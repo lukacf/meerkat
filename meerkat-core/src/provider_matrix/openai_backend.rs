@@ -6,6 +6,8 @@ pub enum OpenAiBackendKind {
     ChatGptBackend,
 }
 
+pub const CHATGPT_CODEX_DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+
 impl OpenAiBackendKind {
     pub const ALL: &'static [Self] = &[Self::OpenAiApi, Self::ChatGptBackend];
 
@@ -27,7 +29,7 @@ impl OpenAiBackendKind {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::OpenAiApi => "https://api.openai.com",
-            Self::ChatGptBackend => "https://chatgpt.com/backend-api",
+            Self::ChatGptBackend => CHATGPT_CODEX_DEFAULT_BASE_URL,
         }
     }
 }
@@ -59,7 +61,7 @@ mod tests {
         );
         assert_eq!(
             OpenAiBackendKind::ChatGptBackend.default_base_url(),
-            "https://chatgpt.com/backend-api",
+            "https://chatgpt.com/backend-api/codex",
         );
     }
 }

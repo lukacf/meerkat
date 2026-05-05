@@ -33,7 +33,7 @@ fn code_assist_realm_with_source(source: CredentialSourceSpec) -> RealmConnectio
             provider: "gemini".into(),
             backend_kind: "google_code_assist".into(),
             base_url: None,
-            options: serde_json::json!({"realm_id": "dev"}),
+            options: serde_json::json!({"realm_id": "dev", "project_id": "test-project"}),
         },
     );
     let mut auth = BTreeMap::new();

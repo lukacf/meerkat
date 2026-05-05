@@ -7,6 +7,8 @@ pub enum GoogleBackendKind {
     GoogleCodeAssist,
 }
 
+pub const GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
+
 impl GoogleBackendKind {
     pub const ALL: &'static [Self] = &[Self::GoogleGenAi, Self::VertexAi, Self::GoogleCodeAssist];
 
@@ -28,10 +30,10 @@ impl GoogleBackendKind {
     pub fn default_base_url(self) -> &'static str {
         match self {
             Self::GoogleGenAi => "https://generativelanguage.googleapis.com",
-            // Vertex and Code Assist have region-dependent URLs — Phase 2
-            // leaves them empty; Phase 3 populates per-region overlay.
+            // Vertex has region-dependent URLs — Phase 2 leaves it empty;
+            // Phase 3 populates per-region overlay.
             Self::VertexAi => "",
-            Self::GoogleCodeAssist => "",
+            Self::GoogleCodeAssist => GOOGLE_CODE_ASSIST_DEFAULT_BASE_URL,
         }
     }
 }
@@ -47,5 +49,13 @@ mod tests {
             let v = *v;
             assert_eq!(GoogleBackendKind::parse(v.as_str()), Some(v));
         }
+    }
+
+    #[test]
+    fn google_code_assist_default_base_url_is_cloudcode() {
+        assert_eq!(
+            GoogleBackendKind::GoogleCodeAssist.default_base_url(),
+            "https://cloudcode-pa.googleapis.com"
+        );
     }
 }

@@ -50,6 +50,14 @@ pub const CLAUDE_AI_SCOPES: &[&str] = &[
 // Console OAuth (for oauth_to_api_key provisioning; org:* scope).
 pub const CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 pub const CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
+pub const ALL_OAUTH_SCOPES: &[&str] = &[
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
 
 // Shared.
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
@@ -60,7 +68,7 @@ pub const MANUAL_REDIRECT_URL: &str = "https://platform.claude.com/oauth/code/ca
 /// Default redirect URI for local loopback flow — the CLI/desktop callers
 /// will bind a random ephemeral port and pass the concrete URL back at
 /// request time via `OAuthEndpoints.redirect_uri`.
-pub const DEFAULT_LOOPBACK_REDIRECT: &str = "http://127.0.0.1:0/callback";
+pub const DEFAULT_LOOPBACK_REDIRECT: &str = "http://localhost:0/callback";
 
 // ---------------------------------------------------------------------
 // Endpoint constructors
@@ -74,11 +82,11 @@ pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         token_url: TOKEN_URL.into(),
         device_code_url: None,
         redirect_uri: redirect_uri.into(),
-        scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
-        extra_authorize_params: Vec::new(),
+        scopes: ALL_OAUTH_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        extra_authorize_params: vec![("code".into(), "true".into())],
         token_request_format: OAuthTokenRequestFormat::Json,
         include_state_in_token_exchange: true,
-        refresh_scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        refresh_scopes: ALL_OAUTH_SCOPES.iter().map(|s| (*s).to_string()).collect(),
         extra_headers: Vec::new(),
     };
     meerkat_auth_core::oauth_flow::apply_test_oauth_endpoint_override(
@@ -440,6 +448,25 @@ impl Default for AnthropicLoginSession {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_ai_endpoints_match_claude_code_loopback_contract() {
+        let endpoints = claude_ai_endpoints("http://localhost:1455/callback");
+        assert_eq!(endpoints.redirect_uri, "http://localhost:1455/callback");
+        assert_eq!(
+            endpoints.scopes,
+            ALL_OAUTH_SCOPES
+                .iter()
+                .map(|scope| (*scope).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            endpoints
+                .extra_authorize_params
+                .contains(&("code".to_string(), "true".to_string()))
+        );
+        assert_eq!(DEFAULT_LOOPBACK_REDIRECT, "http://localhost:0/callback");
+    }
 
     #[test]
     fn oauth_result_to_persisted_rejects_expiry_overflow() {

@@ -28,14 +28,15 @@ const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const ANTHROPIC_CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const ANTHROPIC_SCOPES: &[&str] = &[
+const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
+const ANTHROPIC_ALL_OAUTH_SCOPES: &[&str] = &[
+    "org:create_api_key",
     "user:profile",
     "user:inference",
     "user:sessions:claude_code",
     "user:mcp_servers",
     "user:file_upload",
 ];
-const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
 
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -136,11 +137,11 @@ impl OAuthProviderIdentity {
                 token_url: ANTHROPIC_TOKEN_URL.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_SCOPES),
-                extra_authorize_params: Vec::new(),
+                scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
+                extra_authorize_params: vec![("code".into(), "true".into())],
                 token_request_format: OAuthTokenRequestFormat::Json,
                 include_state_in_token_exchange: true,
-                refresh_scopes: strings(ANTHROPIC_SCOPES),
+                refresh_scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
                 extra_headers: Vec::new(),
             },
             Self::AnthropicConsoleApiKey => OAuthEndpoints {
@@ -2479,6 +2480,15 @@ mod tests {
             OAuthTokenRequestFormat::Json
         );
         assert!(resolved.endpoints.include_state_in_token_exchange);
-        assert_eq!(resolved.endpoints.refresh_scopes, strings(ANTHROPIC_SCOPES));
+        assert_eq!(
+            resolved.endpoints.refresh_scopes,
+            strings(ANTHROPIC_ALL_OAUTH_SCOPES)
+        );
+        assert!(
+            resolved
+                .endpoints
+                .extra_authorize_params
+                .contains(&("code".to_string(), "true".to_string()))
+        );
     }
 }

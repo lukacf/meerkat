@@ -3,8 +3,8 @@
 //!
 //! Covers the full choke-point: TokenStore has persisted tokens for a
 //! `(realm, binding)` → ProviderRuntimeRegistry.resolve returns a
-//! `ResolvedConnection` whose resolved inline secret is the persisted
-//! access token (or a freshly-refreshed one).
+//! `ResolvedConnection` whose Claude.ai OAuth authorizer emits the
+//! persisted access token (or a freshly-refreshed one) as Bearer auth.
 //!
 //! Also covers the `oauth_to_api_key` path: persisted api_key entry
 //! returns the raw API key material.
@@ -30,6 +30,7 @@ use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
     CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
 };
+use meerkat_llm_core::provider_runtime::binding::ResolvedConnection;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
 
 fn realm_with_oauth_binding(auth_method: &str) -> RealmConnectionSet {
@@ -89,6 +90,28 @@ fn default_auth_binding() -> AuthBindingRef {
         binding: BindingId::parse("default_claude").expect("valid binding"),
         profile: None,
     }
+}
+
+async fn assert_claude_ai_authorizer_headers(connection: &ResolvedConnection, token: &str) {
+    let authorizer = connection
+        .resolved_authorizer()
+        .expect("Claude.ai OAuth should resolve as a bearer authorizer");
+    let mut headers = Vec::new();
+    let mut request = meerkat_core::HttpAuthorizationRequest {
+        method: "POST",
+        url: "https://api.anthropic.com/v1/messages",
+        headers: &mut headers,
+    };
+    authorizer.authorize(&mut request).await.unwrap();
+    assert!(headers.contains(&("Authorization".to_string(), format!("Bearer {token}"),)));
+    assert!(headers.contains(&(
+        oauth::OAUTH_BETA_HEADER_NAME.to_string(),
+        oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
+    )));
+    assert!(
+        connection.resolved_secret().is_none(),
+        "Claude.ai OAuth access tokens must not be projected as x-api-key material"
+    );
 }
 
 struct StaticAuthLeaseHandle {
@@ -393,10 +416,7 @@ async fn claude_ai_oauth_fresh_token_returns_access_token() {
         .resolve(&realm, &default_auth_binding(), &env)
         .await
         .expect("fresh OAuth tokens should resolve");
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("fresh-access-xyz".to_string()),
-    );
+    assert_claude_ai_authorizer_headers(&connection, "fresh-access-xyz").await;
 }
 
 #[tokio::test]
@@ -657,10 +677,7 @@ async fn claude_ai_oauth_expired_authmachine_lease_refreshes_through_provider_ru
         .await
         .expect("expired Claude OAuth lease should refresh through AuthMachine gate");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("refreshed-access-NEW".to_string())
-    );
+    assert_claude_ai_authorizer_headers(&connection, "refreshed-access-NEW").await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),
@@ -782,10 +799,7 @@ async fn claude_ai_oauth_force_refresh_uses_authmachine_gate_for_fresh_tokens() 
         .await
         .expect("forced Claude OAuth refresh should resolve through AuthMachine gate");
 
-    assert_eq!(
-        connection.resolved_secret(),
-        Some("forced-claude-access".to_string())
-    );
+    assert_claude_ai_authorizer_headers(&connection, "forced-claude-access").await;
     let stored = store.load(&key).await.unwrap().unwrap();
     assert_eq!(
         stored.primary_secret.as_deref(),

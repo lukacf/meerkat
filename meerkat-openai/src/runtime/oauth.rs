@@ -123,8 +123,11 @@ impl ChatGptIdClaims {
     /// Lift claims from a decoded JWT payload value.
     pub fn lift_from_claims(raw: &serde_json::Value) -> Self {
         // Codex claim keys live under `https://api.openai.com/auth` OR at
-        // top level depending on token version. We probe both.
+        // top level depending on token version. Profile email can live under
+        // `https://api.openai.com/profile`. We probe all Codex-supported
+        // shapes.
         let nested = raw.get("https://api.openai.com/auth");
+        let profile = raw.get("https://api.openai.com/profile");
         fn get_str(v: &serde_json::Value, key: &str) -> Option<String> {
             v.get(key).and_then(|x| x.as_str()).map(ToString::to_string)
         }
@@ -143,10 +146,10 @@ impl ChatGptIdClaims {
         };
         Self {
             plan_type: nested_str("chatgpt_plan_type"),
-            user_id: nested_str("chatgpt_user_id"),
+            user_id: nested_str("chatgpt_user_id").or_else(|| nested_str("user_id")),
             account_id: nested_str("chatgpt_account_id"),
             is_fedramp: nested_bool("chatgpt_account_is_fedramp"),
-            email: get_str(raw, "email"),
+            email: get_str(raw, "email").or_else(|| profile.and_then(|p| get_str(p, "email"))),
         }
     }
 }
@@ -442,5 +445,17 @@ mod tests {
         let c = ChatGptIdClaims::lift_from_claims(&top);
         assert_eq!(c.account_id.as_deref(), Some("acct_top"));
         assert_eq!(c.plan_type.as_deref(), Some("plus"));
+
+        let codex_shape = serde_json::json!({
+            "https://api.openai.com/auth": {
+                "user_id": "user_fallback",
+            },
+            "https://api.openai.com/profile": {
+                "email": "profile@example.com",
+            },
+        });
+        let c = ChatGptIdClaims::lift_from_claims(&codex_shape);
+        assert_eq!(c.user_id.as_deref(), Some("user_fallback"));
+        assert_eq!(c.email.as_deref(), Some("profile@example.com"));
     }
 }

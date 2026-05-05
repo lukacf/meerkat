@@ -76,6 +76,18 @@ fn openai_oauth_refresh_error(
     ProviderAuthError::Auth(AuthError::RefreshFailed(detail))
 }
 
+fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
+    let Some(raw) = configured.filter(|url| !url.trim().is_empty()) else {
+        return OpenAiBackendKind::ChatGptBackend.default_base_url().into();
+    };
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed == "https://chatgpt.com/backend-api" {
+        OpenAiBackendKind::ChatGptBackend.default_base_url().into()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 pub struct OpenAiProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -232,6 +244,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         .clone()
                         .ok_or(ProviderAuthError::Auth(AuthError::MissingSecret))?;
                     let mut chatgpt_account_id = effective_tokens.account_id.clone();
+                    let mut chatgpt_user_id: Option<String> = None;
+                    let mut chatgpt_email: Option<String> = None;
                     let mut chatgpt_is_fedramp: Option<bool> = None;
                     let mut chatgpt_plan_type: Option<String> = None;
                     if let Some(id_token) = effective_tokens.id_token.as_deref()
@@ -242,11 +256,15 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                         if chatgpt_account_id.is_none() {
                             chatgpt_account_id = lifted.account_id;
                         }
+                        chatgpt_user_id = lifted.user_id;
+                        chatgpt_email = lifted.email;
                         chatgpt_is_fedramp = lifted.is_fedramp;
                         chatgpt_plan_type = lifted.plan_type;
                     }
                     let mut metadata = AuthMetadata::default();
                     if chatgpt_account_id.is_some()
+                        || chatgpt_user_id.is_some()
+                        || chatgpt_email.is_some()
                         || chatgpt_is_fedramp.is_some()
                         || chatgpt_plan_type.is_some()
                     {
@@ -256,10 +274,10 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                             Some(meerkat_core::ProviderAuthMetadata::OpenAi(
                                 meerkat_core::OpenAiAuthMetadata {
                                     plan_type: chatgpt_plan_type,
-                                    user_id: None,
+                                    user_id: chatgpt_user_id,
                                     account_id: chatgpt_account_id,
                                     is_fedramp: chatgpt_is_fedramp,
-                                    email: None,
+                                    email: chatgpt_email,
                                 },
                             ));
                     }
@@ -307,14 +325,22 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         // (deleted side channel).
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(authorizer) = connection.resolved_authorizer() {
-            let base_url = connection
-                .backend_profile
-                .base_url
-                .clone()
-                .unwrap_or_else(|| backend_kind.default_base_url().into());
-            let client =
+            let base_url = match backend_kind {
+                OpenAiBackendKind::ChatGptBackend => {
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
+                }
+                OpenAiBackendKind::OpenAiApi => connection
+                    .backend_profile
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| backend_kind.default_base_url().into()),
+            };
+            let mut client =
                 crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
                     .with_authorizer(authorizer);
+            if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
+                client = client.with_chatgpt_backend_wire();
+            }
             return Ok(Arc::new(client));
         }
         // No inline secret and no DynamicAuthorizer kind: the
@@ -353,11 +379,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             OpenAiBackendKind::ChatGptBackend => {
                 // ChatGPT backend: emit account_id + fedramp wire
                 // headers per Codex bearer_auth_provider.rs:23-38.
-                let base_url = connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| OpenAiBackendKind::ChatGptBackend.default_base_url().into());
+                let base_url =
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
                 let mut extra_headers: Vec<(String, String)> = Vec::new();
                 if let Some(acct) = account_id {
                     extra_headers.push((
@@ -373,7 +396,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     ));
                 }
                 let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
-                    .with_extra_headers(extra_headers);
+                    .with_extra_headers(extra_headers)
+                    .with_chatgpt_backend_wire();
                 Ok(Arc::new(client))
             }
         }
@@ -392,14 +416,22 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         };
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(authorizer) = connection.resolved_authorizer() {
-            let base_url = connection
-                .backend_profile
-                .base_url
-                .clone()
-                .unwrap_or_else(|| backend_kind.default_base_url().into());
-            let client =
+            let base_url = match backend_kind {
+                OpenAiBackendKind::ChatGptBackend => {
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
+                }
+                OpenAiBackendKind::OpenAiApi => connection
+                    .backend_profile
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| backend_kind.default_base_url().into()),
+            };
+            let mut client =
                 crate::OpenAiClient::new_with_optional_api_key_and_base_url(None, base_url)
                     .with_authorizer(authorizer);
+            if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
+                client = client.with_chatgpt_backend_wire();
+            }
             return Ok(Some(Arc::new(client)));
         }
         #[cfg(target_arch = "wasm32")]
@@ -418,12 +450,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 None => crate::OpenAiClient::new(secret),
             },
             OpenAiBackendKind::ChatGptBackend => {
-                let base_url = connection
-                    .backend_profile
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| OpenAiBackendKind::ChatGptBackend.default_base_url().into());
-                crate::OpenAiClient::new_with_base_url(secret, base_url)
+                let base_url =
+                    chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
+                crate::OpenAiClient::new_with_base_url(secret, base_url).with_chatgpt_backend_wire()
             }
         };
         Ok(Some(Arc::new(client)))

@@ -168,10 +168,26 @@ package_name_for_dir() {
       const dir = path.resolve(root, process.argv[2]);
       const pkg = metadata.packages.find((pkg) => path.dirname(pkg.manifest_path) === dir);
       if (pkg) process.stdout.write(pkg.name);
-    ' "${workspace_root}" "${dir}"
+	    ' "${workspace_root}" "${dir}"
 }
 
-mapfile -t changed < <(collect_changed_paths | awk 'NF' | sort -u)
+array_contains() {
+  local needle="$1"
+  shift
+  local item
+  for item in "$@"; do
+    if [[ "${item}" == "${needle}" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+changed=()
+while IFS= read -r path; do
+  changed+=("${path}")
+done < <(collect_changed_paths | awk 'NF' | sort -u)
+
 relevant=()
 global=0
 for path in "${changed[@]}"; do
@@ -211,7 +227,7 @@ if [[ "${global}" -eq 1 ]]; then
   exit 0
 fi
 
-declare -A package_names=()
+package_names=()
 for path in "${relevant[@]}"; do
   if [[ "${path}" == */* ]]; then
     dir="${path%/*}"
@@ -221,8 +237,8 @@ for path in "${relevant[@]}"; do
   while [[ -n "${dir}" && "${dir}" != "." ]]; do
     if [[ -f "${dir}/Cargo.toml" ]]; then
       pkg="$(package_name_for_dir "${dir}")"
-      if [[ -n "${pkg}" ]]; then
-        package_names["${pkg}"]=1
+      if [[ -n "${pkg}" ]] && ! array_contains "${pkg}" "${package_names[@]}"; then
+        package_names+=("${pkg}")
       fi
       break
     fi
@@ -239,15 +255,18 @@ if [[ "${#package_names[@]}" -eq 0 ]]; then
 fi
 
 pkg_flags=()
-mapfile -t sorted_packages < <(printf '%s\n' "${!package_names[@]}" | sort)
+sorted_packages=()
+while IFS= read -r pkg; do
+  sorted_packages+=("${pkg}")
+done < <(printf '%s\n' "${package_names[@]}" | sort -u)
 for pkg in "${sorted_packages[@]}"; do
   pkg_flags+=("-p" "${pkg}")
 done
 
 test_flags=("${pkg_flags[@]}")
 exact_selector_package=""
-declare -A exact_selector_features=()
-declare -A exact_selector_tests=()
+exact_selector_features=()
+exact_selector_tests=()
 exact_selector_output="$(./scripts/cargo-exact-tests.mjs --include-non-fast "${relevant[@]}" 2>/dev/null || true)"
 if [[ -n "${exact_selector_output}" ]]; then
   while IFS= read -r line; do
@@ -256,10 +275,16 @@ if [[ -n "${exact_selector_output}" ]]; then
         exact_selector_package="${line#package=}"
         ;;
       feature=*)
-        exact_selector_features["${line#feature=}"]=1
+        feature="${line#feature=}"
+        if ! array_contains "${feature}" "${exact_selector_features[@]}"; then
+          exact_selector_features+=("${feature}")
+        fi
         ;;
       test=*)
-        exact_selector_tests["${line#test=}"]=1
+        test_name="${line#test=}"
+        if ! array_contains "${test_name}" "${exact_selector_tests[@]}"; then
+          exact_selector_tests+=("${test_name}")
+        fi
         ;;
     esac
   done <<<"${exact_selector_output}"
@@ -268,10 +293,16 @@ fi
 if [[ -n "${exact_selector_package}" && "${#sorted_packages[@]}" -eq 1 && "${#exact_selector_tests[@]}" -gt 0 ]]; then
   test_flags=("-p" "${exact_selector_package}")
   if [[ "${#exact_selector_features[@]}" -gt 0 ]]; then
-    mapfile -t sorted_exact_features < <(printf '%s\n' "${!exact_selector_features[@]}" | sort)
+    sorted_exact_features=()
+    while IFS= read -r feature; do
+      sorted_exact_features+=("${feature}")
+    done < <(printf '%s\n' "${exact_selector_features[@]}" | sort -u)
     test_flags+=("--features" "$(IFS=,; printf '%s' "${sorted_exact_features[*]}")")
   fi
-  mapfile -t sorted_exact_tests < <(printf '%s\n' "${!exact_selector_tests[@]}" | sort)
+  sorted_exact_tests=()
+  while IFS= read -r test_name; do
+    sorted_exact_tests+=("${test_name}")
+  done < <(printf '%s\n' "${exact_selector_tests[@]}" | sort -u)
   for test_name in "${sorted_exact_tests[@]}"; do
     test_flags+=("--test" "${test_name}")
   done

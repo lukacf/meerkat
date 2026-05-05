@@ -45,6 +45,8 @@ pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
 pub struct OpenAiClient {
     api_key: Option<String>,
     base_url: String,
+    responses_path: String,
+    chatgpt_backend_wire: bool,
     http: reqwest::Client,
     /// Extra headers emitted on every request (e.g. `ChatGPT-Account-ID`,
     /// `X-OpenAI-Fedramp`). Populated by provider runtimes when the
@@ -56,6 +58,12 @@ pub struct OpenAiClient {
     /// invocation. Used for ExternalAuthorizer flows that produce a
     /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SystemMessageMode {
+    IncludeInInput,
+    ExtractToInstructions,
 }
 
 impl OpenAiClient {
@@ -102,6 +110,8 @@ impl OpenAiClient {
         Self {
             api_key,
             base_url,
+            responses_path: "v1/responses".to_string(),
+            chatgpt_backend_wire: false,
             http,
             extra_headers: Vec::new(),
             authorizer: None,
@@ -115,6 +125,21 @@ impl OpenAiClient {
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
         self
+    }
+
+    /// Set the Responses endpoint path relative to `base_url`.
+    ///
+    /// Public OpenAI uses `/v1/responses`; the ChatGPT Codex backend
+    /// uses `/responses` under `https://chatgpt.com/backend-api/codex`.
+    pub fn with_responses_path(mut self, path: impl Into<String>) -> Self {
+        self.responses_path = path.into().trim_start_matches('/').to_string();
+        self
+    }
+
+    pub fn with_chatgpt_backend_wire(self) -> Self {
+        let mut client = self.with_responses_path("responses");
+        client.chatgpt_backend_wire = true;
+        client
     }
 
     /// Attach a dynamic authorizer. When set, overrides the
@@ -133,6 +158,14 @@ impl OpenAiClient {
         &self.extra_headers
     }
 
+    fn responses_endpoint(&self) -> String {
+        format!(
+            "{}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.responses_path.trim_start_matches('/'),
+        )
+    }
+
     /// Set custom base URL
     pub fn with_base_url(mut self, url: String) -> Self {
         if let Ok(http) = http::build_http_client_for_base_url(reqwest::Client::builder(), &url) {
@@ -144,7 +177,14 @@ impl OpenAiClient {
 
     /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
-        let input = Self::convert_to_responses_input(&request.messages)?;
+        let (input, instructions) = if self.chatgpt_backend_wire {
+            Self::convert_to_responses_input_with_system_mode(
+                &request.messages,
+                SystemMessageMode::ExtractToInstructions,
+            )?
+        } else {
+            (Self::convert_to_responses_input(&request.messages)?, None)
+        };
         let reasoning_enabled = Self::request_supports_reasoning_payload(request);
 
         let mut body = serde_json::json!({
@@ -162,6 +202,19 @@ impl OpenAiClient {
                 "effort": "medium",
                 "summary": "auto"
             });
+        }
+
+        if self.chatgpt_backend_wire {
+            body["instructions"] = Value::String(
+                instructions.unwrap_or_else(|| "You are a helpful assistant.".to_string()),
+            );
+            body["store"] = Value::Bool(false);
+            body["tools"] = Value::Array(Vec::new());
+            body["tool_choice"] = Value::String("auto".to_string());
+            body["parallel_tool_calls"] = Value::Bool(false);
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("max_output_tokens");
+            }
         }
 
         if Self::request_supports_temperature(request)
@@ -255,17 +308,36 @@ impl OpenAiClient {
     /// violating them causes hard request failures. Replaying only user/assistant
     /// messages and tool items is robust across retries and tool-call turns.
     fn convert_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, LlmError> {
+        Self::convert_to_responses_input_with_system_mode(
+            messages,
+            SystemMessageMode::IncludeInInput,
+        )
+        .map(|(input, _)| input)
+    }
+
+    fn convert_to_responses_input_with_system_mode(
+        messages: &[Message],
+        system_mode: SystemMessageMode,
+    ) -> Result<(Vec<Value>, Option<String>), LlmError> {
         let mut items = Vec::new();
+        let mut instructions = Vec::new();
 
         for msg in messages {
             match msg {
-                Message::System(s) => {
-                    items.push(serde_json::json!({
-                        "type": "message",
-                        "role": "system",
-                        "content": s.content
-                    }));
-                }
+                Message::System(s) => match system_mode {
+                    SystemMessageMode::IncludeInInput => {
+                        items.push(serde_json::json!({
+                            "type": "message",
+                            "role": "system",
+                            "content": s.content
+                        }));
+                    }
+                    SystemMessageMode::ExtractToInstructions => {
+                        if !s.content.trim().is_empty() {
+                            instructions.push(s.content.clone());
+                        }
+                    }
+                },
                 Message::SystemNotice(notice) => {
                     items.push(serde_json::json!({
                         "type": "message",
@@ -378,7 +450,12 @@ impl OpenAiClient {
             }
         }
 
-        Ok(items)
+        let instructions = if instructions.is_empty() {
+            None
+        } else {
+            Some(instructions.join("\n\n"))
+        };
+        Ok((items, instructions))
     }
 
     /// Parse an SSE event from the Responses API stream
@@ -536,7 +613,7 @@ impl OpenAiClient {
             "tool_choice": "required",
             "stream": false,
         });
-        let endpoint = format!("{}/v1/responses", self.base_url);
+        let endpoint = self.responses_endpoint();
         let response = self.post_json_to_openai(&endpoint, &body).await?;
         self.normalize_openai_image_response(request, response, true)
             .await
@@ -833,7 +910,7 @@ impl LlmClient for OpenAiClient {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
             let body = self.build_request_body(request)?;
 
-            let endpoint = format!("{}/v1/responses", self.base_url);
+            let endpoint = self.responses_endpoint();
             let mut request_builder = self
                 .http
                 .post(&endpoint)
@@ -1350,6 +1427,20 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct StreamStubState {
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn responses_sse_with_body(
+        State(state): State<StreamStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body);
+        ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    #[derive(Clone)]
     struct ImageStubState {
         response: Value,
         seen: Arc<Mutex<Vec<Value>>>,
@@ -1367,6 +1458,23 @@ mod tests {
         let app = Router::new()
             .route("/v1/responses", post(responses_sse))
             .with_state(payload);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_chatgpt_stub_server(
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/responses", post(responses_sse_with_body))
+            .with_state(StreamStubState { payload, seen });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -1710,6 +1818,75 @@ mod tests {
                 .any(|v| v.as_str() == Some("reasoning.encrypted_content")),
             "should include reasoning.encrypted_content"
         );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_backend_wire_uses_codex_responses_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = [
+            r#"data: {"type":"response.output_text.delta","delta":"Hello from ChatGPT"}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":3}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) = spawn_chatgpt_stub_server(payload, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url)
+            .with_chatgpt_backend_wire();
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![
+                Message::System(meerkat_core::SystemMessage::new(
+                    "You are a careful assistant.".to_string(),
+                )),
+                Message::User(UserMessage::text("hello".to_string())),
+            ],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::TextDelta { delta, .. } => deltas.push(delta),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(deltas, vec!["Hello from ChatGPT"]);
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured ChatGPT backend request");
+        assert_eq!(body["instructions"], "You are a careful assistant.");
+        assert_eq!(body["store"], false);
+        assert_eq!(body["tools"], serde_json::json!([]));
+        assert_eq!(body["tool_choice"], "auto");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert!(body.get("max_output_tokens").is_none());
+        let input = body["input"].as_array().expect("input should be array");
+        assert!(
+            input
+                .iter()
+                .all(|item| item.get("role").and_then(Value::as_str) != Some("system")),
+            "ChatGPT Codex backend rejects system messages in input; they must be lifted to instructions"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chatgpt_backend_wire_supplies_default_instructions_without_system_message() {
+        let client = OpenAiClient::new("test-key".to_string()).with_chatgpt_backend_wire();
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text("Hello".to_string()))],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["instructions"], "You are a helpful assistant.");
+        assert_eq!(body["store"], false);
+        assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]

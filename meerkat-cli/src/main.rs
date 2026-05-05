@@ -3390,7 +3390,7 @@ async fn refresh_auth_profile(
 //      status, and concrete copy-paste commands for next steps.
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LoginProvider {
     Anthropic,
     OpenAi,
@@ -3464,6 +3464,20 @@ impl LoginProvider {
         }
     }
 
+    fn backend_base_url(self) -> Option<&'static str> {
+        match self {
+            Self::Anthropic => None,
+            Self::OpenAi => Some(
+                meerkat_core::provider_matrix::openai::OpenAiBackendKind::ChatGptBackend
+                    .default_base_url(),
+            ),
+            Self::Google => Some(
+                meerkat_core::provider_matrix::google::GoogleBackendKind::GoogleCodeAssist
+                    .default_base_url(),
+            ),
+        }
+    }
+
     fn oauth_auth_method(self) -> &'static str {
         match self {
             Self::Anthropic => "claude_ai_oauth",
@@ -3499,8 +3513,8 @@ impl LoginProvider {
 
     fn callback_redirect_host(self) -> &'static str {
         match self {
-            Self::OpenAi => "localhost",
-            Self::Anthropic | Self::Google => "127.0.0.1",
+            Self::Anthropic | Self::OpenAi => "localhost",
+            Self::Google => "127.0.0.1",
         }
     }
 
@@ -3515,7 +3529,7 @@ impl LoginProvider {
         match self {
             Self::Anthropic => "claude-sonnet-4-6",
             Self::OpenAi => "gpt-5.4",
-            Self::Google => "gemini-3.1-flash-lite",
+            Self::Google => "gemini-2.5-flash",
         }
     }
 }
@@ -3667,13 +3681,30 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
     let section = config.realm.entry(realm_id.to_string()).or_default();
     let mut changed = false;
 
-    if !section.backend.contains_key(backend_profile_id) {
+    if let Some(backend) = section.backend.get_mut(backend_profile_id) {
+        if backend.provider == provider.config_provider()
+            && backend.backend_kind == provider.backend_kind()
+            && let Some(base_url) = provider.backend_base_url()
+        {
+            let should_heal_base_url = backend.base_url.as_deref().is_none_or(str::is_empty)
+                || (provider == LoginProvider::OpenAi
+                    && backend
+                        .base_url
+                        .as_deref()
+                        .map(|url| url.trim_end_matches('/') == "https://chatgpt.com/backend-api")
+                        .unwrap_or(false));
+            if should_heal_base_url {
+                backend.base_url = Some(base_url.to_string());
+                changed = true;
+            }
+        }
+    } else {
         section.backend.insert(
             backend_profile_id.to_string(),
             meerkat_core::BackendProfileConfig {
                 provider: provider.config_provider().to_string(),
                 backend_kind: provider.backend_kind().to_string(),
-                base_url: None,
+                base_url: provider.backend_base_url().map(str::to_string),
                 options: serde_json::Value::Null,
             },
         );
@@ -3707,6 +3738,14 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
                 policy: meerkat_core::BindingPolicy::default(),
             },
         );
+        changed = true;
+    } else if provider == LoginProvider::Google
+        && let Some(binding) = section.binding.get_mut(binding_id)
+        && binding.backend_profile == backend_profile_id
+        && binding.auth_profile == auth_profile_id
+        && binding.default_model.as_deref() == Some("gemini-3.1-flash-lite")
+    {
+        binding.default_model = Some(provider.sample_model().to_string());
         changed = true;
     }
 
@@ -11009,6 +11048,113 @@ mod tests {
         assert_eq!(target.auth_binding.realm.as_str(), "dev");
         assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_google_oauth_config_includes_code_assist_base_url() {
+        let mut config = Config::default();
+
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::Google,
+            &mut config
+        ));
+        let backend = config
+            .realm
+            .get("dev")
+            .expect("dev realm")
+            .backend
+            .get("google_code_assist")
+            .expect("google code assist backend");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://cloudcode-pa.googleapis.com")
+        );
+        assert!(
+            !ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
+            "complete synthesized config should not be rewritten"
+        );
+
+        config
+            .realm
+            .get_mut("dev")
+            .expect("dev realm")
+            .backend
+            .get_mut("google_code_assist")
+            .expect("google code assist backend")
+            .base_url = None;
+
+        assert!(
+            ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
+            "legacy synthesized Google OAuth config without base_url should be healed"
+        );
+        let backend = config
+            .realm
+            .get("dev")
+            .expect("dev realm")
+            .backend
+            .get("google_code_assist")
+            .expect("google code assist backend");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://cloudcode-pa.googleapis.com")
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_openai_oauth_config_uses_codex_backend_base_url() {
+        let mut config = Config::default();
+
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+        let backend = config
+            .realm
+            .get("dev")
+            .expect("dev realm")
+            .backend
+            .get("openai_chatgpt")
+            .expect("openai chatgpt backend");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+
+        config
+            .realm
+            .get_mut("dev")
+            .expect("dev realm")
+            .backend
+            .get_mut("openai_chatgpt")
+            .expect("openai chatgpt backend")
+            .base_url = Some("https://chatgpt.com/backend-api".into());
+
+        assert!(
+            ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config),
+            "legacy ChatGPT backend URL should be healed to the Codex endpoint"
+        );
+        let backend = config
+            .realm
+            .get("dev")
+            .expect("dev realm")
+            .backend
+            .get("openai_chatgpt")
+            .expect("openai chatgpt backend");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_anthropic_oauth_uses_localhost_redirect_host() {
+        assert_eq!(
+            LoginProvider::Anthropic.callback_redirect_host(),
+            "localhost"
+        );
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

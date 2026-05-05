@@ -241,8 +241,9 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn file_config_store_set_skips_null_backend_options() {
-        let temp = tempfile::tempdir().expect("tempdir");
+    async fn file_config_store_set_skips_null_backend_options()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let temp = tempfile::tempdir()?;
         let path = temp.path().join(".rkat").join("config.toml");
         let store = FileConfigStore::new(path.clone());
         let mut config = Config::default();
@@ -277,18 +278,13 @@ mod tests {
         );
         config.realm.insert("dev".to_string(), section);
 
-        store
-            .set(config)
-            .await
-            .expect("file config writes must not serialize JSON null as TOML unit");
-        let rendered = tokio::fs::read_to_string(&path)
-            .await
-            .expect("config file should be written");
+        store.set(config).await?;
+        let rendered = tokio::fs::read_to_string(&path).await?;
         assert!(
             !rendered.contains("options"),
             "null backend options should be omitted from TOML, not rendered"
         );
-        let loaded = store.get().await.expect("written config should parse back");
+        let loaded = store.get().await?;
         assert!(
             loaded
                 .realm
@@ -297,5 +293,6 @@ mod tests {
                 .is_some(),
             "backend profile should survive round trip"
         );
+        Ok(())
     }
 }

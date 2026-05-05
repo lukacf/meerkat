@@ -10,6 +10,7 @@ use async_trait::async_trait;
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 use meerkat_core::AuthError;
 #[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "oauth"),
     all(not(target_arch = "wasm32"), feature = "bedrock"),
     all(not(target_arch = "wasm32"), feature = "vertex"),
     all(not(target_arch = "wasm32"), feature = "foundry")
@@ -35,6 +36,7 @@ use meerkat_auth_core::{
 };
 use meerkat_llm_core::LlmClient;
 #[cfg(any(
+    all(not(target_arch = "wasm32"), feature = "oauth"),
     all(not(target_arch = "wasm32"), feature = "bedrock"),
     all(not(target_arch = "wasm32"), feature = "vertex"),
     all(not(target_arch = "wasm32"), feature = "foundry")
@@ -50,6 +52,41 @@ use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 
 pub use meerkat_core::provider_matrix::anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+struct ClaudeAiOAuthAuthorizer {
+    access_token: String,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+impl ClaudeAiOAuthAuthorizer {
+    fn new(access_token: String) -> Self {
+        Self { access_token }
+    }
+}
+
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
+    async fn authorize(
+        &self,
+        req: &mut meerkat_core::HttpAuthorizationRequest<'_>,
+    ) -> Result<(), meerkat_core::AuthError> {
+        req.headers.push((
+            "Authorization".to_string(),
+            format!("Bearer {}", self.access_token),
+        ));
+        req.headers.push((
+            oauth::OAUTH_BETA_HEADER_NAME.to_string(),
+            oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
+        ));
+        Ok(())
+    }
+
+    fn label(&self) -> &'static str {
+        "claude-ai-oauth"
+    }
+}
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
 fn anthropic_oauth_refresh_failure_is_permanent(error: &oauth::AnthropicOAuthError) -> bool {
@@ -407,12 +444,25 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                             ));
                     }
                     let metadata = finalize_auth_metadata(binding, metadata)?;
-                    Arc::new(StaticLease::inline_secret(
-                        secret,
-                        metadata,
-                        effective_tokens.expires_at,
-                        source_label.clone(),
-                    ))
+                    match auth_method {
+                        AnthropicAuthMethod::ClaudeAiOauth => {
+                            let authorizer: Arc<dyn HttpAuthorizer> =
+                                Arc::new(ClaudeAiOAuthAuthorizer::new(secret));
+                            Arc::new(DynamicLease::new(
+                                authorizer,
+                                metadata,
+                                effective_tokens.expires_at,
+                                source_label.clone(),
+                            ))
+                        }
+                        AnthropicAuthMethod::OauthToApiKey => Arc::new(StaticLease::inline_secret(
+                            secret,
+                            metadata,
+                            effective_tokens.expires_at,
+                            source_label.clone(),
+                        )),
+                        _ => unreachable!("OAuth branch only handles OAuth auth methods"),
+                    }
                 }
                 #[cfg(not(all(not(target_arch = "wasm32"), feature = "oauth")))]
                 {
@@ -654,6 +704,26 @@ mod tests {
     #[test]
     fn provider_id_is_anthropic() {
         assert_eq!(AnthropicProviderRuntime.provider_id(), Provider::Anthropic);
+    }
+
+    #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
+    #[tokio::test]
+    async fn claude_ai_oauth_authorizer_sets_bearer_and_beta_headers() {
+        let authorizer = ClaudeAiOAuthAuthorizer::new("tok-claude".to_string());
+        let mut headers = Vec::new();
+        let mut request = meerkat_core::HttpAuthorizationRequest {
+            method: "POST",
+            url: "https://api.anthropic.com/v1/messages",
+            headers: &mut headers,
+        };
+
+        authorizer.authorize(&mut request).await.unwrap();
+
+        assert!(headers.contains(&("Authorization".to_string(), "Bearer tok-claude".to_string(),)));
+        assert!(headers.contains(&(
+            oauth::OAUTH_BETA_HEADER_NAME.to_string(),
+            oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
+        )));
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]

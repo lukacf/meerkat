@@ -37,11 +37,26 @@ pub struct GeminiClient {
     api_key: String,
     base_url: String,
     http: reqwest::Client,
+    wire_mode: GeminiWireMode,
+    code_assist_project_id: Option<String>,
     /// Dynamic authorizer — when set, replaces the `x-goog-api-key`
     /// header path with `HttpAuthorizer::authorize` invocation (used
     /// for Code Assist + Vertex ADC backends where the Bearer token
     /// is acquired at request time from Google auth / metadata server).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiWireMode {
+    PublicGenerateContent,
+    CodeAssist,
+}
+
+fn code_assist_model(model: &str) -> &str {
+    match model {
+        "gemini-3.1-flash-lite" | "gemini-3.1-flash-lite-preview" => "gemini-2.5-flash",
+        other => other,
+    }
 }
 
 impl GeminiClient {
@@ -61,6 +76,8 @@ impl GeminiClient {
             api_key,
             base_url,
             http,
+            wire_mode: GeminiWireMode::PublicGenerateContent,
+            code_assist_project_id: None,
             authorizer: None,
         }
     }
@@ -83,6 +100,16 @@ impl GeminiClient {
         authorizer: std::sync::Arc<dyn meerkat_core::HttpAuthorizer>,
     ) -> Self {
         self.authorizer = Some(authorizer);
+        self
+    }
+
+    pub fn with_code_assist_wire(mut self) -> Self {
+        self.wire_mode = GeminiWireMode::CodeAssist;
+        self
+    }
+
+    pub fn with_code_assist_project_id(mut self, project_id: Option<String>) -> Self {
+        self.code_assist_project_id = project_id.filter(|project| !project.trim().is_empty());
         self
     }
 
@@ -388,9 +415,81 @@ impl GeminiClient {
         Ok(body)
     }
 
+    fn build_stream_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
+        let body = self.build_request_body(request)?;
+        match self.wire_mode {
+            GeminiWireMode::PublicGenerateContent => Ok(body),
+            GeminiWireMode::CodeAssist => {
+                let mut outer = Map::new();
+                outer.insert(
+                    "model".to_string(),
+                    Value::String(code_assist_model(&request.model).to_string()),
+                );
+                outer.insert(
+                    "user_prompt_id".to_string(),
+                    Value::String(format!(
+                        "meerkat-{}",
+                        meerkat_core::time_compat::new_uuid_v7()
+                    )),
+                );
+                if let Some(project_id) = &self.code_assist_project_id {
+                    outer.insert("project".to_string(), Value::String(project_id.clone()));
+                }
+                outer.insert("request".to_string(), body);
+                Ok(Value::Object(outer))
+            }
+        }
+    }
+
+    fn stream_generate_content_url(&self, model: &str) -> String {
+        match self.wire_mode {
+            GeminiWireMode::PublicGenerateContent => format!(
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                self.base_url.trim_end_matches('/'),
+                model,
+            ),
+            GeminiWireMode::CodeAssist => {
+                let base_url = self.base_url.trim_end_matches('/');
+                let versioned = if base_url.ends_with("/v1internal") {
+                    base_url.to_string()
+                } else {
+                    format!("{base_url}/v1internal")
+                };
+                format!("{versioned}:streamGenerateContent?alt=sse")
+            }
+        }
+    }
+
     /// Parse streaming response line
     fn parse_stream_line(line: &str) -> Option<GenerateContentResponse> {
         serde_json::from_str(line).ok()
+    }
+
+    fn parse_stream_line_for_wire(&self, line: &str) -> Option<GenerateContentResponse> {
+        match self.wire_mode {
+            GeminiWireMode::PublicGenerateContent => Self::parse_stream_line(line),
+            GeminiWireMode::CodeAssist => {
+                let wrapper: Option<CodeAssistGenerateContentResponse> =
+                    serde_json::from_str(line).ok();
+                wrapper
+                    .map(|wrapper| {
+                        if let Some(mut response) = wrapper.response {
+                            if response.response_id.is_none() {
+                                response.response_id = wrapper.trace_id;
+                            }
+                            response
+                        } else {
+                            GenerateContentResponse {
+                                candidates: Some(Vec::new()),
+                                usage_metadata: None,
+                                response_id: wrapper.trace_id,
+                                prompt_feedback: None,
+                            }
+                        }
+                    })
+                    .or_else(|| Self::parse_stream_line(line))
+            }
+        }
     }
 
     fn image_prompt(request: &ProviderImageGenerationRequest) -> String {
@@ -1168,11 +1267,8 @@ fn join_index(prefix: &str, index: usize) -> String {
 impl LlmClient for GeminiClient {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-            let body = self.build_request_body(request)?;
-            let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
-                self.base_url, request.model
-            );
+            let body = self.build_stream_request_body(request)?;
+            let url = self.stream_generate_content_url(&request.model);
 
             // Auth path: if an authorizer is attached (Code Assist /
             // Vertex ADC Bearer flow), collect its headers via the
@@ -1227,7 +1323,7 @@ impl LlmClient for GeminiClient {
                     let line = buffer[..newline_pos].trim();
                     let data = line.strip_prefix("data: ");
                     let parsed_response = if let Some(d) = data {
-                        Self::parse_stream_line(d)
+                        self.parse_stream_line_for_wire(d)
                     } else {
                         None
                     };
@@ -1329,6 +1425,13 @@ struct GenerateContentResponse {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CodeAssistGenerateContentResponse {
+    response: Option<GenerateContentResponse>,
+    trace_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PromptFeedback {
     block_reason: Option<String>,
 }
@@ -1399,12 +1502,26 @@ mod tests {
         seen: Arc<Mutex<Vec<Value>>>,
     }
 
+    #[derive(Clone)]
+    struct GeminiStreamStubState {
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    }
+
     async fn gemini_image_stub(
         State(state): State<GeminiImageStubState>,
         Json(body): Json<Value>,
     ) -> impl IntoResponse {
         state.seen.lock().expect("seen mutex").push(body);
         Json(state.response)
+    }
+
+    async fn gemini_stream_stub(
+        State(state): State<GeminiStreamStubState>,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body);
+        ([("content-type", "text/event-stream")], state.payload)
     }
 
     async fn spawn_gemini_image_stub(
@@ -1421,6 +1538,26 @@ mod tests {
                 post(gemini_image_stub),
             )
             .with_state(GeminiImageStubState { response, seen });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    async fn spawn_code_assist_stream_stub(
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/v1internal:streamGenerateContent",
+                post(gemini_stream_stub),
+            )
+            .with_state(GeminiStreamStubState { payload, seen });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -1500,6 +1637,55 @@ mod tests {
             }
             _ => {}
         }
+    }
+
+    #[tokio::test]
+    async fn code_assist_stream_uses_internal_endpoint_and_wrapper()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"response":{"candidates":[{"content":{"parts":[{"text":"hello from code assist"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}},"traceId":"trace-123"}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) = spawn_code_assist_stream_stub(payload, seen.clone()).await;
+        let client =
+            GeminiClient::new_with_base_url(String::new(), base_url).with_code_assist_wire();
+        let request = LlmRequest::new(
+            "gemini-3.1-flash-lite",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::TextDelta { delta, .. } => deltas.push(delta),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        handle.abort();
+
+        assert_eq!(deltas, vec!["hello from code assist"]);
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured Code Assist request");
+        assert_eq!(body["model"], "gemini-2.5-flash");
+        assert!(
+            body.get("user_prompt_id").and_then(Value::as_str).is_some(),
+            "Code Assist requires a user_prompt_id on generate requests",
+        );
+        assert!(
+            body.get("request")
+                .and_then(|request| request.get("contents"))
+                .is_some(),
+            "Code Assist request must wrap public generateContent payload under `request`",
+        );
+        assert!(
+            body.get("contents").is_none(),
+            "Code Assist must not send public generateContent fields at top level",
+        );
+        Ok(())
     }
 
     #[test]

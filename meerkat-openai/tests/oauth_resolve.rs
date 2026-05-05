@@ -614,7 +614,7 @@ async fn openai_managed_chatgpt_oauth_rejects_marker_with_empty_auth_lifecycle()
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::LeaseAbsent
+                meerkat_core::AuthError::StaleCredential
             )
         ),
         "got {err:?}"
@@ -732,7 +732,7 @@ async fn openai_managed_chatgpt_oauth_rejects_expired_marker_with_empty_auth_lif
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::LeaseAbsent
+                meerkat_core::AuthError::StaleCredential
             )
         ),
         "got {err:?}"
@@ -989,7 +989,7 @@ async fn openai_external_chatgpt_tokens_empty_lifecycle_requires_auth_lease() {
         matches!(
             err,
             meerkat_llm_core::provider_runtime::ProviderAuthError::Auth(
-                meerkat_core::AuthError::LeaseAbsent
+                meerkat_core::AuthError::StaleCredential
             )
         ),
         "got {err:?}"

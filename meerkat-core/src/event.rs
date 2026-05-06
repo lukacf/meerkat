@@ -1394,7 +1394,12 @@ pub enum AgentEvent {
     TextComplete { content: String },
 
     /// Provider-executed tool content surfaced during a model turn.
-    ServerToolContent { name: String, content: Value },
+    ServerToolContent {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        content: Value,
+    },
 
     /// Model requested a tool call
     ToolCallRequested {

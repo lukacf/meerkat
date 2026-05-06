@@ -1814,42 +1814,17 @@ impl SessionRuntimeLlmReconfigureHost {
         }
     }
 
-    fn explicit_meerkat_tool_policy_for_session(session: &Session) -> bool {
-        let Some(metadata) = session.session_metadata() else {
-            return false;
-        };
-        !matches!(
-            metadata.tooling.builtins,
-            meerkat_core::ToolCategoryOverride::Inherit
-        ) || !matches!(
-            metadata.tooling.shell,
-            meerkat_core::ToolCategoryOverride::Inherit
-        ) || !matches!(
-            metadata.tooling.memory,
-            meerkat_core::ToolCategoryOverride::Inherit
-        ) || !matches!(
-            metadata.tooling.mob,
-            meerkat_core::ToolCategoryOverride::Inherit
-        )
-    }
-
     async fn build_request_policy_for_llm_identity(
         &self,
         session_id: &SessionId,
         identity: &SessionLlmIdentity,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, RuntimeDriverError> {
         let config = self.load_config_for_hot_swap().await?;
-        let session = self
-            .service
-            .export_live_session(session_id)
-            .await
-            .map_err(session_error_to_runtime_driver)?;
-        let explicit_meerkat_tool_policy = Self::explicit_meerkat_tool_policy_for_session(&session);
         self.factory
-            .request_policy_for_llm_identity(&config, identity, explicit_meerkat_tool_policy)
+            .request_policy_for_llm_identity(&config, identity)
             .map_err(|e| {
                 RuntimeDriverError::Internal(format!(
-                    "Failed to build LLM request policy for session identity hot-swap: {e}"
+                    "Failed to build LLM request policy for session {session_id} identity hot-swap: {e}"
                 ))
             })
     }

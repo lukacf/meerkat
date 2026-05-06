@@ -2562,6 +2562,10 @@ class WireAssistantBlockToolUse(TypedDict, total=False):
     block_type: Required[Literal['tool_use']]
     data: Required[dict[str, Any]]
 
+class WireAssistantBlockServerToolContent(TypedDict, total=False):
+    block_type: Required[Literal['server_tool_content']]
+    data: Required[dict[str, Any]]
+
 class WireAssistantBlockImage(TypedDict, total=False):
     block_type: Required[Literal['image']]
     data: Required[dict[str, Any]]
@@ -2569,7 +2573,7 @@ class WireAssistantBlockImage(TypedDict, total=False):
 class WireAssistantBlockUnknown(TypedDict, total=False):
     block_type: Required[Literal['unknown']]
 
-WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockImage | WireAssistantBlockUnknown
+WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
 
 # Machine-owned image operation phase.
 class WireImageOperationPhaseRequested(TypedDict, total=False):

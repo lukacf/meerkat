@@ -1679,6 +1679,31 @@
         "type": "object"
       },
       {
+        "description": "Provider-executed tool content surfaced during a model turn.",
+        "properties": {
+          "content": true,
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "type": {
+            "const": "server_tool_content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "name",
+          "content"
+        ],
+        "type": "object"
+      },
+      {
         "description": "Model requested a tool call",
         "properties": {
           "args": {
@@ -2951,6 +2976,31 @@
             },
             "required": [
               "type",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Provider-executed tool content surfaced during a model turn.",
+            "properties": {
+              "content": true,
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "name": {
+                "type": "string"
+              },
+              "type": {
+                "const": "server_tool_content",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "name",
               "content"
             ],
             "type": "object"

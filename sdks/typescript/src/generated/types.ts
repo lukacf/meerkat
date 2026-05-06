@@ -2369,6 +2369,11 @@ export interface WireAssistantBlockToolUse {
   data: Record<string, unknown>;
 }
 
+export interface WireAssistantBlockServerToolContent {
+  block_type: "server_tool_content";
+  data: Record<string, unknown>;
+}
+
 export interface WireAssistantBlockImage {
   block_type: "image";
   data: Record<string, unknown>;
@@ -2378,7 +2383,7 @@ export interface WireAssistantBlockUnknown {
   block_type: "unknown";
 }
 
-export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockImage | WireAssistantBlockUnknown;
+export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown;
 
 export interface WireImageOperationPhaseRequested {
   phase: "requested";

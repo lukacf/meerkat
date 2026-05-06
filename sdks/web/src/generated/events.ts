@@ -348,6 +348,13 @@ export interface TextCompleteEvent {
   type: "text_complete";
 }
 
+export interface ServerToolContentEvent {
+  content: unknown;
+  id?: string | null;
+  name: string;
+  type: "server_tool_content";
+}
+
 export interface ToolCallRequestedEvent {
   args: ToolCallArguments;
   id: string;
@@ -534,6 +541,7 @@ export type AgentEvent =
   ReasoningCompleteEvent |
   TextDeltaEvent |
   TextCompleteEvent |
+  ServerToolContentEvent |
   ToolCallRequestedEvent |
   ToolResultReceivedEvent |
   TurnCompletedEvent |

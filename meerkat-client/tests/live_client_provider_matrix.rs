@@ -287,7 +287,7 @@ async fn e2e_smoke_provider_web_search_all_three() -> Result<(), Box<dyn std::er
         ran += 1;
         let client = GeminiClient::new(api_key);
         let request = LlmRequest::new(
-            "gemini-2.5-flash",
+            "gemini-3.1-flash-lite-preview",
             vec![Message::User(UserMessage::text(prompt.to_string()))],
         )
         .with_provider_params(ProviderTag::Gemini(GeminiProviderTag {

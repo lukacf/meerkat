@@ -743,7 +743,6 @@ fn provider_tool_defaults_for(
     provider: Provider,
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
-    _explicit_meerkat_tool_policy: bool,
 ) -> Option<serde_json::Value> {
     if !model_profile.is_some_and(|profile| profile.supports_web_search) {
         return None;
@@ -2049,7 +2048,6 @@ impl AgentFactory {
         &self,
         config: &Config,
         identity: &SessionLlmIdentity,
-        explicit_meerkat_tool_policy: bool,
     ) -> Result<meerkat_core::SessionLlmRequestPolicy, FactoryError> {
         let registry = config
             .model_registry()
@@ -2062,7 +2060,6 @@ impl AgentFactory {
                 identity.provider,
                 config,
                 model_profile.as_ref(),
-                explicit_meerkat_tool_policy,
             ),
         })
     }
@@ -2762,18 +2759,6 @@ impl AgentFactory {
                     as Arc<dyn meerkat_core::ImageGenerationPlanner>
             })
         };
-
-        let explicit_meerkat_tool_policy =
-            !matches!(
-                build_config.override_builtins,
-                ToolCategoryOverride::Inherit
-            ) || !matches!(build_config.override_shell, ToolCategoryOverride::Inherit)
-                || !matches!(build_config.override_memory, ToolCategoryOverride::Inherit)
-                || !matches!(
-                    build_config.override_schedule,
-                    ToolCategoryOverride::Inherit
-                )
-                || !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
 
         // 2. Resolve provider and any self-hosted server binding.
         let resumed_self_hosted_server_id = resumed_session_metadata
@@ -3967,12 +3952,8 @@ impl AgentFactory {
             }))
             .with_call_timeout_override(effective_call_timeout_override);
 
-        if let Some(defaults) = provider_tool_defaults_for(
-            provider,
-            config,
-            model_profile.as_ref(),
-            explicit_meerkat_tool_policy,
-        ) {
+        if let Some(defaults) = provider_tool_defaults_for(provider, config, model_profile.as_ref())
+        {
             builder = builder.provider_tool_defaults(defaults);
         }
         if let Some(params) = build_config.provider_params.clone() {
@@ -4379,7 +4360,7 @@ mod tests {
         };
 
         let openai_policy = factory
-            .request_policy_for_llm_identity(&config, &openai_identity, false)
+            .request_policy_for_llm_identity(&config, &openai_identity)
             .expect("OpenAI request policy");
         assert_eq!(
             openai_policy.provider_tool_defaults,
@@ -4388,7 +4369,7 @@ mod tests {
         );
 
         let mismatched_policy = factory
-            .request_policy_for_llm_identity(&config, &mismatched_identity, false)
+            .request_policy_for_llm_identity(&config, &mismatched_identity)
             .expect("mismatched request policy should fail closed, not error");
         assert!(
             mismatched_policy.provider_tool_defaults.is_none(),

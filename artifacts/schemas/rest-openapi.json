@@ -5848,6 +5848,48 @@
           {
             "properties": {
               "block_type": {
+                "const": "server_tool_content",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "content": true,
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
                 "const": "image",
                 "type": "string"
               },

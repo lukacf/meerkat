@@ -642,6 +642,24 @@ async fn await_session_archive_with_runtime_cleanup(
     })?
 }
 
+async fn commit_service_turn_terminal_receipt_and_persist(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    if let Err(error) = runtime_adapter
+        .commit_service_turn_terminal_receipt(session_id)
+        .await
+    {
+        let _ = service.discard_live_session(session_id).await;
+        return Err(runtime_driver_error_to_session_error(error));
+    }
+    service
+        .persist_machine_committed_live_turn(session_id)
+        .await
+        .map(|_| ())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingPromotionCleanupMode {
     Restore,
@@ -1106,6 +1124,7 @@ impl RpcMobSessionService {
 
     async fn await_guarded_start_turn(
         service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
+        runtime_adapter: Arc<MeerkatMachine>,
         session_id: SessionId,
         req: StartTurnRequest,
         admission: ActiveCapacityGuard,
@@ -1114,8 +1133,21 @@ impl RpcMobSessionService {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = service
-                .start_turn_with_reserved_admission(&session_id, req, admission)
+                .start_turn_live_with_machine_admission(&session_id, req, admission)
                 .await;
+            let result = match result {
+                Ok(result) => commit_service_turn_terminal_receipt_and_persist(
+                    service.as_ref(),
+                    runtime_adapter.as_ref(),
+                    &session_id,
+                )
+                .await
+                .map(|()| result),
+                Err(error) => {
+                    let _ = service.discard_live_session(&session_id).await;
+                    Err(error)
+                }
+            };
             let _ = result_tx.send(result);
         });
         result_rx
@@ -1284,7 +1316,14 @@ impl SessionService for RpcMobSessionService {
             return Err(SessionError::Busy { id: id.clone() });
         }
         let admission = self.reserve_turn_admission(id).await?;
-        Self::await_guarded_start_turn(Arc::clone(&self.service), id.clone(), req, admission).await
+        Self::await_guarded_start_turn(
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            id.clone(),
+            req,
+            admission,
+        )
+        .await
     }
 
     async fn interrupt(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -1625,6 +1664,12 @@ fn session_error_to_runtime_driver(err: SessionError) -> RuntimeDriverError {
         },
         other => RuntimeDriverError::Internal(other.to_string()),
     }
+}
+
+fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionError {
+    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+        err.to_string(),
+    ))
 }
 
 fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
@@ -3195,11 +3240,25 @@ impl SessionRuntime {
         admission: ActiveCapacityGuard,
     ) -> ServiceStartTurnResultReceiver {
         let service = Arc::clone(&self.service);
+        let runtime_adapter = Arc::clone(&self.runtime_adapter);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = service
-                .start_turn_with_reserved_admission(&session_id, req, admission)
+                .start_turn_live_with_machine_admission(&session_id, req, admission)
                 .await;
+            let result = match result {
+                Ok(result) => commit_service_turn_terminal_receipt_and_persist(
+                    service.as_ref(),
+                    runtime_adapter.as_ref(),
+                    &session_id,
+                )
+                .await
+                .map(|()| result),
+                Err(error) => {
+                    let _ = service.discard_live_session(&session_id).await;
+                    Err(error)
+                }
+            };
             let _ = result_tx.send(result);
         });
         result_rx
@@ -3319,7 +3378,27 @@ impl SessionRuntime {
             #[cfg(test)]
             Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
 
-            let result = service.start_turn(&session_id, start_req).await;
+            let result = match service.reserve_runtime_turn_admission(&session_id).await {
+                Ok(admission) => {
+                    let result = service
+                        .start_turn_live_with_machine_admission(&session_id, start_req, admission)
+                        .await;
+                    match result {
+                        Ok(result) => commit_service_turn_terminal_receipt_and_persist(
+                            service.as_ref(),
+                            runtime_adapter.as_ref(),
+                            &session_id,
+                        )
+                        .await
+                        .map(|()| result),
+                        Err(error) => {
+                            let _ = service.discard_live_session(&session_id).await;
+                            Err(error)
+                        }
+                    }
+                }
+                Err(error) => Err(error),
+            };
             if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
                 let restore_result = promotion_cleanup
                     .restore_after_materialized_failure(
@@ -8647,6 +8726,130 @@ mod tests {
         release: Arc<Notify>,
     }
 
+    struct FailingLifecycleRuntimeStore {
+        inner: meerkat_runtime::InMemoryRuntimeStore,
+        fail_lifecycle_once: AtomicBool,
+    }
+
+    impl FailingLifecycleRuntimeStore {
+        fn new() -> Self {
+            Self {
+                inner: meerkat_runtime::InMemoryRuntimeStore::new(),
+                fail_lifecycle_once: AtomicBool::new(false),
+            }
+        }
+
+        fn fail_next_lifecycle_commit(&self) {
+            self.fail_lifecycle_once
+                .store(true, AtomicOrdering::Release);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_runtime::RuntimeStore for FailingLifecycleRuntimeStore {
+        async fn commit_session_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            session_delta: meerkat_runtime::store::SessionDelta,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .commit_session_snapshot(runtime_id, session_delta)
+                .await
+        }
+
+        async fn atomic_apply(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            session_delta: Option<meerkat_runtime::store::SessionDelta>,
+            receipt: meerkat_core::lifecycle::RunBoundaryReceipt,
+            input_updates: Vec<meerkat_runtime::input_state::StoredInputState>,
+            session_store_key: Option<SessionId>,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner
+                .atomic_apply(
+                    runtime_id,
+                    session_delta,
+                    receipt,
+                    input_updates,
+                    session_store_key,
+                )
+                .await
+        }
+
+        async fn load_input_states(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        ) -> Result<
+            Vec<meerkat_runtime::input_state::StoredInputState>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_input_states(runtime_id).await
+        }
+
+        async fn load_boundary_receipt(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            run_id: &RunId,
+            sequence: u64,
+        ) -> Result<
+            Option<meerkat_core::lifecycle::RunBoundaryReceipt>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner
+                .load_boundary_receipt(runtime_id, run_id, sequence)
+                .await
+        }
+
+        async fn load_session_snapshot(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        ) -> Result<Option<Vec<u8>>, meerkat_runtime::RuntimeStoreError> {
+            self.inner.load_session_snapshot(runtime_id).await
+        }
+
+        async fn persist_input_state(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            state: &meerkat_runtime::input_state::StoredInputState,
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            self.inner.persist_input_state(runtime_id, state).await
+        }
+
+        async fn load_input_state(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            input_id: &InputId,
+        ) -> Result<
+            Option<meerkat_runtime::input_state::StoredInputState>,
+            meerkat_runtime::RuntimeStoreError,
+        > {
+            self.inner.load_input_state(runtime_id, input_id).await
+        }
+
+        async fn load_runtime_state(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+        ) -> Result<Option<RuntimeState>, meerkat_runtime::RuntimeStoreError> {
+            self.inner.load_runtime_state(runtime_id).await
+        }
+
+        async fn commit_machine_lifecycle(
+            &self,
+            runtime_id: &meerkat_runtime::identifiers::LogicalRuntimeId,
+            commit: meerkat_runtime::store::MachineLifecycleCommit,
+            input_states: &[meerkat_runtime::input_state::StoredInputState],
+        ) -> Result<(), meerkat_runtime::RuntimeStoreError> {
+            if self.fail_lifecycle_once.swap(false, AtomicOrdering::AcqRel) {
+                return Err(meerkat_runtime::RuntimeStoreError::WriteFailed(
+                    "synthetic service-turn lifecycle commit failure".to_string(),
+                ));
+            }
+            self.inner
+                .commit_machine_lifecycle(runtime_id, commit, input_states)
+                .await
+        }
+    }
+
     #[async_trait]
     impl LlmClient for BlockingMockLlmClient {
         fn project_replay_messages(
@@ -10959,9 +11162,9 @@ mod tests {
                 None,
                 None,
                 None,
-        )
-        .await
-        .expect("runtime turn must reuse live mechanics instead of rebuilding comms");
+            )
+            .await
+            .expect("runtime turn must reuse live mechanics instead of rebuilding comms");
         assert!(
             result.text.contains("Hello from mock"),
             "unexpected runtime turn result: {:?}",
@@ -12430,6 +12633,106 @@ mod tests {
             result.text.contains("Hello from mock"),
             "Expected mock response text, got: {}",
             result.text
+        );
+        assert_eq!(
+            runtime
+                .runtime_adapter()
+                .runtime_state(&session_id)
+                .await
+                .expect("runtime state should be readable"),
+            RuntimeState::Attached,
+            "direct service start_turn must close its machine-owned run binding after durable return"
+        );
+        assert!(
+            runtime
+                .runtime_adapter()
+                .list_active_inputs(&session_id)
+                .await
+                .expect("active inputs should be readable")
+                .is_empty(),
+            "direct service start_turn should not leave active runtime inputs"
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_start_turn_lifecycle_commit_failure_fails_closed_before_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let runtime_store = Arc::new(FailingLifecycleRuntimeStore::new());
+        let runtime_store_dyn: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        let runtime = Arc::new(SessionRuntime::new(
+            temp_factory(&temp),
+            Config::default(),
+            10,
+            meerkat::PersistenceBundle::new(store, Some(runtime_store_dyn), blob_store),
+            crate::router::NotificationSink::noop(),
+        ));
+
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session");
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "first".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("first direct start_turn should commit");
+        let durable_before = runtime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load durable session before failure")
+            .expect("durable session should exist before failure");
+        let durable_message_count = durable_before.messages().len();
+
+        runtime_store.fail_next_lifecycle_commit();
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        let error = runtime
+            .start_turn(
+                &session_id,
+                "second".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("machine lifecycle commit failure must reject the direct turn");
+        assert!(
+            error
+                .message
+                .contains("synthetic service-turn lifecycle commit failure"),
+            "unexpected error: {error:?}"
+        );
+        assert!(
+            !runtime
+                .service
+                .has_live_session(&session_id)
+                .await
+                .expect("live status after failed commit"),
+            "failed machine receipt must evict the uncommitted live turn"
+        );
+        let durable_after = runtime
+            .service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("load durable session after failure")
+            .expect("durable session should remain at previous snapshot");
+        assert_eq!(
+            durable_after.messages().len(),
+            durable_message_count,
+            "failed machine receipt must not persist the completed service turn snapshot"
         );
     }
 

@@ -5,7 +5,11 @@ import json
 import pytest
 
 from meerkat import MeerkatClient, RealtimeChannel
-from meerkat.generated.types import RealtimeOpenInfo, RealtimeProtocolVersion
+from meerkat.generated.types import (
+    RealtimeOpenInfo,
+    RealtimeProtocolVersion,
+    RealtimeStatusResult,
+)
 
 REALTIME_PROTOCOL_VERSION: RealtimeProtocolVersion = "2"
 
@@ -197,3 +201,64 @@ async def test_realtime_channel_connects_from_supplied_open_info() -> None:
                 "turning_mode": "provider_managed",
             }
         ]
+
+
+@pytest.mark.asyncio
+async def test_realtime_channel_connect_wait_accepts_wire_dict_status() -> None:
+    import websockets
+
+    async def handler(websocket) -> None:
+        await websocket.recv()
+        await websocket.send(
+            json.dumps(
+                {
+                    "type": "channel.opened",
+                    "protocol_version": REALTIME_PROTOCOL_VERSION,
+                    "status": {"state": "ready", "attempt_count": 0},
+                    "capabilities": {
+                        "input_kinds": ["text"],
+                        "output_kinds": ["text"],
+                        "turning_modes": ["provider_managed"],
+                        "interrupt_supported": True,
+                        "transcript_supported": True,
+                        "tool_lifecycle_events_supported": False,
+                        "video_supported": False,
+                    },
+                    "role": "primary",
+                }
+            )
+        )
+        await websocket.recv()
+
+    async with websockets.serve(handler, "127.0.0.1", 0) as server:
+        port = server.sockets[0].getsockname()[1]
+        client = MeerkatClient()
+
+        async def fake_open_info(_request):
+            return RealtimeOpenInfo(
+                ws_url=f"ws://127.0.0.1:{port}/realtime/ws",
+                open_token="token-3",
+                expires_at="2026-04-15T12:00:00Z",
+                target={"type": "session_target", "session_id": "session-1"},
+                supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
+                default_protocol_version=REALTIME_PROTOCOL_VERSION,
+                capabilities={
+                    "input_kinds": ["text"],
+                    "output_kinds": ["text"],
+                    "turning_modes": ["provider_managed"],
+                    "interrupt_supported": True,
+                    "transcript_supported": True,
+                    "tool_lifecycle_events_supported": False,
+                    "video_supported": False,
+                },
+            )
+
+        async def fake_status(_params):
+            return RealtimeStatusResult(status={"state": "ready", "attempt_count": 0})
+
+        client.realtime_open_info = fake_open_info  # type: ignore[method-assign]
+        client.realtime_status = fake_status  # type: ignore[method-assign]
+
+        channel = RealtimeChannel.session(client, "session-1")
+        connection = await channel.connect(attachment_timeout_secs=1.0)
+        await connection.close()

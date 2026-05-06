@@ -25801,12 +25801,11 @@ async fn test_member_status_round_trips_through_machine_command_surface() {
 }
 
 #[tokio::test]
-async fn test_member_status_surface_exposes_current_session_id_for_realtime_routing() {
-    // Identity-first realtime routing (Phase 5G/T5i) requires callers to
-    // resolve `mob/member_status → current_session_id → realtime/open_info
-    // (session_target)`. The session id MUST survive serialization to
-    // JSON — it is the sole bridge from mob membership to a realtime
-    // session handle since `mob_member_target` was removed.
+async fn test_member_status_surface_exposes_current_session_id_for_diagnostics_only() {
+    // `current_session_id` remains observable for status/continuity
+    // diagnostics, but it is not a realtime routing contract. Public
+    // realtime callers use `RealtimeChannelTarget::MobMember` so the server
+    // resolves the machine-owned bridge binding at open/reconnect time.
     let (handle, _service) = create_test_mob(sample_definition()).await;
     let receipt = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -25828,7 +25827,7 @@ async fn test_member_status_surface_exposes_current_session_id_for_realtime_rout
             .get("current_session_id")
             .and_then(|v| v.as_str()),
         Some(expected_session_id.to_string().as_str()),
-        "mob/member_status response must surface current_session_id for realtime routing: {json_value}"
+        "mob/member_status response should surface current_session_id for diagnostics: {json_value}"
     );
     // The bridge-internal alias stays hidden — it is not part of the
     // public identity contract.

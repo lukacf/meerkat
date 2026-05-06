@@ -1801,6 +1801,13 @@ pub trait RealtimeProductTurnHandle: Send + Sync {
     /// completed a provider-session refresh drain. Returns to `Clean`.
     fn projection_refreshed(&self, observed_ms: u64) -> Result<bool, DslTransitionError>;
 
+    /// Fire `RealtimeProjectionBaselineObserved { observed_ms }` — the shell
+    /// observed a provider-owned session-context mutation that the currently
+    /// open provider session already contains. This may advance a clean
+    /// frontier, but it must not clear `StaleDeferred` / `StaleImmediate`;
+    /// only a real refresh drain may make stale state clean.
+    fn projection_baseline_observed(&self, observed_ms: u64) -> Result<bool, DslTransitionError>;
+
     /// Fire `RealtimeProjectionReset { baseline_ms }` — the shell closed
     /// or reconnected the product session and wants to re-seed the
     /// `Clean` baseline at the current DSL session-context watermark.

@@ -3948,7 +3948,10 @@ mod runtime_turn_metadata_tests {
                 .ticks
                 .lock()
                 .expect("session context ticks lock poisoned");
-            if ticks.last().is_some_and(|current| updated_at_ms <= *current) {
+            if ticks
+                .last()
+                .is_some_and(|current| updated_at_ms <= *current)
+            {
                 return Ok(false);
             }
             ticks.push(updated_at_ms);
@@ -4089,9 +4092,9 @@ mod runtime_turn_metadata_tests {
         fn session_context_handle(
             &self,
         ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {
-            self.session_context_handle
-                .as_ref()
-                .map(|handle| Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>)
+            self.session_context_handle.as_ref().map(|handle| {
+                Arc::clone(handle) as Arc<dyn meerkat_core::handles::SessionContextHandle>
+            })
         }
     }
 

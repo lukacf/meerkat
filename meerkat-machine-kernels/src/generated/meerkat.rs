@@ -4560,6 +4560,10 @@ pub mod inputs {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ServiceTurnCommitted {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RunFailed {
         pub run_id: RunId,
         pub runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
@@ -4957,6 +4961,10 @@ pub mod inputs {
         pub observed_ms: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RealtimeProjectionBaselineObserved {
+        pub observed_ms: u64,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RealtimeProjectionReset {
         pub baseline_ms: u64,
     }
@@ -5119,6 +5127,7 @@ pub enum Input {
     TimeBudgetExceeded(inputs::TimeBudgetExceeded),
     ForceCancelNoRun(inputs::ForceCancelNoRun),
     RunCompleted(inputs::RunCompleted),
+    ServiceTurnCommitted(inputs::ServiceTurnCommitted),
     RunFailed(inputs::RunFailed),
     RunCancelled(inputs::RunCancelled),
     RecoverInputLifecycle(inputs::RecoverInputLifecycle),
@@ -5214,6 +5223,7 @@ pub enum Input {
     ProductTurnTerminal(inputs::ProductTurnTerminal),
     RealtimeProjectionAdvanceObserved(inputs::RealtimeProjectionAdvanceObserved),
     RealtimeProjectionRefreshed(inputs::RealtimeProjectionRefreshed),
+    RealtimeProjectionBaselineObserved(inputs::RealtimeProjectionBaselineObserved),
     RealtimeProjectionReset(inputs::RealtimeProjectionReset),
     ClassifyRealtimeClientInputSubmitted(inputs::ClassifyRealtimeClientInputSubmitted),
     ClassifyRealtimeMidTurnActivity(inputs::ClassifyRealtimeMidTurnActivity),
@@ -5317,6 +5327,7 @@ impl Input {
             Self::TimeBudgetExceeded(_) => InputKind::TimeBudgetExceeded,
             Self::ForceCancelNoRun(_) => InputKind::ForceCancelNoRun,
             Self::RunCompleted(_) => InputKind::RunCompleted,
+            Self::ServiceTurnCommitted(_) => InputKind::ServiceTurnCommitted,
             Self::RunFailed(_) => InputKind::RunFailed,
             Self::RunCancelled(_) => InputKind::RunCancelled,
             Self::RecoverInputLifecycle(_) => InputKind::RecoverInputLifecycle,
@@ -5416,6 +5427,9 @@ impl Input {
                 InputKind::RealtimeProjectionAdvanceObserved
             }
             Self::RealtimeProjectionRefreshed(_) => InputKind::RealtimeProjectionRefreshed,
+            Self::RealtimeProjectionBaselineObserved(_) => {
+                InputKind::RealtimeProjectionBaselineObserved
+            }
             Self::RealtimeProjectionReset(_) => InputKind::RealtimeProjectionReset,
             Self::ClassifyRealtimeClientInputSubmitted(_) => {
                 InputKind::ClassifyRealtimeClientInputSubmitted
@@ -5522,6 +5536,7 @@ pub enum InputKind {
     TimeBudgetExceeded,
     ForceCancelNoRun,
     RunCompleted,
+    ServiceTurnCommitted,
     RunFailed,
     RunCancelled,
     RecoverInputLifecycle,
@@ -5617,6 +5632,7 @@ pub enum InputKind {
     ProductTurnTerminal,
     RealtimeProjectionAdvanceObserved,
     RealtimeProjectionRefreshed,
+    RealtimeProjectionBaselineObserved,
     RealtimeProjectionReset,
     ClassifyRealtimeClientInputSubmitted,
     ClassifyRealtimeMidTurnActivity,
@@ -6437,6 +6453,9 @@ pub enum TransitionId {
     TimeBudgetExceeded,
     ForceCancelNoRun,
     RunCompleted,
+    ServiceTurnCommittedRunningToIdle,
+    ServiceTurnCommittedRunningToAttached,
+    ServiceTurnCommittedRunningToRetired,
     RunFailed,
     RunCancelled,
     SurfaceRegisterAttached,
@@ -6924,6 +6943,12 @@ pub enum TransitionId {
     RealtimeProjectionRefreshedRunning,
     RealtimeProjectionRefreshedRetired,
     RealtimeProjectionRefreshedStopped,
+    RealtimeProjectionBaselineObservedCleanInitializing,
+    RealtimeProjectionBaselineObservedCleanIdle,
+    RealtimeProjectionBaselineObservedCleanAttached,
+    RealtimeProjectionBaselineObservedCleanRunning,
+    RealtimeProjectionBaselineObservedCleanRetired,
+    RealtimeProjectionBaselineObservedCleanStopped,
     RealtimeProjectionResetInitializing,
     RealtimeProjectionResetIdle,
     RealtimeProjectionResetAttached,

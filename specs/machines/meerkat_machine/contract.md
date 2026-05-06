@@ -234,6 +234,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TimeBudgetExceeded`
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
+- `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
@@ -329,6 +330,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ProductTurnTerminal`
 - `RealtimeProjectionAdvanceObserved`(advanced_at_ms: u64)
 - `RealtimeProjectionRefreshed`(observed_ms: u64)
+- `RealtimeProjectionBaselineObserved`(observed_ms: u64)
 - `RealtimeProjectionReset`(baseline_ms: u64)
 - `ClassifyRealtimeClientInputSubmitted`
 - `ClassifyRealtimeMidTurnActivity`
@@ -2643,6 +2645,33 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `run_matches_binding`
 - To: `Running`
+
+### `ServiceTurnCommittedRunningToIdle`
+- From: `Running`
+- On: `ServiceTurnCommitted`(run_id)
+- Guards:
+  - `pre_run_phase_matches_idle`
+  - `run_matches_binding`
+  - `turn_completed`
+- To: `Idle`
+
+### `ServiceTurnCommittedRunningToAttached`
+- From: `Running`
+- On: `ServiceTurnCommitted`(run_id)
+- Guards:
+  - `pre_run_phase_matches_attached`
+  - `run_matches_binding`
+  - `turn_completed`
+- To: `Attached`
+
+### `ServiceTurnCommittedRunningToRetired`
+- From: `Running`
+- On: `ServiceTurnCommitted`(run_id)
+- Guards:
+  - `pre_run_phase_matches_retired`
+  - `run_matches_binding`
+  - `turn_completed`
+- To: `Retired`
 
 ### `RunFailed`
 - From: `Running`
@@ -6670,6 +6699,60 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `not_behind_frontier`
   - `actually_changing`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Stopped`
+
+### `RealtimeProjectionBaselineObservedCleanInitializing`
+- From: `Initializing`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Initializing`
+
+### `RealtimeProjectionBaselineObservedCleanIdle`
+- From: `Idle`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Idle`
+
+### `RealtimeProjectionBaselineObservedCleanAttached`
+- From: `Attached`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Attached`
+
+### `RealtimeProjectionBaselineObservedCleanRunning`
+- From: `Running`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Running`
+
+### `RealtimeProjectionBaselineObservedCleanRetired`
+- From: `Retired`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
+- Emits: `RealtimeProjectionFreshnessChanged`
+- To: `Retired`
+
+### `RealtimeProjectionBaselineObservedCleanStopped`
+- From: `Stopped`
+- On: `RealtimeProjectionBaselineObserved`(observed_ms)
+- Guards:
+  - `clean`
+  - `monotonic`
 - Emits: `RealtimeProjectionFreshnessChanged`
 - To: `Stopped`
 

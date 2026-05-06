@@ -54,7 +54,7 @@ struct DeferredTurnEventDelivery {
 #[cfg(feature = "runtime-adapter")]
 #[derive(Debug)]
 enum DeferredTurnCompletion {
-    Completed(meerkat_core::types::RunResult),
+    Completed(Box<meerkat_core::types::RunResult>),
     CompletedWithoutResult,
     Failed {
         class: meerkat_core::event::AgentErrorClass,
@@ -69,7 +69,7 @@ impl DeferredTurnCompletion {
     ) -> Self {
         match completion {
             meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
-                Self::Completed(result.as_ref().clone())
+                Self::Completed(Box::new(result.as_ref().clone()))
             }
             meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
                 Self::CompletedWithoutResult
@@ -109,14 +109,17 @@ impl DeferredTurnCompletion {
         session_id: SessionId,
     ) -> meerkat_core::EventEnvelope<meerkat_core::AgentEvent> {
         let payload = match self {
-            Self::Completed(result) => meerkat_core::AgentEvent::RunCompleted {
-                session_id: session_id.clone(),
-                result: result.text,
-                structured_output: result.structured_output,
-                usage: result.usage,
-                terminal_cause_kind: result.terminal_cause_kind,
-                extraction_required: false,
-            },
+            Self::Completed(result) => {
+                let result = *result;
+                meerkat_core::AgentEvent::RunCompleted {
+                    session_id: session_id.clone(),
+                    result: result.text,
+                    structured_output: result.structured_output,
+                    usage: result.usage,
+                    terminal_cause_kind: result.terminal_cause_kind,
+                    extraction_required: false,
+                }
+            }
             Self::CompletedWithoutResult => meerkat_core::AgentEvent::RunCompleted {
                 session_id: session_id.clone(),
                 result: String::new(),

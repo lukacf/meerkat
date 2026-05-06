@@ -802,6 +802,69 @@ pub(crate) fn machine_apply_run_return_projection(
     Ok(())
 }
 
+pub(crate) async fn machine_commit_service_turn_terminal_receipt(
+    driver: &mut DriverEntry,
+) -> Result<(), RuntimeDriverError> {
+    let current_phase = driver.runtime_state();
+    if current_phase != RuntimeState::Running {
+        return Err(RuntimeDriverError::Internal(format!(
+            "service-turn terminal receipt requires a running machine-owned lifecycle; found {current_phase:?}"
+        )));
+    }
+    let active_inputs = driver.as_driver().active_input_ids();
+    if !active_inputs.is_empty() {
+        return Err(RuntimeDriverError::Internal(format!(
+            "direct service turn returned while runtime inputs are still active: {}",
+            active_inputs
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    let Some(run_id) = driver.current_run_id() else {
+        return Err(RuntimeDriverError::Internal(
+            "service-turn terminal receipt requires a machine-owned current_run_id".to_string(),
+        ));
+    };
+    let next_phase =
+        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
+    let rollback = match driver {
+        DriverEntry::Persistent(driver) => Some(driver.rollback_snapshot()),
+        DriverEntry::Ephemeral(_) => None,
+    };
+    let authority = driver.shared_dsl_authority();
+    {
+        let mut auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+            &mut *auth,
+            crate::meerkat_machine::dsl::MeerkatMachineInput::ServiceTurnCommitted {
+                run_id: crate::meerkat_machine::dsl::RunId::from_domain(&run_id),
+            },
+        )
+        .map_err(|_| {
+            RuntimeDriverError::Internal(
+                crate::runtime_state::RuntimeStateTransitionError {
+                    from: current_phase,
+                    to: next_phase,
+                }
+                .to_string(),
+            )
+        })?;
+    }
+    driver.set_control_projection(next_phase, None, None);
+    if let Some(rollback) = rollback
+        && let DriverEntry::Persistent(driver) = driver
+    {
+        driver
+            .commit_service_turn_terminal_lifecycle(rollback, next_phase)
+            .await?;
+    }
+    Ok(())
+}
+
 fn machine_rollback_active_run_after_boundary_commit_failure(
     driver: &mut DriverEntry,
     run_id: &RunId,

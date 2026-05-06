@@ -231,6 +231,13 @@ impl RealtimeProductTurnHandle for RuntimeRealtimeProductTurnHandle {
         )
     }
 
+    fn projection_baseline_observed(&self, observed_ms: u64) -> Result<bool, DslTransitionError> {
+        self.apply_idempotent_with_freshness_effects(
+            mm_dsl::MeerkatMachineInput::RealtimeProjectionBaselineObserved { observed_ms },
+            "RealtimeProductTurnHandle::projection_baseline_observed",
+        )
+    }
+
     fn projection_reset(&self, baseline_ms: u64) -> Result<bool, DslTransitionError> {
         self.apply_idempotent_with_freshness_effects(
             mm_dsl::MeerkatMachineInput::RealtimeProjectionReset { baseline_ms },

@@ -841,6 +841,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RunCompleted`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
+- `ServiceTurnCommittedRunningToIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+- `ServiceTurnCommittedRunningToAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
+- `ServiceTurnCommittedRunningToRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `product_turn_streaming`
 - `RunFailed`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `retire-reset-destroy`, `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`, `recycle_and_compaction`
@@ -2302,6 +2311,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RealtimeProjectionRefreshedStopped`
   - anchors: `meerkat_machine`
   - scenarios: `product_turn_streaming`
+- `RealtimeProjectionBaselineObservedCleanInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
+- `RealtimeProjectionBaselineObservedCleanIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
+- `RealtimeProjectionBaselineObservedCleanAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`
+- `RealtimeProjectionBaselineObservedCleanRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
+- `RealtimeProjectionBaselineObservedCleanRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
+- `RealtimeProjectionBaselineObservedCleanStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `realtime_connection_projection`, `product_turn_streaming`
 - `RealtimeProjectionResetInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `product_turn_streaming`

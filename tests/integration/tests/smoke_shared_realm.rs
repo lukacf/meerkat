@@ -5,8 +5,6 @@
     dead_code,
     unused_assignments,
     unused_variables,
-    // T5i removed RealtimeChannel::mob_member; these smoke scenarios still
-    // reference it as a panic stub pending session-target migration.
     deprecated
 )]
 
@@ -1429,8 +1427,9 @@ async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_m
             "realtime/open_info",
             json!({
                 "target": {
-                    "type": "session_target",
-                    "session_id": current_session_id,
+                    "type": "mob_member",
+                    "mob_id": mob_id,
+                    "agent_identity": agent_identity,
                 },
                 "role": "primary",
                 "turning_mode": "provider_managed",
@@ -1440,7 +1439,7 @@ async fn realtime_audio_member_target_roundtrip_emits_output_audio_and_updates_m
         .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id.to_string(), agent_identity);
         eprintln!("[member audio helper] connect channel");
         let connection = channel.connect(&open_info).await?;
         let (mut sender, mut receiver) = connection.split();
@@ -5512,33 +5511,6 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
         Err(err) => return Err(err),
     };
 
-    // Resolve worker-1's session_id before opening realtime (T5i: mob_member_target removed).
-    eprintln!("[scenario 63] resolve worker session id");
-    let worker_status = match tcp_rpc_call(
-        &rpc_addr,
-        3,
-        "mob/member_status",
-        json!({
-            "mob_id": mob_id,
-            "agent_identity": "worker-1",
-        }),
-        30,
-    )
-    .await
-    {
-        Ok(worker_status) => worker_status,
-        Err(err) if is_elapsed_timeout(err.as_ref()) => {
-            shutdown_stdio_process_lenient(mcp).await;
-            shutdown_child(rpc_child).await?;
-            return Ok(());
-        }
-        Err(err) => return Err(err),
-    };
-    let worker_session_id = worker_status["current_session_id"]
-        .as_str()
-        .ok_or("mob/member_status missing current_session_id")?
-        .to_string();
-
     eprintln!("[scenario 63] request realtime open_info through MCP");
     let open_info_response = match mcp_call_tool(
         &mut mcp,
@@ -5546,8 +5518,9 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
         "meerkat_realtime_open_info",
         json!({
             "target": {
-                "type": "session_target",
-                "session_id": worker_session_id,
+                "type": "mob_member",
+                "mob_id": mob_id,
+                "agent_identity": "worker-1",
             },
             "role": "primary",
             "turning_mode": "provider_managed",
@@ -5569,7 +5542,7 @@ async fn e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange()
         serde_json::from_value(open_info_payload)?;
 
     eprintln!("[scenario 63] connect Rust SDK realtime channel");
-    let channel = meerkat::RealtimeChannel::session(worker_session_id.clone());
+    let channel = meerkat::RealtimeChannel::mob_member(mob_id.clone(), "worker-1");
     let mut connection = channel.connect(&open_info).await.map_err(|error| {
         format!("scenario 63 Rust SDK realtime channel connect failed after MCP open_info: {error}")
     })?;
@@ -5853,8 +5826,9 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "session_target",
-                        "session_id": current_session_id,
+                        "type": "mob_member",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -5864,7 +5838,7 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id.to_string(), operator);
         let connection = match channel.connect(&open_info).await {
             Ok(connection) => connection,
             Err(error) => {
@@ -6159,14 +6133,15 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
             )
             .into());
         }
-        let operator_async_peer_result = operator_async_peer_response_run["payload"]["result"]
+        if operator_async_peer_response_run["payload"]["result"]
             .as_str()
-            .map(normalize_semantic_text)
-            .ok_or_else(|| {
-                format!(
-                    "operator async post-turn run_completed event missing result payload: {operator_async_peer_response_run}"
-                )
-            })?;
+            .is_none()
+        {
+            return Err(format!(
+                "operator async post-turn run_completed event missing result payload: {operator_async_peer_response_run}"
+            )
+            .into());
+        }
         eprintln!("[scenario 71] reopen realtime channel on reconstructed session state");
         // Public contract note:
         // `session/read` on an active live session is intentionally a coarse
@@ -6193,8 +6168,9 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "session_target",
-                        "session_id": current_session_id,
+                        "type": "mob_member",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -6341,11 +6317,9 @@ turn3_capture={turn3_capture:?}; error={err}"
                 Ok(capture) => capture,
                 Err(error) => {
                     let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
-                    let stderr_path = std::env::temp_dir().join("s71-turn45-stderr.log");
-                    let _ = tokio::fs::write(&stderr_path, rpc_stderr.as_bytes()).await;
                     return Err(format!(
-                        "scenario 71 turn 4-5 barge-in failed: {error}\nrpc stderr dumped to {}",
-                        stderr_path.display()
+                        "scenario 71 turn 4-5 barge-in failed: {error}\nrpc stderr:\n{}",
+                        rpc_stderr.trim()
                     ).into());
                 }
             };
@@ -6518,15 +6492,11 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
             )
             .await?;
             let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
-            let stderr_path = std::env::temp_dir().join("s71-turn6-rpc-stderr.log");
-            let _ = tokio::fs::write(&stderr_path, rpc_stderr.as_bytes()).await;
             return Err(format!(
                 "turn 6 recall emitted unexpected semantic output text `{turn6_output_text}`: {turn6_capture:?}; \
                  expected_checksum_token={expected_checksum_token_normalized}; \
-                 operator_async_peer_result={operator_async_peer_result}; \
-                 turn5_history={turn5_history}; \
-                 rpc stderr dumped to {}",
-                stderr_path.display()
+                 rpc stderr:\n{}",
+                rpc_stderr.trim()
             )
             .into());
         }
@@ -6619,8 +6589,9 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "session_target",
-                        "session_id": current_session_id,
+                        "type": "mob_member",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -6817,8 +6788,9 @@ turn45_output_text={:?}; turn45_frame_log={:?}; error={err}",
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "session_target",
-                        "session_id": current_session_id,
+                        "type": "mob_member",
+                        "mob_id": mob_id,
+                        "agent_identity": operator,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -7291,8 +7263,9 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
                 "realtime/open_info",
                 json!({
                     "target": {
-                        "type": "session_target",
-                        "session_id": current_session_id,
+                        "type": "mob_member",
+                        "mob_id": mob_id,
+                        "agent_identity": agent_identity,
                     },
                     "role": "primary",
                     "turning_mode": "provider_managed",
@@ -7302,7 +7275,7 @@ async fn e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity(
             .await?;
         let open_info: meerkat::contracts::RealtimeOpenInfo =
             serde_json::from_value(open_info_value)?;
-        let channel = meerkat::RealtimeChannel::session(current_session_id.clone());
+        let channel = meerkat::RealtimeChannel::mob_member(mob_id.to_string(), agent_identity);
         eprintln!("[scenario 72] connect realtime channel");
         let connection = channel.connect(&open_info).await?;
         let (mut sender, mut receiver) = connection.split();

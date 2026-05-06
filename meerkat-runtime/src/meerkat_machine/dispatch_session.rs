@@ -390,6 +390,40 @@ impl MeerkatMachine {
                     .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
+            MeerkatMachineCommand::CommitServiceTurnTerminalReceipt { session_id } => {
+                // Direct SessionService turns share the runtime turn-state
+                // handle, but their durable commit occurs inside
+                // `SessionService::start_turn`, not the runtime loop. After
+                // that call returns successfully, close the run binding here
+                // through the same machine-owned lifecycle authority.
+                if matches!(
+                    self.existing_session_runtime_state(&session_id).await,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+
+                let gate = self.session_mutation_gate(&session_id).await;
+                let _gate_guard = match gate {
+                    Some(ref g) => Some(g.lock().await),
+                    None => None,
+                };
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions
+                        .get(&session_id)
+                        .ok_or(RuntimeDriverError::NotReady {
+                            state: RuntimeState::Destroyed,
+                        })?
+                        .driver
+                        .clone()
+                };
+                {
+                    let mut driver = driver.lock().await;
+                    machine_commit_service_turn_terminal_receipt(&mut driver).await?
+                }
+                Ok(MeerkatMachineCommandResult::Unit)
+            }
             MeerkatMachineCommand::ContainsSession { session_id } => {
                 Ok(MeerkatMachineCommandResult::Bool(
                     self.sessions.read().await.contains_key(&session_id),

@@ -49,11 +49,12 @@ async fn require_realtime_bootstrap_eligibility(
         })
 }
 
-/// W3-H: resolve a RealtimeChannelTarget to a concrete bridge session id.
-/// On mob-enabled builds this routes through the MobMcpState resolver
-/// (SessionTarget parses directly; MobMember reads the MobMachine's
-/// canonical binding map). On mob-disabled builds MobMember targets are
-/// rejected with INVALID_PARAMS, and SessionTarget parses directly.
+/// W3-H: resolve a RealtimeChannelTarget to a concrete session id.
+/// On mob-enabled builds this routes through the MobMcpState resolver:
+/// `SessionTarget` is accepted only for standalone sessions, and mob-owned
+/// bridge sessions must use `MobMember` so the MobMachine binding remains
+/// authoritative. On mob-disabled builds MobMember targets are rejected with
+/// INVALID_PARAMS, and SessionTarget parses directly.
 #[cfg(feature = "mob")]
 async fn resolve_realtime_target_session(
     target: &meerkat_contracts::RealtimeChannelTarget,

@@ -38,6 +38,18 @@ impl RealtimeChannel {
         }
     }
 
+    pub fn mob_member(mob_id: impl Into<String>, agent_identity: impl Into<String>) -> Self {
+        Self {
+            target: RealtimeChannelTarget::MobMember {
+                mob_id: mob_id.into(),
+                agent_identity: agent_identity.into(),
+            },
+            role: RealtimeChannelRole::Primary,
+            turning_mode: RealtimeTurningMode::ProviderManaged,
+            reconnect_policy: None,
+        }
+    }
+
     pub fn role(mut self, role: RealtimeChannelRole) -> Self {
         self.role = role;
         self

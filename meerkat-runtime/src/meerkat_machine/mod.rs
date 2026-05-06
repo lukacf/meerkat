@@ -302,7 +302,8 @@ pub(crate) use driver::{
     DriverEntry, SharedCompletionRegistry, SharedDriver, commit_runtime_loop_run, fail_machine_run,
     fail_runtime_loop_run, machine_apply_run_return_projection,
     machine_batch_primitive_projections, machine_batch_runtime_semantics, machine_begin_run,
-    machine_commit_prepared_destroy, machine_executor_attach_projection, machine_input_boundary,
+    machine_commit_prepared_destroy, machine_commit_service_turn_terminal_receipt,
+    machine_executor_attach_projection, machine_input_boundary,
     machine_prepare_bindings_projection, machine_prepare_destroy, machine_recover_ephemeral_driver,
     machine_recover_persistent_driver, machine_recycle_preserving_work, machine_reset,
     machine_retire, machine_select_runtime_loop_batch, machine_stop_runtime,
@@ -1223,6 +1224,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::SetSilentIntents { .. }
                 | MeerkatMachineCommand::CancelAfterBoundary { .. }
                 | MeerkatMachineCommand::StopRuntimeExecutor { .. }
+                | MeerkatMachineCommand::CommitServiceTurnTerminalReceipt { .. }
                 | MeerkatMachineCommand::ContainsSession { .. }
                 | MeerkatMachineCommand::SessionHasExecutor { .. }
                 | MeerkatMachineCommand::SessionHasComms { .. }

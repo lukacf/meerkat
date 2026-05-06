@@ -1390,11 +1390,9 @@ export class MeerkatClient {
     };
     resolvedCapabilities?: ResolvedModelCapabilities;
     /**
-     * Phase 5G/T5i identity-first realtime routing: session id of the
-     * member's current bridge session. Consumers navigate
-     * `mob/member_status.currentSessionId → realtime/open_info
-     * (session_target)`. Absent when the member is not yet bound to a
-     * session.
+     * Diagnostic bridge-session id for status/continuity only. Realtime
+     * callers open `RealtimeChannel.mobMember(...)`; the server resolves the
+     * current binding behind the stable mob-member target.
      */
     currentSessionId?: string;
   }> {

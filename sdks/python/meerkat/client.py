@@ -1704,10 +1704,9 @@ class MeerkatClient:
                 if isinstance(result.get("kickoff"), dict)
                 else {}
             ),
-            # Phase 5G/T5i identity-first realtime routing: preserve
-            # `current_session_id` so callers (including
-            # `RealtimeChannel.mob_member`) can resolve a mob member
-            # into a `session_target` for `realtime/open_info`.
+            # Preserve `current_session_id` as diagnostic status/continuity
+            # data only. Realtime callers use the stable `mob_member` target
+            # and let the server resolve the current bridge binding.
             **(
                 {"current_session_id": str(result["current_session_id"])}
                 if isinstance(result.get("current_session_id"), str)

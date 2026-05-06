@@ -2004,6 +2004,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             TimeBudgetExceeded,
             ForceCancelNoRun,
             RunCompleted { run_id: RunId },
+            ServiceTurnCommitted { run_id: RunId },
             RunFailed {
                 run_id: RunId,
                 runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
@@ -2199,12 +2200,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             // dogma #1, #3, #13, #20). The realtime-WS shell fires
             // `RealtimeProjectionAdvanceObserved` on every
             // `SessionContextAdvanced` observer tick, `RealtimeProjectionRefreshed`
-            // after a successful provider-session rebuild, and
+            // after a successful provider-session rebuild,
+            // `RealtimeProjectionBaselineObserved` after provider-owned events
+            // that the currently-open provider session already knows about, and
             // `RealtimeProjectionReset` on product-session close / error /
             // reconnect. The DSL decides whether each advance lands as
-            // `StaleDeferred` (turn live) or `StaleImmediate` (turn idle).
+            // `StaleDeferred` (turn live) or `StaleImmediate` (turn idle), and
+            // only refresh/reset paths may clear stale.
             RealtimeProjectionAdvanceObserved { advanced_at_ms: u64 },
             RealtimeProjectionRefreshed { observed_ms: u64 },
+            RealtimeProjectionBaselineObserved { observed_ms: u64 },
             RealtimeProjectionReset { baseline_ms: u64 },
             // Realtime reconnect-policy inputs (dogma round 2, U-C / dogma
             // #1, #3, #18, #20). `ClassifyRealtimeClientInputSubmitted` fires
@@ -6286,6 +6291,49 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
             }
             to Running
+        }
+
+        // Direct service turns still use the shared runtime turn-state handle
+        // while materializing legacy/session-service callers. Once the service
+        // turn has durably returned, the runtime shell must ask the machine to
+        // close the lifecycle binding instead of treating `Running` as a local
+        // projection. The runtime-loop path continues to use `Commit` with a
+        // boundary receipt and consumed input ids.
+        transition ServiceTurnCommittedRunningToIdle {
+            on input ServiceTurnCommitted { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+        }
+        transition ServiceTurnCommittedRunningToAttached {
+            on input ServiceTurnCommitted { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Attached
+        }
+        transition ServiceTurnCommittedRunningToRetired {
+            on input ServiceTurnCommitted { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
+            guard "run_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_completed" { self.turn_phase == TurnPhase::Completed && self.terminal_outcome == Some(TurnTerminalOutcome::Completed) }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Retired
         }
 
         transition RunFailed {

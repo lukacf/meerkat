@@ -329,14 +329,19 @@ fn openai_realtime_terminal_peer_response_summary(
     let (_, result_text) = append.text.split_once("Result:")?;
     let mut deserializer = serde_json::Deserializer::from_str(result_text.trim());
     let result = serde_json::Value::deserialize(&mut deserializer).ok()?;
-    let intent = result.get("request_intent").and_then(|value| value.as_str())?;
+    let intent = result
+        .get("request_intent")
+        .and_then(|value| value.as_str())?;
     let subject = result
         .get("request_subject")
         .and_then(|value| value.as_str());
     let token = result.get("token").and_then(|value| value.as_str());
     let source = append.source.as_deref().unwrap_or("runtime_system_context");
 
-    let mut fields = vec![format!("source `{source}`"), format!("request_intent `{intent}`")];
+    let mut fields = vec![
+        format!("source `{source}`"),
+        format!("request_intent `{intent}`"),
+    ];
     if let Some(subject) = subject {
         fields.push(format!("request_subject `{subject}`"));
     }
@@ -1364,7 +1369,8 @@ impl OpenAiRealtimeSession {
                 {
                     self.note_previous_for_item(item_id, previous_item_id);
                     None
-                } else if let Some((item_id, role)) = openai_realtime_item_transcript_identity(&item)
+                } else if let Some((item_id, role)) =
+                    openai_realtime_item_transcript_identity(&item)
                 {
                     Some(self.observe_transcript_item(item_id, previous_item_id, role, None))
                 } else {

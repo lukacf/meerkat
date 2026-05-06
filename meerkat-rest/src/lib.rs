@@ -6871,11 +6871,13 @@ mod tests {
         assert_eq!(output.receipt.contributing_input_ids, vec![input_id]);
         assert!(state.runtime_adapter.contains_session(&session_id).await);
 
-        let exported = state
-            .session_service
-            .export_live_session(&session_id)
-            .await
-            .expect("export recovered live session");
+        let exported: Session = serde_json::from_slice(
+            output
+                .session_snapshot
+                .as_deref()
+                .expect("runtime output should carry a staged session snapshot"),
+        )
+        .expect("staged REST session snapshot should deserialize");
         let system_context = exported
             .messages()
             .iter()
@@ -6888,6 +6890,11 @@ mod tests {
             system_context.contains("ctx-rest-recovered-live-missing")
                 && system_context.contains("rest recovered runtime context"),
             "context-only recovery should persist REST runtime context append: {system_context}"
+        );
+        let live_export = state.session_service.export_live_session(&session_id).await;
+        assert!(
+            matches!(live_export, Err(SessionError::NotFound { .. })),
+            "context-only recovery output must wait for the machine-owned commit before exporting live truth"
         );
     }
 
@@ -10040,26 +10047,34 @@ mod tests {
             .expect("session create should succeed");
         let session_id = created.session_id.to_string();
 
-        session_service
-            .start_turn(
-                &created.session_id,
-                meerkat_core::service::StartTurnRequest {
-                    prompt: "Follow up".to_string().into(),
-                    system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
-                    event_tx: None,
-
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    pre_turn_context_appends: Vec::new(),
-                    turn_metadata: None,
-                },
-            )
-            .await
-            .expect("second turn should succeed");
-
         let app = router(state.clone());
+        let continue_request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!("/sessions/{session_id}/messages"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "session_id": session_id,
+                    "prompt": "Follow up"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let continue_response = app.clone().oneshot(continue_request).await.unwrap();
+        let continue_status = continue_response.status();
+        let continue_body = continue_response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert_eq!(
+            continue_status,
+            StatusCode::OK,
+            "second turn should succeed through the REST/session-runtime composition path: {}",
+            String::from_utf8_lossy(&continue_body)
+        );
+
         let request = axum::http::Request::builder()
             .method("GET")
             .uri(format!("/sessions/{session_id}/history?offset=1&limit=2"))

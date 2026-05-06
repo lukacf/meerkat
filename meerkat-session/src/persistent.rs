@@ -251,6 +251,12 @@ enum StoreOnlyArchiveMode {
     MachineAuthority,
 }
 
+#[derive(Clone, Copy)]
+enum DirectStartTurnPersistence {
+    RuntimelessImmediate,
+    MachineCommitted,
+}
+
 /// Checkpointer that saves sessions to a [`SessionStore`].
 ///
 /// Used by keep-alive agents to persist the session after each interaction
@@ -1460,6 +1466,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         req: StartTurnRequest,
         admission: crate::ephemeral::RuntimeContextAdmissionGuard,
     ) -> Result<RunResult, SessionError> {
+        self.reject_runtime_backed_direct_start_turn()?;
         self.start_turn_with_recoverable_reserved_admission(id, req, admission)
             .await
             .map_err(|(error, _admission)| error)
@@ -1477,8 +1484,65 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
         ),
     > {
-        self.start_turn_inner_with_admission(id, req, Some(admission))
+        if let Err(error) = self.reject_runtime_backed_direct_start_turn() {
+            return Err((error, Some(admission)));
+        }
+        self.start_turn_inner_with_admission(
+            id,
+            req,
+            Some(admission),
+            DirectStartTurnPersistence::RuntimelessImmediate,
+        )
+        .await
+    }
+
+    pub async fn start_turn_live_with_machine_admission(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
+    ) -> Result<RunResult, SessionError> {
+        self.start_turn_live_with_recoverable_machine_admission(id, req, admission)
             .await
+            .map_err(|(error, _admission)| error)
+    }
+
+    pub async fn start_turn_live_with_recoverable_machine_admission(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
+    ) -> Result<
+        RunResult,
+        (
+            SessionError,
+            Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        ),
+    > {
+        self.start_turn_inner_with_admission(
+            id,
+            req,
+            Some(admission),
+            DirectStartTurnPersistence::MachineCommitted,
+        )
+        .await
+    }
+
+    pub async fn persist_machine_committed_live_turn(
+        &self,
+        id: &SessionId,
+    ) -> Result<usize, SessionError> {
+        self.persist_full_session_or_discard_live(id).await
+    }
+
+    fn reject_runtime_backed_direct_start_turn(&self) -> Result<(), SessionError> {
+        if self.runtime_store.is_some() {
+            return Err(SessionError::Unsupported(
+                "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     async fn start_turn_inner_with_admission(
@@ -1486,6 +1550,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         id: &SessionId,
         req: StartTurnRequest,
         mut admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        persistence: DirectStartTurnPersistence,
     ) -> Result<
         RunResult,
         (
@@ -1520,7 +1585,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let result = match result {
             Ok(result) => result,
             Err((error, admission)) => {
-                if Self::callback_pending_terminal(&error).is_some()
+                if matches!(
+                    persistence,
+                    DirectStartTurnPersistence::RuntimelessImmediate
+                ) && Self::callback_pending_terminal(&error).is_some()
                     && let Err(persist_error) = self.persist_full_session_or_discard_live(id).await
                 {
                     return Err((persist_error, admission));
@@ -1529,15 +1597,38 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             }
         };
 
-        // Always persist after a direct start_turn call. Runtime-backed sessions
-        // that go through apply_runtime_turn() have their own atomic boundary
-        // commit path and don't call start_turn on PersistentSessionService.
-        let _ = self
-            .persist_full_session_or_discard_live(id)
-            .await
-            .map_err(|error| (error, None))?;
+        match persistence {
+            DirectStartTurnPersistence::RuntimelessImmediate => {
+                let _ = self
+                    .persist_full_session_or_discard_live(id)
+                    .await
+                    .map_err(|error| (error, None))?;
+            }
+            DirectStartTurnPersistence::MachineCommitted => {}
+        }
 
         Ok(result)
+    }
+
+    async fn legacy_start_turn_inner_with_admission(
+        &self,
+        id: &SessionId,
+        req: StartTurnRequest,
+        admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+    ) -> Result<
+        RunResult,
+        (
+            SessionError,
+            Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        ),
+    > {
+        self.start_turn_inner_with_admission(
+            id,
+            req,
+            admission,
+            DirectStartTurnPersistence::RuntimelessImmediate,
+        )
+        .await
     }
 
     pub async fn event_log_latest_seq(&self, id: &SessionId) -> Result<Option<u64>, SessionError> {
@@ -2653,7 +2744,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
         id: &SessionId,
         req: StartTurnRequest,
     ) -> Result<RunResult, SessionError> {
-        self.start_turn_inner_with_admission(id, req, None)
+        self.reject_runtime_backed_direct_start_turn()?;
+        self.legacy_start_turn_inner_with_admission(id, req, None)
             .await
             .map_err(|(error, _admission)| error)
     }
@@ -2833,7 +2925,18 @@ impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionServi
     }
 
     async fn has_live_session(&self, id: &SessionId) -> Result<bool, SessionError> {
-        self.inner.has_live_session(id).await
+        match self.live_session_authority(id).await? {
+            LiveSessionAuthority::NoLive => Ok(false),
+            LiveSessionAuthority::LiveAuthoritative => Ok(true),
+            LiveSessionAuthority::DurableAuthoritative { session, .. }
+                if metadata_marks_archived(session.metadata()) =>
+            {
+                self.remember_archived_session((*session).clone()).await;
+                self.discard_live_session(id).await?;
+                Ok(false)
+            }
+            LiveSessionAuthority::DurableAuthoritative { .. } => Ok(true),
+        }
     }
 
     async fn archive(&self, id: &SessionId) -> Result<(), SessionError> {
@@ -5454,6 +5557,18 @@ mod tests {
         }
     }
 
+    fn assert_runtime_backed_direct_start_turn_rejected(error: &SessionError) {
+        match error {
+            SessionError::Unsupported(message) => assert!(
+                message.contains(
+                    "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
+                ),
+                "unexpected unsupported error: {message}"
+            ),
+            other => panic!("expected runtime-backed direct start_turn rejection, got {other:?}"),
+        }
+    }
+
     fn runtime_content_turn_request(prompt: &str) -> StartTurnRequest {
         let mut req = start_turn_request(prompt);
         req.turn_metadata = Some(
@@ -6084,12 +6199,17 @@ mod tests {
             }),
             "runtime output should carry the staged context for the machine-owned commit"
         );
+        let live_export = service.export_live_session(&created.session_id).await;
         assert!(
-            !service
+            matches!(live_export, Err(SessionError::NotFound { .. })),
+            "uncommitted staged context must not export as public live truth"
+        );
+        assert!(
+            service
                 .has_live_session(&created.session_id)
                 .await
                 .expect("live-session status should succeed"),
-            "uncommitted staged context must not remain visible as public live truth"
+            "context-only staging must retain the mechanical live handle for the runtime machine"
         );
         let authoritative = service
             .load_authoritative_session(&created.session_id)
@@ -8509,7 +8629,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_projection_save_failure_fails_closed_and_list_uses_authority() {
+    async fn test_runtime_backed_direct_start_turn_is_rejected_before_projection_or_runtime_mutation()
+     {
         let fail_store = Arc::new(FailSaveStore::new());
         let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -8533,69 +8654,54 @@ mod tests {
             .await
             .expect("raw projection load should succeed")
             .expect("initial projection should exist");
-        let raw_message_count = raw_before.messages().len();
+        let initial_authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist before rejected direct turn");
 
         fail_store.set_fail_save(true);
         let error = service
             .start_turn(
                 &result.session_id,
-                start_turn_request("runtime authority commits before projection failure"),
+                start_turn_request("runtime-backed direct start_turn must not commit"),
             )
             .await
-            .expect_err("projection save failure after runtime authority commit must fail closed");
-        assert!(
-            matches!(error, SessionError::Store(_)),
-            "projection failure should surface as a store error, got {error:?}"
-        );
+            .expect_err("runtime-backed direct start_turn must be removed");
+        assert_runtime_backed_direct_start_turn_rejected(&error);
 
+        fail_store.set_fail_save(false);
         let authoritative = service
             .load_authoritative_session(&result.session_id)
             .await
             .expect("authoritative load should succeed")
-            .expect("runtime authority should still contain the committed turn");
-        assert!(
-            authoritative.messages().len() > raw_message_count,
-            "runtime authority should be ahead of the stale session-store projection"
+            .expect("runtime authority should remain present after rejected direct turn");
+        assert_eq!(
+            authoritative.messages().len(),
+            initial_authoritative.messages().len(),
+            "rejected direct start_turn must not advance runtime authority"
         );
         let raw_after = store
             .load(&result.session_id)
             .await
-            .expect("raw projection load should succeed after failure")
-            .expect("stale projection should remain present");
+            .expect("raw projection load should succeed after rejection")
+            .expect("projection should remain present");
         assert_eq!(
             raw_after.messages().len(),
-            raw_message_count,
-            "failed projection update must not be silently refreshed"
+            raw_before.messages().len(),
+            "rejected direct start_turn must not update the session-store projection"
         );
         assert!(
-            !service
+            service
                 .has_live_session(&result.session_id)
                 .await
-                .expect("status should succeed after projection failure"),
-            "post-commit projection failure must evict stale live state"
-        );
-        let listed = service
-            .list(SessionQuery::default())
-            .await
-            .expect("list should not fail while authoritative runtime snapshot exists");
-        let summary = listed
-            .iter()
-            .find(|summary| summary.session_id == result.session_id)
-            .expect("stale projection row should only identify the authoritative session");
-        assert_eq!(
-            summary.message_count,
-            authoritative.messages().len(),
-            "list() must report runtime authority, not stale SessionStore projection metadata"
-        );
-        assert_ne!(
-            summary.message_count,
-            raw_after.messages().len(),
-            "list() must not present stale projection state as fresh canonical state"
+                .expect("status should succeed after rejection"),
+            "rejection happens before live state is mutated or evicted"
         );
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_callback_pending_projection_failure_surfaces_store_error() {
+    async fn test_runtime_backed_callback_pending_direct_start_turn_cannot_bypass_machine_commit() {
         let fail_store = Arc::new(FailSaveStore::new());
         let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -8619,34 +8725,42 @@ mod tests {
             .await
             .expect("raw projection load should succeed")
             .expect("initial projection should exist");
+        let initial_authoritative = service
+            .load_authoritative_session(&result.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist before rejected direct turn");
 
         fail_store.set_fail_save(true);
         let error = service
             .start_turn(
                 &result.session_id,
-                start_turn_request("callback pending after projection failure"),
+                start_turn_request("callback pending direct path must not commit"),
             )
             .await
-            .expect_err("callback-pending projection failure must surface the store error");
-        assert!(
-            matches!(error, SessionError::Store(_)),
-            "projection failure should win over callback-pending error, got {error:?}"
-        );
-        assert!(
-            !service
-                .has_live_session(&result.session_id)
-                .await
-                .expect("status should succeed after callback projection failure"),
-            "callback-pending projection failure must evict stale live state"
-        );
+            .expect_err("runtime-backed direct start_turn must be removed before builder output");
+        assert_runtime_backed_direct_start_turn_rejected(&error);
+
+        fail_store.set_fail_save(false);
         let authoritative = service
             .load_authoritative_session(&result.session_id)
             .await
             .expect("authoritative load should succeed")
-            .expect("runtime authority should retain the callback-pending mutation");
-        assert!(
-            authoritative.messages().len() > raw_before.messages().len(),
-            "runtime authority should be ahead of the stale callback projection"
+            .expect("runtime authority should remain present after rejected direct turn");
+        assert_eq!(
+            authoritative.messages().len(),
+            initial_authoritative.messages().len(),
+            "rejected direct start_turn must not advance runtime authority"
+        );
+        let raw_after = store
+            .load(&result.session_id)
+            .await
+            .expect("raw projection load should succeed after rejection")
+            .expect("projection should remain present");
+        assert_eq!(
+            raw_after.messages().len(),
+            raw_before.messages().len(),
+            "rejected direct start_turn must not update the session-store projection"
         );
     }
 
@@ -8722,7 +8836,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_direct_start_turn_snapshot_commit_failure_discards_live_state() {
+    async fn test_runtime_backed_direct_start_turn_rejection_ignores_snapshot_store_failures() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -8744,28 +8858,23 @@ mod tests {
             .load_authoritative_session(&result.session_id)
             .await
             .expect("authoritative load should succeed")
-            .expect("runtime authority should exist before failed turn");
+            .expect("runtime authority should exist before rejected direct turn");
 
         runtime_store.set_fail_snapshot_commits(true);
         let error = service
             .start_turn(
                 &result.session_id,
-                start_turn_request("failed direct snapshot commit must not leak"),
+                start_turn_request("removed direct path must not reach snapshot commit"),
             )
             .await
-            .expect_err("runtime snapshot commit failure must propagate");
+            .expect_err("runtime-backed direct start_turn must be rejected before snapshot commit");
+        assert_runtime_backed_direct_start_turn_rejected(&error);
         assert!(
-            error
-                .to_string()
-                .contains("synthetic runtime snapshot commit failure"),
-            "unexpected error: {error}"
-        );
-        assert!(
-            !service
+            service
                 .has_live_session(&result.session_id)
                 .await
                 .expect("live-session status should succeed"),
-            "failed direct start_turn snapshot commit must discard mutated live state"
+            "rejection happens before live state is mutated or evicted"
         );
 
         runtime_store.set_fail_snapshot_commits(false);
@@ -8781,9 +8890,10 @@ mod tests {
         );
         assert!(
             authoritative.messages().iter().all(|message| {
-                !format!("{message:?}").contains("failed direct snapshot commit must not leak")
+                !format!("{message:?}")
+                    .contains("removed direct path must not reach snapshot commit")
             }),
-            "failed direct start_turn must not leak into durable authority"
+            "rejected direct start_turn must not leak into durable authority"
         );
 
         let view = service
@@ -8793,12 +8903,12 @@ mod tests {
         assert_eq!(
             view.state.message_count,
             initial_authoritative.messages().len(),
-            "read() must not report the failed live mutation as clean truth"
+            "read() must not report the rejected live mutation as clean truth"
         );
         let listed = service
             .list(SessionQuery::default())
             .await
-            .expect("list should succeed after failed snapshot commit");
+            .expect("list should succeed after rejected direct start_turn");
         let summary = listed
             .iter()
             .find(|summary| summary.session_id == result.session_id)
@@ -8941,7 +9051,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_start_turn_persists_follow_up_snapshot() {
+    async fn test_runtime_backed_follow_up_start_turn_must_use_machine_commit_protocol() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -8968,19 +9078,21 @@ mod tests {
             .messages()
             .len();
 
-        service
+        let error = service
             .start_turn(&id, start_turn_request("follow up"))
             .await
-            .expect("start_turn should succeed");
+            .expect_err("runtime-backed follow-up start_turn must be removed");
+        assert_runtime_backed_direct_start_turn_rejected(&error);
 
         let stored = service
             .load_authoritative_session(&id)
             .await
             .expect("authoritative load should succeed")
-            .expect("runtime-backed start_turn should update authoritative snapshot");
-        assert!(
-            stored.messages().len() > initial_count,
-            "follow-up turn should be durably saved for direct SessionService callers"
+            .expect("runtime-backed session should remain durable");
+        assert_eq!(
+            stored.messages().len(),
+            initial_count,
+            "rejected follow-up direct start_turn must not update authoritative snapshot"
         );
     }
 
@@ -9968,10 +10080,17 @@ mod tests {
             ))
             .await
             .expect("create_session should succeed");
-        service
-            .start_turn(&result.session_id, start_turn_request("live runtime truth"))
+        let output = service
+            .apply_runtime_turn(
+                &result.session_id,
+                RunId::new(),
+                runtime_content_turn_request("live runtime truth"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
             .await
-            .expect("live turn should succeed");
+            .expect("machine-owned runtime turn should succeed");
+        machine_commit_runtime_output(runtime_store.as_ref(), &result.session_id, &output).await;
         let live = service
             .export_live_session(&result.session_id)
             .await
@@ -10045,10 +10164,17 @@ mod tests {
             ))
             .await
             .expect("create_session should succeed");
-        service
-            .start_turn(&result.session_id, start_turn_request("live runtime truth"))
+        let output = service
+            .apply_runtime_turn(
+                &result.session_id,
+                RunId::new(),
+                runtime_content_turn_request("live runtime truth"),
+                RunApplyBoundary::Immediate,
+                vec![],
+            )
             .await
-            .expect("live turn should succeed");
+            .expect("machine-owned runtime turn should succeed");
+        machine_commit_runtime_output(runtime_store.as_ref(), &result.session_id, &output).await;
         let live = service
             .export_live_session(&result.session_id)
             .await
@@ -10246,7 +10372,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_append_system_context_uses_runtime_authority_after_direct_turn() {
+    async fn test_runtime_backed_append_system_context_uses_runtime_authority_after_runtime_turn() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -10278,11 +10404,6 @@ mod tests {
         machine_commit_runtime_output(runtime_store.as_ref(), &result.session_id, &output).await;
 
         service
-            .start_turn(&result.session_id, start_turn_request("direct follow-up"))
-            .await
-            .expect("direct turn should succeed");
-
-        service
             .append_system_context(
                 &result.session_id,
                 AppendSystemContextRequest {
@@ -10298,12 +10419,17 @@ mod tests {
             .load_authoritative_session(&result.session_id)
             .await
             .expect("authoritative load should succeed")
-            .expect("append should preserve the latest direct-service turn");
+            .expect("append should preserve the latest machine-owned runtime turn");
         assert_eq!(
             stored.messages().len(),
-            4,
-            "direct SessionService turns must update runtime authority before later control mutations"
+            2,
+            "append must preserve runtime authority instead of using the stale session-store projection"
         );
+        let state = stored
+            .system_context_state()
+            .expect("append should persist pending control state");
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].text, "prefer store");
     }
 
     #[tokio::test]

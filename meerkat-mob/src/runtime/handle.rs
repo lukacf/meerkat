@@ -107,14 +107,13 @@ pub struct MobMemberSnapshot {
     /// unavailable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub realtime_attachment_status: Option<MobRealtimeAttachmentStatus>,
-    /// Identity-first session id for the member's current bridge session.
+    /// Diagnostic session id for the member's current bridge session.
     ///
-    /// Exposed over the wire so realtime routing can do the canonical
-    /// `mob/member_status → current_session_id → realtime/open_info`
-    /// navigation. Phase 5G/T5i removed the `mob_member_target`
-    /// shortcut; `RealtimeChannelTarget` only accepts `session_target`
-    /// now, and this field is the only path from mob membership to a
-    /// realtime session handle.
+    /// This remains observable for status/continuity diagnostics, but it is
+    /// not a realtime routing contract. Public realtime callers must address
+    /// mob members through `RealtimeChannelTarget::MobMember` so the runtime
+    /// resolves the current machine-owned bridge binding at open/reconnect
+    /// time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<SessionId>,
     /// Bridge-internal session binding — not part of the public identity contract.
@@ -196,16 +195,16 @@ pub struct MobMemberListEntry {
     // --- Bridge internals (pub(crate)) ---
     // `list_members` stays the lightweight roster view: no session_id
     // in the wire shape (see `tests.rs::test_identity_first_list_members_returns_identity_native_entries`
-    // which regression-asserts that). Callers that need to bridge a
-    // member to a realtime session use `mob/member_status`, which
-    // surfaces `current_session_id` explicitly.
+    // which regression-asserts that). `current_session_id` is kept as
+    // bridge-internal projection state; public realtime callers use the
+    // stable mob-member realtime target instead of routing through this id.
     //
     // `agent_runtime_id` and `fence_token` are binding-era atoms used
     // by the bridge for wiring and stale-command rejection. They are
     // `pub(crate)` and `#[serde(skip)]` so they do not leak to
     // app-facing payloads (wire contract: app tools receive
-    // `agent_identity`, surfaces project `current_session_id` for
-    // realtime). External consumers that legitimately need these
+    // `agent_identity`; bridge session ids stay diagnostic/control
+    // projection data). External consumers that legitimately need these
     // atoms (mob-mcp, mob-pack verify paths) route through a typed
     // helper; they never reach into the field directly.
     #[serde(skip)]

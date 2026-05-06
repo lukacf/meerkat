@@ -202,6 +202,31 @@ impl MeerkatMachine {
         }
     }
 
+    pub async fn commit_service_turn_terminal_receipt(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::CommitServiceTurnTerminalReceipt {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .map_err(|err| match err {
+                MeerkatMachineCommandError::Driver(err) => err,
+                MeerkatMachineCommandError::Control(err) => {
+                    RuntimeDriverError::Internal(err.to_string())
+                }
+            })? {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            _ => Err(RuntimeDriverError::Internal(
+                "commit_service_turn_terminal_receipt: unexpected command result variant".into(),
+            )),
+        }
+    }
+
     /// Register a runtime driver for a session WITH a RuntimeLoop backed by a
     /// `CoreExecutor`. Takes `self: &Arc<Self>` because executor attachment is
     /// routed through the Arc-backed command path that owns runtime-loop spawn.

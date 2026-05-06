@@ -249,41 +249,18 @@ const fn default_limit() -> usize {
     100
 }
 
-/// W3-H: resolve a `RealtimeChannelTarget` to the concrete bridge session id
-/// the RPC query should operate on. `SessionTarget` returns its session id
-/// directly; `MobMember` looks up the current binding from the MobMachine's
-/// canonical binding map via the mob handle — the single-source-of-truth
-/// read path (dogma #1).
+/// W3-H: resolve a `RealtimeChannelTarget` to the concrete session id the
+/// RPC query should operate on. `SessionTarget` is valid only for standalone
+/// sessions; mob-owned bridge sessions must be addressed as `MobMember` so
+/// the current binding comes from the MobMachine's canonical map.
 async fn resolve_target_session_id(
     state: &Arc<MobMcpState>,
     target: &RealtimeChannelTarget,
 ) -> Result<meerkat_core::types::SessionId, McpToolError> {
-    match target {
-        RealtimeChannelTarget::SessionTarget { session_id } => {
-            meerkat_core::types::SessionId::parse(session_id)
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))
-        }
-        RealtimeChannelTarget::MobMember {
-            mob_id,
-            agent_identity,
-        } => {
-            let dsl_mob_id = meerkat_mob::ids::MobId::from(mob_id.as_str());
-            let mob_handle = state
-                .handle_for(&dsl_mob_id)
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            let identity = meerkat_mob::ids::AgentIdentity::from(agent_identity.as_str());
-            mob_handle
-                .current_realtime_binding(identity)
-                .await
-                .map_err(|err| McpToolError::invalid_params(err.to_string()))?
-                .ok_or_else(|| {
-                    McpToolError::invalid_params(format!(
-                        "mob {mob_id:?} has no realtime binding for identity {agent_identity:?}"
-                    ))
-                })
-        }
-    }
+    state
+        .resolve_realtime_target_session(target)
+        .await
+        .map_err(|err| McpToolError::invalid_params(err.to_string()))
 }
 
 async fn realtime_status_payload(

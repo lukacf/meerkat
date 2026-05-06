@@ -144,6 +144,19 @@ impl PersistentRuntimeDriver {
         Ok(())
     }
 
+    pub(crate) async fn commit_service_turn_terminal_lifecycle(
+        &mut self,
+        checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
+        target_state: RuntimeState,
+    ) -> Result<(), RuntimeDriverError> {
+        self.commit_lifecycle_with_rollback(
+            checkpoint,
+            target_state,
+            "service turn terminal receipt",
+        )
+        .await
+    }
+
     pub(crate) fn set_control_projection(
         &mut self,
         next_phase: RuntimeState,

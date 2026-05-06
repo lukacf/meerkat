@@ -51,6 +51,14 @@ def _to_wire(value: Any) -> Any:
     return value
 
 
+def _status_state(status: Any) -> str | None:
+    if isinstance(status, dict):
+        state = status.get("state")
+    else:
+        state = getattr(status, "state", None)
+    return state if isinstance(state, str) else None
+
+
 class RealtimeConnection:
     """A connected realtime websocket channel."""
 
@@ -248,11 +256,12 @@ class RealtimeChannel:
             while asyncio.get_running_loop().time() < deadline:
                 try:
                     st = await self.status()
-                    if st.status.state == "ready":
-                        attached = True
-                        break
                 except Exception:
-                    pass
+                    await asyncio.sleep(0.25)
+                    continue
+                if _status_state(getattr(st, "status", None)) == "ready":
+                    attached = True
+                    break
                 await asyncio.sleep(0.25)
             if not attached:
                 await conn.close()

@@ -51,6 +51,30 @@ fn session_metadata_marks_archived(session: &meerkat_core::Session) -> bool {
         .unwrap_or(false)
 }
 
+fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
+    SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+        err.to_string(),
+    ))
+}
+
+async fn commit_mcp_service_turn_terminal_receipt_and_persist(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat::SessionId,
+) -> Result<(), SessionError> {
+    if let Err(error) = runtime_adapter
+        .commit_service_turn_terminal_receipt(session_id)
+        .await
+    {
+        let _ = service.discard_live_session(session_id).await;
+        return Err(runtime_driver_error_to_session_error(error));
+    }
+    service
+        .persist_machine_committed_live_turn(session_id)
+        .await
+        .map(|_| ())
+}
+
 fn skill_source_provenance(
     source_uuid: meerkat_core::skills::SourceUuid,
     display_name: impl Into<String>,
@@ -3634,8 +3658,9 @@ async fn handle_meerkat_resume(
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                 .await;
         }
-        // Try start_turn on the live session first (it may still be alive
-        // from a prior meerkat_run in the same MCP server process).
+        // Live MCP resumes still use the runtime/machine service-turn receipt
+        // path; the persistent service only owns the live mutation and post-
+        // receipt projection, not lifecycle truth.
         let turn_req = StartTurnRequest {
             prompt: prompt.clone().into(),
             system_prompt: None,
@@ -3648,22 +3673,33 @@ async fn handle_meerkat_resume(
             pre_turn_context_appends: Vec::new(),
             turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         };
-        let turn_result = match live_turn_admission.take() {
-            Some(admission) => {
-                state
-                    .service
-                    .start_turn_with_recoverable_reserved_admission(
-                        &session_id,
-                        turn_req,
-                        admission,
-                    )
-                    .await
-            }
+        let admission = match live_turn_admission.take() {
+            Some(admission) => admission,
             None => state
                 .service
-                .start_turn(&session_id, turn_req)
+                .reserve_runtime_turn_admission(&session_id)
                 .await
-                .map_err(|error| (error, None)),
+                .map_err(|err| ToolCallError::internal(format!("Agent error: {err}")))?,
+        };
+        let turn_result = state
+            .service
+            .start_turn_live_with_recoverable_machine_admission(&session_id, turn_req, admission)
+            .await;
+        let turn_result = match turn_result {
+            Ok(run_result) => commit_mcp_service_turn_terminal_receipt_and_persist(
+                state.service.as_ref(),
+                state.runtime_adapter.as_ref(),
+                &session_id,
+            )
+            .await
+            .map(|()| run_result)
+            .map_err(|error| (error, None)),
+            Err((error, recovered_admission)) => {
+                if !matches!(error, SessionError::NotFound { .. }) {
+                    let _ = state.service.discard_live_session(&session_id).await;
+                }
+                Err((error, recovered_admission))
+            }
         };
         match turn_result {
             Ok(run_result) => Ok(run_result),

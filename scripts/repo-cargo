@@ -8,7 +8,13 @@ git_common_dir="$(cd "${repo_root}" && git rev-parse --path-format=absolute --gi
 worktree_root="$(cd "${repo_root}" && git rev-parse --path-format=absolute --show-toplevel)"
 
 hash_path() {
-  printf '%s' "$1" | shasum | cut -c1-10
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum | cut -c1-10
+  elif command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha1sum | cut -c1-10
+  else
+    printf '%s' "$1" | cksum | cut -d' ' -f1
+  fi
 }
 
 repo_slug="$(basename "${repo_root}")"

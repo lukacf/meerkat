@@ -125,6 +125,11 @@ jobs:
       - name: Add release target
         run: rustup target add ${{ matrix.target }}
 
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
       - name: Build surface binaries
         shell: bash
         env:
@@ -134,10 +139,10 @@ jobs:
           # Package names (for cargo build -p) — binary names differ via [[bin]]
           PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
           for pkg in "${PACKAGES[@]}"; do
-            ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
+            cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
-          ./scripts/repo-cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
-          ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
+          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+          cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'

@@ -5,14 +5,17 @@ use meerkat_core::lifecycle::core_executor::{
     CoreExecutorInterruptHandle,
 };
 use meerkat_core::lifecycle::run_primitive::{
-    ConversationContextAppend, CoreRenderable, RunPrimitive,
+    ConversationContextAppend, CoreRenderable, RunPrimitive, RuntimeTurnMetadata,
 };
+use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
-    SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides, build_recovered_session,
+    AgentEvent, EventEnvelope, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
+    build_recovered_session,
 };
 use meerkat_runtime::meerkat_machine::RuntimeBindingsError;
 use meerkat_runtime::{MeerkatMachine, RuntimeDriverError};
+use tokio::sync::mpsc;
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use crate::JsonlStore;
@@ -99,6 +102,147 @@ pub enum SurfaceRuntimeMaterializeError {
     },
 }
 
+pub struct RuntimeBackedInitialTurn {
+    prompt: meerkat_core::types::ContentInput,
+    event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
+    turn_metadata: RuntimeTurnMetadata,
+}
+
+pub fn split_runtime_backed_eager_create_request(
+    mut request: CreateSessionRequest,
+) -> (CreateSessionRequest, Option<RuntimeBackedInitialTurn>) {
+    if request.initial_turn != InitialTurnPolicy::RunImmediately {
+        return (request, None);
+    }
+
+    let mut turn_metadata = request
+        .build
+        .as_mut()
+        .and_then(|build| build.initial_turn_metadata.take())
+        .unwrap_or_default();
+    if turn_metadata.render_metadata.is_none() {
+        turn_metadata.render_metadata = request.render_metadata.take();
+    } else {
+        request.render_metadata = None;
+    }
+    if turn_metadata.skill_references.is_none() {
+        turn_metadata.skill_references = request.skill_references.take();
+    } else {
+        request.skill_references = None;
+    }
+
+    let prompt = std::mem::replace(
+        &mut request.prompt,
+        meerkat_core::types::ContentInput::Text(String::new()),
+    );
+    let event_tx = request.event_tx.take();
+    request.initial_turn = InitialTurnPolicy::Defer;
+    request.deferred_prompt_policy = DeferredPromptPolicy::Discard;
+
+    (
+        request,
+        Some(RuntimeBackedInitialTurn {
+            prompt,
+            event_tx,
+            turn_metadata: meerkat_runtime::runtime_stamped_prompt_turn_metadata(Some(
+                turn_metadata,
+            )),
+        }),
+    )
+}
+
+fn start_turn_request_from_initial_turn(
+    initial_turn: RuntimeBackedInitialTurn,
+) -> StartTurnRequest {
+    StartTurnRequest {
+        prompt: initial_turn.prompt,
+        system_prompt: None,
+        render_metadata: None,
+        handling_mode: initial_turn
+            .turn_metadata
+            .handling_mode
+            .unwrap_or(HandlingMode::Queue),
+        event_tx: initial_turn.event_tx,
+        skill_references: None,
+        flow_tool_overlay: None,
+        pre_turn_context_appends: Vec::new(),
+        turn_metadata: Some(initial_turn.turn_metadata),
+    }
+}
+
+async fn commit_service_turn_terminal_receipt_and_persist(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+) -> Result<(), SurfaceRuntimeMaterializeError> {
+    if let Err(error) = adapter
+        .commit_service_turn_terminal_receipt(session_id)
+        .await
+    {
+        let _ = service.discard_live_session(session_id).await;
+        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
+    }
+    service
+        .persist_machine_committed_live_turn(session_id)
+        .await?;
+    Ok(())
+}
+
+async fn finish_runtime_backed_service_turn_result(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    result: Result<RunResult, (SessionError, Option<crate::RuntimeContextAdmissionGuard>)>,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    match result {
+        Ok(result) => {
+            commit_service_turn_terminal_receipt_and_persist(service, adapter, session_id).await?;
+            Ok(result)
+        }
+        Err((error, _admission))
+            if service
+                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
+                .await =>
+        {
+            commit_service_turn_terminal_receipt_and_persist(service, adapter, session_id).await?;
+            Err(SurfaceRuntimeMaterializeError::Session(error))
+        }
+        Err((error, _admission)) => {
+            let _ = service.discard_live_session(session_id).await;
+            Err(SurfaceRuntimeMaterializeError::Session(error))
+        }
+    }
+}
+
+async fn materialize_error_preserves_runtime_session(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    session_id: &SessionId,
+    error: &SurfaceRuntimeMaterializeError,
+) -> bool {
+    match error {
+        SurfaceRuntimeMaterializeError::Session(error) => {
+            service
+                .service_turn_error_requires_machine_terminal_receipt(session_id, error)
+                .await
+        }
+        _ => false,
+    }
+}
+
+pub async fn run_runtime_backed_initial_turn_with_machine(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    adapter: &Arc<MeerkatMachine>,
+    session_id: &SessionId,
+    initial_turn: RuntimeBackedInitialTurn,
+) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
+    let admission = service.reserve_runtime_turn_admission(session_id).await?;
+    let request = start_turn_request_from_initial_turn(initial_turn);
+    let result = service
+        .start_turn_live_with_recoverable_machine_admission(session_id, request, admission)
+        .await;
+    finish_runtime_backed_service_turn_result(service, adapter, session_id, result).await
+}
+
 pub async fn materialize_session<F>(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     adapter: &Arc<MeerkatMachine>,
@@ -133,12 +277,8 @@ where
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
     build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
-    if request.initial_turn == meerkat_core::service::InitialTurnPolicy::RunImmediately {
-        build.initial_turn_metadata = Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
-            build.initial_turn_metadata.take(),
-        ));
-    }
     request.build = Some(build);
+    let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
 
     let result = match service
         .create_session_with_reserved_admission(request, reserved_admission)
@@ -151,6 +291,44 @@ where
             }
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
+    };
+
+    if let Err(error) =
+        ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(error);
+    }
+
+    let result = match initial_turn {
+        Some(initial_turn) => {
+            match run_runtime_backed_initial_turn_with_machine(
+                service,
+                adapter,
+                &prepared_session_id,
+                initial_turn,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    if !runtime_was_registered
+                        && !materialize_error_preserves_runtime_session(
+                            service,
+                            &prepared_session_id,
+                            &error,
+                        )
+                        .await
+                    {
+                        adapter.unregister_session(&prepared_session_id).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        None => result,
     };
 
     if let Err(error) =
@@ -206,12 +384,8 @@ where
     let mut build = request.build.unwrap_or_default();
     build.resume_session = Some(session);
     build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
-    if request.initial_turn == meerkat_core::service::InitialTurnPolicy::RunImmediately {
-        build.initial_turn_metadata = Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
-            build.initial_turn_metadata.take(),
-        ));
-    }
     request.build = Some(build);
+    let (request, initial_turn) = split_runtime_backed_eager_create_request(request);
 
     let result = match service
         .create_session_with_reserved_admission(request, reserved_admission)
@@ -224,6 +398,44 @@ where
             }
             return Err(SurfaceRuntimeMaterializeError::Session(error));
         }
+    };
+
+    if let Err(error) =
+        ensure_materialized_session_id_matches(&prepared_session_id, &result.session_id)
+    {
+        if !runtime_was_registered {
+            adapter.unregister_session(&prepared_session_id).await;
+        }
+        return Err(error);
+    }
+
+    let result = match initial_turn {
+        Some(initial_turn) => {
+            match run_runtime_backed_initial_turn_with_machine(
+                service,
+                adapter,
+                &prepared_session_id,
+                initial_turn,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    if !runtime_was_registered
+                        && !materialize_error_preserves_runtime_session(
+                            service,
+                            &prepared_session_id,
+                            &error,
+                        )
+                        .await
+                    {
+                        adapter.unregister_session(&prepared_session_id).await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        None => result,
     };
 
     if let Err(error) =
@@ -609,6 +821,7 @@ mod tests {
     use meerkat_openai::realtime_attachment::{
         OpenAiRealtimeAttachmentOrchestrator, RealtimeAttachmentToolDispatchHost,
     };
+    use meerkat_runtime::SessionServiceRuntimeExt;
     use meerkat_runtime::completion::CompletionOutcome;
     #[cfg(all(
         feature = "openai",
@@ -638,7 +851,7 @@ mod tests {
         feature = "openai-realtime",
         not(target_arch = "wasm32")
     ))]
-    use meerkat_runtime::{RealtimeAttachmentStatus, SessionServiceRuntimeExt};
+    use meerkat_runtime::RealtimeAttachmentStatus;
 
     #[test]
     fn run_primitive_carries_runtime_metadata_into_start_turn_request() {
@@ -857,6 +1070,36 @@ mod tests {
 
         async fn health_check(&self) -> Result<(), LlmError> {
             Ok(())
+        }
+    }
+
+    struct CallbackPendingDispatcher;
+
+    #[async_trait::async_trait]
+    impl meerkat_core::AgentToolDispatcher for CallbackPendingDispatcher {
+        fn tools(&self) -> Arc<[Arc<meerkat_core::ToolDef>]> {
+            Arc::from([Arc::new(meerkat_core::ToolDef::new(
+                "external_callback",
+                "external callback test tool",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" }
+                    }
+                }),
+            ))])
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::ToolCallView<'_>,
+        ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
+            let args = serde_json::from_str(call.args.get()).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "raw": call.args.get()
+                })
+            });
+            Err(meerkat_core::ToolError::callback_pending(call.name, args))
         }
     }
 
@@ -1094,6 +1337,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn materialize_session_commits_callback_pending_initial_turn_before_returning_error() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let llm = TestClient::new(vec![
+            LlmEvent::ToolCallComplete {
+                id: "toolu_callback".to_string(),
+                name: "external_callback".to_string(),
+                args: serde_json::json!({ "key": "alpha" }),
+                meta: None,
+            },
+            LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: meerkat_core::StopReason::ToolUse,
+                },
+            },
+        ]);
+        let (service, adapter) = build_test_service_with_llm(&temp, Arc::new(llm)).await;
+        let session = Session::new();
+        let session_id = session.id().clone();
+        let mut build = SessionBuildOptions {
+            external_tools: Some(Arc::new(CallbackPendingDispatcher)),
+            ..Default::default()
+        };
+        build.override_builtins = meerkat_core::ToolCategoryOverride::Disable;
+        let mut request = make_request(build);
+        request.initial_turn = meerkat_core::service::InitialTurnPolicy::RunImmediately;
+        request.prompt = "call the external callback".to_string().into();
+
+        let error = Box::pin(materialize_session(&service, &adapter, session, request, {
+            let service = Arc::clone(&service);
+            let adapter = Arc::clone(&adapter);
+            move |session_id| default_persistent_executor(service, adapter, session_id)
+        }))
+        .await
+        .expect_err("callback-pending initial turn should surface as a resumable error");
+
+        assert!(
+            matches!(
+                error,
+                SurfaceRuntimeMaterializeError::Session(SessionError::Agent(
+                    meerkat_core::AgentError::CallbackPending { .. }
+                ))
+            ),
+            "unexpected materialize error: {error}"
+        );
+        assert_eq!(
+            adapter.runtime_state(&session_id).await.unwrap(),
+            RuntimeState::Attached,
+            "callback-pending service turn must close the machine-owned run"
+        );
+        let authoritative = service
+            .load_authoritative_session(&session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("callback-pending service turn should leave durable session truth");
+        assert!(
+            authoritative.messages().len() >= 2,
+            "callback-pending service turn should persist the user/tool-call boundary"
+        );
+
+        service
+            .discard_live_session(&session_id)
+            .await
+            .expect("discard live session");
+        adapter.unregister_session(&session_id).await;
+    }
+
+    #[tokio::test]
     async fn materialize_session_stamps_existing_eager_initial_turn_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
@@ -1199,7 +1509,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_runtime_owned_eager_create_rejects_missing_execution_kind_stamp() {
+    async fn direct_runtime_owned_eager_create_is_removed() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
         let session = Session::new();
@@ -1220,10 +1530,12 @@ mod tests {
         let error = service
             .create_session(request)
             .await
-            .expect_err("runtime-backed eager create must require stamped execution kind");
+            .expect_err("runtime-backed eager create must be removed");
 
         assert!(
-            error.to_string().contains("runtime_execution_kind not set"),
+            error.to_string().contains(
+                "runtime-backed eager create_session must route through the MeerkatMachine service-turn commit protocol"
+            ),
             "unexpected error: {error}"
         );
         adapter.unregister_session(&session_id).await;

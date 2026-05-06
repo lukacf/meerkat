@@ -46,6 +46,7 @@ use meerkat::surface::{
     RequestAlreadyExists, RequestContext, RequestTerminal, RequestTerminalResolution,
     SurfaceRequestExecutor, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
     build_recovered_session, noop_request_action, request_action,
+    run_runtime_backed_initial_turn_with_machine, split_runtime_backed_eager_create_request,
 };
 use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, OutputSchema,
@@ -7228,9 +7229,8 @@ mod tests {
             .prepare_bindings(session_id.clone())
             .await
             .expect("runtime bindings should prepare");
-        let created = state
-            .session_service
-            .create_session(SvcCreateSessionRequest {
+        let (request, initial_turn) =
+            split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
@@ -7247,22 +7247,27 @@ mod tests {
                         .clone()
                         .map(encode_llm_client_override_for_service),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-                    initial_turn_metadata: Some(
-                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                            execution_kind: Some(
-                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
-                            ),
-                            ..Default::default()
-                        },
-                    ),
                     ..Default::default()
                 }),
                 labels: None,
-            })
+            });
+        let created = state
+            .session_service
+            .create_session(request)
             .await
-            .expect("completed session create should succeed");
+            .expect("deferred session create should succeed");
+        let initial_turn =
+            initial_turn.expect("runtime-backed eager fixture should split an initial turn");
+        let completed = run_runtime_backed_initial_turn_with_machine(
+            &state.session_service,
+            &state.runtime_adapter,
+            &created.session_id,
+            initial_turn,
+        )
+        .await
+        .expect("initial service turn should commit through machine receipt");
         ensure_rest_session_runtime_executor(state, &created.session_id).await;
-        created.session_id
+        completed.session_id
     }
 
     #[cfg(feature = "comms")]
@@ -7274,9 +7279,8 @@ mod tests {
             .prepare_bindings(session_id.clone())
             .await
             .expect("runtime bindings should prepare");
-        let created = state
-            .session_service
-            .create_session(SvcCreateSessionRequest {
+        let (request, initial_turn) =
+            split_runtime_backed_eager_create_request(SvcCreateSessionRequest {
                 model: state.default_model.to_string(),
                 prompt: "Hello".to_string().into(),
                 render_metadata: None,
@@ -7295,22 +7299,27 @@ mod tests {
                         .clone()
                         .map(encode_llm_client_override_for_service),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-                    initial_turn_metadata: Some(
-                        meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                            execution_kind: Some(
-                                meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
-                            ),
-                            ..Default::default()
-                        },
-                    ),
                     ..Default::default()
                 }),
                 labels: None,
-            })
+            });
+        let created = state
+            .session_service
+            .create_session(request)
             .await
-            .expect("completed comms session create should succeed");
+            .expect("deferred comms session create should succeed");
+        let initial_turn =
+            initial_turn.expect("runtime-backed eager fixture should split an initial turn");
+        let completed = run_runtime_backed_initial_turn_with_machine(
+            &state.session_service,
+            &state.runtime_adapter,
+            &created.session_id,
+            initial_turn,
+        )
+        .await
+        .expect("initial comms service turn should commit through machine receipt");
         ensure_rest_session_runtime_executor(state, &created.session_id).await;
-        created.session_id
+        completed.session_id
     }
 
     async fn wait_for_rest_llm_calls(calls: &AtomicUsize, expected: usize, description: &str) {
@@ -10022,30 +10031,8 @@ mod tests {
             .unwrap();
         state.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_service = state.session_service.clone();
-        let created = session_service
-            .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
-                prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(state.max_tokens),
-                event_tx: None,
-
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::RunImmediately,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
-                labels: None,
-            })
-            .await
-            .expect("session create should succeed");
-        let session_id = created.session_id.to_string();
+        let created_session_id = create_completed_rest_runtime_session(&state).await;
+        let session_id = created_session_id.to_string();
 
         let app = router(state.clone());
         let continue_request = axum::http::Request::builder()
@@ -10096,7 +10083,7 @@ mod tests {
         assert_eq!(payload["messages"].as_array().unwrap().len(), 2);
 
         session_service
-            .archive(&created.session_id)
+            .archive(&created_session_id)
             .await
             .expect("archive should succeed");
 
@@ -10124,11 +10111,11 @@ mod tests {
             "archived history should return the full transcript"
         );
 
-        ensure_rest_session_runtime_executor(&state, &created.session_id).await;
+        ensure_rest_session_runtime_executor(&state, &created_session_id).await;
         assert!(
             state
                 .runtime_adapter
-                .contains_session(&created.session_id)
+                .contains_session(&created_session_id)
                 .await,
             "test should start with a stale runtime registration"
         );
@@ -10150,7 +10137,7 @@ mod tests {
         assert!(
             !state
                 .runtime_adapter
-                .contains_session(&created.session_id)
+                .contains_session(&created_session_id)
                 .await,
             "archived REST continue must not register runtime state"
         );

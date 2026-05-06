@@ -660,6 +660,34 @@ async fn commit_service_turn_terminal_receipt_and_persist(
         .map(|_| ())
 }
 
+async fn finish_service_turn_result_with_machine_receipt(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &MeerkatMachine,
+    session_id: &SessionId,
+    result: Result<RunResult, SessionError>,
+) -> Result<RunResult, SessionError> {
+    match result {
+        Ok(result) => {
+            commit_service_turn_terminal_receipt_and_persist(service, runtime_adapter, session_id)
+                .await?;
+            Ok(result)
+        }
+        Err(error)
+            if service
+                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
+                .await =>
+        {
+            commit_service_turn_terminal_receipt_and_persist(service, runtime_adapter, session_id)
+                .await?;
+            Err(error)
+        }
+        Err(error) => {
+            let _ = service.discard_live_session(session_id).await;
+            Err(error)
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingPromotionCleanupMode {
     Restore,
@@ -1135,19 +1163,13 @@ impl RpcMobSessionService {
             let result = service
                 .start_turn_live_with_machine_admission(&session_id, req, admission)
                 .await;
-            let result = match result {
-                Ok(result) => commit_service_turn_terminal_receipt_and_persist(
-                    service.as_ref(),
-                    runtime_adapter.as_ref(),
-                    &session_id,
-                )
-                .await
-                .map(|()| result),
-                Err(error) => {
-                    let _ = service.discard_live_session(&session_id).await;
-                    Err(error)
-                }
-            };
+            let result = finish_service_turn_result_with_machine_receipt(
+                service.as_ref(),
+                runtime_adapter.as_ref(),
+                &session_id,
+                result,
+            )
+            .await;
             let _ = result_tx.send(result);
         });
         result_rx
@@ -3246,19 +3268,13 @@ impl SessionRuntime {
             let result = service
                 .start_turn_live_with_machine_admission(&session_id, req, admission)
                 .await;
-            let result = match result {
-                Ok(result) => commit_service_turn_terminal_receipt_and_persist(
-                    service.as_ref(),
-                    runtime_adapter.as_ref(),
-                    &session_id,
-                )
-                .await
-                .map(|()| result),
-                Err(error) => {
-                    let _ = service.discard_live_session(&session_id).await;
-                    Err(error)
-                }
-            };
+            let result = finish_service_turn_result_with_machine_receipt(
+                service.as_ref(),
+                runtime_adapter.as_ref(),
+                &session_id,
+                result,
+            )
+            .await;
             let _ = result_tx.send(result);
         });
         result_rx
@@ -3383,19 +3399,13 @@ impl SessionRuntime {
                     let result = service
                         .start_turn_live_with_machine_admission(&session_id, start_req, admission)
                         .await;
-                    match result {
-                        Ok(result) => commit_service_turn_terminal_receipt_and_persist(
-                            service.as_ref(),
-                            runtime_adapter.as_ref(),
-                            &session_id,
-                        )
-                        .await
-                        .map(|()| result),
-                        Err(error) => {
-                            let _ = service.discard_live_session(&session_id).await;
-                            Err(error)
-                        }
-                    }
+                    finish_service_turn_result_with_machine_receipt(
+                        service.as_ref(),
+                        runtime_adapter.as_ref(),
+                        &session_id,
+                        result,
+                    )
+                    .await
                 }
                 Err(error) => Err(error),
             };

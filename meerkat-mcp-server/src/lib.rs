@@ -12,7 +12,8 @@ mod schedule_host;
 use meerkat::SessionStore;
 use meerkat::surface::{
     RequestContext, install_prepared_runtime_interrupt_handle, prepare_surface_session,
-    request_action,
+    request_action, run_runtime_backed_initial_turn_with_machine,
+    split_runtime_backed_eager_create_request,
 };
 use meerkat::{
     AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
@@ -57,6 +58,50 @@ fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverErro
     ))
 }
 
+fn surface_materialize_error_to_session_error(
+    err: meerkat::surface::SurfaceRuntimeMaterializeError,
+) -> SessionError {
+    match err {
+        meerkat::surface::SurfaceRuntimeMaterializeError::Session(err) => err,
+        meerkat::surface::SurfaceRuntimeMaterializeError::RuntimeDriver(err) => {
+            runtime_driver_error_to_session_error(err)
+        }
+        other => SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            other.to_string(),
+        )),
+    }
+}
+
+async fn create_runtime_backed_session_and_run_initial_turn(
+    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
+    runtime_adapter: &Arc<meerkat_runtime::MeerkatMachine>,
+    session_id: &meerkat::SessionId,
+    req: CreateSessionRequest,
+    admission: Option<meerkat::RuntimeContextAdmissionGuard>,
+) -> Result<meerkat::RunResult, SessionError> {
+    let (req, initial_turn) = split_runtime_backed_eager_create_request(req);
+    let create_result = match admission {
+        Some(admission) => {
+            service
+                .create_session_with_reserved_admission(req, admission)
+                .await
+        }
+        None => service.create_session(req).await,
+    }?;
+
+    match initial_turn {
+        Some(initial_turn) => run_runtime_backed_initial_turn_with_machine(
+            service,
+            runtime_adapter,
+            session_id,
+            initial_turn,
+        )
+        .await
+        .map_err(surface_materialize_error_to_session_error),
+        None => Ok(create_result),
+    }
+}
+
 async fn commit_mcp_service_turn_terminal_receipt_and_persist(
     service: &PersistentSessionService<FactoryAgentBuilder>,
     runtime_adapter: &meerkat_runtime::MeerkatMachine,
@@ -73,6 +118,42 @@ async fn commit_mcp_service_turn_terminal_receipt_and_persist(
         .persist_machine_committed_live_turn(session_id)
         .await
         .map(|_| ())
+}
+
+async fn finish_mcp_service_turn_result_with_machine_receipt(
+    service: &PersistentSessionService<FactoryAgentBuilder>,
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &meerkat::SessionId,
+    result: Result<meerkat::RunResult, SessionError>,
+) -> Result<meerkat::RunResult, SessionError> {
+    match result {
+        Ok(result) => {
+            commit_mcp_service_turn_terminal_receipt_and_persist(
+                service,
+                runtime_adapter,
+                session_id,
+            )
+            .await?;
+            Ok(result)
+        }
+        Err(error)
+            if service
+                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
+                .await =>
+        {
+            commit_mcp_service_turn_terminal_receipt_and_persist(
+                service,
+                runtime_adapter,
+                session_id,
+            )
+            .await?;
+            Err(error)
+        }
+        Err(error) => {
+            let _ = service.discard_live_session(session_id).await;
+            Err(error)
+        }
+    }
 }
 
 fn skill_source_provenance(
@@ -3182,10 +3263,14 @@ async fn handle_meerkat_run(
         labels: input.labels,
     };
 
-    let result = state
-        .service
-        .create_session_with_reserved_admission(req, create_admission)
-        .await;
+    let result = create_runtime_backed_session_and_run_initial_turn(
+        &state.service,
+        &state.runtime_adapter,
+        &session_id,
+        req,
+        Some(create_admission),
+    )
+    .await;
     drop(event_tx);
     if let Some(task) = event_task
         && let Err(e) = task.await
@@ -3605,15 +3690,14 @@ async fn handle_meerkat_resume(
             build: Some(build),
             labels: None,
         };
-        match resume_admission.take() {
-            Some(admission) => {
-                state
-                    .service
-                    .create_session_with_reserved_admission(req, admission)
-                    .await
-            }
-            None => state.service.create_session(req).await,
-        }
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            req,
+            resume_admission.take(),
+        )
+        .await
     } else {
         let mut live_turn_admission = None;
         if keep_alive_override.is_some() {
@@ -3686,19 +3770,34 @@ async fn handle_meerkat_resume(
             .start_turn_live_with_recoverable_machine_admission(&session_id, turn_req, admission)
             .await;
         let turn_result = match turn_result {
-            Ok(run_result) => commit_mcp_service_turn_terminal_receipt_and_persist(
+            Ok(run_result) => finish_mcp_service_turn_result_with_machine_receipt(
                 state.service.as_ref(),
                 state.runtime_adapter.as_ref(),
                 &session_id,
+                Ok(run_result),
             )
             .await
-            .map(|()| run_result)
             .map_err(|error| (error, None)),
             Err((error, recovered_admission)) => {
-                if !matches!(error, SessionError::NotFound { .. }) {
-                    let _ = state.service.discard_live_session(&session_id).await;
+                if state
+                    .service
+                    .service_turn_error_requires_machine_terminal_receipt(&session_id, &error)
+                    .await
+                {
+                    finish_mcp_service_turn_result_with_machine_receipt(
+                        state.service.as_ref(),
+                        state.runtime_adapter.as_ref(),
+                        &session_id,
+                        Err(error),
+                    )
+                    .await
+                    .map_err(|error| (error, None))
+                } else {
+                    if !matches!(error, SessionError::NotFound { .. }) {
+                        let _ = state.service.discard_live_session(&session_id).await;
+                    }
+                    Err((error, recovered_admission))
                 }
-                Err((error, recovered_admission))
             }
         };
         match turn_result {
@@ -3799,10 +3898,14 @@ async fn handle_meerkat_resume(
                     build: Some(build),
                     labels: None,
                 };
-                state
-                    .service
-                    .create_session_with_reserved_admission(req, admission)
-                    .await
+                create_runtime_backed_session_and_run_initial_turn(
+                    &state.service,
+                    &state.runtime_adapter,
+                    &session_id,
+                    req,
+                    Some(admission),
+                )
+                .await
             }
             Err((other, _admission)) => Err(other),
         }
@@ -5553,9 +5656,11 @@ mod tests {
         let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
             McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
         ));
-        state
-            .service
-            .create_session(CreateSessionRequest {
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            CreateSessionRequest {
                 model: "claude-opus-4-6".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 render_metadata: None,
@@ -5571,15 +5676,14 @@ mod tests {
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
                     )),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-                    initial_turn_metadata: Some(
-                        meerkat_runtime::runtime_stamped_prompt_turn_metadata(None),
-                    ),
                     ..Default::default()
                 }),
                 labels: None,
-            })
-            .await
-            .expect("live session create should succeed");
+            },
+            None,
+        )
+        .await
+        .expect("live session create should succeed");
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         assert!(
             state
@@ -5671,9 +5775,11 @@ mod tests {
         let mcp_adapter = Arc::new(meerkat_mcp::McpRouterAdapter::new(
             McpRouter::new_with_surface_handle(Arc::clone(bindings.external_tool_surface())),
         ));
-        state
-            .service
-            .create_session(CreateSessionRequest {
+        create_runtime_backed_session_and_run_initial_turn(
+            &state.service,
+            &state.runtime_adapter,
+            &session_id,
+            CreateSessionRequest {
                 model: "claude-opus-4-6".to_string(),
                 prompt: "Initial live turn".to_string().into(),
                 render_metadata: None,
@@ -5689,17 +5795,16 @@ mod tests {
                         Arc::new(MockLlmClient) as Arc<dyn LlmClient>,
                     )),
                     runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-                    initial_turn_metadata: Some(
-                        meerkat_runtime::runtime_stamped_prompt_turn_metadata(None),
-                    ),
                     comms_name: Some("mcp-agent".to_string()),
                     keep_alive: false,
                     ..Default::default()
                 }),
                 labels: None,
-            })
-            .await
-            .expect("live session create should succeed");
+            },
+            None,
+        )
+        .await
+        .expect("live session create should succeed");
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         assert!(
             state.service.comms_runtime(&session_id).await.is_some(),

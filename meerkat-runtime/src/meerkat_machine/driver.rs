@@ -827,6 +827,21 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             "service-turn terminal receipt requires a machine-owned current_run_id".to_string(),
         ));
     };
+    let turn_needs_completion = {
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !matches!(
+            auth.state.turn_phase,
+            crate::meerkat_machine::dsl::TurnPhase::Completed
+                | crate::meerkat_machine::dsl::TurnPhase::Failed
+                | crate::meerkat_machine::dsl::TurnPhase::Cancelled
+        )
+    };
+    if turn_needs_completion {
+        machine_apply_turn_run_completed(driver, &run_id)?;
+    }
     let next_phase =
         crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
     let rollback = match driver {

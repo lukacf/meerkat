@@ -171,9 +171,10 @@ pub use ops_lifecycle::{
 
 /// Stamp prompt turn metadata with the runtime-owned input semantics.
 ///
-/// This helper exists for runtime-backed surfaces that must run an eager first
-/// turn through `SessionService::create_session` before the normal queued
-/// runtime loop can observe an `Input::Prompt`.
+/// This helper exists for runtime-backed service-turn paths that already hold
+/// machine admission and must pass a runtime-classified prompt turn into the
+/// session layer. New prompt materialization should prefer `MeerkatMachine`
+/// input admission so the machine creates this metadata directly.
 pub fn runtime_stamped_prompt_turn_metadata(
     metadata: Option<RuntimeStampedTurnMetadata>,
 ) -> RuntimeStampedTurnMetadata {

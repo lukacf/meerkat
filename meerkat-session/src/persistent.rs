@@ -42,7 +42,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal}
 use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
-    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
+    AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest, InitialTurnPolicy,
     MobToolAuthorityContext, SessionControlError, SessionError, SessionForkAtRequest,
     SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage, SessionHistoryQuery,
     SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
@@ -1535,10 +1535,45 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         self.persist_full_session_or_discard_live(id).await
     }
 
+    pub async fn service_turn_error_requires_machine_terminal_receipt(
+        &self,
+        id: &SessionId,
+        error: &SessionError,
+    ) -> bool {
+        if Self::callback_pending_terminal(error).is_some() {
+            return true;
+        }
+        self.execution_snapshot(id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|snapshot| snapshot.turn_phase.is_terminal())
+    }
+
     fn reject_runtime_backed_direct_start_turn(&self) -> Result<(), SessionError> {
         if self.runtime_store.is_some() {
             return Err(SessionError::Unsupported(
                 "runtime-backed direct start_turn must route through the MeerkatMachine service-turn commit protocol"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn reject_runtime_backed_eager_create_session(
+        &self,
+        req: &CreateSessionRequest,
+    ) -> Result<(), SessionError> {
+        let runtime_backed = self.runtime_store.is_some()
+            || req.build.as_ref().is_some_and(|build| {
+                matches!(
+                    &build.runtime_build_mode,
+                    meerkat_core::RuntimeBuildMode::SessionOwned(_)
+                )
+            });
+        if runtime_backed && req.initial_turn == InitialTurnPolicy::RunImmediately {
+            return Err(SessionError::Unsupported(
+                "runtime-backed eager create_session must route through the MeerkatMachine service-turn commit protocol"
                     .to_string(),
             ));
         }
@@ -2515,6 +2550,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         mut req: CreateSessionRequest,
         reserved_create_admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, SessionError> {
+        self.reject_runtime_backed_eager_create_session(&req)?;
+
         // Inject a checkpointer for all sessions. The keep-alive attached loop
         // calls it after each interaction; runtime-backed sessions keep it
         // disabled so they do not bypass runtime boundary persistence.
@@ -5569,6 +5606,18 @@ mod tests {
         }
     }
 
+    fn assert_runtime_backed_eager_create_rejected(error: &SessionError) {
+        match error {
+            SessionError::Unsupported(message) => assert!(
+                message.contains(
+                    "runtime-backed eager create_session must route through the MeerkatMachine service-turn commit protocol"
+                ),
+                "unexpected unsupported error: {message}"
+            ),
+            other => panic!("expected runtime-backed eager create rejection, got {other:?}"),
+        }
+    }
+
     fn runtime_content_turn_request(prompt: &str) -> StartTurnRequest {
         let mut req = start_turn_request(prompt);
         req.turn_metadata = Some(
@@ -6146,7 +6195,7 @@ mod tests {
         );
 
         let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
             .expect("create_session should succeed");
 
@@ -6237,7 +6286,7 @@ mod tests {
         );
 
         let created = service
-            .create_session(create_request("seed", InitialTurnPolicy::RunImmediately))
+            .create_session(create_request("seed", InitialTurnPolicy::Defer))
             .await
             .expect("create_session should succeed");
         let admission = service
@@ -8389,7 +8438,7 @@ mod tests {
         let result = service
             .create_session(create_request(
                 "hello",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                meerkat_core::service::InitialTurnPolicy::Defer,
             ))
             .await
             .expect("create_session should succeed");
@@ -8562,7 +8611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_create_session_persists_initial_authority_snapshot() {
+    async fn test_runtime_backed_eager_create_session_is_rejected_before_authority_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -8573,22 +8622,17 @@ mod tests {
             memory_blob_store(),
         );
 
-        let result = service
+        let error = service
             .create_session(create_request(
                 "hello",
                 meerkat_core::service::InitialTurnPolicy::RunImmediately,
             ))
             .await
-            .expect("create_session should succeed");
-
-        let stored = service
-            .load_authoritative_session(&result.session_id)
-            .await
-            .expect("authoritative load should succeed")
-            .expect("runtime-backed create_session should persist an authoritative snapshot");
+            .expect_err("runtime-backed eager create_session must be removed");
+        assert_runtime_backed_eager_create_rejected(&error);
         assert!(
-            stored.messages().len() >= 2,
-            "initial turn should be durably persisted for direct SessionService callers"
+            service.checkpointer_gates.lock().await.is_empty(),
+            "rejected eager create must not allocate persistence/checkpointer state"
         );
     }
 
@@ -8765,7 +8809,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_resume_callback_pending_projection_failure_surfaces_store_error() {
+    async fn test_runtime_backed_resume_eager_create_is_rejected_before_projection_or_runtime_mutation()
+     {
         let fail_store = Arc::new(FailSaveStore::new());
         let store = Arc::clone(&fail_store) as Arc<dyn SessionStore>;
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
@@ -8812,26 +8857,25 @@ mod tests {
         let error = service
             .create_session(req)
             .await
-            .expect_err("resume callback-pending projection failure must surface the store error");
-        assert!(
-            matches!(error, SessionError::Store(_)),
-            "projection failure should win over resume callback-pending error, got {error:?}"
-        );
+            .expect_err("runtime-backed eager resume create must be removed");
+        assert_runtime_backed_eager_create_rejected(&error);
         assert!(
             !service
                 .has_live_session(&result.session_id)
                 .await
-                .expect("status should succeed after resume callback projection failure"),
-            "resume callback-pending projection failure must evict stale live state"
+                .expect("status should succeed after eager create rejection"),
+            "eager create rejection happens before recovering live state"
         );
+        fail_store.set_fail_save(false);
         let authoritative = service
             .load_authoritative_session(&result.session_id)
             .await
             .expect("authoritative load should succeed")
-            .expect("runtime authority should retain the resume callback-pending mutation");
-        assert!(
-            authoritative.messages().len() > raw_before.messages().len(),
-            "runtime authority should be ahead of the stale resume callback projection"
+            .expect("runtime authority should remain unchanged after eager create rejection");
+        assert_eq!(
+            authoritative.messages().len(),
+            raw_before.messages().len(),
+            "runtime authority must not advance through rejected eager create"
         );
     }
 
@@ -9065,7 +9109,7 @@ mod tests {
         let result = service
             .create_session(create_request(
                 "hello",
-                meerkat_core::service::InitialTurnPolicy::RunImmediately,
+                meerkat_core::service::InitialTurnPolicy::Defer,
             ))
             .await
             .expect("create_session should succeed");

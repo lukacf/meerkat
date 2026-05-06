@@ -586,7 +586,7 @@ async fn create_materialized_session_with_external_tools(
         .await;
     let (event_tx, _event_rx) = tokio::sync::mpsc::channel(32);
     runtime
-        .start_turn(
+        .start_turn_via_runtime(
             &session_id,
             "materialize realtime target".into(),
             event_tx,

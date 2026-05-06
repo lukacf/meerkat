@@ -16,8 +16,9 @@ use meerkat::surface::{
     split_runtime_backed_eager_create_request,
 };
 use meerkat::{
-    AgentFactory, FactoryAgentBuilder, OutputSchema, PersistenceBundle, PersistentSessionService,
-    ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
+    AgentFactory, FactoryAgentBuilder, MachineServiceTurnCommitProtocol, OutputSchema,
+    PersistenceBundle, PersistentSessionService, ScheduleService, ScheduleToolDispatcher,
+    ToolError, ToolResult,
 };
 use meerkat_contracts::{RealtimeOpenRequest, SkillsParams};
 use meerkat_core::error::invalid_session_id_message;
@@ -99,60 +100,6 @@ async fn create_runtime_backed_session_and_run_initial_turn(
         .await
         .map_err(surface_materialize_error_to_session_error),
         None => Ok(create_result),
-    }
-}
-
-async fn commit_mcp_service_turn_terminal_receipt_and_persist(
-    service: &PersistentSessionService<FactoryAgentBuilder>,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
-    session_id: &meerkat::SessionId,
-) -> Result<(), SessionError> {
-    if let Err(error) = runtime_adapter
-        .commit_service_turn_terminal_receipt(session_id)
-        .await
-    {
-        let _ = service.discard_live_session(session_id).await;
-        return Err(runtime_driver_error_to_session_error(error));
-    }
-    service
-        .persist_machine_committed_live_turn(session_id)
-        .await
-        .map(|_| ())
-}
-
-async fn finish_mcp_service_turn_result_with_machine_receipt(
-    service: &PersistentSessionService<FactoryAgentBuilder>,
-    runtime_adapter: &meerkat_runtime::MeerkatMachine,
-    session_id: &meerkat::SessionId,
-    result: Result<meerkat::RunResult, SessionError>,
-) -> Result<meerkat::RunResult, SessionError> {
-    match result {
-        Ok(result) => {
-            commit_mcp_service_turn_terminal_receipt_and_persist(
-                service,
-                runtime_adapter,
-                session_id,
-            )
-            .await?;
-            Ok(result)
-        }
-        Err(error)
-            if service
-                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
-                .await =>
-        {
-            commit_mcp_service_turn_terminal_receipt_and_persist(
-                service,
-                runtime_adapter,
-                session_id,
-            )
-            .await?;
-            Err(error)
-        }
-        Err(error) => {
-            let _ = service.discard_live_session(session_id).await;
-            Err(error)
-        }
     }
 }
 
@@ -3767,39 +3714,13 @@ async fn handle_meerkat_resume(
         };
         let turn_result = state
             .service
-            .start_turn_live_with_recoverable_machine_admission(&session_id, turn_req, admission)
-            .await;
-        let turn_result = match turn_result {
-            Ok(run_result) => finish_mcp_service_turn_result_with_machine_receipt(
-                state.service.as_ref(),
-                state.runtime_adapter.as_ref(),
+            .run_machine_committed_live_turn(
+                MachineServiceTurnCommitProtocol::from_machine(state.runtime_adapter.as_ref()),
                 &session_id,
-                Ok(run_result),
+                turn_req,
+                admission,
             )
-            .await
-            .map_err(|error| (error, None)),
-            Err((error, recovered_admission)) => {
-                if state
-                    .service
-                    .service_turn_error_requires_machine_terminal_receipt(&session_id, &error)
-                    .await
-                {
-                    finish_mcp_service_turn_result_with_machine_receipt(
-                        state.service.as_ref(),
-                        state.runtime_adapter.as_ref(),
-                        &session_id,
-                        Err(error),
-                    )
-                    .await
-                    .map_err(|error| (error, None))
-                } else {
-                    if !matches!(error, SessionError::NotFound { .. }) {
-                        let _ = state.service.discard_live_session(&session_id).await;
-                    }
-                    Err((error, recovered_admission))
-                }
-            }
-        };
+            .await;
         match turn_result {
             Ok(run_result) => Ok(run_result),
             Err((SessionError::NotFound { .. }, recovered_admission)) => {

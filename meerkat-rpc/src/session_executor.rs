@@ -3,7 +3,7 @@
 //! This is the bridge between the v9 runtime layer and the existing RPC session
 //! management. When the RuntimeLoop processes a queued input, it calls
 //! `CoreExecutor::apply()` on this executor, which translates the `RunPrimitive`
-//! into a `SessionRuntime::start_turn()` call.
+//! into a machine-owned `SessionRuntime::apply_runtime_turn_with_pre_admission()` call.
 
 use std::sync::Arc;
 
@@ -25,11 +25,12 @@ use crate::{error, protocol::RpcError};
 #[cfg(feature = "mob")]
 use meerkat_mob::MobSessionService;
 
-/// Implements `CoreExecutor` by delegating to `SessionRuntime::start_turn()`.
+/// Implements `CoreExecutor` by delegating to the runtime-owned apply path.
 ///
 /// Each session gets its own executor instance, which is owned by the
 /// RuntimeLoop task. The executor extracts the prompt from the `RunPrimitive`
-/// and calls `start_turn`, forwarding events to the RPC notification sink.
+/// and calls the runtime-owned apply path, forwarding events to the RPC
+/// notification sink.
 pub struct SessionRuntimeExecutor {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,

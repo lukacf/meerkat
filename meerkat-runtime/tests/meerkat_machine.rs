@@ -496,6 +496,83 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
 }
 
 #[tokio::test]
+async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+
+    struct StopRecordingExecutor {
+        stop_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for StopRecordingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "unexpected apply during stop regression",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    let stop_called = Arc::new(AtomicBool::new(false));
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(StopRecordingExecutor {
+                stop_called: Arc::clone(&stop_called),
+            }),
+        )
+        .await;
+
+    adapter
+        .stop_runtime_executor(&sid, "async stop lifecycle failure")
+        .await
+        .expect("async stop command should enqueue the machine-approved effect");
+    wait_for_atomic_bool(&stop_called, "stop effect should reach executor").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_ne!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Stopped,
+        "failed durable stop commit must not publish visible Stopped state"
+    );
+    assert_ne!(
+        store
+            .load_runtime_state(&LogicalRuntimeId::for_session(&sid))
+            .await
+            .unwrap(),
+        Some(RuntimeState::Stopped),
+        "failed durable stop commit must not publish durable Stopped state"
+    );
+}
+
+#[tokio::test]
 async fn cold_reregister_does_not_force_destroyed_runtime_projection() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();

@@ -65,6 +65,13 @@ pub struct StagedSlot {
     pub deferred_prompt: Option<ContentInput>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
+    /// One-shot authority for retrying materialization after a prior
+    /// materialized attempt was archived through machine control.
+    ///
+    /// This is intentionally in-memory staged-session state. If the process
+    /// restarts, the durable archived snapshot remains authoritative and the
+    /// retry fails closed.
+    pub machine_archived_resume_authorized: bool,
 }
 
 /// Plain-old-data summary of a staged slot suitable for list/read surfaces.
@@ -87,6 +94,7 @@ pub struct PromotingSlot {
     pub deferred_prompt: Option<ContentInput>,
     pub created_at_secs: u64,
     pub updated_at_secs: u64,
+    pub machine_archived_resume_authorized: bool,
 }
 
 /// Errors returned by registry transitions.
@@ -235,6 +243,7 @@ impl StagedSessionRegistry {
             deferred_prompt: slot.deferred_prompt.clone(),
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
+            machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
         }))
     }
 
@@ -264,6 +273,7 @@ impl StagedSessionRegistry {
                         deferred_prompt: slot.deferred_prompt,
                         created_at_secs: slot.created_at_secs,
                         updated_at_secs: slot.updated_at_secs,
+                        machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
                     },
                 );
                 None
@@ -278,6 +288,7 @@ impl StagedSessionRegistry {
                         deferred_prompt: slot.deferred_prompt,
                         created_at_secs: slot.created_at_secs,
                         updated_at_secs: slot.updated_at_secs,
+                        machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
                     },
                 );
                 None
@@ -320,6 +331,7 @@ impl StagedSessionRegistry {
         deferred_prompt: Option<ContentInput>,
         created_at_secs: u64,
         updated_at_secs: u64,
+        machine_archived_resume_authorized: bool,
     ) -> bool {
         let mut slots = self.slots.write().await;
         let Some(slot) = slots.get(&id) else {
@@ -340,6 +352,7 @@ impl StagedSessionRegistry {
                 deferred_prompt,
                 created_at_secs,
                 updated_at_secs,
+                machine_archived_resume_authorized,
             },
         );
         true
@@ -594,6 +607,7 @@ mod tests {
             deferred_prompt: None,
             created_at_secs: 100,
             updated_at_secs: 100,
+            machine_archived_resume_authorized: false,
         }
     }
 
@@ -671,6 +685,7 @@ mod tests {
             promoted.deferred_prompt,
             promoted.created_at_secs,
             promoted.updated_at_secs,
+            promoted.machine_archived_resume_authorized,
         )
         .await;
         // Slot must be Staged again so a follow-up start_turn sees the
@@ -706,6 +721,7 @@ mod tests {
                 promoted.deferred_prompt,
                 promoted.created_at_secs,
                 promoted.updated_at_secs,
+                promoted.machine_archived_resume_authorized,
             )
             .await;
         assert!(!restored, "finished promotion must not be restored");
@@ -743,6 +759,7 @@ mod tests {
                 promoted.deferred_prompt,
                 promoted.created_at_secs,
                 promoted.updated_at_secs,
+                promoted.machine_archived_resume_authorized,
             )
             .await
         );

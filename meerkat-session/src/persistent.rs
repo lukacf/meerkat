@@ -56,7 +56,9 @@ use meerkat_runtime::identifiers::LogicalRuntimeId;
 #[cfg(test)]
 use meerkat_runtime::input_state::{InputLifecycleState, InputTerminalOutcome, StoredInputState};
 use meerkat_runtime::store::SessionDelta;
-use meerkat_runtime::{MachineSessionControlAuthority, RuntimeMode, RuntimeState, RuntimeStore};
+use meerkat_runtime::{
+    MachineSessionControlAuthority, MeerkatMachine, RuntimeMode, RuntimeState, RuntimeStore,
+};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -74,8 +76,11 @@ use crate::projector::SessionProjector;
 pub use crate::migrations;
 
 const SESSION_ARCHIVED_KEY: &str = "session_archived";
-const SESSION_TRANSIENT_PENDING_ARCHIVE_KEY: &str = "session_transient_pending_archive";
 const DEFAULT_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
+
+fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
+    SessionError::Agent(AgentError::InternalError(err.to_string()))
+}
 
 fn session_id_from_event(event: &meerkat_core::event::AgentEvent) -> Option<SessionId> {
     match event {
@@ -428,17 +433,39 @@ enum LiveSessionAuthority {
     },
 }
 
-fn metadata_marks_transient_pending_archive(
-    metadata: &serde_json::Map<String, serde_json::Value>,
-) -> bool {
-    metadata
-        .get(SESSION_TRANSIENT_PENDING_ARCHIVE_KEY)
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
+#[derive(Clone, Copy)]
+enum ArchivedResumeAuthorization {
+    RejectArchived,
+    MachinePendingPromotion {
+        _authority: MachineSessionControlAuthority,
+    },
 }
 
-fn clear_transient_pending_archive_marker(session: &mut Session) {
-    session.remove_metadata(SESSION_TRANSIENT_PENDING_ARCHIVE_KEY);
+impl ArchivedResumeAuthorization {
+    fn allows_archived_resume(self) -> bool {
+        matches!(
+            self,
+            ArchivedResumeAuthorization::MachinePendingPromotion { .. }
+        )
+    }
+}
+
+/// Runtime/session composition protocol for a live service turn whose terminal
+/// publication is owned by `MeerkatMachine`.
+#[derive(Clone, Copy)]
+pub struct MachineServiceTurnCommitProtocol<'a> {
+    runtime_adapter: &'a MeerkatMachine,
+    _authority: MachineSessionControlAuthority,
+}
+
+impl<'a> MachineServiceTurnCommitProtocol<'a> {
+    #[must_use]
+    pub fn from_machine(runtime_adapter: &'a MeerkatMachine) -> Self {
+        Self {
+            runtime_adapter,
+            _authority: runtime_adapter.session_control_authority(),
+        }
+    }
 }
 
 impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
@@ -651,22 +678,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 Err(error)
             }
         }
-    }
-
-    pub async fn mark_transient_pending_archive(&self, id: &SessionId) -> Result<(), SessionError> {
-        let Some(mut session) = self.load_authoritative_session_base(id).await? else {
-            return Ok(());
-        };
-        if !metadata_marks_archived(session.metadata()) {
-            return Ok(());
-        }
-        session.set_metadata(
-            SESSION_TRANSIENT_PENDING_ARCHIVE_KEY,
-            serde_json::Value::Bool(true),
-        );
-        let session = self.save_normalized_session(session).await?;
-        self.remember_archived_session(session).await;
-        Ok(())
     }
 
     async fn load_authoritative_session_base(
@@ -1456,8 +1467,28 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         req: CreateSessionRequest,
         admission: crate::ephemeral::RuntimeContextAdmissionGuard,
     ) -> Result<RunResult, SessionError> {
-        self.create_session_with_admission(req, Some(admission))
-            .await
+        self.create_session_with_admission(
+            req,
+            Some(admission),
+            ArchivedResumeAuthorization::RejectArchived,
+        )
+        .await
+    }
+
+    pub async fn create_session_with_reserved_machine_archived_resume_admission(
+        &self,
+        req: CreateSessionRequest,
+        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
+        authority: MachineSessionControlAuthority,
+    ) -> Result<RunResult, SessionError> {
+        self.create_session_with_admission(
+            req,
+            Some(admission),
+            ArchivedResumeAuthorization::MachinePendingPromotion {
+                _authority: authority,
+            },
+        )
+        .await
     }
 
     pub async fn start_turn_with_reserved_admission(
@@ -1496,19 +1527,9 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         .await
     }
 
-    pub async fn start_turn_live_with_machine_admission(
+    pub async fn run_machine_committed_live_turn(
         &self,
-        id: &SessionId,
-        req: StartTurnRequest,
-        admission: crate::ephemeral::RuntimeContextAdmissionGuard,
-    ) -> Result<RunResult, SessionError> {
-        self.start_turn_live_with_recoverable_machine_admission(id, req, admission)
-            .await
-            .map_err(|(error, _admission)| error)
-    }
-
-    pub async fn start_turn_live_with_recoverable_machine_admission(
-        &self,
+        protocol: MachineServiceTurnCommitProtocol<'_>,
         id: &SessionId,
         req: StartTurnRequest,
         admission: crate::ephemeral::RuntimeContextAdmissionGuard,
@@ -1519,20 +1540,54 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
         ),
     > {
-        self.start_turn_inner_with_admission(
-            id,
-            req,
-            Some(admission),
-            DirectStartTurnPersistence::MachineCommitted,
-        )
-        .await
-    }
-
-    pub async fn persist_machine_committed_live_turn(
-        &self,
-        id: &SessionId,
-    ) -> Result<usize, SessionError> {
-        self.persist_full_session_or_discard_live(id).await
+        let result = self
+            .start_turn_inner_with_admission(
+                id,
+                req,
+                Some(admission),
+                DirectStartTurnPersistence::MachineCommitted,
+            )
+            .await;
+        match result {
+            Ok(result) => {
+                if let Err(error) = protocol
+                    .runtime_adapter
+                    .commit_service_turn_terminal_receipt(id)
+                    .await
+                {
+                    let _ = self.discard_live_session(id).await;
+                    return Err((runtime_driver_error_to_session_error(error), None));
+                }
+                self.persist_full_session_or_discard_live(id)
+                    .await
+                    .map_err(|error| (error, None))?;
+                Ok(result)
+            }
+            Err((error, admission))
+                if self
+                    .service_turn_error_requires_machine_terminal_receipt(id, &error)
+                    .await =>
+            {
+                if let Err(commit_error) = protocol
+                    .runtime_adapter
+                    .commit_service_turn_terminal_receipt(id)
+                    .await
+                {
+                    let _ = self.discard_live_session(id).await;
+                    return Err((runtime_driver_error_to_session_error(commit_error), admission));
+                }
+                if let Err(persist_error) = self.persist_full_session_or_discard_live(id).await {
+                    return Err((persist_error, admission));
+                }
+                Err((error, admission))
+            }
+            Err((error, admission)) => {
+                if !matches!(error, SessionError::NotFound { .. }) {
+                    let _ = self.discard_live_session(id).await;
+                }
+                Err((error, admission))
+            }
+        }
     }
 
     pub async fn service_turn_error_requires_machine_terminal_receipt(
@@ -1746,9 +1801,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut session: Session,
     ) -> Result<Session, SessionError> {
-        if !metadata_marks_archived(session.metadata()) {
-            clear_transient_pending_archive_marker(&mut session);
-        }
         session
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
@@ -2549,6 +2601,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         mut req: CreateSessionRequest,
         reserved_create_admission: Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
+        archived_resume_authorization: ArchivedResumeAuthorization,
     ) -> Result<RunResult, SessionError> {
         self.reject_runtime_backed_eager_create_session(&req)?;
 
@@ -2569,6 +2622,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             let build = req.build.get_or_insert_with(Default::default);
             if let Some(session) = build.resume_session.as_ref()
                 && metadata_marks_archived(session.metadata())
+                && !archived_resume_authorization.allows_archived_resume()
             {
                 return Err(SessionError::NotFound {
                     id: session.id().clone(),
@@ -2582,11 +2636,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             build.blob_store_override = Some(Arc::clone(&self.blob_store));
             resume_session_id
         };
-        let resume_session_is_transient_pending_archive = req
-            .build
-            .as_ref()
-            .and_then(|build| build.resume_session.as_ref())
-            .is_some_and(|session| metadata_marks_transient_pending_archive(session.metadata()));
         let _resume_recovery_guard = if let Some(resume_session_id) = resume_session_id.as_ref() {
             let recovery_gate = self.recovery_gate_for_session(resume_session_id).await;
             let guard = recovery_gate.lock_owned().await;
@@ -2594,8 +2643,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 .load_authoritative_session_base(resume_session_id)
                 .await?
                 && metadata_marks_archived(session.metadata())
-                && !(resume_session_is_transient_pending_archive
-                    && metadata_marks_transient_pending_archive(session.metadata()))
+                && !archived_resume_authorization.allows_archived_resume()
             {
                 self.reject_if_archived_session(resume_session_id, &session)
                     .await
@@ -2675,14 +2723,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         if let Some(ref session) = archived_snapshot
             && metadata_marks_archived(session.metadata())
         {
-            if metadata_marks_transient_pending_archive(session.metadata()) {
-                let mut session = session.clone();
-                clear_transient_pending_archive_marker(&mut session);
-                let session = self.save_normalized_session(session).await?;
-                self.remember_archived_session(session).await;
-            } else {
-                self.remember_archived_session(session.clone()).await;
-            }
+            self.remember_archived_session(session.clone()).await;
             return Err(SessionError::NotFound { id: id.clone() });
         }
 
@@ -2703,7 +2744,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let mut saved_archived_snapshot = false;
         if let Some(mut session) = archived_snapshot.clone() {
             session.set_metadata(SESSION_ARCHIVED_KEY, serde_json::Value::Bool(true));
-            clear_transient_pending_archive_marker(&mut session);
             match self.save_normalized_session(session).await {
                 Ok(session) => {
                     saved_archived_snapshot = true;
@@ -2773,7 +2813,8 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 #[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionService for PersistentSessionService<B> {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
-        self.create_session_with_admission(req, None).await
+        self.create_session_with_admission(req, None, ArchivedResumeAuthorization::RejectArchived)
+            .await
     }
 
     async fn start_turn(
@@ -7858,7 +7899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_persistent_transient_archive_marker_requires_marked_resume_session() {
+    async fn test_machine_authorized_archived_resume_is_not_metadata_driven() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let service = PersistentSessionService::new(
             DummyBuilder,
@@ -7881,30 +7922,44 @@ mod tests {
             .archive(&created.session_id)
             .await
             .expect("archive should succeed");
-        service
-            .mark_transient_pending_archive(&created.session_id)
-            .await
-            .expect("mark transient archived snapshot");
         let stored = service
             .load_authoritative_session(&created.session_id)
             .await
-            .expect("load transient archived snapshot")
-            .expect("transient archived snapshot should exist");
+            .expect("load archived snapshot")
+            .expect("archived snapshot should exist");
         assert!(metadata_marks_archived(stored.metadata()));
-        assert!(metadata_marks_transient_pending_archive(stored.metadata()));
 
+        let stale_resume_for_authorized = stale_resume.clone();
         let rejected = service.create_session(resume_request(stale_resume)).await;
         assert!(
             matches!(rejected, Err(SessionError::NotFound { .. })),
-            "unmarked stale resume must not resurrect a transient archived snapshot: {rejected:?}"
+            "ordinary stale resume must not resurrect an archived snapshot: {rejected:?}"
         );
+        let machine = meerkat_runtime::MeerkatMachine::ephemeral();
+        let admission = service
+            .reserve_create_session_admission()
+            .await
+            .expect("reserve machine-authorized retry admission");
+        service
+            .create_session_with_reserved_machine_archived_resume_admission(
+                resume_request(stale_resume_for_authorized),
+                admission,
+                machine.session_control_authority(),
+            )
+            .await
+            .expect("machine-authorized pending-promotion retry may resume archived durable base");
+        service
+            .archive(&created.session_id)
+            .await
+            .expect("authorized retry should remain controllable and release capacity");
+
         service
             .create_session(create_request(
-                "after stale transient resume",
+                "after stale archived resume",
                 InitialTurnPolicy::Defer,
             ))
             .await
-            .expect("rejected stale transient resume should not leak active capacity");
+            .expect("archived resume checks should not leak active capacity");
     }
 
     #[tokio::test]

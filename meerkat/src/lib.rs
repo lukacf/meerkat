@@ -239,7 +239,7 @@ pub use meerkat_session::DefaultCompactor;
 // EphemeralSessionService: in-memory substrate for testing/embedded use only.
 // Both implement SessionService. Production paths add MeerkatMachine on top.
 #[cfg(feature = "session-store")]
-pub use meerkat_session::PersistentSessionService;
+pub use meerkat_session::{MachineServiceTurnCommitProtocol, PersistentSessionService};
 pub use meerkat_session::{
     EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
 };

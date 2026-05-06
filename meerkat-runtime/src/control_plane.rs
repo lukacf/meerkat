@@ -42,28 +42,24 @@ pub(crate) async fn apply_executor_effect(
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect: RuntimeEffect,
-) -> bool {
-    let (result, should_stop) = match effect.into_inner() {
+) -> Result<bool, RuntimeDriverError> {
+    match effect.into_inner() {
         RuntimeEffectInner::CancelAfterBoundary { reason } => {
-            (executor.cancel_after_boundary(reason).await, false)
+            if let Err(err) = executor.cancel_after_boundary(reason).await {
+                tracing::warn!(error = %err, "failed to apply runtime executor effect");
+            }
+            Ok(false)
         }
         RuntimeEffectInner::StopRuntimeExecutor { reason } => {
-            (executor.stop_runtime_executor(reason).await, true)
+            executor.stop_runtime_executor(reason).await.map_err(|err| {
+                RuntimeDriverError::Internal(format!(
+                    "failed to apply stop-runtime-executor effect: {err}"
+                ))
+            })?;
+            terminalize_async_stop(driver, completions).await?;
+            Ok(true)
         }
-    };
-
-    if let Err(err) = result {
-        tracing::warn!(error = %err, "failed to apply runtime executor effect");
     }
-
-    if should_stop && let Err(err) = terminalize_async_stop(driver, completions).await {
-        tracing::warn!(
-            error = %err,
-            "failed to terminalize runtime stop after stop-runtime-executor effect"
-        );
-    }
-
-    should_stop
 }
 
 /// Drain any ready executor effects before starting another unit of
@@ -73,16 +69,16 @@ pub(crate) async fn drain_ready_executor_effects(
     completions: Option<&SharedCompletionRegistry>,
     executor: &mut dyn meerkat_core::lifecycle::CoreExecutor,
     effect_rx: &mut mpsc::Receiver<RuntimeEffect>,
-) -> bool {
+) -> Result<bool, RuntimeDriverError> {
     loop {
         match effect_rx.try_recv() {
             Ok(effect) => {
-                if apply_executor_effect(driver, completions, executor, effect).await {
-                    return true;
+                if apply_executor_effect(driver, completions, executor, effect).await? {
+                    return Ok(true);
                 }
             }
-            Err(mpsc::error::TryRecvError::Empty) => return false,
-            Err(mpsc::error::TryRecvError::Disconnected) => return true,
+            Err(mpsc::error::TryRecvError::Empty) => return Ok(false),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Ok(true),
         }
     }
 }
@@ -160,7 +156,8 @@ mod tests {
             &mut executor,
             runtime_effect(RuntimeEffectKind::CancelAfterBoundary, "boundary"),
         )
-        .await;
+        .await
+        .expect("boundary effect should apply");
 
         assert!(!should_stop);
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
@@ -172,7 +169,8 @@ mod tests {
             &mut executor,
             runtime_effect(RuntimeEffectKind::StopRuntimeExecutor, "stop"),
         )
-        .await;
+        .await
+        .expect("stop effect should apply");
 
         assert!(should_stop);
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);

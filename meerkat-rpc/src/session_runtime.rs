@@ -6,8 +6,9 @@
 //!
 //! The runtime preserves the two-step create-then-run API required by the
 //! JSON-RPC handlers: `create_session()` stages a build config and returns a
-//! `SessionId`; the first `start_turn()` call for that ID materializes the
-//! session inside the service (which runs the first turn).
+//! `SessionId`; `start_turn_via_runtime()` admits the first prompt through
+//! `MeerkatMachine`, and the runtime executor materializes the session inside
+//! the service.
 
 #[path = "session_runtime/schedule_host.rs"]
 mod schedule_host;
@@ -22,9 +23,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use meerkat::{
-    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, PersistenceBundle,
-    PersistentSessionService, PromotingSlot, ScheduleService, ScheduleToolDispatcher, StagedPhase,
-    StagedSessionRegistry, StagedSlot, encode_llm_client_override_for_service,
+    AgentBuildConfig, AgentFactory, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
+    PersistenceBundle, PersistentSessionService, PromotingSlot, ScheduleService,
+    ScheduleToolDispatcher, StagedPhase, StagedSessionRegistry, StagedSlot,
+    encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
 #[cfg(all(test, feature = "mcp"))]
@@ -70,8 +72,6 @@ use meerkat::{
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
 
-const SESSION_TRANSIENT_PENDING_ARCHIVE_KEY: &str = "session_transient_pending_archive";
-
 fn unknown_provider_message(provider: &str) -> String {
     format!("unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)")
 }
@@ -113,6 +113,7 @@ fn pending_system_context_appends(
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
 
+#[cfg(test)]
 type ServiceStartTurnResultReceiver =
     tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
 type ServiceApplyRuntimeTurnResultReceiver =
@@ -642,52 +643,6 @@ async fn await_session_archive_with_runtime_cleanup(
     })?
 }
 
-async fn commit_service_turn_terminal_receipt_and_persist(
-    service: &PersistentSessionService<FactoryAgentBuilder>,
-    runtime_adapter: &MeerkatMachine,
-    session_id: &SessionId,
-) -> Result<(), SessionError> {
-    if let Err(error) = runtime_adapter
-        .commit_service_turn_terminal_receipt(session_id)
-        .await
-    {
-        let _ = service.discard_live_session(session_id).await;
-        return Err(runtime_driver_error_to_session_error(error));
-    }
-    service
-        .persist_machine_committed_live_turn(session_id)
-        .await
-        .map(|_| ())
-}
-
-async fn finish_service_turn_result_with_machine_receipt(
-    service: &PersistentSessionService<FactoryAgentBuilder>,
-    runtime_adapter: &MeerkatMachine,
-    session_id: &SessionId,
-    result: Result<RunResult, SessionError>,
-) -> Result<RunResult, SessionError> {
-    match result {
-        Ok(result) => {
-            commit_service_turn_terminal_receipt_and_persist(service, runtime_adapter, session_id)
-                .await?;
-            Ok(result)
-        }
-        Err(error)
-            if service
-                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
-                .await =>
-        {
-            commit_service_turn_terminal_receipt_and_persist(service, runtime_adapter, session_id)
-                .await?;
-            Err(error)
-        }
-        Err(error) => {
-            let _ = service.discard_live_session(session_id).await;
-            Err(error)
-        }
-    }
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingPromotionCleanupMode {
     Restore,
@@ -706,7 +661,7 @@ struct PendingPromotionCleanup {
     created_at_secs: u64,
     updated_at_secs: u64,
     mode: PendingPromotionCleanupMode,
-    transient_pending_archive: bool,
+    machine_archived_resume_authorized: bool,
     armed: bool,
 }
 
@@ -730,7 +685,7 @@ impl PendingPromotionCleanup {
             created_at_secs: slot.created_at_secs,
             updated_at_secs: slot.updated_at_secs,
             mode: PendingPromotionCleanupMode::Restore,
-            transient_pending_archive: false,
+            machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
             armed: true,
         }
     }
@@ -816,39 +771,16 @@ impl PendingPromotionCleanup {
             self.restore_now().await;
             return Err(error);
         }
-        if let Err(error) = service
-            .mark_transient_pending_archive(&self.session_id)
-            .await
-        {
-            self.restore_now().await;
-            return Err(error);
-        }
-        self.mark_transient_pending_archive();
+        self.authorize_machine_archived_resume();
         self.restore_now().await;
         Ok(())
     }
 
-    fn mark_transient_pending_archive(&mut self) {
+    fn authorize_machine_archived_resume(&mut self) {
         if !self.armed {
             return;
         }
-        self.transient_pending_archive = true;
-        if let Some(build_config) = self.build_config.as_mut() {
-            Self::mark_build_config_transient_pending_archive(&self.session_id, build_config);
-        }
-    }
-
-    fn mark_build_config_transient_pending_archive(
-        session_id: &SessionId,
-        build_config: &mut AgentBuildConfig,
-    ) {
-        let session = build_config
-            .resume_session
-            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-        session.set_metadata(
-            SESSION_TRANSIENT_PENDING_ARCHIVE_KEY,
-            serde_json::Value::Bool(true),
-        );
+        self.machine_archived_resume_authorized = true;
     }
 
     async fn preserve_promoting_system_context_state(
@@ -888,9 +820,6 @@ impl PendingPromotionCleanup {
             &mut build_config,
         )
         .await;
-        if self.transient_pending_archive {
-            Self::mark_build_config_transient_pending_archive(&self.session_id, &mut build_config);
-        }
         let Some(admission) = self.staged_capacity_admission.take() else {
             self.abort_restore_without_capacity().await;
             return;
@@ -905,6 +834,7 @@ impl PendingPromotionCleanup {
                 self.deferred_prompt.clone(),
                 self.created_at_secs,
                 self.updated_at_secs,
+                self.machine_archived_resume_authorized,
             )
             .await;
         if restored {
@@ -954,7 +884,7 @@ impl Drop for PendingPromotionCleanup {
                 let deferred_prompt = self.deferred_prompt.clone();
                 let created_at_secs = self.created_at_secs;
                 let updated_at_secs = self.updated_at_secs;
-                let transient_pending_archive = self.transient_pending_archive;
+                let machine_archived_resume_authorized = self.machine_archived_resume_authorized;
                 tokio::spawn(async move {
                     let Some(admission) = staged_capacity_admission else {
                         tracing::warn!(
@@ -972,12 +902,6 @@ impl Drop for PendingPromotionCleanup {
                         &mut build_config,
                     )
                     .await;
-                    if transient_pending_archive {
-                        Self::mark_build_config_transient_pending_archive(
-                            &session_id,
-                            &mut build_config,
-                        );
-                    }
                     let restored = staged_sessions
                         .abandon_promotion(
                             session_id.clone(),
@@ -987,6 +911,7 @@ impl Drop for PendingPromotionCleanup {
                             deferred_prompt,
                             created_at_secs,
                             updated_at_secs,
+                            machine_archived_resume_authorized,
                         )
                         .await;
                     if restored {
@@ -1161,15 +1086,14 @@ impl RpcMobSessionService {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = service
-                .start_turn_live_with_machine_admission(&session_id, req, admission)
-                .await;
-            let result = finish_service_turn_result_with_machine_receipt(
-                service.as_ref(),
-                runtime_adapter.as_ref(),
-                &session_id,
-                result,
-            )
-            .await;
+                .run_machine_committed_live_turn(
+                    MachineServiceTurnCommitProtocol::from_machine(runtime_adapter.as_ref()),
+                    &session_id,
+                    req,
+                    admission,
+                )
+                .await
+                .map_err(|(error, _admission)| error);
             let _ = result_tx.send(result);
         });
         result_rx
@@ -2865,6 +2789,7 @@ impl SessionRuntime {
             .unwrap_or(false)
     }
 
+    #[cfg(test)]
     async fn should_restore_pending_after_start_turn(
         service: &PersistentSessionService<FactoryAgentBuilder>,
         session_id: &SessionId,
@@ -3228,6 +3153,7 @@ impl SessionRuntime {
         });
     }
 
+    #[cfg(test)]
     fn is_pre_run_start_turn_failure(result: &Result<RunResult, SessionError>) -> bool {
         matches!(
             result,
@@ -3255,6 +3181,7 @@ impl SessionRuntime {
         matches!(error, SessionError::NotFound { .. })
     }
 
+    #[cfg(test)]
     fn spawn_service_start_turn_with_admission_guard(
         &self,
         session_id: SessionId,
@@ -3266,15 +3193,14 @@ impl SessionRuntime {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = service
-                .start_turn_live_with_machine_admission(&session_id, req, admission)
-                .await;
-            let result = finish_service_turn_result_with_machine_receipt(
-                service.as_ref(),
-                runtime_adapter.as_ref(),
-                &session_id,
-                result,
-            )
-            .await;
+                .run_machine_committed_live_turn(
+                    MachineServiceTurnCommitProtocol::from_machine(runtime_adapter.as_ref()),
+                    &session_id,
+                    req,
+                    admission,
+                )
+                .await
+                .map_err(|(error, _admission)| error);
             let _ = result_tx.send(result);
         });
         result_rx
@@ -3313,12 +3239,14 @@ impl SessionRuntime {
         Self::wait_pending_promotion_pre_turn_hook(&self.runtime_routed_pre_promotion_hook).await;
     }
 
+    #[cfg(test)]
     fn spawn_pending_create_and_start_turn_with_admission_guard(
         &self,
         session_id: SessionId,
         create_req: CreateSessionRequest,
         start_req: StartTurnRequest,
         mut promotion_cleanup: PendingPromotionCleanup,
+        machine_archived_resume_authorized: bool,
     ) -> ServiceStartTurnResultReceiver {
         let service = Arc::clone(&self.service);
         let staged_sessions = Arc::clone(&self.staged_sessions);
@@ -3327,13 +3255,30 @@ impl SessionRuntime {
         let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let create_result = match promotion_cleanup.take_staged_capacity_admission() {
-                Some(admission) => {
+            let create_result = match (
+                promotion_cleanup.take_staged_capacity_admission(),
+                machine_archived_resume_authorized,
+            ) {
+                (Some(admission), true) => {
+                    service
+                        .create_session_with_reserved_machine_archived_resume_admission(
+                            create_req,
+                            admission,
+                            runtime_adapter.session_control_authority(),
+                        )
+                        .await
+                }
+                (Some(admission), false) => {
                     service
                         .create_session_with_reserved_admission(create_req, admission)
                         .await
                 }
-                None => service.create_session(create_req).await,
+                (None, true) => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    )),
+                )),
+                (None, false) => service.create_session(create_req).await,
             };
             match create_result {
                 Ok(_) => {
@@ -3396,16 +3341,17 @@ impl SessionRuntime {
 
             let result = match service.reserve_runtime_turn_admission(&session_id).await {
                 Ok(admission) => {
-                    let result = service
-                        .start_turn_live_with_machine_admission(&session_id, start_req, admission)
-                        .await;
-                    finish_service_turn_result_with_machine_receipt(
-                        service.as_ref(),
-                        runtime_adapter.as_ref(),
-                        &session_id,
-                        result,
-                    )
-                    .await
+                    service
+                        .run_machine_committed_live_turn(
+                            MachineServiceTurnCommitProtocol::from_machine(
+                                runtime_adapter.as_ref(),
+                            ),
+                            &session_id,
+                            start_req,
+                            admission,
+                        )
+                        .await
+                        .map_err(|(error, _admission)| error)
                 }
                 Err(error) => Err(error),
             };
@@ -3437,6 +3383,7 @@ impl SessionRuntime {
         result_rx
     }
 
+    #[cfg(test)]
     async fn await_service_start_turn(
         session_id: &SessionId,
         result_rx: ServiceStartTurnResultReceiver,
@@ -3498,6 +3445,7 @@ impl SessionRuntime {
         contributing_input_ids: Vec<meerkat_core::InputId>,
         mut promotion_cleanup: PendingPromotionCleanup,
         keep_alive: bool,
+        machine_archived_resume_authorized: bool,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
         let service = Arc::clone(&self.service);
         let staged_sessions = Arc::clone(&self.staged_sessions);
@@ -3506,13 +3454,30 @@ impl SessionRuntime {
         let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let create_result = match promotion_cleanup.take_staged_capacity_admission() {
-                Some(admission) => {
+            let create_result = match (
+                promotion_cleanup.take_staged_capacity_admission(),
+                machine_archived_resume_authorized,
+            ) {
+                (Some(admission), true) => {
+                    service
+                        .create_session_with_reserved_machine_archived_resume_admission(
+                            create_req,
+                            admission,
+                            runtime_adapter.session_control_authority(),
+                        )
+                        .await
+                }
+                (Some(admission), false) => {
                     service
                         .create_session_with_reserved_admission(create_req, admission)
                         .await
                 }
-                None => service.create_session(create_req).await,
+                (None, true) => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
+                    )),
+                )),
+                (None, false) => service.create_session(create_req).await,
             };
             match create_result {
                 Ok(_) => {
@@ -6051,6 +6016,7 @@ impl SessionRuntime {
                 build_config,
                 labels,
                 deferred_prompt,
+                machine_archived_resume_authorized,
                 ..
             } = slot;
             let mut build_config = *build_config;
@@ -6187,6 +6153,7 @@ impl SessionRuntime {
                 primitive.contributing_input_ids().to_vec(),
                 promotion_cleanup,
                 build_config.keep_alive,
+                machine_archived_resume_authorized,
             );
             let output = Self::await_service_apply_runtime_turn(session_id, output_rx).await;
             self.bridge_pending_session_event_streams(session_id).await;
@@ -6366,6 +6333,7 @@ impl SessionRuntime {
                     deferred_prompt,
                     created_at_secs: now,
                     updated_at_secs: now,
+                    machine_archived_resume_authorized: false,
                 },
             )
             .await
@@ -6396,6 +6364,7 @@ impl SessionRuntime {
     /// For materialized sessions, only `keep_alive` is allowed; all other
     /// overrides are rejected with an error.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub async fn start_turn(
         &self,
         session_id: &SessionId,
@@ -6441,6 +6410,7 @@ impl SessionRuntime {
                 build_config,
                 labels,
                 deferred_prompt,
+                machine_archived_resume_authorized,
                 ..
             } = slot;
             let mut build_config = *build_config;
@@ -6594,6 +6564,7 @@ impl SessionRuntime {
                     turn_metadata,
                 },
                 promotion_cleanup,
+                machine_archived_resume_authorized,
             );
             let result = Self::await_service_start_turn(session_id, result_rx).await;
             self.bridge_pending_session_event_streams(session_id).await;
@@ -6750,6 +6721,7 @@ impl SessionRuntime {
     ///
     /// Returns `SESSION_NOT_FOUND` if the session cannot be recovered.
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     async fn try_recover_persisted_session(
         &self,
         session_id: &SessionId,
@@ -6842,6 +6814,7 @@ impl SessionRuntime {
                         deferred_prompt: None,
                         created_at_secs: now,
                         updated_at_secs: now,
+                        machine_archived_resume_authorized: false,
                     },
                 )
                 .await
@@ -12832,6 +12805,7 @@ mod tests {
                     deferred_prompt: None,
                     created_at_secs: now,
                     updated_at_secs: now,
+                    machine_archived_resume_authorized: false,
                 },
             )
             .await
@@ -16569,11 +16543,11 @@ mod tests {
         let stored = runtime
             .load_persisted_session(&session_id)
             .await
-            .expect("load transient no-pending snapshot")
+            .expect("load machine-archived no-pending snapshot")
             .expect("no-pending runtime apply should leave a durable terminal snapshot");
         assert!(
             session_metadata_marks_archived(&stored),
-            "transient no-pending snapshot should be archived while the staged slot is restored"
+            "no-pending snapshot should be machine-archived while the staged slot is restored"
         );
         let (event_tx, _event_rx) = mpsc::channel(100);
         let recovery = runtime
@@ -16687,7 +16661,7 @@ mod tests {
             .expect("retry should persist the materialized session");
         assert!(
             !session_metadata_marks_archived(&stored),
-            "retry should overwrite the transient archived no-pending snapshot"
+            "retry should overwrite the machine-archived no-pending snapshot"
         );
         runtime
             .create_session(mock_build_config(), None, None)
@@ -16723,6 +16697,7 @@ mod tests {
         let PromotingSlot {
             build_config,
             labels,
+            machine_archived_resume_authorized,
             ..
         } = slot;
         let build_config = *build_config;
@@ -16744,12 +16719,13 @@ mod tests {
             create_req,
             service_resume_pending_request(),
             promotion_cleanup,
+            machine_archived_resume_authorized,
         );
         SessionRuntime::await_service_start_turn(session_id, result_rx).await
     }
 
     #[tokio::test]
-    async fn pending_start_pre_run_failure_archives_transient_snapshot_and_allows_retry() {
+    async fn pending_start_pre_run_failure_archives_snapshot_and_allows_machine_retry() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
 
@@ -16767,11 +16743,11 @@ mod tests {
         let stored = runtime
             .load_persisted_session(&session_id)
             .await
-            .expect("load transient no-pending start snapshot")
-            .expect("pending start should leave a durable transient snapshot");
+            .expect("load machine-archived no-pending start snapshot")
+            .expect("pending start should leave a durable archived snapshot");
         assert!(
             session_metadata_marks_archived(&stored),
-            "transient start no-pending snapshot should be archived while staged slot is restored"
+            "start no-pending snapshot should be machine-archived while staged slot is restored"
         );
 
         let blocked = runtime
@@ -16890,7 +16866,7 @@ mod tests {
             "competing create must make staged capacity replenishment fail"
         );
 
-        promotion_cleanup.mark_transient_pending_archive();
+        promotion_cleanup.authorize_machine_archived_resume();
         promotion_cleanup.restore_now().await;
         promotion_cleanup.disarm();
 

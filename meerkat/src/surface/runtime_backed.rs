@@ -20,8 +20,8 @@ use tokio::sync::mpsc;
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use crate::JsonlStore;
 use crate::{
-    CreateSessionRequest, FactoryAgentBuilder, PersistentSessionService, RunResult, Session,
-    SessionError, SessionId,
+    CreateSessionRequest, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
+    PersistentSessionService, RunResult, Session, SessionError, SessionId,
 };
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use meerkat_store::MemoryBlobStore;
@@ -170,50 +170,6 @@ fn start_turn_request_from_initial_turn(
     }
 }
 
-async fn commit_service_turn_terminal_receipt_and_persist(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    adapter: &Arc<MeerkatMachine>,
-    session_id: &SessionId,
-) -> Result<(), SurfaceRuntimeMaterializeError> {
-    if let Err(error) = adapter
-        .commit_service_turn_terminal_receipt(session_id)
-        .await
-    {
-        let _ = service.discard_live_session(session_id).await;
-        return Err(SurfaceRuntimeMaterializeError::RuntimeDriver(error));
-    }
-    service
-        .persist_machine_committed_live_turn(session_id)
-        .await?;
-    Ok(())
-}
-
-async fn finish_runtime_backed_service_turn_result(
-    service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    adapter: &Arc<MeerkatMachine>,
-    session_id: &SessionId,
-    result: Result<RunResult, (SessionError, Option<crate::RuntimeContextAdmissionGuard>)>,
-) -> Result<RunResult, SurfaceRuntimeMaterializeError> {
-    match result {
-        Ok(result) => {
-            commit_service_turn_terminal_receipt_and_persist(service, adapter, session_id).await?;
-            Ok(result)
-        }
-        Err((error, _admission))
-            if service
-                .service_turn_error_requires_machine_terminal_receipt(session_id, &error)
-                .await =>
-        {
-            commit_service_turn_terminal_receipt_and_persist(service, adapter, session_id).await?;
-            Err(SurfaceRuntimeMaterializeError::Session(error))
-        }
-        Err((error, _admission)) => {
-            let _ = service.discard_live_session(session_id).await;
-            Err(SurfaceRuntimeMaterializeError::Session(error))
-        }
-    }
-}
-
 async fn materialize_error_preserves_runtime_session(
     service: &Arc<PersistentSessionService<FactoryAgentBuilder>>,
     session_id: &SessionId,
@@ -238,9 +194,14 @@ pub async fn run_runtime_backed_initial_turn_with_machine(
     let admission = service.reserve_runtime_turn_admission(session_id).await?;
     let request = start_turn_request_from_initial_turn(initial_turn);
     let result = service
-        .start_turn_live_with_recoverable_machine_admission(session_id, request, admission)
+        .run_machine_committed_live_turn(
+            MachineServiceTurnCommitProtocol::from_machine(adapter),
+            session_id,
+            request,
+            admission,
+        )
         .await;
-    finish_runtime_backed_service_turn_result(service, adapter, session_id, result).await
+    result.map_err(|(error, _admission)| SurfaceRuntimeMaterializeError::Session(error))
 }
 
 pub async fn materialize_session<F>(

@@ -163,15 +163,7 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "failed to apply DSL stop-runtime-executor transition after runtime loop snapshot failure"
             );
-            if let Err(stop_error) =
-                crate::control_plane::terminalize_async_stop(driver, completions).await
-            {
-                tracing::warn!(
-                    error = %stop_error,
-                    "failed to terminalize runtime loop after stop-runtime-executor DSL rejection"
-                );
-            }
-            return true;
+            return false;
         }
     };
 
@@ -183,25 +175,27 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "DSL stop-runtime-executor transition did not emit a runtime effect fact"
             );
-            if let Err(stop_error) =
-                crate::control_plane::terminalize_async_stop(driver, completions).await
-            {
-                tracing::warn!(
-                    error = %stop_error,
-                    "failed to terminalize runtime loop after missing stop-runtime-executor effect"
-                );
-            }
-            return true;
+            return false;
         }
     };
 
-    crate::control_plane::apply_executor_effect(
+    match crate::control_plane::apply_executor_effect(
         driver,
         completions,
         executor,
         projected_effect.into_effect(),
     )
     .await
+    {
+        Ok(should_stop) => should_stop,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "failed to apply stop-runtime-executor effect from runtime loop"
+            );
+            false
+        }
+    }
 }
 
 fn abandon_completion_waiters(
@@ -513,7 +507,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                 maybe_effect = effect_rx.recv() => {
                     match maybe_effect {
                         Some(effect) => {
-                            if crate::control_plane::apply_executor_effect(
+                            match crate::control_plane::apply_executor_effect(
                                 &driver,
                                 completions.as_ref(),
                                 &mut *executor,
@@ -521,7 +515,14 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                             )
                             .await
                             {
-                                break;
+                                Ok(true) => break,
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::error!(
+                                        error = %error,
+                                        "failed to apply runtime executor effect"
+                                    );
+                                }
                             }
                         }
                         None => break,
@@ -708,7 +709,7 @@ async fn process_queue(
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
 ) -> bool {
     loop {
-        if crate::control_plane::drain_ready_executor_effects(
+        match crate::control_plane::drain_ready_executor_effects(
             driver,
             completions,
             executor,
@@ -716,7 +717,14 @@ async fn process_queue(
         )
         .await
         {
-            return true;
+            Ok(true) => return true,
+            Ok(false) => {}
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    "failed to drain runtime executor effect"
+                );
+            }
         }
 
         // Dequeue and prepare under the driver lock

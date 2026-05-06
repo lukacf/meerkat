@@ -61,7 +61,7 @@ pub type BroadcastEventReceiver =
 pub use compactor::DefaultCompactor;
 
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-pub use persistent::PersistentSessionService;
+pub use persistent::{MachineServiceTurnCommitProtocol, PersistentSessionService};
 
 // Skill registration (inventory + meerkat-skills not available on wasm32)
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]

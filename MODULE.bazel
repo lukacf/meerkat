@@ -6,6 +6,8 @@ module(
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "rules_shell", version = "0.8.0")
 bazel_dep(name = "platforms", version = "1.0.0")
+bazel_dep(name = "apple_support", version = "1.24.1")
+bazel_dep(name = "rules_cc", version = "0.1.1")
 bazel_dep(name = "toolchains_buildbuddy", version = "0.0.4")
 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
@@ -77,16 +79,32 @@ filegroup(name = "rust_std", srcs = glob(["**/*"]), visibility = ["//visibility:
 )
 
 buildbuddy = use_extension("@toolchains_buildbuddy//:extensions.bzl", "buildbuddy")
+buildbuddy.msvc_toolchain(
+    msvc_edition = "Professional",
+    msvc_release = "2022",
+    msvc_version = "14.42.34433",
+    windows_kits_version = "10.0.26100.0",
+    windows_kits_release = "10",
+)
 use_repo(buildbuddy, "buildbuddy_toolchain")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
     edition = "2024",
-    extra_target_triples = ["wasm32-unknown-unknown"],
+    extra_target_triples = [
+        "wasm32-unknown-unknown",
+        "x86_64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    ],
     versions = ["1.94.0"],
 )
 use_repo(rust, "rust_toolchains")
 register_toolchains("@rust_toolchains//:all")
+register_toolchains(
+    "//platforms:meerkat_windows_cc_toolchain_impl",
+    "@buildbuddy_toolchain//:ubuntu_cc_toolchain",
+    "@buildbuddy_toolchain//:ubuntu_cc_toolchain_arm64",
+)
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.annotation(
@@ -106,5 +124,13 @@ crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
     manifests = ["//:Cargo.toml"],
+    supported_platform_triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "wasm32-unknown-unknown",
+    ],
 )
 use_repo(crate, "crates")

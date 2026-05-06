@@ -1,3 +1,32 @@
+load("@apple_support//xcode:xcode_config.bzl", "xcode_config")
+load("@apple_support//xcode:xcode_version.bzl", "xcode_version")
+
+xcode_version(
+    name = "xcode_26_4_0",
+    version = "26.4.0.17E192",
+    aliases = ["26.4.0", "26.4", "26"],
+    default_macos_sdk_version = "26.4",
+    default_ios_sdk_version = "26.4",
+    default_tvos_sdk_version = "26.4",
+    default_watchos_sdk_version = "26.4",
+)
+
+xcode_version(
+    name = "xcode_26_4_1",
+    version = "26.4.1.17E202",
+    aliases = ["26.4.1"],
+    default_macos_sdk_version = "26.4",
+    default_ios_sdk_version = "26.4",
+    default_tvos_sdk_version = "26.4",
+    default_watchos_sdk_version = "26.4",
+)
+
+xcode_config(
+    name = "rbe_xcodes",
+    versions = [":xcode_26_4_0", ":xcode_26_4_1"],
+    default = ":xcode_26_4_1",
+)
+
 platform(
     name = "macos_arm64",
     constraint_values = [
@@ -35,7 +64,9 @@ platform(
     exec_properties = {
         "Arch": "amd64",
         "OSFamily": "linux",
+        "container-image": "docker://docker.io/library/buildpack-deps:22.04",
     },
+    parents = ["@toolchains_buildbuddy//platforms:linux_x86_64"],
 )
 
 platform(
@@ -47,7 +78,9 @@ platform(
     exec_properties = {
         "Arch": "arm64",
         "OSFamily": "linux",
+        "container-image": "docker://docker.io/library/buildpack-deps:22.04",
     },
+    parents = ["@toolchains_buildbuddy//platforms:linux_arm64"],
 )
 
 platform(
@@ -58,6 +91,14 @@ platform(
     ],
     exec_properties = {
         "Arch": "amd64",
-        "OSFamily": "windows",
+        "OSFamily": "Windows",
+        "use-self-hosted-executors": "true",
+        "recycle-runner": "true",
+        "preserve-workspace": "true",
     },
+    parents = ["@toolchains_buildbuddy//platforms:windows_x86_64"],
 )
+
+load("//platforms:windows_cc.bzl", "meerkat_windows_cc_toolchain")
+
+meerkat_windows_cc_toolchain(name = "meerkat_windows_cc")

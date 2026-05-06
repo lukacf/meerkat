@@ -391,9 +391,9 @@ case "${command}" in
     ;;
   release-build-macos-x86)
     command="build"
-    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-x86-rbe}"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
     default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//platforms:macos_x86_64)
     ;;
   release-build-linux-x86)
     command="build"
@@ -411,7 +411,22 @@ case "${command}" in
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-windows-rbe}"
     default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
-    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    msvc_ver="${BUILDBUDDY_WINDOWS_MSVC_VERSION:-14.42.34433}"
+    msvc_edition="${BUILDBUDDY_WINDOWS_MSVC_EDITION:-Professional}"
+    msvc_root="C:/Program Files/Microsoft Visual Studio/2022/${msvc_edition}"
+    winsdk_ver="${BUILDBUDDY_WINDOWS_SDK_VERSION:-10.0.26100.0}"
+    winsdk_root="C:/Program Files (x86)/Windows Kits/10"
+    extra_args+=(
+      --compilation_mode=opt
+      --remote_download_outputs=toplevel
+      "--action_env=PATH=${msvc_root}/VC/Tools/MSVC/${msvc_ver}/bin/HostX64/x64;${winsdk_root}/bin/${winsdk_ver}/x64;C:/Windows/System32"
+      "--action_env=LIB=${msvc_root}/VC/Tools/MSVC/${msvc_ver}/lib/x64;${winsdk_root}/Lib/${winsdk_ver}/um/x64;${winsdk_root}/Lib/${winsdk_ver}/ucrt/x64"
+      "--action_env=INCLUDE=${msvc_root}/VC/Tools/MSVC/${msvc_ver}/include;${winsdk_root}/Include/${winsdk_ver}/ucrt;${winsdk_root}/Include/${winsdk_ver}/um;${winsdk_root}/Include/${winsdk_ver}/shared;${winsdk_root}/Include/${winsdk_ver}/cppwinrt;${winsdk_root}/Include/${winsdk_ver}/winrt"
+      --action_env=TEMP
+      --action_env=TMP
+      --host_action_env=TEMP
+      --host_action_env=TMP
+    )
     ;;
   wasm-contract-rbe)
     command="test"
@@ -778,12 +793,15 @@ fi
 
 apple_platform_args=()
 if [[ "${config}" == buildbuddy-macos-rbe* ]]; then
-  macos_sdk_version="${BUILDBUDDY_MACOS_SDK_VERSION:-26.2}"
+  macos_sdk_version="${BUILDBUDDY_MACOS_SDK_VERSION:-26.4}"
   macos_minimum_os="${BUILDBUDDY_MACOS_MINIMUM_OS:-13.0}"
+  xcode_version="${BUILDBUDDY_XCODE_VERSION:-26.4.0}"
   apple_platform_args+=(
     --macos_sdk_version="${macos_sdk_version}"
     --macos_minimum_os="${macos_minimum_os}"
     --host_macos_minimum_os="${macos_minimum_os}"
+    --xcode_version_config=//platforms:rbe_xcodes
+    --xcode_version="${xcode_version}"
   )
 fi
 
@@ -802,6 +820,14 @@ bb_args+=(
   --config="${config}"
   --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
 )
+if [[ -n "${BUILDBUDDY_ENDPOINT:-}" ]]; then
+  bb_args+=(
+    --bes_results_url="https://${BUILDBUDDY_ENDPOINT}/invocation/"
+    --bes_backend="grpcs://${BUILDBUDDY_ENDPOINT}"
+    --remote_cache="grpcs://${BUILDBUDDY_ENDPOINT}"
+    --remote_executor="grpcs://${BUILDBUDDY_ENDPOINT}"
+  )
+fi
 if [[ "${#apple_platform_args[@]}" -gt 0 ]]; then
   bb_args+=("${apple_platform_args[@]}")
 fi

@@ -641,61 +641,58 @@ impl MeerkatMachine {
             epoch_id,
             _visibility_state,
             formal_pre_run_phase,
-        ) =
-            {
-                let sessions = self.sessions.read().await;
-                let entry = sessions.get(session_id)?;
-                // W6 Class B (`e5c5ecaf3`): the shell-side `control_projection`
-                // is no longer written by the finalize-* paths in the driver
-                // (`machine_retire` / `machine_destroy` / `machine_stop_runtime`
-                // / `machine_reset` used to call `set_control_projection(...)`
-                // pre-finalize, deleted by the shadow-truth cleanup). DSL is
-                // the canonical source for `lifecycle_phase` AND `current_run_id`
-                // (both fields were updated together by the deleted
-                // `set_control_projection` call; both are tracked on the DSL
-                // side at `dsl.rs::state.lifecycle_phase` + `state.current_run_id`).
-                // Project both from the DSL authority so `spine_snapshot` matches
-                // the DSL's visible control contract post-retire/destroy/reset.
-                // A retired drain uses an internal Running/pre_run_phase=Retired
-                // pair to execute preserved work, but remains externally Retired.
-                // `pre_run_phase` is also DSL-owned now, so the spine projects the
-                // whole lifecycle/run tuple from one authority.
-                // Mirrors `existing_session_runtime_state`.
-                let mut snapshot = entry.control_snapshot();
-                let (phase, current_run_id, pre_run_phase, formal_pre_run_phase) =
-                    {
-                        let authority = entry
-                            .dsl_authority
-                            .lock()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        (
-                    crate::meerkat_machine::dsl_authority::visible_runtime_phase_from_authority(
-                        &authority,
-                    ),
-                    crate::meerkat_machine::dsl_authority::current_run_id_from_authority(
-                        &authority,
-                    ),
-                    crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority),
-                    authority.state.pre_run_phase.map(|phase| format!("{phase:?}")),
-                )
-                    };
-                snapshot.phase = phase;
-                snapshot.current_run_id = current_run_id;
-                snapshot.pre_run_phase = pre_run_phase;
-                (
-                    Arc::clone(&entry.driver),
-                    snapshot,
-                    Arc::clone(&entry.completions),
-                    Arc::clone(&entry.ops_lifecycle),
-                    Arc::clone(&entry.cursor_state),
-                    true,
-                    true,
-                    entry.attachment_is_live(),
-                    entry.epoch_id.clone(),
-                    entry.tool_visibility_owner.visibility_state().ok()?,
-                    formal_pre_run_phase,
-                )
-            };
+        ) = {
+            let sessions = self.sessions.read().await;
+            let entry = sessions.get(session_id)?;
+            // DSL is the transition authority for live states. Persistent
+            // sessions hold `control_projection` as the machine-published
+            // lifecycle barrier for run-return and terminal boundaries until
+            // the durable receipt succeeds, so diagnostics do not expose
+            // in-flight terminal proposals.
+            let control = entry.control_snapshot();
+            let mut snapshot = control.clone();
+            let authority = entry
+                .dsl_authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dsl_phase =
+                crate::meerkat_machine::dsl_authority::runtime_phase_from_authority(&authority);
+            let dsl_current_run_id =
+                crate::meerkat_machine::dsl_authority::current_run_id_from_authority(&authority);
+            let dsl_pre_run_phase =
+                crate::meerkat_machine::dsl_authority::pre_run_phase_from_authority(&authority);
+            let publish_control = self.has_runtime_persistence()
+                && crate::meerkat_machine::dsl_authority::should_publish_control_over_dsl(
+                    control.phase,
+                    dsl_phase,
+                    dsl_pre_run_phase,
+                );
+            if !publish_control {
+                snapshot.phase = crate::meerkat_machine::dsl_authority::visible_runtime_phase(
+                    dsl_phase,
+                    dsl_pre_run_phase,
+                );
+                snapshot.current_run_id = dsl_current_run_id;
+                snapshot.pre_run_phase = dsl_pre_run_phase;
+            }
+            let formal_pre_run_phase = snapshot
+                .pre_run_phase
+                .and_then(crate::meerkat_machine::dsl_authority::pre_run_phase_from_runtime_state)
+                .map(|phase| format!("{phase:?}"));
+            (
+                Arc::clone(&entry.driver),
+                snapshot,
+                Arc::clone(&entry.completions),
+                Arc::clone(&entry.ops_lifecycle),
+                Arc::clone(&entry.cursor_state),
+                true,
+                true,
+                entry.attachment_is_live(),
+                entry.epoch_id.clone(),
+                entry.tool_visibility_owner.visibility_state().ok()?,
+                formal_pre_run_phase,
+            )
+        };
         let completion_waiters = {
             let completions = completions_handle.lock().await;
             let snapshot = completions.diagnostic_snapshot();

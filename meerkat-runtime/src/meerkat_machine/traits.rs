@@ -510,14 +510,28 @@ impl MeerkatMachine {
     ) -> Option<RuntimeState> {
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id)?;
-        // DSL is the single source of truth. The async runtime-loop stop path
-        // terminalizes through the shared driver authority, so
-        // `lifecycle_phase` is Stopped by the time any observer reads it.
+        // DSL remains the transition authority for live, non-terminal states.
+        // Persistent drivers use the published control projection as the
+        // visibility barrier when DSL has crossed a run-return or terminal
+        // lifecycle boundary before the durable commit has published it.
+        let control = entry.control_snapshot();
         let authority = entry
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(dsl_authority::runtime_phase_from_authority(&authority))
+        let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
+        let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
+        if self.has_runtime_persistence()
+            && dsl_authority::should_publish_control_over_dsl(
+                control.phase,
+                dsl_phase,
+                dsl_pre_run_phase,
+            )
+        {
+            Some(control.phase)
+        } else {
+            Some(dsl_phase)
+        }
     }
 
     pub(super) async fn existing_session_visible_runtime_state(
@@ -526,13 +540,30 @@ impl MeerkatMachine {
     ) -> Option<RuntimeState> {
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id)?;
+        let control = entry.control_snapshot();
         let authority = entry
             .dsl_authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Some(dsl_authority::visible_runtime_phase_from_authority(
-            &authority,
-        ))
+        let dsl_phase = dsl_authority::runtime_phase_from_authority(&authority);
+        let dsl_pre_run_phase = dsl_authority::pre_run_phase_from_authority(&authority);
+        if self.has_runtime_persistence()
+            && dsl_authority::should_publish_control_over_dsl(
+                control.phase,
+                dsl_phase,
+                dsl_pre_run_phase,
+            )
+        {
+            Some(dsl_authority::visible_runtime_phase(
+                control.phase,
+                control.pre_run_phase,
+            ))
+        } else {
+            Some(dsl_authority::visible_runtime_phase(
+                dsl_phase,
+                dsl_pre_run_phase,
+            ))
+        }
     }
 
     /// Look up the session entry for a runtime ID, returning a control-plane error

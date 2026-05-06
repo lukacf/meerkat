@@ -56,16 +56,39 @@ pub(crate) fn runtime_phase_from_authority(
     write_back_phase(authority.state.lifecycle_phase)
 }
 
-pub(crate) fn visible_runtime_phase_from_authority(
-    authority: &mm_dsl::MeerkatMachineAuthority,
+pub(crate) fn visible_runtime_phase(
+    phase: RuntimeState,
+    pre_run_phase: Option<RuntimeState>,
 ) -> RuntimeState {
-    if authority.state.lifecycle_phase == mm_dsl::MeerkatPhase::Running
-        && authority.state.pre_run_phase == Some(mm_dsl::PreRunPhase::Retired)
-    {
+    if phase == RuntimeState::Running && pre_run_phase == Some(RuntimeState::Retired) {
         RuntimeState::Retired
     } else {
-        runtime_phase_from_authority(authority)
+        phase
     }
+}
+
+pub(crate) fn should_publish_control_over_dsl(
+    control_phase: RuntimeState,
+    dsl_phase: RuntimeState,
+    dsl_pre_run_phase: Option<RuntimeState>,
+) -> bool {
+    if control_phase == RuntimeState::Retired
+        && dsl_phase == RuntimeState::Running
+        && dsl_pre_run_phase == Some(RuntimeState::Retired)
+    {
+        return false;
+    }
+    control_phase != dsl_phase
+        && (matches!(
+            dsl_phase,
+            RuntimeState::Retired | RuntimeState::Stopped | RuntimeState::Destroyed
+        ) || matches!(
+            control_phase,
+            RuntimeState::Running
+                | RuntimeState::Retired
+                | RuntimeState::Stopped
+                | RuntimeState::Destroyed
+        ))
 }
 
 pub(crate) fn current_run_id_from_authority(

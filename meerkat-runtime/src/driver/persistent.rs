@@ -144,7 +144,7 @@ impl PersistentRuntimeDriver {
         Ok(())
     }
 
-    pub(crate) async fn commit_service_turn_terminal_lifecycle(
+    pub(crate) async fn publish_service_turn_terminal_lifecycle(
         &mut self,
         checkpoint: super::ephemeral::EphemeralDriverRollbackSnapshot,
         target_state: RuntimeState,
@@ -154,7 +154,9 @@ impl PersistentRuntimeDriver {
             target_state,
             "service turn terminal receipt",
         )
-        .await
+        .await?;
+        self.inner.set_control_projection(target_state, None, None);
+        Ok(())
     }
 
     pub(crate) fn set_control_projection(
@@ -408,11 +410,11 @@ impl PersistentRuntimeDriver {
         &mut self,
     ) -> Result<crate::traits::RetireReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        self.inner
-            .set_control_projection(RuntimeState::Retired, None, None);
         let report = self.inner.finalize_retire();
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Retired, "retire")
             .await?;
+        self.inner
+            .set_control_projection(RuntimeState::Retired, None, None);
         Ok(report)
     }
 
@@ -420,11 +422,11 @@ impl PersistentRuntimeDriver {
         &mut self,
     ) -> Result<crate::traits::ResetReport, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
-        self.inner
-            .set_control_projection(RuntimeState::Idle, None, None);
         let report = self.inner.reset_cleanup();
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Idle, "reset")
             .await?;
+        self.inner
+            .set_control_projection(RuntimeState::Idle, None, None);
         Ok(report)
     }
 
@@ -468,10 +470,11 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(err);
         }
-        self.inner.sync_control_projection_from_dsl_authority();
         self.inner.stop_runtime_cleanup();
         self.commit_lifecycle_with_rollback(checkpoint, RuntimeState::Stopped, "stop")
-            .await
+            .await?;
+        self.inner.sync_control_projection_from_dsl_authority();
+        Ok(())
     }
 
     pub(crate) fn machine_realize_boundary_applied_in_memory(

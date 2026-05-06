@@ -3740,22 +3740,44 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit RuntimeNotice { kind: RuntimeNoticeKind::Reset, detail: "runtime reset" }
         }
 
-        // 16. StopRuntimeExecutor: different behavior per phase
-        // Unbound (Initializing, Idle, Retired) → Stopped
-        transition StopRuntimeExecutorUnbound {
+        // 16. StopRuntimeExecutor: request stop, then terminalize on
+        // RuntimeExecutorExited. Even when no executor is attached, the shell
+        // must run the same machine-owned terminalization path instead of
+        // publishing Stopped from the request transition.
+        transition StopRuntimeExecutorInitializing {
             on input StopRuntimeExecutor { reason }
-            guard {
-                self.lifecycle_phase == Phase::Initializing
-                || self.lifecycle_phase == Phase::Idle
-                || self.lifecycle_phase == Phase::Retired
-            }
+            guard { self.lifecycle_phase == Phase::Initializing }
             update {
                 self.current_run_id = None;
                 self.pre_run_phase = None;
                 self.silent_intent_overrides = EmptySet;
             }
-            to Stopped
-            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stopped" }
+            to Initializing
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stop requested" }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
+        }
+        transition StopRuntimeExecutorIdle {
+            on input StopRuntimeExecutor { reason }
+            guard { self.lifecycle_phase == Phase::Idle }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Idle
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stop requested" }
+            emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
+        }
+        transition StopRuntimeExecutorRetired {
+            on input StopRuntimeExecutor { reason }
+            guard { self.lifecycle_phase == Phase::Retired }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+                self.silent_intent_overrides = EmptySet;
+            }
+            to Retired
+            emit RuntimeNotice { kind: RuntimeNoticeKind::Stop, detail: "runtime executor stop requested" }
             emit RuntimeEffectFact { kind: RuntimeEffectKind::StopRuntimeExecutor, reason: reason }
         }
         // Attached → Attached (self-loop)

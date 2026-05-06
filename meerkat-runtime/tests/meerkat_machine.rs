@@ -129,6 +129,9 @@ struct HarnessRuntimeStore {
     fail_atomic_apply: bool,
     /// Fail commit_machine_lifecycle after N successful calls (None = never fail).
     fail_commit_machine_lifecycle_after: Option<usize>,
+    /// Delay commit_machine_lifecycle after N successful calls (None = never delay).
+    delay_commit_machine_lifecycle_after: Option<usize>,
+    commit_machine_lifecycle_delay: Duration,
     commit_machine_lifecycle_calls: AtomicUsize,
     load_input_states_delay: Duration,
     fail_persist_input_state_after: Option<usize>,
@@ -142,6 +145,8 @@ impl HarnessRuntimeStore {
             inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
             fail_atomic_apply: true,
             fail_commit_machine_lifecycle_after: None,
+            delay_commit_machine_lifecycle_after: None,
+            commit_machine_lifecycle_delay: Duration::ZERO,
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             load_input_states_delay: Duration::ZERO,
             fail_persist_input_state_after: None,
@@ -155,6 +160,8 @@ impl HarnessRuntimeStore {
             inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
             fail_atomic_apply: false,
             fail_commit_machine_lifecycle_after: None,
+            delay_commit_machine_lifecycle_after: None,
+            commit_machine_lifecycle_delay: Duration::ZERO,
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             load_input_states_delay: delay,
             fail_persist_input_state_after: None,
@@ -170,6 +177,8 @@ impl HarnessRuntimeStore {
             // Session registration/recovery performs the first lifecycle
             // commit. Let that seed succeed, then fail the command commit.
             fail_commit_machine_lifecycle_after: Some(1),
+            delay_commit_machine_lifecycle_after: None,
+            commit_machine_lifecycle_delay: Duration::ZERO,
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             load_input_states_delay: Duration::ZERO,
             fail_persist_input_state_after: None,
@@ -185,6 +194,23 @@ impl HarnessRuntimeStore {
             // Recovery calls commit_machine_lifecycle once (call 0 succeeds),
             // the terminal event call (call 1) fails.
             fail_commit_machine_lifecycle_after: Some(1),
+            delay_commit_machine_lifecycle_after: None,
+            commit_machine_lifecycle_delay: Duration::ZERO,
+            commit_machine_lifecycle_calls: AtomicUsize::new(0),
+            load_input_states_delay: Duration::ZERO,
+            fail_persist_input_state_after: None,
+            persist_input_state_calls: AtomicUsize::new(0),
+            runtime_state_overrides: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn delayed_terminal_lifecycle_commit(delay: Duration) -> Self {
+        Self {
+            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
+            fail_atomic_apply: false,
+            fail_commit_machine_lifecycle_after: None,
+            delay_commit_machine_lifecycle_after: Some(1),
+            commit_machine_lifecycle_delay: delay,
             commit_machine_lifecycle_calls: AtomicUsize::new(0),
             load_input_states_delay: Duration::ZERO,
             fail_persist_input_state_after: None,
@@ -332,6 +358,13 @@ impl RuntimeStore for HarnessRuntimeStore {
             return Err(RuntimeStoreError::WriteFailed(
                 "synthetic commit_machine_lifecycle failure".to_string(),
             ));
+        }
+        if self
+            .delay_commit_machine_lifecycle_after
+            .is_some_and(|delay_after| call_index >= delay_after)
+            && !self.commit_machine_lifecycle_delay.is_zero()
+        {
+            tokio::time::sleep(self.commit_machine_lifecycle_delay).await;
         }
         self.inner
             .commit_machine_lifecycle(runtime_id, commit, input_states)
@@ -588,6 +621,100 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
         Some(RuntimeState::Stopped),
         "failed durable stop commit must not publish durable Stopped state"
     );
+}
+
+#[tokio::test]
+async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight() {
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::run_primitive::RunPrimitive;
+
+    struct StopRecordingExecutor {
+        stop_called: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for StopRecordingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "unexpected apply during stop publish regression",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(HarnessRuntimeStore::delayed_terminal_lifecycle_commit(
+        Duration::from_millis(250),
+    ));
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    let stop_called = Arc::new(AtomicBool::new(false));
+    adapter
+        .register_session_with_executor(
+            sid.clone(),
+            Box::new(StopRecordingExecutor {
+                stop_called: Arc::clone(&stop_called),
+            }),
+        )
+        .await;
+
+    let baseline_commits = store.commit_machine_lifecycle_calls();
+    let stop_adapter = Arc::clone(&adapter);
+    let stop_sid = sid.clone();
+    let stop_task = tokio::spawn(async move {
+        stop_adapter
+            .stop_runtime_executor(&stop_sid, "delayed async stop")
+            .await
+    });
+
+    wait_for_atomic_bool(&stop_called, "stop effect should reach executor").await;
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while store.commit_machine_lifecycle_calls() <= baseline_commits {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("stop lifecycle commit should enter the delayed store call");
+
+    assert_ne!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Stopped,
+        "in-flight durable stop commit must not publish visible Stopped state"
+    );
+
+    stop_task
+        .await
+        .expect("stop task should not panic")
+        .expect("delayed stop should eventually commit");
+    wait_for_runtime_state(
+        &adapter,
+        &sid,
+        RuntimeState::Stopped,
+        "stop should publish after durable commit",
+    )
+    .await;
 }
 
 #[tokio::test]

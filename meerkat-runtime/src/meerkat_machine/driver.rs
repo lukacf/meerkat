@@ -663,6 +663,7 @@ pub(crate) fn machine_begin_run(
 /// turn-state authority has recorded a typed failed terminal cause; `Rollback`
 /// is non-semantic cleanup for prepare/stage failures before turn failure
 /// exists.
+#[derive(Clone, Copy)]
 pub(crate) enum RunReturnDisposition<'a> {
     Commit { input_id: &'a InputId },
     Failed,
@@ -763,6 +764,8 @@ pub(crate) fn machine_apply_run_return_projection(
     // flip `lifecycle_phase` accordingly. The runtime-loop path owns this
     // DSL transition uniformly; dispatch-ingress no longer snapshots or
     // pre-stages the return input.
+    let publish_control_immediately = matches!(driver, DriverEntry::Ephemeral(_))
+        || matches!(disposition, RunReturnDisposition::Rollback);
     let authority = driver.shared_dsl_authority();
     {
         let mut auth = authority
@@ -794,11 +797,12 @@ pub(crate) fn machine_apply_run_return_projection(
         }
     }
 
-    // Shell `control_projection` update is retained as mechanical event
-    // plumbing. DSL's Commit/Fail transition is the authoritative
-    // lifecycle/run writer above; DriverEntry readers consult DSL state, so
-    // this projection must stay mechanical.
-    driver.set_control_projection(next_phase, None, None);
+    // Persistent terminal paths publish the user-visible control projection
+    // only after the durable receipt succeeds. Rollback is non-terminal
+    // cleanup, and ephemeral drivers have no durable receipt to await.
+    if publish_control_immediately {
+        driver.set_control_projection(next_phase, None, None);
+    }
     Ok(())
 }
 
@@ -869,13 +873,14 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
             )
         })?;
     }
-    driver.set_control_projection(next_phase, None, None);
     if let Some(rollback) = rollback
         && let DriverEntry::Persistent(driver) = driver
     {
         driver
-            .commit_service_turn_terminal_lifecycle(rollback, next_phase)
+            .publish_service_turn_terminal_lifecycle(rollback, next_phase)
             .await?;
+    } else {
+        driver.set_control_projection(next_phase, None, None);
     }
     Ok(())
 }
@@ -2407,10 +2412,11 @@ pub(crate) fn machine_prepare_bindings_projection(
             driver.set_control_projection(RuntimeState::Attached, None, None);
             Ok(())
         }
-        RuntimeState::Attached
-        | RuntimeState::Running
-        | RuntimeState::Retired
-        | RuntimeState::Stopped => Ok(()),
+        RuntimeState::Attached => {
+            driver.set_control_projection(RuntimeState::Attached, None, None);
+            Ok(())
+        }
+        RuntimeState::Running | RuntimeState::Retired | RuntimeState::Stopped => Ok(()),
         from => Err(RuntimeDriverError::Internal(
             crate::runtime_state::RuntimeStateTransitionError {
                 from,
@@ -2429,7 +2435,10 @@ pub(crate) fn machine_executor_attach_projection(
             driver.set_control_projection(RuntimeState::Attached, None, None);
             Ok(true)
         }
-        RuntimeState::Attached => Ok(false),
+        RuntimeState::Attached => {
+            driver.set_control_projection(RuntimeState::Attached, None, None);
+            Ok(false)
+        }
         from => Err(RuntimeDriverError::Internal(
             crate::runtime_state::RuntimeStateTransitionError {
                 from,
@@ -2590,6 +2599,9 @@ pub(crate) async fn commit_runtime_loop_run(
             )),
         ));
     }
+    if matches!(&*driver, DriverEntry::Persistent(_)) {
+        driver.set_control_projection(next_phase, None, None);
+    }
 
     Ok(())
 }
@@ -2686,6 +2698,9 @@ async fn fail_runtime_loop_run_inner(
         return Err(RuntimeLoopRunFailError::TerminalSnapshot(
             RuntimeDriverError::Internal(format!("failed to record run-failed event: {run_err}")),
         ));
+    }
+    if matches!(&*driver, DriverEntry::Persistent(_)) {
+        driver.set_control_projection(next_phase, None, None);
     }
     Ok(())
 }

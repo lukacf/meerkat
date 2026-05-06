@@ -196,7 +196,12 @@ case "${lane}" in
       npm test)
     make verify-schema-freshness CARGO="${CARGO}"
     make check-rust-release-packaging CARGO="${CARGO}"
-    make fmt-check CARGO="${CARGO}"
+    rustfmt_bin="$(find_runfile "*stable_tools*/bin/rustfmt")"
+    if [[ -n "${rustfmt_bin}" ]]; then
+      find . -name '*.rs' -not -path './target/*' -not -path './vendor/*' | xargs "${rustfmt_bin}" --check
+    else
+      make fmt-check CARGO="${CARGO}"
+    fi
     ;;
   sdk-suites)
     configure_rust "aarch64-apple-darwin__stable_tools"

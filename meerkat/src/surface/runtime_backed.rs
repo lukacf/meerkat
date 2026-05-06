@@ -717,6 +717,10 @@ impl CoreExecutor for PersistentRuntimeExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         let discard_result = self.service.discard_live_session(&self.session_id).await;
         self.adapter.unregister_session(&self.session_id).await;
         match discard_result {
@@ -1520,7 +1524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn persistent_runtime_executor_stop_discards_and_unregisters() {
+    async fn persistent_runtime_executor_stop_request_does_not_unregister_before_terminalization() {
         let temp = tempfile::tempdir().expect("tempdir");
         let (service, adapter) = build_test_service(&temp).await;
         let result = Box::pin(materialize_session(
@@ -1547,18 +1551,10 @@ mod tests {
             .await
             .expect("stop runtime executor");
 
-        let result = adapter
-            .accept_input_with_completion(
-                &result.session_id,
-                Input::Prompt(PromptInput::new("must stay unregistered", None)),
-            )
-            .await;
-        assert!(matches!(
-            result,
-            Err(RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            })
-        ));
+        assert!(
+            adapter.contains_session(&result.session_id).await,
+            "executor stop request must not unregister before machine-owned terminalization commits"
+        );
     }
 
     #[tokio::test]

@@ -369,6 +369,10 @@ impl CoreExecutor for SessionRuntimeExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         let discard_result = self.runtime.discard_live_session(&self.session_id).await;
         self.runtime
             .runtime_adapter()
@@ -558,6 +562,10 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         let discard_result = self
             .session_service
             .discard_live_session(&self.session_id)

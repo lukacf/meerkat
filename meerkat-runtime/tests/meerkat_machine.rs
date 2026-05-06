@@ -504,6 +504,7 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
 
     struct StopRecordingExecutor {
         stop_called: Arc<AtomicBool>,
+        cleanup_called: Arc<AtomicBool>,
     }
 
     #[async_trait::async_trait]
@@ -532,6 +533,13 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
             self.stop_called.store(true, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            self.cleanup_called.store(true, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     let store = Arc::new(HarnessRuntimeStore::failing_lifecycle_commit());
@@ -541,11 +549,13 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
     ));
     let sid = SessionId::new();
     let stop_called = Arc::new(AtomicBool::new(false));
+    let cleanup_called = Arc::new(AtomicBool::new(false));
     adapter
         .register_session_with_executor(
             sid.clone(),
             Box::new(StopRecordingExecutor {
                 stop_called: Arc::clone(&stop_called),
+                cleanup_called: Arc::clone(&cleanup_called),
             }),
         )
         .await;
@@ -557,6 +567,14 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
     wait_for_atomic_bool(&stop_called, "stop effect should reach executor").await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    assert!(
+        !cleanup_called.load(Ordering::SeqCst),
+        "post-stop cleanup must not run when durable stop terminalization fails"
+    );
+    assert!(
+        adapter.contains_session(&sid).await,
+        "failed durable stop terminalization must not unregister the session"
+    );
     assert_ne!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Stopped,

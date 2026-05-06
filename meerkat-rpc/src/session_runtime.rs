@@ -3340,19 +3340,15 @@ impl SessionRuntime {
             Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
 
             let result = match service.reserve_runtime_turn_admission(&session_id).await {
-                Ok(admission) => {
-                    service
-                        .run_machine_committed_live_turn(
-                            MachineServiceTurnCommitProtocol::from_machine(
-                                runtime_adapter.as_ref(),
-                            ),
-                            &session_id,
-                            start_req,
-                            admission,
-                        )
-                        .await
-                        .map_err(|(error, _admission)| error)
-                }
+                Ok(admission) => service
+                    .run_machine_committed_live_turn(
+                        MachineServiceTurnCommitProtocol::from_machine(runtime_adapter.as_ref()),
+                        &session_id,
+                        start_req,
+                        admission,
+                    )
+                    .await
+                    .map_err(|(error, _admission)| error),
                 Err(error) => Err(error),
             };
             if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {

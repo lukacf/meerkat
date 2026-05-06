@@ -805,6 +805,21 @@ impl MeerkatMachine {
         }
     }
 
+    /// Whether this adapter owns the same runtime persistence authority as a
+    /// concrete runtime store handle.
+    #[must_use]
+    pub fn shares_runtime_store_authority(&self, store: &Arc<dyn RuntimeStore>) -> bool {
+        self.store
+            .as_ref()
+            .is_some_and(|machine_store| runtime_stores_share_authority(machine_store, store))
+    }
+
+    /// Whether this adapter has a runtime persistence store.
+    #[must_use]
+    pub fn has_runtime_persistence(&self) -> bool {
+        self.store.is_some()
+    }
+
     fn normalize_destroyed_error(err: RuntimeDriverError) -> RuntimeDriverError {
         match err {
             RuntimeDriverError::NotReady {

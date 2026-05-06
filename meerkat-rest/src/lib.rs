@@ -1578,6 +1578,10 @@ impl CoreExecutor for RestSessionRuntimeExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         let discard_result = self
             .context
             .session_service

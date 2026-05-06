@@ -238,11 +238,11 @@ pub use meerkat_session::DefaultCompactor;
 // PersistentSessionService: used by runtime-backed surfaces (REST, RPC, MCP).
 // EphemeralSessionService: in-memory substrate for testing/embedded use only.
 // Both implement SessionService. Production paths add MeerkatMachine on top.
-#[cfg(feature = "session-store")]
-pub use meerkat_session::{MachineServiceTurnCommitProtocol, PersistentSessionService};
 pub use meerkat_session::{
     EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
 };
+#[cfg(feature = "session-store")]
+pub use meerkat_session::{MachineServiceTurnCommitProtocol, PersistentSessionService};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

@@ -1167,6 +1167,10 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
     }
 
     async fn stop_runtime_executor(&mut self, _reason: String) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
         tracing::debug!(
             bridge_session_id = %self.bridge_session_id,
             "mob runtime executor received stop; discarding live session"

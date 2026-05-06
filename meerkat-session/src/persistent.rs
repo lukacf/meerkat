@@ -1540,6 +1540,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             Option<crate::ephemeral::RuntimeContextAdmissionGuard>,
         ),
     > {
+        if let Err(error) = self.validate_machine_service_turn_protocol(protocol) {
+            return Err((error, Some(admission)));
+        }
+
         let result = self
             .start_turn_inner_with_admission(
                 id,
@@ -1574,7 +1578,10 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                     .await
                 {
                     let _ = self.discard_live_session(id).await;
-                    return Err((runtime_driver_error_to_session_error(commit_error), admission));
+                    return Err((
+                        runtime_driver_error_to_session_error(commit_error),
+                        admission,
+                    ));
                 }
                 if let Err(persist_error) = self.persist_full_session_or_discard_live(id).await {
                     return Err((persist_error, admission));
@@ -1587,6 +1594,31 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
                 Err((error, admission))
             }
+        }
+    }
+
+    fn validate_machine_service_turn_protocol(
+        &self,
+        protocol: MachineServiceTurnCommitProtocol<'_>,
+    ) -> Result<(), SessionError> {
+        match self.runtime_store.as_ref() {
+            Some(runtime_store) => {
+                if protocol
+                    .runtime_adapter
+                    .shares_runtime_store_authority(runtime_store)
+                {
+                    return Ok(());
+                }
+                Err(SessionError::Unsupported(
+                    "machine service-turn commit protocol runtime authority does not match the session service runtime store"
+                        .to_string(),
+                ))
+            }
+            None if !protocol.runtime_adapter.has_runtime_persistence() => Ok(()),
+            None => Err(SessionError::Unsupported(
+                "persistent machine service-turn commit protocol requires a runtime-backed session service"
+                    .to_string(),
+            )),
         }
     }
 
@@ -8796,6 +8828,92 @@ mod tests {
                 .await
                 .expect("status should succeed after rejection"),
             "rejection happens before live state is mutated or evicted"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_machine_committed_live_turn_rejects_mismatched_runtime_authority() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service_runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let builder = BlockingRunBuilder::new();
+        let service = PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::clone(&store),
+            Some(Arc::clone(&service_runtime_store)),
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request(
+                "hello",
+                meerkat_core::service::InitialTurnPolicy::Defer,
+            ))
+            .await
+            .expect("create_session should succeed");
+        let raw_before = store
+            .load(&created.session_id)
+            .await
+            .expect("raw projection load should succeed")
+            .expect("initial projection should exist");
+        let authoritative_before = service
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("authoritative load should succeed")
+            .expect("runtime authority should exist before rejected protocol");
+        let admission = service
+            .reserve_runtime_turn_admission(&created.session_id)
+            .await
+            .expect("runtime turn admission should be reserved");
+        let mismatched_runtime_store: Arc<dyn RuntimeStore> = Arc::new(InMemoryRuntimeStore::new());
+        let mismatched_machine =
+            meerkat_runtime::MeerkatMachine::persistent_without_blobs(mismatched_runtime_store);
+
+        let (error, returned_admission) = service
+            .run_machine_committed_live_turn(
+                MachineServiceTurnCommitProtocol::from_machine(&mismatched_machine),
+                &created.session_id,
+                start_turn_request("must not start"),
+                admission,
+            )
+            .await
+            .expect_err("mismatched machine/service runtime authority must fail closed");
+
+        assert!(
+            returned_admission.is_some(),
+            "authority rejection must return the unconsumed admission guard"
+        );
+        match error {
+            SessionError::Unsupported(message) => assert!(
+                message.contains("runtime authority does not match"),
+                "unexpected unsupported error: {message}"
+            ),
+            other => panic!("expected unsupported authority rejection, got {other:?}"),
+        }
+        assert_eq!(
+            builder.entered_runs.load(Ordering::Acquire),
+            0,
+            "authority rejection must happen before the live turn starts"
+        );
+        let authoritative_after = service
+            .load_authoritative_session(&created.session_id)
+            .await
+            .expect("authoritative load should still succeed")
+            .expect("runtime authority should remain present");
+        assert_eq!(
+            authoritative_after.messages().len(),
+            authoritative_before.messages().len(),
+            "rejected protocol must not advance runtime authority"
+        );
+        let raw_after = store
+            .load(&created.session_id)
+            .await
+            .expect("raw projection load should still succeed")
+            .expect("projection should remain present");
+        assert_eq!(
+            raw_after.messages().len(),
+            raw_before.messages().len(),
+            "rejected protocol must not update the session-store projection"
         );
     }
 

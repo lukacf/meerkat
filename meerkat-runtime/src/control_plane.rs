@@ -51,12 +51,21 @@ pub(crate) async fn apply_executor_effect(
             Ok(false)
         }
         RuntimeEffectInner::StopRuntimeExecutor { reason } => {
-            executor.stop_runtime_executor(reason).await.map_err(|err| {
-                RuntimeDriverError::Internal(format!(
-                    "failed to apply stop-runtime-executor effect: {err}"
-                ))
-            })?;
+            executor
+                .stop_runtime_executor(reason)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "failed to apply stop-runtime-executor effect: {err}"
+                    ))
+                })?;
             terminalize_async_stop(driver, completions).await?;
+            if let Err(err) = executor.cleanup_after_runtime_stop_terminalized().await {
+                tracing::warn!(
+                    error = %err,
+                    "failed to clean up executor after durable runtime stop"
+                );
+            }
             Ok(true)
         }
     }
@@ -111,6 +120,7 @@ mod tests {
     struct RecordingExecutor {
         boundary_calls: Arc<AtomicUsize>,
         stop_calls: Arc<AtomicUsize>,
+        cleanup_calls: Arc<AtomicUsize>,
     }
 
     #[async_trait::async_trait]
@@ -138,15 +148,24 @@ mod tests {
             self.stop_calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+
+        async fn cleanup_after_runtime_stop_terminalized(
+            &mut self,
+        ) -> Result<(), CoreExecutorError> {
+            self.cleanup_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
     }
 
     #[tokio::test]
     async fn apply_executor_effect_dispatches_only_boundary_and_stop_effects() {
         let boundary_calls = Arc::new(AtomicUsize::new(0));
         let stop_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
         let mut executor = RecordingExecutor {
             boundary_calls: Arc::clone(&boundary_calls),
             stop_calls: Arc::clone(&stop_calls),
+            cleanup_calls: Arc::clone(&cleanup_calls),
         };
         let driver = shared_driver();
 
@@ -162,6 +181,7 @@ mod tests {
         assert!(!should_stop);
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(cleanup_calls.load(Ordering::SeqCst), 0);
 
         let should_stop = apply_executor_effect(
             &driver,
@@ -175,5 +195,10 @@ mod tests {
         assert!(should_stop);
         assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
         assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cleanup_calls.load(Ordering::SeqCst),
+            1,
+            "post-stop cleanup must run only after machine-owned terminalization succeeds"
+        );
     }
 }

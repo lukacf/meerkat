@@ -439,8 +439,14 @@ pub trait CoreExecutor: Send + Sync {
     /// Request cancellation at the next cooperative boundary.
     async fn cancel_after_boundary(&mut self, reason: String) -> Result<(), CoreExecutorError>;
 
-    /// Stop this runtime executor and release live session state.
+    /// Ask this runtime executor to stop accepting work.
     async fn stop_runtime_executor(&mut self, reason: String) -> Result<(), CoreExecutorError>;
+
+    /// Cleanup that is safe only after the runtime control plane has durably
+    /// terminalized the stop.
+    async fn cleanup_after_runtime_stop_terminalized(&mut self) -> Result<(), CoreExecutorError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

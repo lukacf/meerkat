@@ -6119,6 +6119,12 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         &mut self,
         _reason: String,
     ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+        Ok(())
+    }
+
+    async fn cleanup_after_runtime_stop_terminalized(
+        &mut self,
+    ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
         // Discard live session state via concrete type (not on SessionService trait).
         #[cfg(feature = "session-store")]
         if let Some(ref persistent) = self.persistent_service {

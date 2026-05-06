@@ -1085,7 +1085,7 @@ rust_library(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
-    ] + [
+    ] + glob(["src/help_content/**/*.md"]) + [
         "//:meerkat_platform_skill_files",
     ],
     srcs = glob(["src/**/*.rs"]),
@@ -1156,7 +1156,7 @@ rust_test(
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
         "src/surface/request_execution.rs",
-    ] + [
+    ] + glob(["src/help_content/**/*.md"]) + [
         "//:meerkat_platform_skill_files",
     ],
     srcs = glob(["src/**/*.rs"]),

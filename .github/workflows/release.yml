@@ -75,19 +75,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - bb_config: buildbuddy-linux-rbe
+          - bb_command: release-build-linux-x86
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
-          - bb_config: buildbuddy-linux-arm64-rbe
+          - bb_command: release-build-linux-arm64
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-          - bb_config: buildbuddy-macos-rbe
+          - bb_command: release-build-macos-arm64
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - bb_config: buildbuddy-macos-x86-rbe
+          - bb_command: release-build-macos-x86
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-          - bb_config: buildbuddy-windows-rbe
+          - bb_command: release-build-windows-x86
             target: x86_64-pc-windows-msvc
             archive_ext: zip
 
@@ -101,24 +101,11 @@ jobs:
 
       - name: Build release binaries via BuildBuddy
         shell: bash
-        run: |
-          set -euo pipefail
-          bb --output_base="${RUNNER_TEMP}/bb-release-${{ matrix.target }}" \
-            --max_idle_secs=300 \
-            build \
-            --lockfile_mode=error \
-            --repository_cache="${RUNNER_TEMP}/buildbuddy-repository-cache" \
-            --config=${{ matrix.bb_config }} \
-            --remote_header=x-buildbuddy-api-key="${BUILDBUDDY_API_KEY}" \
-            --compilation_mode=opt \
-            --remote_download_outputs=toplevel \
-            --jobs=512 \
-            //meerkat-cli:rkat \
-            //meerkat-cli:rkat_mini_bin \
-            //meerkat-rpc:rkat_rpc_bin \
-            //meerkat-rpc:rkat_rpc_mini_bin \
-            //meerkat-rest:rkat_rest_bin \
-            //meerkat-mcp-server:rkat_mcp_bin
+        env:
+          BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
+          BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
+          MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
+        run: scripts/buildbuddy-bazel-poc --jobs=512
 
       - name: Package artifacts
         shell: bash

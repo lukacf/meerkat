@@ -383,6 +383,36 @@ case "${command}" in
       --curses=no
     )
     ;;
+  release-build-macos-arm64)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    ;;
+  release-build-macos-x86)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-x86-rbe}"
+    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    ;;
+  release-build-linux-x86)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-rbe}"
+    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    ;;
+  release-build-linux-arm64)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-arm64-rbe}"
+    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    ;;
+  release-build-windows-x86)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-windows-rbe}"
+    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
+    ;;
   wasm-contract-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"

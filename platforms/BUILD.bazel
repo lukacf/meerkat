@@ -23,7 +23,7 @@ platform(
         "OSFamily": "darwin",
         "use-self-hosted-executors": "true",
     },
-    parents = ["@toolchains_buildbuddy//platforms:darwin_amd64"],
+    parents = ["@toolchains_buildbuddy//platforms:darwin_x86_64"],
 )
 
 platform(

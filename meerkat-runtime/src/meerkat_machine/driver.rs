@@ -455,6 +455,22 @@ impl DriverEntry {
         }
     }
 
+    pub(crate) async fn machine_realize_run_cancelled(
+        &mut self,
+        run_id: RunId,
+        contributing_input_ids: Vec<InputId>,
+    ) -> Result<(), RuntimeDriverError> {
+        match self {
+            DriverEntry::Ephemeral(d) => {
+                d.machine_realize_run_cancelled(&run_id, &contributing_input_ids)
+            }
+            DriverEntry::Persistent(d) => {
+                d.machine_realize_run_cancelled(&run_id, &contributing_input_ids)
+                    .await
+            }
+        }
+    }
+
     /// Stage an input (Queued → Staged).
     pub(crate) fn stage_input(
         &mut self,
@@ -667,6 +683,7 @@ pub(crate) fn machine_begin_run(
 pub(crate) enum RunReturnDisposition<'a> {
     Commit { input_id: &'a InputId },
     Failed,
+    Cancelled,
     Rollback,
 }
 
@@ -780,6 +797,11 @@ pub(crate) fn machine_apply_run_return_projection(
             }
             RunReturnDisposition::Failed => {
                 crate::meerkat_machine::dsl::MeerkatMachineInput::Fail {
+                    run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+                }
+            }
+            RunReturnDisposition::Cancelled => {
+                crate::meerkat_machine::dsl::MeerkatMachineInput::CancelRun {
                     run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
                 }
             }
@@ -982,6 +1004,34 @@ fn machine_apply_turn_run_failed(
     .map_err(|err| {
         RuntimeDriverError::Internal(format!(
             "failed to apply runtime turn failure for run {run_id}: {err}"
+        ))
+    })
+}
+
+fn machine_apply_turn_run_cancelled(
+    driver: &mut DriverEntry,
+    run_id: &RunId,
+) -> Result<(), RuntimeDriverError> {
+    let authority = driver.shared_dsl_authority();
+    let mut auth = authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if auth.state.lifecycle_phase != crate::meerkat_machine::dsl::MeerkatPhase::Running
+        || auth.state.current_run_id.as_ref().map(|id| id.0.as_str())
+            != Some(run_id.to_string().as_str())
+    {
+        return Ok(());
+    }
+    crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut *auth,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::RunCancelled {
+            run_id: crate::meerkat_machine::dsl::RunId::from_domain(run_id),
+        },
+    )
+    .map(|_| ())
+    .map_err(|err| {
+        RuntimeDriverError::Internal(format!(
+            "failed to apply runtime turn cancellation for run {run_id}: {err}"
         ))
     })
 }
@@ -1269,6 +1319,28 @@ pub(crate) fn machine_validate_run_failed(
         if lifecycle != Some(InputLifecycleState::Staged) {
             return Err(RuntimeDriverError::Internal(format!(
                 "run failed requires staged contributors, but {work_id:?} is {lifecycle:?}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+pub(crate) fn machine_validate_run_cancelled(
+    driver: &DriverEntry,
+    contributing_work_ids: &[InputId],
+) -> Result<(), RuntimeDriverError> {
+    if contributing_work_ids.is_empty() {
+        return Err(RuntimeDriverError::Internal(
+            "run cancelled requires at least one staged contributor".to_string(),
+        ));
+    }
+
+    for work_id in contributing_work_ids {
+        let lifecycle = driver.as_driver().input_phase(work_id);
+        if lifecycle != Some(InputLifecycleState::Staged) {
+            return Err(RuntimeDriverError::Internal(format!(
+                "run cancelled requires staged contributors, but {work_id:?} is {lifecycle:?}"
             )));
         }
     }
@@ -2482,9 +2554,11 @@ pub(crate) async fn machine_recycle_preserving_work(
         ));
     }
 
-    driver.set_control_projection(target_phase, None, None);
     match driver {
-        DriverEntry::Ephemeral(driver) => driver.recycle_preserving_work(),
+        DriverEntry::Ephemeral(driver) => {
+            driver.set_control_projection(target_phase, None, None);
+            driver.recycle_preserving_work()
+        }
         DriverEntry::Persistent(driver) => driver.recycle_preserving_work(target_phase).await,
     }
 }
@@ -2634,6 +2708,52 @@ pub(crate) async fn fail_machine_run(
         None,
     )
     .await
+}
+
+pub(crate) async fn cancel_runtime_loop_run(
+    driver: &SharedDriver,
+    run_id: RunId,
+) -> Result<(), RuntimeLoopRunFailError> {
+    let mut driver = driver.lock().await;
+    let next_phase =
+        crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
+    let cancelled_run_id = run_id.clone();
+    let staged_input_ids = machine_staged_contributors(&driver);
+    machine_validate_run_cancelled(&driver, &staged_input_ids)
+        .map_err(RuntimeLoopRunFailError::Rejected)?;
+    let terminal_checkpoint = driver.rollback_snapshot();
+    if let Err(err) = machine_apply_turn_run_cancelled(&mut driver, &cancelled_run_id) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::Rejected(err));
+    }
+    if let Err(err) = machine_apply_run_return_projection(
+        &mut driver,
+        &cancelled_run_id,
+        RunReturnDisposition::Cancelled,
+        next_phase,
+    ) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::Rejected(
+            RuntimeDriverError::Internal(format!(
+                "failed to apply runtime return projection after cancellation: {err}"
+            )),
+        ));
+    }
+    if let Err(run_err) = driver
+        .machine_realize_run_cancelled(cancelled_run_id.clone(), staged_input_ids)
+        .await
+    {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(RuntimeLoopRunFailError::TerminalSnapshot(
+            RuntimeDriverError::Internal(format!(
+                "failed to record run-cancelled event: {run_err}"
+            )),
+        ));
+    }
+    if matches!(&*driver, DriverEntry::Persistent(_)) {
+        driver.set_control_projection(next_phase, None, None);
+    }
+    Ok(())
 }
 
 async fn fail_runtime_loop_run_inner(

@@ -947,8 +947,9 @@ async fn process_queue(
                             _ => None,
                         };
                         drop(d);
-                        // RunFailed rolls back Staged → Queued and returns to Idle
-                        let fail_result = if let Some(failure) = terminal_failure {
+                        let fail_result = if cancelled {
+                            crate::meerkat_machine::cancel_runtime_loop_run(driver, run_id).await
+                        } else if let Some(failure) = terminal_failure {
                             crate::meerkat_machine::fail_machine_run(driver, run_id, failure).await
                         } else {
                             crate::meerkat_machine::fail_runtime_loop_run(
@@ -959,7 +960,7 @@ async fn process_queue(
                             .await
                         };
                         if let Err(err) = fail_result {
-                            tracing::error!(error = %err, "failed to record run-failed event");
+                            tracing::error!(error = %err, "failed to record runtime terminal event");
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,

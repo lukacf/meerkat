@@ -435,7 +435,6 @@ impl MeerkatMachine {
                         return Err(RuntimeControlPlaneError::Internal(reason));
                     }
                 };
-                drv.sync_control_projection_from_dsl_authority();
                 let report = prepared_destroy.report;
                 match Box::pin(machine_commit_prepared_destroy(
                     &mut drv,

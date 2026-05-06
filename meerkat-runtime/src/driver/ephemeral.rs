@@ -2048,6 +2048,59 @@ impl EphemeralRuntimeDriver {
         count
     }
 
+    pub(crate) fn abandon_staged_inputs(
+        &mut self,
+        input_ids: &[InputId],
+        reason: InputAbandonReason,
+    ) -> Result<usize, RuntimeDriverError> {
+        let dsl_reason = mm_dsl::InputAbandonReason::from(&reason);
+        let reason_label = dsl_reason.as_str();
+        let mut count = 0;
+        for input_id in input_ids {
+            if self.input_phase(input_id) != Some(InputLifecycleState::Staged) {
+                continue;
+            }
+            let from_phase = self
+                .input_phase(input_id)
+                .unwrap_or(InputLifecycleState::Staged);
+            let attempt_count = u64::from(self.input_attempt_count(input_id));
+            self.dsl_apply(
+                mm_dsl::MeerkatMachineInput::AbandonInput {
+                    input_id: Self::dsl_key(input_id),
+                    reason: dsl_reason,
+                    attempt_count,
+                },
+                "AbandonInput(CancelledRun)",
+            )?;
+
+            let now = Utc::now();
+            if let Some(state) = self.ledger.get_mut(input_id) {
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: from_phase,
+                    to: InputLifecycleState::Abandoned,
+                    reason: Some(format!("Abandon({reason_label})")),
+                });
+                state.terminal_outcome = Some(InputTerminalOutcome::Abandoned {
+                    reason: reason.clone(),
+                });
+                state.updated_at = now;
+            }
+            count += 1;
+            self.events
+                .push(self.make_envelope(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Abandoned {
+                        input_id: input_id.clone(),
+                        reason: reason_label.to_string(),
+                    },
+                )));
+        }
+
+        self.rebuild_queue_projections();
+        self.debug_assert_queue_projection_alignment();
+        Ok(count)
+    }
+
     pub(crate) fn abandon_pending_inputs(&mut self, reason: InputAbandonReason) -> usize {
         let abandoned = self.abandon_all_non_terminal(reason);
         self.queue.drain();
@@ -2093,6 +2146,22 @@ impl EphemeralRuntimeDriver {
         // transitions and re-inserts surviving contributors into the correct
         // lane — no separate lane seeding is needed here.
         self.rollback_staged(contributing_input_ids)
+    }
+
+    /// Machine-owned realization for a validated cancelled run.
+    pub(crate) fn machine_realize_run_cancelled(
+        &mut self,
+        run_id: &RunId,
+        contributing_input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        tracing::debug!(
+            run_id = ?run_id,
+            contributors = contributing_input_ids.len(),
+            "runtime abandoned cancelled run contributors"
+        );
+        let _ =
+            self.abandon_staged_inputs(contributing_input_ids, InputAbandonReason::Cancelled)?;
+        Ok(())
     }
 
     /// Machine-owned realization for a validated boundary-application step.

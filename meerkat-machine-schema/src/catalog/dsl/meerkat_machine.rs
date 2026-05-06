@@ -1961,6 +1961,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
+            CancelRun { run_id: RunId },
             RollbackRun { run_id: RunId },
             Recycle,
             StartConversationRun {
@@ -7260,6 +7261,59 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase == TurnPhase::Failed
                 && self.terminal_cause_kind != None
                 && self.terminal_cause_kind != Some(TurnTerminalCauseKind::Unknown)
+            }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Retired
+            emit RecordTerminalOutcome
+        }
+
+        // 32a. CancelRun: Running -> Idle/Attached/Retired only after the
+        // machine has observed a cancelled turn terminal. This is distinct
+        // from `Fail`, so caller-visible cancellation cannot be persisted as a
+        // failed/retry-shaped terminal path.
+        transition CancelRunningToIdle {
+            on input CancelRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_idle" { self.pre_run_phase == Some(PreRunPhase::Idle) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_cancelled" {
+                self.turn_phase == TurnPhase::Cancelled
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Idle
+            emit RecordTerminalOutcome
+        }
+        transition CancelRunningToAttached {
+            on input CancelRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_attached" { self.pre_run_phase == Some(PreRunPhase::Attached) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_cancelled" {
+                self.turn_phase == TurnPhase::Cancelled
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
+            }
+            update {
+                self.current_run_id = None;
+                self.pre_run_phase = None;
+            }
+            to Attached
+            emit RecordTerminalOutcome
+        }
+        transition CancelRunningToRetired {
+            on input CancelRun { run_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "pre_run_phase_matches_retired" { self.pre_run_phase == Some(PreRunPhase::Retired) }
+            guard "current_run_id_matches_binding" { self.current_run_id == Some(run_id) }
+            guard "turn_cancelled" {
+                self.turn_phase == TurnPhase::Cancelled
+                && self.terminal_outcome == Some(TurnTerminalOutcome::Cancelled)
             }
             update {
                 self.current_run_id = None;

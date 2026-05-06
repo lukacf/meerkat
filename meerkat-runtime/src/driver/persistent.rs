@@ -385,12 +385,19 @@ impl PersistentRuntimeDriver {
         target_phase: RuntimeState,
     ) -> Result<usize, RuntimeDriverError> {
         let checkpoint = self.inner.rollback_snapshot();
+        let transferred = match self.inner.recycle_preserving_work() {
+            Ok(transferred) => transferred,
+            Err(err) => {
+                self.inner.restore_rollback_snapshot(checkpoint);
+                return Err(err);
+            }
+        };
         let input_states = self.inner.stored_input_states_snapshot();
         if let Err(err) = self
             .store
             .commit_machine_lifecycle(
                 &self.runtime_id,
-                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                MachineLifecycleCommit::new(target_phase),
                 &input_states,
             )
             .await
@@ -401,9 +408,8 @@ impl PersistentRuntimeDriver {
             )));
         }
 
-        let _ = self.inner.recycle_preserving_work()?;
         self.inner.set_control_projection(target_phase, None, None);
-        Ok(self.inner.active_input_ids().len())
+        Ok(transferred)
     }
 
     pub(crate) async fn realize_retire_lifecycle(
@@ -555,6 +561,37 @@ impl PersistentRuntimeDriver {
             self.inner.restore_rollback_snapshot(checkpoint);
             return Err(RuntimeDriverError::Internal(format!(
                 "terminal event persist failed: {err}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn machine_realize_run_cancelled(
+        &mut self,
+        run_id: &RunId,
+        contributing_input_ids: &[InputId],
+    ) -> Result<(), RuntimeDriverError> {
+        let checkpoint = self.inner.rollback_snapshot();
+        self.inner
+            .machine_realize_run_cancelled(run_id, contributing_input_ids)?;
+        tracing::debug!(
+            run_id = ?run_id,
+            contributors = contributing_input_ids.len(),
+            "persistent driver realized machine-owned cancelled run"
+        );
+        let input_states = self.inner.stored_input_states_snapshot();
+        if let Err(err) = self
+            .store
+            .commit_machine_lifecycle(
+                &self.runtime_id,
+                MachineLifecycleCommit::new(self.runtime_state_for_persistence()),
+                &input_states,
+            )
+            .await
+        {
+            self.inner.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(format!(
+                "terminal cancellation persist failed: {err}"
             )));
         }
         Ok(())

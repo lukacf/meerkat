@@ -67,27 +67,27 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         run: make verify-version
 
-  # ── Binary builds (parallel with validation) ───────────────────────────
+  # ── Binary builds (BuildBuddy RBE, parallel with validation) ─────────
   build_binaries:
     name: Build and package surface binaries
-    runs-on: ${{ matrix.runs-on }}
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runs-on: ubuntu-latest
+          - bb_config: buildbuddy-linux-rbe
             target: x86_64-unknown-linux-gnu
             archive_ext: tar.gz
-          - runs-on: ubuntu-24.04-arm
+          - bb_config: buildbuddy-linux-arm64-rbe
             target: aarch64-unknown-linux-gnu
             archive_ext: tar.gz
-          - runs-on: macos-15
+          - bb_config: buildbuddy-macos-rbe
             target: aarch64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: macos-15-large
+          - bb_config: buildbuddy-macos-x86-rbe
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-          - runs-on: windows-latest
+          - bb_config: buildbuddy-windows-rbe
             target: x86_64-pc-windows-msvc
             archive_ext: zip
 
@@ -95,38 +95,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Add release target
-        run: rustup target add ${{ matrix.target }}
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-buildbuddy-ci
         with:
-          key: release-${{ matrix.target }}
+          profile: native
 
-      - name: Build surface binaries
-        shell: bash
-        env:
-          CARGO_TARGET_DIR: target
-        run: |
-          set -euo pipefail
-          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
-          for pkg in "${PACKAGES[@]}"; do
-            cargo build -p "$pkg" --release --target "${{ matrix.target }}"
-          done
-          cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
-          cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
-
-      - name: Ad-hoc codesign macOS binaries
-        if: runner.os == 'macOS'
+      - name: Build release binaries via BuildBuddy
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
-            codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
-          done
+          bb --output_base="${RUNNER_TEMP}/bb-release-${{ matrix.target }}" \
+            --max_idle_secs=300 \
+            build \
+            --lockfile_mode=error \
+            --repository_cache="${RUNNER_TEMP}/buildbuddy-repository-cache" \
+            --config=${{ matrix.bb_config }} \
+            --remote_header=x-buildbuddy-api-key="${BUILDBUDDY_API_KEY}" \
+            --compilation_mode=opt \
+            --remote_download_outputs=toplevel \
+            --jobs=512 \
+            //meerkat-cli:rkat \
+            //meerkat-cli:rkat_mini_bin \
+            //meerkat-rpc:rkat_rpc_bin \
+            //meerkat-rpc:rkat_rpc_mini_bin \
+            //meerkat-rest:rkat_rest_bin \
+            //meerkat-mcp-server:rkat_mcp_bin
 
       - name: Package artifacts
         shell: bash
@@ -134,28 +126,35 @@ jobs:
           TARGET: ${{ matrix.target }}
           VERSION: ${{ github.ref_name }}
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
+          BB_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-mini" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
+          BAZEL_BIN="${BB_OUTPUT_BASE}/execroot/_main/bazel-out"
 
-          for bin in "${BINARIES[@]}"; do
-            if [[ "${RUNNER_OS}" == "Windows" ]]; then
-              src="target/${TARGET}/release/${bin}.exe"
-            else
-              src="target/${TARGET}/release/${bin}"
-            fi
-            artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
+          declare -A BIN_PATHS=(
+            [rkat]="meerkat-cli/rkat"
+            [rkat-mini]="meerkat-cli/rkat_mini_bin"
+            [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
+            [rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_bin"
+            [rkat-rest]="meerkat-rest/rkat_rest_bin"
+            [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
+          )
 
-            if [[ ! -f "$src" ]]; then
-              echo "Missing expected binary at $src" >&2
+          for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+            rel_path="${BIN_PATHS[$bin]}"
+            src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
+            if [[ -z "$src" ]]; then
+              echo "Missing binary for ${bin} (expected under ${BAZEL_BIN}/*/${rel_path})" >&2
+              find "${BAZEL_BIN}" -type f -name "${bin}*" 2>/dev/null || true
               exit 1
             fi
 
+            artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
             if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-              7z a -tzip "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(cygpath -w "$src")"
+              7z a -tzip "dist/${artifact_name}" "$src"
             else
               tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
             fi
@@ -170,7 +169,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-${{ matrix.target }}-${{ matrix.runs-on }}
+          name: meerkat-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 

@@ -16,5 +16,46 @@ build:buildbuddy-macos-rbe --remote_default_exec_properties=use-self-hosted-exec
 build:buildbuddy-macos-rbe --nobuild_runfile_links
 build:buildbuddy-macos-rbe --symlink_prefix=/
 
+build:buildbuddy-macos-x86-rbe --config=buildbuddy
+build:buildbuddy-macos-x86-rbe --remote_executor=grpcs://remote.buildbuddy.io
+build:buildbuddy-macos-x86-rbe --remote_download_minimal
+build:buildbuddy-macos-x86-rbe --platforms=//platforms:macos_x86_64
+build:buildbuddy-macos-x86-rbe --extra_execution_platforms=//platforms:macos_x86_64
+build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=OSFamily=darwin
+build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=Arch=amd64
+build:buildbuddy-macos-x86-rbe --remote_default_exec_properties=use-self-hosted-executors=true
+build:buildbuddy-macos-x86-rbe --nobuild_runfile_links
+build:buildbuddy-macos-x86-rbe --symlink_prefix=/
+
+build:buildbuddy-linux-rbe --config=buildbuddy
+build:buildbuddy-linux-rbe --remote_executor=grpcs://remote.buildbuddy.io
+build:buildbuddy-linux-rbe --remote_download_minimal
+build:buildbuddy-linux-rbe --platforms=//platforms:linux_x86_64
+build:buildbuddy-linux-rbe --extra_execution_platforms=//platforms:linux_x86_64
+build:buildbuddy-linux-rbe --remote_default_exec_properties=OSFamily=linux
+build:buildbuddy-linux-rbe --remote_default_exec_properties=Arch=amd64
+build:buildbuddy-linux-rbe --nobuild_runfile_links
+build:buildbuddy-linux-rbe --symlink_prefix=/
+
+build:buildbuddy-linux-arm64-rbe --config=buildbuddy
+build:buildbuddy-linux-arm64-rbe --remote_executor=grpcs://remote.buildbuddy.io
+build:buildbuddy-linux-arm64-rbe --remote_download_minimal
+build:buildbuddy-linux-arm64-rbe --platforms=//platforms:linux_arm64
+build:buildbuddy-linux-arm64-rbe --extra_execution_platforms=//platforms:linux_arm64
+build:buildbuddy-linux-arm64-rbe --remote_default_exec_properties=OSFamily=linux
+build:buildbuddy-linux-arm64-rbe --remote_default_exec_properties=Arch=arm64
+build:buildbuddy-linux-arm64-rbe --nobuild_runfile_links
+build:buildbuddy-linux-arm64-rbe --symlink_prefix=/
+
+build:buildbuddy-windows-rbe --config=buildbuddy
+build:buildbuddy-windows-rbe --remote_executor=grpcs://remote.buildbuddy.io
+build:buildbuddy-windows-rbe --remote_download_minimal
+build:buildbuddy-windows-rbe --platforms=//platforms:windows_x86_64
+build:buildbuddy-windows-rbe --extra_execution_platforms=//platforms:windows_x86_64
+build:buildbuddy-windows-rbe --remote_default_exec_properties=OSFamily=windows
+build:buildbuddy-windows-rbe --remote_default_exec_properties=Arch=amd64
+build:buildbuddy-windows-rbe --nobuild_runfile_links
+build:buildbuddy-windows-rbe --symlink_prefix=/
+
 test:buildbuddy-macos-rbe-fast --config=buildbuddy-macos-rbe
 test:buildbuddy-macos-rbe-fast --test_tag_filters=fast

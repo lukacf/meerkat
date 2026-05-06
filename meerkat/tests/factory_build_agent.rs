@@ -2156,7 +2156,7 @@ async fn web_search_explicit_params_merged_with_defaults() {
 }
 
 #[tokio::test]
-async fn explicit_meerkat_tool_policy_suppresses_ambient_provider_search_defaults() {
+async fn explicit_meerkat_tool_policy_preserves_provider_search_defaults() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp);
     let config = Config::default();
@@ -2171,8 +2171,8 @@ async fn explicit_meerkat_tool_policy_suppresses_ambient_provider_search_default
     let params = client.captured_params();
     let has_web_search = params.as_ref().and_then(|p| p.get("web_search")).is_some();
     assert!(
-        !has_web_search,
-        "explicit Meerkat tool policy should suppress ambient provider web_search defaults: {params:?}"
+        has_web_search,
+        "explicit Meerkat tool policy should not suppress provider web_search defaults: {params:?}"
     );
 }
 

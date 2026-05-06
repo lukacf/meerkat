@@ -128,7 +128,9 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         println!("└────────────────────────────────────────┘");
                         tool_calls.push(ToolCall::new(id, name, args));
                     }
-                    LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. } => {}
+                    LlmEvent::ReasoningDelta { .. }
+                    | LlmEvent::ReasoningComplete { .. }
+                    | LlmEvent::ServerToolContent { .. } => {}
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }

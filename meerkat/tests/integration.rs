@@ -81,6 +81,9 @@ mod llm_normalization {
                 Ok(LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. }) => {
                     // Reasoning events are valid
                 }
+                Ok(LlmEvent::ServerToolContent { .. }) => {
+                    // Provider-executed tool evidence is a valid side-channel event.
+                }
                 Err(e) => panic!("Unexpected error: {e:?}"),
             }
         }

@@ -423,6 +423,9 @@ impl OpenAiClient {
                                     "arguments": args.get()  // Already JSON string
                                 }));
                             }
+                            AssistantBlock::ServerToolContent { content, .. } => {
+                                items.push(content.clone());
+                            }
                             // Reasoning replay can violate Responses API adjacency
                             // constraints and hard-fail requests; skip it and any
                             // unknown future variants.
@@ -1006,6 +1009,19 @@ impl LlmClient for OpenAiClient {
                                                             if let Some(part_type) = part.get("type").and_then(|t| t.as_str()) {
                                                                 match part_type {
                                                                     "output_text" => {
+                                                                        if let Some(annotations) = part.get("annotations") {
+                                                                            yield LlmEvent::ServerToolContent {
+                                                                                id: item.get("id")
+                                                                                    .and_then(|v| v.as_str())
+                                                                                    .map(std::string::ToString::to_string),
+                                                                                name: "web_search_annotations".to_string(),
+                                                                                content: serde_json::json!({
+                                                                                    "type": "message_annotations",
+                                                                                    "annotations": annotations
+                                                                                }),
+                                                                                meta: None,
+                                                                            };
+                                                                        }
                                                                         if let Some(text) = part.get("text").and_then(|t| t.as_str())
                                                                             && !saw_stream_text_delta
                                                                         {
@@ -1111,6 +1127,18 @@ impl LlmClient for OpenAiClient {
                                                         id: call_id.to_string(),
                                                         name: name.into(),
                                                         args: args_value,
+                                                        meta: None,
+                                                    };
+                                                }
+                                                "web_search_call" | "web_search_result" => {
+                                                    let id = item.get("id")
+                                                        .or_else(|| item.get("call_id"))
+                                                        .and_then(|v| v.as_str())
+                                                        .map(std::string::ToString::to_string);
+                                                    yield LlmEvent::ServerToolContent {
+                                                        id,
+                                                        name: item_type.to_string(),
+                                                        content: item.clone(),
                                                         meta: None,
                                                     };
                                                 }
@@ -1250,6 +1278,25 @@ impl LlmClient for OpenAiClient {
                                 };
                             }
                         }
+                        else if event.event_type.starts_with("response.web_search_call.") {
+                            let mut content = serde_json::Map::new();
+                            content.insert("type".to_string(), Value::String(event.event_type.clone()));
+                            if let Some(item_id) = &event.item_id {
+                                content.insert("item_id".to_string(), Value::String(item_id.clone()));
+                            }
+                            if let Some(output_index) = event.output_index {
+                                content.insert("output_index".to_string(), Value::from(output_index));
+                            }
+                            if let Some(sequence_number) = event.sequence_number {
+                                content.insert("sequence_number".to_string(), Value::from(sequence_number));
+                            }
+                            yield LlmEvent::ServerToolContent {
+                                id: event.item_id.clone(),
+                                name: "web_search".to_string(),
+                                content: Value::Object(content),
+                                meta: None,
+                            };
+                        }
                         else if event.event_type == "response.done" {
                             // Final done event — always update usage
                             if let Some(response_obj) = &event.response {
@@ -1383,6 +1430,12 @@ struct ResponsesStreamEvent {
     response: Option<Value>,
     /// Error object for streaming error events
     error: Option<Value>,
+    /// Output item ID for built-in tool streaming events.
+    item_id: Option<String>,
+    /// Output index for built-in tool streaming events.
+    output_index: Option<u64>,
+    /// Sequence number for built-in tool streaming events.
+    sequence_number: Option<u64>,
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -2842,6 +2895,57 @@ mod tests {
         server.abort();
 
         assert_eq!(deltas, vec!["Hello"]);
+    }
+
+    #[tokio::test]
+    async fn test_web_search_call_blocks_are_emitted() {
+        let payload = [
+            r#"data: {"type":"response.web_search_call.searching","output_index":0,"item_id":"ws_123","sequence_number":1}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"web_search_call","id":"ws_123","status":"completed","action":{"type":"search","queries":["meerkat runtime"]}},{"type":"message","content":[{"type":"output_text","text":"done","annotations":[{"type":"url_citation","url":"https://example.com","title":"Example","start_index":0,"end_index":4}]}]}],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("search".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut server_blocks = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ServerToolContent {
+                    id, name, content, ..
+                } => {
+                    server_blocks.push((id, name, content));
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(server_blocks.len(), 3);
+        assert_eq!(server_blocks[0].0.as_deref(), Some("ws_123"));
+        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(
+            server_blocks[0].2["type"],
+            "response.web_search_call.searching"
+        );
+        assert_eq!(server_blocks[1].0.as_deref(), Some("ws_123"));
+        assert_eq!(server_blocks[1].1, "web_search_call");
+        assert_eq!(
+            server_blocks[1].2["action"]["queries"][0],
+            "meerkat runtime"
+        );
+        assert_eq!(server_blocks[2].1, "web_search_annotations");
+        assert_eq!(
+            server_blocks[2].2["annotations"][0]["url"],
+            "https://example.com"
+        );
     }
 
     // =========================================================================

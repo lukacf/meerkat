@@ -332,6 +332,16 @@ pub enum LlmEvent {
         meta: Option<Box<meerkat_core::ProviderMeta>>,
     },
 
+    /// Provider-executed tool content, including web-search citations and
+    /// grounding metadata that are not caller-dispatched tool calls.
+    ServerToolContent {
+        id: Option<String>,
+        name: String,
+        content: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<meerkat_core::ProviderMeta>>,
+    },
+
     /// Token usage update
     UsageUpdate { usage: Usage },
 

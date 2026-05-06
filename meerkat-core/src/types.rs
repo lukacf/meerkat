@@ -499,6 +499,21 @@ pub enum AssistantBlock {
         meta: Option<Box<ProviderMeta>>,
     },
 
+    /// Provider-executed tool evidence, such as OpenAI web search calls,
+    /// Anthropic server-side web search blocks, or Gemini grounding metadata.
+    ServerToolContent {
+        /// Provider item or tool-use ID when one exists.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// Provider-native tool name, for example `web_search` or `google_search`.
+        name: String,
+        /// Provider-native JSON payload, preserved for citations and grounding evidence.
+        content: Value,
+        /// Provider continuity metadata, if any.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<ProviderMeta>>,
+    },
+
     /// Canonical generated image output.
     Image {
         image_id: AssistantImageId,
@@ -536,6 +551,20 @@ impl PartialEq for AssistantBlock {
                     meta: m2,
                 },
             ) => i1 == i2 && n1 == n2 && a1.get() == a2.get() && m1 == m2,
+            (
+                AssistantBlock::ServerToolContent {
+                    id: i1,
+                    name: n1,
+                    content: c1,
+                    meta: m1,
+                },
+                AssistantBlock::ServerToolContent {
+                    id: i2,
+                    name: n2,
+                    content: c2,
+                    meta: m2,
+                },
+            ) => i1 == i2 && n1 == n2 && c1 == c2 && m1 == m2,
             (
                 AssistantBlock::Image {
                     image_id: i1,

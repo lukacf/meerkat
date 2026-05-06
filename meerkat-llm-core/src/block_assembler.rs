@@ -254,6 +254,24 @@ impl BlockAssembler {
         }
     }
 
+    /// Add a provider-executed tool content block.
+    pub fn on_server_tool_content(
+        &mut self,
+        id: Option<String>,
+        name: String,
+        content: serde_json::Value,
+        meta: Option<Box<ProviderMeta>>,
+    ) {
+        self.slots.push(BlockSlot::Finalized(Box::new(
+            AssistantBlock::ServerToolContent {
+                id,
+                name,
+                content,
+                meta,
+            },
+        )));
+    }
+
     /// Finalize the assembler and return the ordered blocks.
     ///
     /// Slab iteration is in insertion order, so blocks are returned

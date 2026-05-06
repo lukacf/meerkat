@@ -407,6 +407,14 @@ pub enum WireAssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
+    ServerToolContent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        name: String,
+        content: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<WireProviderMeta>,
+    },
     Image {
         image_id: meerkat_core::AssistantImageId,
         blob_ref: meerkat_core::BlobRef,
@@ -443,6 +451,17 @@ impl From<AssistantBlock> for WireAssistantBlock {
                 // args are opaque from provider to dispatcher and this
                 // wire type preserves that invariant.
                 args,
+                meta: meta.map(|m| (*m).into()),
+            },
+            AssistantBlock::ServerToolContent {
+                id,
+                name,
+                content,
+                meta,
+            } => Self::ServerToolContent {
+                id,
+                name,
+                content,
                 meta: meta.map(|m| (*m).into()),
             },
             AssistantBlock::Image {

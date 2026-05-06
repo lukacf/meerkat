@@ -301,6 +301,19 @@ impl AgentLlmClient for LlmClientAdapter {
                         };
                         let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
+                    LlmEvent::ServerToolContent {
+                        id,
+                        name,
+                        content,
+                        meta,
+                    } => {
+                        assembler.on_server_tool_content(id, name.clone(), content.clone(), meta);
+                        if let Some(ref tx) = self.event_tx {
+                            let _ = tx
+                                .send(AgentEvent::ServerToolContent { name, content })
+                                .await;
+                        }
+                    }
                     LlmEvent::UsageUpdate { usage: u } => {
                         usage = u;
                     }

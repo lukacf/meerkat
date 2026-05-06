@@ -20,6 +20,9 @@ use meerkat_core::image_generation::{
     ToolCallId,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
+use meerkat_core::lifecycle::run_primitive::{
+    AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag, ProviderTag,
+};
 use meerkat_core::{Message, StopReason, UserMessage};
 use meerkat_gemini::{GeminiImageOutputOptions, GeminiImageTurnPlan};
 use meerkat_llm_core::{ImageGenerationExecutor, ProviderImageGenerationRequest};
@@ -135,6 +138,25 @@ fn gemini_api_key() -> Option<String> {
     first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
+async fn collect_stream_text_and_server_tool_count<C: LlmClient + ?Sized>(
+    client: &C,
+    request: &LlmRequest,
+) -> Result<(String, usize), Box<dyn std::error::Error>> {
+    let mut stream = client.stream(request);
+    let mut text = String::new();
+    let mut server_tool_count = 0;
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok(LlmEvent::TextDelta { delta, .. }) => text.push_str(&delta),
+            Ok(LlmEvent::ServerToolContent { .. }) => server_tool_count += 1,
+            Ok(LlmEvent::Done { .. }) => break,
+            Ok(_) => {}
+            Err(e) => return Err(format!("Unexpected error: {e:?}").into()),
+        }
+    }
+    Ok((text, server_tool_count))
+}
+
 fn tiny_image_request(provider: &str, model: &str) -> GenerateImageRequest {
     GenerateImageRequest::new(
         ImageGenerationIntent::Generate {
@@ -199,6 +221,95 @@ async fn e2e_anthropic_stream() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     assert!(got_text);
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_provider_web_search_all_three() -> Result<(), Box<dyn std::error::Error>> {
+    let mut ran = 0usize;
+    let prompt = "Use the web search tool for this answer. Search for the current title of https://example.com and answer in one short sentence with the source URL.";
+
+    if let Some(api_key) = openai_api_key() {
+        ran += 1;
+        let client = OpenAiClient::new(api_key);
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text(prompt.to_string()))],
+        )
+        .with_provider_params(ProviderTag::OpenAi(OpenAiProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                "type": "web_search"
+            }))),
+            ..Default::default()
+        }));
+        let (text, server_tools) =
+            collect_stream_text_and_server_tool_count(&client, &request).await?;
+        assert!(
+            server_tools > 0,
+            "OpenAI should emit web_search server tool content; text={text}"
+        );
+        assert!(!text.trim().is_empty(), "OpenAI should return text");
+    } else {
+        eprintln!(
+            "Skipping OpenAI web search smoke: missing OPENAI_API_KEY (or RKAT_OPENAI_API_KEY)"
+        );
+    }
+
+    if let Some(api_key) = anthropic_api_key() {
+        ran += 1;
+        let client = AnthropicClient::new(api_key)?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text(prompt.to_string()))],
+        )
+        .with_provider_params(ProviderTag::Anthropic(AnthropicProviderTag {
+            web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                "type": "web_search_20250305",
+                "name": "web_search"
+            }))),
+            ..Default::default()
+        }));
+        let (text, server_tools) =
+            collect_stream_text_and_server_tool_count(&client, &request).await?;
+        assert!(
+            server_tools > 0,
+            "Anthropic should emit web_search server tool content; text={text}"
+        );
+        assert!(!text.trim().is_empty(), "Anthropic should return text");
+    } else {
+        eprintln!(
+            "Skipping Anthropic web search smoke: missing ANTHROPIC_API_KEY (or RKAT_ANTHROPIC_API_KEY)"
+        );
+    }
+
+    if let Some(api_key) = gemini_api_key() {
+        ran += 1;
+        let client = GeminiClient::new(api_key);
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text(prompt.to_string()))],
+        )
+        .with_provider_params(ProviderTag::Gemini(GeminiProviderTag {
+            google_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({}))),
+            ..Default::default()
+        }));
+        let (text, server_tools) =
+            collect_stream_text_and_server_tool_count(&client, &request).await?;
+        assert!(
+            server_tools > 0,
+            "Gemini should emit google_search grounding metadata; text={text}"
+        );
+        assert!(!text.trim().is_empty(), "Gemini should return text");
+    } else {
+        eprintln!(
+            "Skipping Gemini web search smoke: missing GOOGLE_API_KEY (or GEMINI_API_KEY/RKAT_GEMINI_API_KEY)"
+        );
+    }
+
+    if ran == 0 {
+        eprintln!("Skipping provider web search smoke: no provider API keys configured");
+    }
     Ok(())
 }
 

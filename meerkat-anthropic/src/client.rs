@@ -342,6 +342,41 @@ impl AnthropicClient {
                                     "input": args_value
                                 }));
                             }
+                            meerkat_core::AssistantBlock::ServerToolContent {
+                                id,
+                                name,
+                                content: server_content,
+                                ..
+                            } => {
+                                if server_content.get("type").and_then(Value::as_str)
+                                    == Some("server_tool_use")
+                                {
+                                    content.push(serde_json::json!({
+                                        "type": "server_tool_use",
+                                        "id": id,
+                                        "name": name,
+                                        "input": server_content
+                                            .get("input")
+                                            .cloned()
+                                            .unwrap_or_else(|| serde_json::json!({}))
+                                    }));
+                                } else {
+                                    let mut block = server_content.clone();
+                                    if let Some(object) = block.as_object_mut() {
+                                        object.insert(
+                                            "type".to_string(),
+                                            Value::String("web_search_tool_result".to_string()),
+                                        );
+                                        if let Some(tool_use_id) = id {
+                                            object.insert(
+                                                "tool_use_id".to_string(),
+                                                Value::String(tool_use_id.clone()),
+                                            );
+                                        }
+                                    }
+                                    content.push(block);
+                                }
+                            }
                             // Handle future block types (non_exhaustive pattern)
                             _ => {}
                         }
@@ -727,6 +762,9 @@ impl LlmClient for AnthropicClient {
             let mut current_tool_id: Option<String> = None;
             let mut current_tool_name: Option<String> = None;
             let mut accumulated_tool_args = String::new();
+            let mut current_server_tool_id: Option<String> = None;
+            let mut current_server_tool_name: Option<String> = None;
+            let mut accumulated_server_tool_input = String::new();
             let mut current_block_type: Option<String> = None;
             let mut current_thinking_signature: Option<String> = None;
             let mut last_stop_reason: Option<StopReason> = None;
@@ -762,13 +800,17 @@ impl LlmClient for AnthropicClient {
                                     }
                                     "input_json_delta" => {
                                         if let Some(partial_json) = delta.partial_json {
-                                            accumulated_tool_args.push_str(&partial_json);
                                             saw_event = true;
-                                            yield LlmEvent::ToolCallDelta {
-                                                id: current_tool_id.clone().unwrap_or_default(),
-                                                name: None,
-                                                args_delta: partial_json,
-                                            };
+                                            if current_block_type.as_deref() == Some("server_tool_use") {
+                                                accumulated_server_tool_input.push_str(&partial_json);
+                                            } else {
+                                                accumulated_tool_args.push_str(&partial_json);
+                                                yield LlmEvent::ToolCallDelta {
+                                                    id: current_tool_id.clone().unwrap_or_default(),
+                                                    name: None,
+                                                    args_delta: partial_json,
+                                                };
+                                            }
                                         }
                                     }
                                     "compaction_delta" => {
@@ -789,6 +831,20 @@ impl LlmClient for AnthropicClient {
                             if let Some(content_block) = $event.content_block {
                                 current_block_type = Some(content_block.block_type.clone());
                                 match content_block.block_type.as_str() {
+                                    "text" => {
+                                        if let Some(citations) = content_block.extra.get("citations") {
+                                            saw_event = true;
+                                            yield LlmEvent::ServerToolContent {
+                                                id: None,
+                                                name: "web_search_citations".to_string(),
+                                                content: serde_json::json!({
+                                                    "type": "text_citations",
+                                                    "citations": citations
+                                                }),
+                                                meta: None,
+                                            };
+                                        }
+                                    }
                                     "thinking" => {
                                         // Start of thinking block
                                         // Signature may already be present or arrive via signature_delta
@@ -817,6 +873,20 @@ impl LlmClient for AnthropicClient {
                                             id,
                                             name: content_block.name,
                                             args_delta: String::new(),
+                                        };
+                                    }
+                                    "server_tool_use" => {
+                                        current_server_tool_id = content_block.id.clone();
+                                        current_server_tool_name = content_block.name.clone();
+                                        accumulated_server_tool_input.clear();
+                                    }
+                                    "web_search_tool_result" => {
+                                        saw_event = true;
+                                        yield LlmEvent::ServerToolContent {
+                                            id: content_block.tool_use_id.clone(),
+                                            name: "web_search".to_string(),
+                                            content: content_block.extra.clone(),
+                                            meta: None,
                                         };
                                     }
                                     _ => {}
@@ -873,6 +943,31 @@ impl LlmClient for AnthropicClient {
                                         accumulated_tool_args.clear();
                                     }
                                     current_tool_id = None;
+                                }
+                                Some("server_tool_use") => {
+                                    let input = if accumulated_server_tool_input.is_empty() {
+                                        serde_json::json!({})
+                                    } else {
+                                        serde_json::from_str(&accumulated_server_tool_input)
+                                            .unwrap_or_else(|_| serde_json::json!({
+                                                "partial_json": accumulated_server_tool_input
+                                            }))
+                                    };
+                                    let id = current_server_tool_id.take();
+                                    let name = current_server_tool_name
+                                        .take()
+                                        .unwrap_or_else(|| "server_tool".to_string());
+                                    accumulated_server_tool_input.clear();
+                                    saw_event = true;
+                                    yield LlmEvent::ServerToolContent {
+                                        id,
+                                        name,
+                                        content: serde_json::json!({
+                                            "type": "server_tool_use",
+                                            "input": input
+                                        }),
+                                        meta: None,
+                                    };
                                 }
                                 _ => {}
                             }
@@ -1074,10 +1169,13 @@ struct AnthropicContentBlock {
     block_type: String,
     id: Option<String>,
     name: Option<String>,
+    tool_use_id: Option<String>,
     /// Signature for thinking block continuity
     signature: Option<String>,
     /// Encrypted data for redacted_thinking blocks
     data: Option<String>,
+    #[serde(flatten)]
+    extra: Value,
 }
 
 fn parse_streamed_tool_args(args: &str, tool_id: &str) -> Result<Value, LlmError> {
@@ -2146,6 +2244,58 @@ mod tests {
             "Expected Done event from message_delta stop_reason"
         );
         assert!(done_is_success, "Expected successful Done outcome");
+    }
+
+    #[tokio::test]
+    async fn test_web_search_server_tool_blocks_are_emitted() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"query\":\"latest meerkat runtime\"}"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","title":"Result","url":"https://example.com"}]}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("search".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut server_blocks = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ServerToolContent {
+                    id, name, content, ..
+                } => {
+                    server_blocks.push((id, name, content));
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(server_blocks.len(), 2);
+        assert_eq!(server_blocks[0].0.as_deref(), Some("srvtoolu_1"));
+        assert_eq!(server_blocks[0].1, "web_search");
+        assert_eq!(
+            server_blocks[0].2["input"]["query"],
+            "latest meerkat runtime"
+        );
+        assert_eq!(server_blocks[1].0.as_deref(), Some("srvtoolu_1"));
+        assert_eq!(
+            server_blocks[1].2["content"][0]["url"],
+            "https://example.com"
+        );
     }
 
     /// Regression: Anthropic streaming error event must yield Done with error.

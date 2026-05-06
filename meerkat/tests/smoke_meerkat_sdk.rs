@@ -115,7 +115,9 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                             ));
                         }
                     },
-                    LlmEvent::ReasoningDelta { .. } | LlmEvent::ReasoningComplete { .. } => {}
+                    LlmEvent::ReasoningDelta { .. }
+                    | LlmEvent::ReasoningComplete { .. }
+                    | LlmEvent::ServerToolContent { .. } => {}
                 },
                 Err(e) => {
                     return Err(AgentError::llm(

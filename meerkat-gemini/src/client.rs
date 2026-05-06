@@ -1378,6 +1378,14 @@ impl LlmClient for GeminiClient {
                                     }
                                 }
 
+                                if let Some(grounding_metadata) = cand.grounding_metadata {
+                                    yield LlmEvent::ServerToolContent {
+                                        id: None,
+                                        name: "google_search".to_string(),
+                                        content: grounding_metadata,
+                                        meta: None,
+                                    };
+                                }
                                 if let Some(reason) = cand.finish_reason {
                                     let stop = match reason.as_str() {
                                         "MAX_TOKENS" => StopReason::MaxTokens,
@@ -1441,6 +1449,7 @@ struct PromptFeedback {
 struct Candidate {
     content: Option<CandidateContent>,
     finish_reason: Option<String>,
+    grounding_metadata: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1568,6 +1577,25 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn spawn_gemini_stream_stub(
+        model: &'static str,
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let route = format!("/v1beta/models/{model}:streamGenerateContent");
+        let app = Router::new()
+            .route(&route, post(gemini_stream_stub))
+            .with_state(GeminiStreamStubState { payload, seen });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     fn gemini_image_executor_request_json() -> ProviderImageGenerationRequest {
         serde_json::from_value(serde_json::json!({
             "operation_id": "00000000-0000-0000-0000-000000000201",
@@ -1684,6 +1712,46 @@ mod tests {
         assert!(
             body.get("contents").is_none(),
             "Code Assist must not send public generateContent fields at top level",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stream_emits_grounding_metadata_as_server_tool_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let payload = [
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"grounded"}]},"finishReason":"STOP","groundingMetadata":{"webSearchQueries":["meerkat runtime"],"groundingChunks":[{"web":{"uri":"https://example.com","title":"Example"}}],"groundingSupports":[{"segment":{"startIndex":0,"endIndex":8},"groundingChunkIndices":[0]}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, handle) =
+            spawn_gemini_stream_stub("gemini-2.5-flash", payload, seen.clone()).await;
+        let client = GeminiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gemini-2.5-flash",
+            vec![Message::User(UserMessage::text("search".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut grounding = None;
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::ServerToolContent { name, content, .. } => {
+                    assert_eq!(name, "google_search");
+                    grounding = Some(content);
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        handle.abort();
+
+        let grounding = grounding.expect("grounding metadata");
+        assert_eq!(grounding["webSearchQueries"][0], "meerkat runtime");
+        assert_eq!(
+            grounding["groundingChunks"][0]["web"]["uri"],
+            "https://example.com"
         );
         Ok(())
     }

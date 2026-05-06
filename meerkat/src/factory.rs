@@ -743,11 +743,9 @@ fn provider_tool_defaults_for(
     provider: Provider,
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
-    explicit_meerkat_tool_policy: bool,
+    _explicit_meerkat_tool_policy: bool,
 ) -> Option<serde_json::Value> {
-    if explicit_meerkat_tool_policy
-        || !model_profile.is_some_and(|profile| profile.supports_web_search)
-    {
+    if !model_profile.is_some_and(|profile| profile.supports_web_search) {
         return None;
     }
 

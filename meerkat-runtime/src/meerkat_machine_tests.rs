@@ -3963,21 +3963,15 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
     .await
     .expect("destroy should reach the durable lifecycle commit");
 
-    assert_eq!(
-        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
-        Some(RuntimeState::Destroyed),
-        "test probe should observe the store after durable destroyed commit",
-    );
-
     {
         let sessions = adapter.sessions.read().await;
         let entry = sessions
             .get(&session_id)
             .expect("destroy keeps the session entry available for terminal snapshots");
-        assert_eq!(
+        assert_ne!(
             entry.control_snapshot().phase,
             RuntimeState::Destroyed,
-            "durable destroyed state must not become visible while the shared driver projection still trails canonical destroy",
+            "destroyed visibility must wait until the lifecycle commit is acknowledged",
         );
         let authority = entry
             .dsl_authority
@@ -3997,6 +3991,22 @@ async fn persistent_destroy_durable_commit_observes_canonical_destroy_truth() {
         .expect("destroy task should not panic")
         .expect("destroy should succeed");
     assert_eq!(report.inputs_abandoned, 0);
+    assert_eq!(
+        store.inner.load_runtime_state(&runtime_id).await.unwrap(),
+        Some(RuntimeState::Destroyed),
+        "test probe should observe the durable destroyed commit after ack",
+    );
+    {
+        let sessions = adapter.sessions.read().await;
+        let entry = sessions
+            .get(&session_id)
+            .expect("destroy keeps the session entry available for terminal snapshots");
+        assert_eq!(
+            entry.control_snapshot().phase,
+            RuntimeState::Destroyed,
+            "destroyed visibility should publish after the lifecycle commit is acknowledged",
+        );
+    }
 }
 
 #[tokio::test]

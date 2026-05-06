@@ -102,6 +102,7 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             mob: input.tools.mob,
             mob_tasks: input.tools.mob_tasks,
             schedule: input.tools.schedule,
+            image_generation: input.tools.image_generation,
             mcp: input.tools.mcp,
             rust_bundles: Vec::new(),
         },

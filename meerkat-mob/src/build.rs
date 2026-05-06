@@ -171,6 +171,8 @@ pub async fn build_agent_config(
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.memory);
     config.override_schedule =
         meerkat_core::ToolCategoryOverride::from_effective(profile.tools.schedule);
+    config.override_image_generation =
+        meerkat_core::ToolCategoryOverride::from_effective(profile.tools.image_generation);
     let (override_mob, authority) =
         resolve_profile_mob_operator_access(profile, mob_tool_authority_context);
     config.override_mob = override_mob;
@@ -323,6 +325,7 @@ fn apply_resumed_session_metadata(
     config.override_builtins = metadata.tooling.builtins;
     config.override_shell = metadata.tooling.shell;
     config.override_memory = metadata.tooling.memory;
+    config.override_image_generation = metadata.tooling.image_generation;
     if matches!(
         config.override_mob,
         meerkat_core::ToolCategoryOverride::Inherit
@@ -431,6 +434,7 @@ mod tests {
                     mob: true,
                     mob_tasks: true,
                     schedule: false,
+                    image_generation: true,
                     mcp: vec![],
                     rust_bundles: vec![],
                 },
@@ -456,6 +460,7 @@ mod tests {
                     mob: false,
                     mob_tasks: false,
                     schedule: false,
+                    image_generation: false,
                     mcp: vec![],
                     rust_bundles: vec![],
                 },
@@ -546,6 +551,7 @@ mod tests {
                     comms: meerkat_core::session::ToolCategoryOverride::Enable,
                     mob: meerkat_core::session::ToolCategoryOverride::Enable,
                     memory: meerkat_core::session::ToolCategoryOverride::Disable,
+                    image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     active_skills: None,
                 },
                 keep_alive: false,
@@ -719,6 +725,10 @@ mod tests {
             config.override_memory,
             meerkat_core::ToolCategoryOverride::Disable
         );
+        assert_eq!(
+            config.override_image_generation,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         // Lead profile declares tools.mob = true; with no persisted authority
         // the canonical resolver synthesizes a generated create-only shape and
         // override_mob is Enable (not Disable as in the pre-canonicalization
@@ -758,6 +768,10 @@ mod tests {
         );
         assert_eq!(
             config.override_memory,
+            meerkat_core::ToolCategoryOverride::Disable
+        );
+        assert_eq!(
+            config.override_image_generation,
             meerkat_core::ToolCategoryOverride::Disable
         );
         assert_eq!(

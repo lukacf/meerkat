@@ -305,6 +305,7 @@ mod image_generation_substrate {
                 blob_store: blob_store.clone(),
                 executor,
             },
+            meerkat_core::ToolCategoryOverride::Enable,
         );
 
         let raw = RawValue::from_string(

@@ -240,6 +240,7 @@ test_suite(
         "//meerkat-contracts:auth_binding_wire_test",
         "//meerkat-contracts:image_generation_wire_test",
         "//meerkat-contracts:meerkat_contracts_unit_test",
+        "//meerkat-contracts:mob_wire_test",
         "//meerkat-contracts:realtime_audio_format_test",
         "//meerkat-contracts:realtime_barge_in_test",
         "//meerkat-contracts:realtime_deadline_and_jitter_test",

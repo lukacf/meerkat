@@ -130,6 +130,7 @@ fn profile_from_wire(profile: WireMobProfile) -> Profile {
             mob: tools.mob,
             mob_tasks: tools.mob_tasks,
             schedule: tools.schedule,
+            image_generation: tools.image_generation,
             mcp: tools.mcp,
             rust_bundles: Vec::new(),
         },

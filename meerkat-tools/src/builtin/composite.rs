@@ -9,6 +9,8 @@ use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutpu
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ToolCategoryOverride;
 use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
@@ -34,6 +36,12 @@ pub enum CompositeDispatcherError {
     ToolInitFailed { name: String, message: String },
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct ImageGenerationToolBinding {
+    runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
+    visibility: ToolCategoryOverride,
+}
+
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
@@ -56,7 +64,7 @@ pub struct CompositeDispatcher {
     #[allow(dead_code)]
     job_manager: Option<Arc<JobManager>>,
     #[cfg(not(target_arch = "wasm32"))]
-    image_generation_runtime: Option<crate::builtin::image_generation::ImageGenerationToolRuntime>,
+    image_generation_runtime: Option<ImageGenerationToolBinding>,
     allowed_tools: HashSet<String>,
 }
 
@@ -258,13 +266,21 @@ impl CompositeDispatcher {
     pub fn register_image_generation_tool(
         &mut self,
         runtime: crate::builtin::image_generation::ImageGenerationToolRuntime,
+        visibility: ToolCategoryOverride,
     ) {
+        // Inherit means visible when the session-owned image substrate is wired.
+        if !visibility.resolve(true) {
+            return;
+        }
         let tool = Arc::new(crate::builtin::image_generation::GenerateImageTool::new(
             runtime.clone(),
         ));
         self.allowed_tools.insert(tool.name().to_string());
         self.builtin_tools.push(tool);
-        self.image_generation_runtime = Some(runtime);
+        self.image_generation_runtime = Some(ImageGenerationToolBinding {
+            runtime,
+            visibility,
+        });
     }
 
     /// Get usage instructions for all enabled tools.
@@ -632,8 +648,8 @@ impl AgentToolDispatcher for CompositeDispatcher {
             if let Some(skill_tools) = owned.skill_tools.take() {
                 rebound.register_skill_tools(skill_tools);
             }
-            if let Some(runtime) = owned.image_generation_runtime.take() {
-                rebound.register_image_generation_tool(runtime);
+            if let Some(binding) = owned.image_generation_runtime.take() {
+                rebound.register_image_generation_tool(binding.runtime, binding.visibility);
             }
 
             Ok(BindOutcome::Bound(Arc::new(rebound)))

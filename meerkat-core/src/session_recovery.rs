@@ -42,6 +42,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
+    pub override_image_generation: Option<bool>,
     pub preload_skills: Option<Vec<SkillKey>>,
     pub app_context: Option<serde_json::Value>,
     pub shell_env: Option<HashMap<String, String>>,
@@ -212,6 +213,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.override_shell.is_some()
         || overrides.override_memory.is_some()
         || overrides.override_mob.is_some()
+        || overrides.override_image_generation.is_some()
         || overrides.preload_skills.is_some()
         || overrides.app_context.is_some()
         || overrides.shell_env.is_some()
@@ -315,6 +317,7 @@ pub fn resolve_effective_turn_config(
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
         override_mob: overrides.override_mob.is_some(),
+        override_image_generation: overrides.override_image_generation.is_some(),
         preload_skills: overrides.preload_skills.is_some(),
         keep_alive: overrides.keep_alive.is_some(),
         comms_name: overrides.comms_name.is_some(),
@@ -396,6 +399,10 @@ pub fn resolve_effective_turn_config(
             .override_mob
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.mob),
+        override_image_generation: overrides
+            .override_image_generation
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.image_generation),
         schedule_tools: None,
         preload_skills: overrides
             .preload_skills
@@ -504,6 +511,7 @@ mod tests {
                     comms: ToolCategoryOverride::Inherit,
                     mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
+                    image_generation: ToolCategoryOverride::Inherit,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,

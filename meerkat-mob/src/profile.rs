@@ -34,6 +34,9 @@ pub struct ToolConfig {
     /// Enable schedule tools (create, list, update, pause, resume, delete).
     #[serde(default)]
     pub schedule: bool,
+    /// Enable assistant image generation tools.
+    #[serde(default)]
+    pub image_generation: bool,
     /// MCP server names this profile connects to.
     #[serde(default)]
     pub mcp: Vec<String>,
@@ -209,6 +212,7 @@ mod tests {
             mob: true,
             mob_tasks: true,
             schedule: true,
+            image_generation: true,
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
             rust_bundles: vec!["custom-tools".to_string()],
         };
@@ -227,6 +231,7 @@ mod tests {
             mob: false,
             mob_tasks: false,
             schedule: false,
+            image_generation: false,
             mcp: vec!["mcp-server".to_string()],
             rust_bundles: Vec::new(),
         };
@@ -248,6 +253,7 @@ mod tests {
                 mob: true,
                 mob_tasks: true,
                 schedule: false,
+                image_generation: false,
                 mcp: vec![],
                 rust_bundles: vec![],
             },
@@ -277,6 +283,7 @@ mod tests {
                 mob: false,
                 mob_tasks: true,
                 schedule: false,
+                image_generation: false,
                 mcp: vec!["code-server".to_string()],
                 rust_bundles: vec!["custom".to_string()],
             },

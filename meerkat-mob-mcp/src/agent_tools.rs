@@ -1598,7 +1598,7 @@ fn build_tool_defs_with_profile_support(
              PROFILE FIELDS:\n\
              - model (required): LLM model name, e.g. \"claude-sonnet-4-5\".\n\
              - tools: {builtins: bool, shell: bool, comms: bool, memory: bool, mob: bool, \
-               mob_tasks: bool, schedule: bool}. Each defaults to false.\n\
+               mob_tasks: bool, schedule: bool, image_generation: bool}. Each defaults to false.\n\
              - skills: Array of skill names to load.\n\
              - peer_description: Human-readable role description visible to other members.\n\
              - runtime_mode: \"autonomous_host\" (default) or \"turn_driven\".\n\

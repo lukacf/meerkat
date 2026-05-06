@@ -1998,6 +1998,9 @@ pub struct SessionTooling {
     /// Semantic memory.
     #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
     pub memory: ToolCategoryOverride,
+    /// Assistant image generation.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub image_generation: ToolCategoryOverride,
     /// Active skills at session creation time (for deterministic resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_skills: Option<Vec<crate::skills::SkillKey>>,

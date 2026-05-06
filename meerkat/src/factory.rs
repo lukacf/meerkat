@@ -302,6 +302,8 @@ pub struct AgentBuildConfig {
     pub override_schedule: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: ToolCategoryOverride,
+    /// Per-build override for assistant image generation visibility.
+    pub override_image_generation: ToolCategoryOverride,
     /// Agent-facing scheduler tools supplied by the embedding surface.
     ///
     /// Scheduler is a surface capability. This dispatcher only controls
@@ -450,6 +452,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_mob", &self.override_mob)
+            .field("override_image_generation", &self.override_image_generation)
             .field("schedule_tools", &self.schedule_tools.is_some())
             .field(
                 "mob_tool_authority_context",
@@ -516,6 +519,7 @@ impl AgentBuildConfig {
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
+            override_image_generation: ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
             mob_tools: None,
@@ -608,6 +612,7 @@ impl AgentBuildConfig {
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
         self.override_mob = build.override_mob;
+        self.override_image_generation = build.override_image_generation;
         self.schedule_tools = build.schedule_tools.clone();
         self.mob_tool_authority_context = build.mob_tool_authority_context.clone();
         self.mob_tools = build.mob_tools.clone();
@@ -657,6 +662,7 @@ impl AgentBuildConfig {
             override_memory: self.override_memory,
             override_schedule: self.override_schedule,
             override_mob: self.override_mob,
+            override_image_generation: self.override_image_generation,
             schedule_tools: self.schedule_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
@@ -1853,6 +1859,9 @@ impl AgentFactory {
                 .as_ref()
                 .and_then(Session::mob_tool_authority_context);
         }
+        if !mask.override_image_generation {
+            build_config.override_image_generation = metadata.tooling.image_generation;
+        }
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
         }
@@ -2604,6 +2613,7 @@ impl AgentFactory {
             None,
             None,
             None,
+            ToolCategoryOverride::Inherit,
         )
         .await
     }
@@ -2630,6 +2640,7 @@ impl AgentFactory {
         image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
         image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
+        image_generation_visibility: ToolCategoryOverride,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -2688,6 +2699,7 @@ impl AgentFactory {
                     blob_store,
                     executor,
                 },
+                image_generation_visibility,
             );
         }
 
@@ -2717,6 +2729,10 @@ impl AgentFactory {
             !matches!(build_config.override_memory, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_mob |=
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
+        build_config.resume_override_mask.override_image_generation |= !matches!(
+            build_config.override_image_generation,
+            ToolCategoryOverride::Inherit
+        );
 
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
@@ -3396,6 +3412,7 @@ impl AgentFactory {
                             }),
                         image_generation_planner.clone(),
                         build_config.blob_store_override.clone(),
+                        build_config.override_image_generation,
                     )
                     .await?
                 }
@@ -3885,6 +3902,7 @@ impl AgentFactory {
             // (metadata.tooling.comms is left unchanged)
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
+            metadata.tooling.image_generation = build_config.override_image_generation;
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
             }
@@ -3912,6 +3930,7 @@ impl AgentFactory {
                     comms: ToolCategoryOverride::Inherit,
                     mob: build_config.override_mob,
                     memory: build_config.override_memory,
+                    image_generation: build_config.override_image_generation,
                     active_skills: active_skill_ids.clone(),
                 },
                 keep_alive: build_config.keep_alive,
@@ -7260,6 +7279,7 @@ impl AgentFactory {
         image_generation_executor: Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
         image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
+        image_generation_visibility: ToolCategoryOverride,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -7328,6 +7348,7 @@ impl AgentFactory {
                 image_generation_executor,
                 image_generation_planner,
                 image_generation_blob_store,
+                image_generation_visibility,
             )
             .await?;
 

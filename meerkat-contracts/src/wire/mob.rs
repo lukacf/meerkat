@@ -136,6 +136,8 @@ pub struct WireMobToolConfig {
     #[serde(default)]
     pub schedule: bool,
     #[serde(default)]
+    pub image_generation: bool,
+    #[serde(default)]
     pub mcp: Vec<String>,
 }
 
@@ -216,6 +218,8 @@ pub struct MobToolConfigInput {
     pub mob_tasks: bool,
     #[serde(default)]
     pub schedule: bool,
+    #[serde(default)]
+    pub image_generation: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp: Vec<String>,
 }

@@ -1363,7 +1363,8 @@ mod tests {
             true,
         )
         .unwrap();
-        dispatcher.register_image_generation_tool(runtime);
+        dispatcher
+            .register_image_generation_tool(runtime, meerkat_core::ToolCategoryOverride::Enable);
 
         let raw = RawValue::from_string(
             serde_json::to_string(&json!({
@@ -1440,7 +1441,8 @@ mod tests {
             true,
         )
         .unwrap();
-        dispatcher.register_image_generation_tool(runtime);
+        dispatcher
+            .register_image_generation_tool(runtime, meerkat_core::ToolCategoryOverride::Enable);
 
         let registry: Arc<dyn meerkat_core::ops_lifecycle::OpsLifecycleRegistry> =
             Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
@@ -1455,6 +1457,39 @@ mod tests {
                 .iter()
                 .any(|tool| tool.name == "generate_image"),
             "ops lifecycle rebinding must preserve late-registered image generation tool"
+        );
+    }
+
+    #[test]
+    fn generate_image_registration_respects_visibility_override() {
+        let runtime = ImageGenerationToolRuntime {
+            session_id: SessionId::new(),
+            machine: Arc::new(FakeMachine::default()),
+            planner: fake_planner(),
+            blob_store: Arc::new(FakeBlobStore {
+                writes: Mutex::new(Vec::new()),
+            }),
+            executor: Arc::new(FakeExecutor),
+        };
+        let mut dispatcher = crate::builtin::CompositeDispatcher::new(
+            Arc::new(crate::builtin::MemoryTaskStore::new()),
+            &crate::builtin::BuiltinToolConfig::default(),
+            None,
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        dispatcher
+            .register_image_generation_tool(runtime, meerkat_core::ToolCategoryOverride::Disable);
+
+        assert!(
+            !dispatcher
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "generate_image"),
+            "explicit image_generation disable must hide generate_image even when runtime exists"
         );
     }
 

@@ -232,6 +232,11 @@ pub struct SessionBuildOptions {
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
     pub override_mob: ToolCategoryOverride,
+    /// Per-build override for assistant image generation visibility.
+    ///
+    /// `Inherit` means "visible when the session-owned image-generation
+    /// substrate is available"; `Disable` hides the tool even when wired.
+    pub override_image_generation: ToolCategoryOverride,
     /// Agent-facing scheduler tools supplied by the embedding surface.
     ///
     /// Scheduler remains surface-owned. This dispatcher only controls
@@ -607,6 +612,7 @@ pub struct ResumeOverrideMask {
     pub override_shell: bool,
     pub override_memory: bool,
     pub override_mob: bool,
+    pub override_image_generation: bool,
     pub preload_skills: bool,
     pub keep_alive: bool,
     pub comms_name: bool,
@@ -668,6 +674,7 @@ impl Default for SessionBuildOptions {
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
+            override_image_generation: ToolCategoryOverride::Inherit,
             schedule_tools: None,
             preload_skills: None,
             realm_id: None,

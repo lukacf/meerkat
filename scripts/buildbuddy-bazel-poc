@@ -372,6 +372,17 @@ case "${command}" in
       --curses=no
     )
     ;;
+  release-validate-rbe)
+    command="test"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    default_target="//tools/buildbuddy:release_validate_cargo_equivalent_test"
+    extra_args+=(
+      --test_output=errors
+      --test_summary=terse
+      --color=no
+      --curses=no
+    )
+    ;;
   wasm-contract-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"

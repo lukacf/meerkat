@@ -258,6 +258,9 @@ case "${lane}" in
   sdk-suites)
     run_bazel_lane sdk-suites-rbe --jobs="${bazel_jobs}"
     ;;
+  release-validate)
+    run_bazel_lane release-validate-rbe --jobs="${bazel_jobs}"
+    ;;
   rust-release-packaging)
     echo "rust-release-packaging is release-preflight/manual-only; use Cargo release-preflight for package archive verification" >&2
     exit 2

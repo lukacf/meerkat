@@ -178,6 +178,27 @@ case "${lane}" in
     configure_cargo_deny
     "${CARGO_DENY}" check
     ;;
+  release-validate)
+    configure_rust "aarch64-apple-darwin__stable_tools"
+    configure_node
+    configure_python
+    "${CARGO}" build -p meerkat-rpc
+    make verify-version-parity CARGO="${CARGO}"
+    make verify-rpc-surface-alignment CARGO="${CARGO}"
+    make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
+    (cd sdks/python &&
+      "${PYTHON}" -m pip install --upgrade pip &&
+      "${PYTHON}" -m pip install -e ".[dev]" &&
+      "${PYTHON}" -m pytest -q tests)
+    (cd sdks/typescript &&
+      npm install --ignore-scripts &&
+      npm run build &&
+      npm test)
+    make verify-schema-freshness CARGO="${CARGO}"
+    make check-rust-release-packaging CARGO="${CARGO}"
+    make check-mini-skill-size CARGO="${CARGO}"
+    make fmt-check CARGO="${CARGO}"
+    ;;
   sdk-suites)
     configure_rust "aarch64-apple-darwin__stable_tools"
     configure_node

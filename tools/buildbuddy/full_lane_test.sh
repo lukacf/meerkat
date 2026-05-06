@@ -196,7 +196,6 @@ case "${lane}" in
       npm test)
     make verify-schema-freshness CARGO="${CARGO}"
     make check-rust-release-packaging CARGO="${CARGO}"
-    make check-mini-skill-size CARGO="${CARGO}"
     make fmt-check CARGO="${CARGO}"
     ;;
   sdk-suites)

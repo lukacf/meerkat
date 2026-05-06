@@ -1084,9 +1084,12 @@ rust_library(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1155,9 +1158,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1238,9 +1244,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/agent_builder_policy_canary.rs",
@@ -1355,9 +1364,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/agent_factory_auth_binding.rs",
@@ -1438,9 +1450,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/catalog_control_agent_boundary.rs",
@@ -1521,9 +1536,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/e2e_shell.rs",
@@ -1608,9 +1626,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/embedded_skill_registration.rs",
@@ -1691,9 +1712,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/factory_build_agent.rs",
@@ -1776,9 +1800,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/integration.rs",
@@ -1862,9 +1889,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/live_meerkat_comms.rs",
@@ -1946,9 +1976,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/live_meerkat_regression.rs",
@@ -2030,9 +2063,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/live_meerkat_user_flows.rs",
@@ -2118,9 +2154,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/persistence_contract.rs",
@@ -2201,9 +2240,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/realtime_channel_builder.rs",
@@ -2284,9 +2326,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/schedule_host_typed_mapping.rs",
@@ -2369,9 +2414,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/sdk_agentfactory.rs",
@@ -2456,9 +2504,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/sdk_config_ephemeral.rs",
@@ -2539,9 +2590,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/sdk_structured_output.rs",
@@ -2623,9 +2677,12 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "skills/mob-communication/SKILL.md",
+        "src/help_content/api_reference.md",
+        "src/help_content/cli_reference_skill.md",
+        "src/help_content/migration_0_5.md",
+        "src/help_content/mobs.md",
+        "src/help_content/platform_skill.md",
         "src/surface/request_execution.rs",
-    ] + [
-        "//:meerkat_platform_skill_files",
     ],
     srcs = [
         "tests/smoke_meerkat_sdk.rs",

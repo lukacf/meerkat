@@ -204,6 +204,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
+- `CancelRun`(run_id: RunId)
 - `RollbackRun`(run_id: RunId)
 - `Recycle`
 - `StartConversationRun`(run_id: RunId, primitive_kind: TurnPrimitiveKind, admitted_content_shape: ContentShape, vision_enabled: Bool, image_tool_results_enabled: Bool, max_extraction_retries: u64)
@@ -1477,11 +1478,23 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RuntimeNotice`
 - To: `Idle`
 
-### `StopRuntimeExecutorUnbound`
-- From: `Initializing`, `Idle`, `Retired`
+### `StopRuntimeExecutorInitializing`
+- From: `Initializing`
 - On: `StopRuntimeExecutor`(reason)
 - Emits: `RuntimeNotice`, `RuntimeEffectFact`
-- To: `Stopped`
+- To: `Initializing`
+
+### `StopRuntimeExecutorIdle`
+- From: `Idle`
+- On: `StopRuntimeExecutor`(reason)
+- Emits: `RuntimeNotice`, `RuntimeEffectFact`
+- To: `Idle`
+
+### `StopRuntimeExecutorRetired`
+- From: `Retired`
+- On: `StopRuntimeExecutor`(reason)
+- Emits: `RuntimeNotice`, `RuntimeEffectFact`
+- To: `Retired`
 
 ### `StopRuntimeExecutorAttached`
 - From: `Attached`
@@ -3063,6 +3076,36 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `pre_run_phase_matches_retired`
   - `current_run_id_matches_binding`
   - `turn_failed_with_cause`
+- Emits: `RecordTerminalOutcome`
+- To: `Retired`
+
+### `CancelRunningToIdle`
+- From: `Running`
+- On: `CancelRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_idle`
+  - `current_run_id_matches_binding`
+  - `turn_cancelled`
+- Emits: `RecordTerminalOutcome`
+- To: `Idle`
+
+### `CancelRunningToAttached`
+- From: `Running`
+- On: `CancelRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_attached`
+  - `current_run_id_matches_binding`
+  - `turn_cancelled`
+- Emits: `RecordTerminalOutcome`
+- To: `Attached`
+
+### `CancelRunningToRetired`
+- From: `Running`
+- On: `CancelRun`(run_id)
+- Guards:
+  - `pre_run_phase_matches_retired`
+  - `current_run_id_matches_binding`
+  - `turn_cancelled`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 

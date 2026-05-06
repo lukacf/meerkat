@@ -4459,6 +4459,10 @@ pub mod inputs {
         pub run_id: RunId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct CancelRun {
+        pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RollbackRun {
         pub run_id: RunId,
     }
@@ -5097,6 +5101,7 @@ pub enum Input {
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
+    CancelRun(inputs::CancelRun),
     RollbackRun(inputs::RollbackRun),
     Recycle(inputs::Recycle),
     StartConversationRun(inputs::StartConversationRun),
@@ -5297,6 +5302,7 @@ impl Input {
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
+            Self::CancelRun(_) => InputKind::CancelRun,
             Self::RollbackRun(_) => InputKind::RollbackRun,
             Self::Recycle(_) => InputKind::Recycle,
             Self::StartConversationRun(_) => InputKind::StartConversationRun,
@@ -5506,6 +5512,7 @@ pub enum InputKind {
     Prepare,
     Commit,
     Fail,
+    CancelRun,
     RollbackRun,
     Recycle,
     StartConversationRun,
@@ -6305,7 +6312,9 @@ pub enum TransitionId {
     RetireRequestedFromIdle,
     RetireAlreadyRetired,
     Reset,
-    StopRuntimeExecutorUnbound,
+    StopRuntimeExecutorInitializing,
+    StopRuntimeExecutorIdle,
+    StopRuntimeExecutorRetired,
     StopRuntimeExecutorAttached,
     StopRuntimeExecutorRunning,
     RuntimeExecutorExitedFromAttached,
@@ -6502,6 +6511,9 @@ pub enum TransitionId {
     FailRunningToIdle,
     FailRunningToAttached,
     FailRunningToRetired,
+    CancelRunningToIdle,
+    CancelRunningToAttached,
+    CancelRunningToRetired,
     RollbackRunRunningToIdle,
     RollbackRunRunningToAttached,
     RollbackRunRunningToRetired,

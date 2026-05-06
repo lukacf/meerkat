@@ -420,7 +420,7 @@ impl MeerkatMachine {
                 };
                 {
                     let mut driver = driver.lock().await;
-                    machine_commit_service_turn_terminal_receipt(&mut driver).await?
+                    machine_commit_service_turn_terminal_receipt(&mut driver).await?;
                 }
                 Ok(MeerkatMachineCommandResult::Unit)
             }

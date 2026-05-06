@@ -397,9 +397,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `Reset`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `product_turn_streaming`
-- `StopRuntimeExecutorUnbound`
+- `StopRuntimeExecutorInitializing`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
+  - scenarios: `session_registration_and_binding`
+- `StopRuntimeExecutorIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`
+- `StopRuntimeExecutorRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `StopRuntimeExecutorAttached`
   - anchors: `meerkat_machine`
   - scenarios: `retire-reset-destroy`, `session_registration_and_binding`
@@ -988,6 +994,15 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `FailRunningToRetired`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `realtime_connection_projection`, `live_topology_and_supervision`
+- `CancelRunningToIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `CancelRunningToAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `CancelRunningToRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
 - `RollbackRunRunningToIdle`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`

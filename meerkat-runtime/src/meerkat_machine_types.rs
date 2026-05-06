@@ -817,6 +817,7 @@ meerkat_machine_runtime_internal_inputs!(
     ],
     CancellationLifecycle => [
         CancelNow,
+        CancelRun,
         CancellationObserved,
         ForceCancelNoRun,
         ProductTurnInterrupted,
@@ -850,6 +851,7 @@ meerkat_machine_runtime_internal_inputs!(
         ProjectRealtimeIntent,
         PublishRealtimeSignal,
         RealtimeProjectionAdvanceObserved,
+        RealtimeProjectionBaselineObserved,
         RealtimeProjectionRefreshed,
         RealtimeProjectionReset,
         ReplaceRealtimeBinding,

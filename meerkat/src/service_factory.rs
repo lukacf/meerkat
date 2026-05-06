@@ -282,6 +282,7 @@ impl SessionAgent for FactoryAgent {
         self.agent.sync_system_context_state_to_session();
     }
 
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
         &mut self,
         session: Session,

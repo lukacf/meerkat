@@ -15,9 +15,9 @@ use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::event_injector::SubscribableInjector;
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::core_executor::{
-    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle,
+    CoreApplyOutput, CoreExecutor, CoreExecutorBoundaryHandle, CoreExecutorError,
+    CoreExecutorInterruptHandle,
 };
-use meerkat_core::lifecycle::core_executor::{CoreExecutorError, CoreExecutorInterruptHandle};
 #[cfg(feature = "runtime-adapter")]
 use meerkat_core::lifecycle::run_primitive::{CoreRenderable, RunApplyBoundary, RunPrimitive};
 #[cfg(feature = "runtime-adapter")]
@@ -152,6 +152,13 @@ impl DeferredTurnEventDelivery {
         let _ = self
             .release_tx
             .send(DeferredTurnCompletion::CompletedWithoutResult);
+    }
+
+    fn release_failed(self, error: String) {
+        let _ = self.release_tx.send(DeferredTurnCompletion::Failed {
+            class: meerkat_core::event::AgentErrorClass::Internal,
+            error,
+        });
     }
 }
 
@@ -472,7 +479,11 @@ impl SessionBackend {
                 {
                     let _ = state.discard_turn_context(&requested_input_id).await;
                 }
-                return Err(MobError::Internal(err.to_string()));
+                let error = err.to_string();
+                if let Some(delivery) = deferred_delivery {
+                    delivery.release_failed(error.clone());
+                }
+                return Err(MobError::Internal(error));
             }
         };
 
@@ -563,7 +574,11 @@ impl SessionBackend {
                 {
                     let _ = state.discard_turn_context(&requested_input_id).await;
                 }
-                return Err(MobError::Internal(err.to_string()));
+                let error = err.to_string();
+                if let Some(delivery) = deferred_delivery {
+                    delivery.release_failed(error.clone());
+                }
+                return Err(MobError::Internal(error));
             }
         };
 
@@ -766,7 +781,8 @@ impl RuntimeSessionState {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        MultiBackendProvisioner, runtime_completion_to_mob_result, session_turn_error_to_mob_error,
+        MultiBackendProvisioner, defer_turn_events_until_machine_completion,
+        runtime_completion_to_mob_result, session_turn_error_to_mob_error,
     };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
@@ -821,6 +837,38 @@ mod tests {
                 assert_eq!(args, json!({ "value": "browser" }));
             }
             other => panic!("expected callback-pending mob error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn deferred_turn_delivery_releases_admission_error() {
+        let session_id = SessionId::new();
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        let (queued_event_tx, deferred_delivery) =
+            defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
+
+        let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
+        deferred_delivery.release_failed("runtime admission rejected".to_string());
+        drop(queued_event_tx);
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("deferred delivery should emit")
+            .expect("deferred delivery should keep event stream open long enough to emit");
+
+        match event.payload {
+            meerkat_core::AgentEvent::RunFailed {
+                session_id: actual_session_id,
+                error_class,
+                error,
+                ..
+            } => {
+                assert_eq!(actual_session_id, session_id);
+                assert_eq!(error_class, meerkat_core::event::AgentErrorClass::Internal);
+                assert_eq!(error, "runtime admission rejected");
+            }
+            other => panic!("expected synthetic admission failure, got {other:?}"),
         }
     }
 
@@ -983,12 +1031,14 @@ impl CoreExecutorBoundaryHandle for MobSessionRuntimeBoundaryHandle {
     }
 }
 
+#[cfg(feature = "runtime-adapter")]
 struct MobSessionServiceInterruptHandle {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Arc<MeerkatMachine>,
     bridge_session_id: SessionId,
 }
 
+#[cfg(feature = "runtime-adapter")]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl CoreExecutorInterruptHandle for MobSessionServiceInterruptHandle {

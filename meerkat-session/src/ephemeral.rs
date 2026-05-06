@@ -115,6 +115,7 @@ enum SessionCommand {
     SyncSystemContextState {
         reply_tx: oneshot::Sender<()>,
     },
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     SyncSessionFromDurableSnapshot {
         session: meerkat_core::Session,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
@@ -684,6 +685,7 @@ pub trait SessionAgent: Send {
     fn sync_system_context_state(&mut self) {}
 
     /// Replace live semantic session state from durable authority while preserving live mechanics.
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     fn sync_session_from_durable_snapshot(
         &mut self,
         _session: meerkat_core::Session,
@@ -1536,6 +1538,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         })
     }
 
+    #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
     pub(crate) async fn sync_session_from_durable_snapshot(
         &self,
         id: &SessionId,
@@ -3363,6 +3366,7 @@ async fn session_task<A: SessionAgent>(
                 let _ = reply_tx.send(());
                 continue;
             }
+            #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             SessionCommand::SyncSessionFromDurableSnapshot { session, reply_tx } => {
                 let result = agent.sync_session_from_durable_snapshot(session);
                 if result.is_ok() {

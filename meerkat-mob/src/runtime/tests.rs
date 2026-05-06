@@ -18103,17 +18103,18 @@ async fn test_runtime_adapter_cancel_all_work_rejects_unsupported_boundary_cance
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
 async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound() {
+    type RecordingSignalFields = Vec<(
+        meerkat_machine_schema::identity::FieldId,
+        meerkat_runtime::composition::OwnedFieldValue,
+    )>;
+    type RecordingMobSignalLog = Vec<(
+        meerkat_machine_schema::identity::SignalVariantId,
+        RecordingSignalFields,
+    )>;
+
     #[derive(Default)]
     struct RecordingMobSignalSurface {
-        log: tokio::sync::Mutex<
-            Vec<(
-                meerkat_machine_schema::identity::SignalVariantId,
-                Vec<(
-                    meerkat_machine_schema::identity::FieldId,
-                    meerkat_runtime::composition::OwnedFieldValue,
-                )>,
-            )>,
-        >,
+        log: tokio::sync::Mutex<RecordingMobSignalLog>,
     }
 
     #[async_trait]
@@ -18130,10 +18131,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
         async fn receive_signal(
             &self,
             variant: meerkat_machine_schema::identity::SignalVariantId,
-            projected_fields: Vec<(
-                meerkat_machine_schema::identity::FieldId,
-                meerkat_runtime::composition::OwnedFieldValue,
-            )>,
+            projected_fields: RecordingSignalFields,
         ) -> Result<(), String> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())

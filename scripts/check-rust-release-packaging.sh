@@ -6,7 +6,10 @@ ROOT="${ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 CARGO="${CARGO:-$ROOT/scripts/repo-cargo}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/tmp/meerkat-release-packaging-target}"
 
-mapfile -t RELEASE_CRATES < <("$ROOT/scripts/release-rust-crates.sh")
+RELEASE_CRATES=()
+while IFS= read -r crate; do
+    RELEASE_CRATES+=("$crate")
+done < <("$ROOT/scripts/release-rust-crates.sh")
 
 python3 "$ROOT/scripts/check_rust_release_packaging.py" "$ROOT" "${RELEASE_CRATES[@]}"
 

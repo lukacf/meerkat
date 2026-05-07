@@ -771,10 +771,15 @@ where
         let next_frame = match timeout(remaining, receiver.next_frame()).await {
             Ok(result) => result?,
             Err(_) if started_barge_in && next_barge_in_send_at.is_some() => continue,
-            Err(_) => return Err(format!(
-                "timed out waiting for barge-in preemption (interrupted event): capture={capture:?}"
-            )
-            .into()),
+            Err(_) => {
+                if started_barge_in
+                    && next_barge_in_chunk == barge_in_chunks.len()
+                    && capture.saw_interrupted
+                {
+                    return Ok(capture);
+                }
+                continue;
+            }
         };
         let Some(frame) = next_frame else {
             return Err("realtime websocket closed before barge-in completed".into());

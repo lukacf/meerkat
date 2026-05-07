@@ -163,7 +163,7 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "failed to apply DSL stop-runtime-executor transition after runtime loop snapshot failure"
             );
-            return false;
+            return true;
         }
     };
 
@@ -175,7 +175,7 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "DSL stop-runtime-executor transition did not emit a runtime effect fact"
             );
-            return false;
+            return true;
         }
     };
 
@@ -193,7 +193,7 @@ async fn stop_runtime_loop_executor_from_dsl_effect(
                 error = %error,
                 "failed to apply stop-runtime-executor effect from runtime loop"
             );
-            false
+            true
         }
     }
 }
@@ -522,6 +522,7 @@ pub(crate) fn spawn_runtime_loop_with_completions(
                                         error = %error,
                                         "failed to apply runtime executor effect"
                                     );
+                                    break;
                                 }
                             }
                         }
@@ -724,6 +725,7 @@ async fn process_queue(
                     error = %error,
                     "failed to drain runtime executor effect"
                 );
+                return true;
             }
         }
 
@@ -1076,7 +1078,11 @@ mod tests {
     use meerkat_core::lifecycle::run_primitive::{
         ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
     };
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
 
     use meerkat_core::ops_lifecycle::{
         OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
@@ -1117,6 +1123,148 @@ mod tests {
                 ),
             ),
         ))
+    }
+
+    fn stop_runtime_executor_effect(reason: &str) -> crate::effect::RuntimeEffect {
+        crate::effect::runtime_effect_for_test(
+            crate::meerkat_machine::dsl::RuntimeEffectKind::StopRuntimeExecutor,
+            reason,
+        )
+    }
+
+    struct StopFailingExecutor {
+        stop_calls: Arc<AtomicUsize>,
+        apply_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::core_executor::CoreExecutor for StopFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, CoreExecutorError>
+        {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "stop failure regression must not apply queued work",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::control_failed_runtime(
+                "synthetic stop effect failure",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_loop_stop_effect_failure_is_fail_closed_from_helper() {
+        let driver = make_shared_ephemeral_driver("stop-helper-fail-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = StopFailingExecutor {
+            stop_calls: Arc::clone(&stop_calls),
+            apply_calls: Arc::clone(&apply_calls),
+        };
+
+        let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+            &driver,
+            None,
+            &mut executor,
+            "snapshot failure should stop the runtime loop".to_string(),
+        )
+        .await;
+
+        assert!(
+            should_stop,
+            "stop-effect failures must fail closed by stopping the runtime loop"
+        );
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            0,
+            "stop-effect failure must not fall through to queued work"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_loop_drain_effect_failure_is_fail_closed() {
+        let driver = make_shared_ephemeral_driver("drain-effect-fail-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = StopFailingExecutor {
+            stop_calls: Arc::clone(&stop_calls),
+            apply_calls: Arc::clone(&apply_calls),
+        };
+        let (effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
+        effect_tx
+            .send(stop_runtime_executor_effect("drain failure should stop"))
+            .await
+            .expect("test effect should enqueue");
+
+        let should_stop = process_queue(&driver, &mut executor, &mut effect_rx, None).await;
+
+        assert!(
+            should_stop,
+            "drained executor-effect failures must stop the runtime loop"
+        );
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            apply_calls.load(Ordering::SeqCst),
+            0,
+            "failed stop effect must not be followed by ordinary queue processing"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_loop_direct_effect_failure_exits_loop_with_channels_open() {
+        let driver = make_shared_ephemeral_driver("direct-effect-fail-closed");
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let executor = StopFailingExecutor {
+            stop_calls: Arc::clone(&stop_calls),
+            apply_calls: Arc::clone(&apply_calls),
+        };
+        let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
+        let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
+        let handle = spawn_runtime_loop_with_completions(
+            driver,
+            Box::new(executor),
+            wake_rx,
+            effect_rx,
+            None,
+            None,
+            None,
+            std::sync::Weak::<crate::meerkat_machine::MeerkatMachine>::new(),
+            SessionId::new(),
+        );
+
+        effect_tx
+            .send(stop_runtime_executor_effect(
+                "direct effect failure should stop",
+            ))
+            .await
+            .expect("test effect should enqueue");
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("runtime loop must exit after executor-effect failure")
+            .expect("runtime loop task should not panic");
+        assert_eq!(stop_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
+        drop((wake_tx, effect_tx));
     }
 
     fn make_prompt(text: &str) -> Input {

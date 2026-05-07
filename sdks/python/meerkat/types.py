@@ -433,7 +433,7 @@ class ModelProfile(TypedDict):
     supports_reasoning: bool
     inline_video: bool
     realtime: bool
-    web_search: bool
+    supports_web_search: bool
     image_generation: bool
     params_schema: dict[str, Any]
 

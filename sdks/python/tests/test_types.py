@@ -112,6 +112,18 @@ def test_contract_version_matches_package_version():
     assert CONTRACT_VERSION == data["project"]["version"]
 
 
+def test_model_profile_type_uses_wire_web_search_key():
+    from meerkat import ModelProfile
+    from meerkat.types import ResolvedModelCapabilities
+
+    model_profile_fields = set(ModelProfile.__annotations__)
+    assert "supports_web_search" in model_profile_fields
+    assert "web_search" not in model_profile_fields
+
+    resolved_fields = set(ResolvedModelCapabilities.__annotations__)
+    assert "web_search" in resolved_fields
+
+
 def test_generated_realtime_types_include_open_info_shape():
     info = GeneratedRealtimeOpenInfo(
         ws_url="ws://localhost:9999/realtime/ws",
@@ -2030,7 +2042,10 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
 
     models = await client.get_models_catalog()
     assert models["contract_version"] == {"major": 0, "minor": 5, "patch": 1}
-    assert models["providers"][0]["models"][0]["profile"]["image_generation"] is True
+    profile = models["providers"][0]["models"][0]["profile"]
+    assert profile["supports_web_search"] is True
+    assert "web_search" not in profile
+    assert profile["image_generation"] is True
 
     await client.create_schedule({"name": "test"})
     await client.get_schedule("sch_1")

@@ -1,36 +1,40 @@
 ---
 title: "Mini surfaces"
-description: "Use the shipped slim Meerkat binaries or compose your own custom surface builds."
+description: "Use the shipped slim RPC binary or compose your own custom reduced surface builds."
 icon: "boxes-stacked"
 ---
 
-Meerkat now ships two official slim binaries alongside the full product surfaces:
+Meerkat ships one official slim binary alongside the full product surfaces:
 
-- `rkat-mini`
 - `rkat-rpc-mini`
 
-These are static, capability-gated builds of the existing CLI and RPC crates. They are not separate reimplementations, and they are not runtime-dynamic command subsets.
+The repository also keeps `rkat-mini` as a source-build CLI profile for teams
+that want a smaller task-first command surface in their own packaging. These
+profiles are static, capability-gated builds of the existing CLI and RPC
+crates. They are not separate reimplementations, and they are not
+runtime-dynamic command subsets.
 
 ## What this guide is for
 
 Use this guide when you want:
 
-- the shipped slim binaries
+- the shipped slim RPC binary
+- a source-built reduced CLI profile
 - a smaller surface for embedding or packaging
 - a starting point for custom product-surface builds
 
-## Shipped surface tiers
+## Surface tiers
 
 | Surface | Purpose |
 |---------|---------|
 | `rkat` | Batteries-included terminal UX |
-| `rkat-mini` | Small task-first CLI for run/session/config workflows |
+| `rkat-mini` | Source-build-only task-first CLI profile for run/session/config workflows |
 | `rkat-rpc` | Full JSON-RPC surface used by the Python and TypeScript SDKs |
-| `rkat-rpc-mini` | Small JSON-RPC runtime for create/list/read/archive/start/interrupt/config/catalog/capabilities |
+| `rkat-rpc-mini` | Shipped small JSON-RPC runtime for create/list/read/archive/start/interrupt/config/catalog/capabilities |
 | `rkat-rest` | Full REST surface |
 | `rkat-mcp` | Full MCP server surface |
 
-All shipped binaries keep the same provider support:
+The shipped binaries and the documented source-built mini profile keep the same provider support:
 
 - Anthropic
 - OpenAI
@@ -39,7 +43,9 @@ All shipped binaries keep the same provider support:
 
 ## `rkat-mini`
 
-`rkat-mini` is the small official CLI surface.
+`rkat-mini` is a source-build-only CLI profile. It is not published as a
+GitHub release asset or Homebrew resource; build it from source when you want
+to carry a reduced CLI in your own product or deployment.
 
 Included commands:
 
@@ -67,11 +73,14 @@ The built-in shell and patch tools are still available through `--tools workspac
 The CLI now gates command visibility by compiled capability features rather than by a special UI-only profile. That means `rkat-mini` still exposes core commands like `blob`, while capability-backed surfaces like `mob` and `mcp` disappear when their supporting features are not compiled in.
 </Note>
 
-### Why `skill` is in the shipped mini surface
+### Skill support and size expectations
 
-We gate `skill` with a stripped-binary size check on the canonical Linux release target. The current measurement stays within the 20% budget, so the shipped `rkat-mini` includes `skill`.
+The repository still includes a stripped-binary size check for the canonical
+Linux source profile so maintainers can see how much `skill` support adds to a
+custom CLI build. That gate no longer participates in the public release
+preflight because the CLI mini profile is not shipped.
 
-### Using `rkat-mini`
+### Using a source-built `rkat-mini`
 
 ```bash
 rkat-mini "summarize this repository"
@@ -122,7 +131,8 @@ Omitted methods:
 
 ## Building your own custom surface
 
-The official mini binaries are examples of the same shared surface seams you can use for custom builds.
+The source-built CLI profile and shipped RPC mini binary use the same shared
+surface seams you can use for custom builds.
 
 ### Build `rkat-mini`
 

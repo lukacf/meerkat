@@ -1,4 +1,4 @@
-name: Repair Mini Release Assets
+name: Repair rkat-rpc-mini Release Assets
 
 on:
   workflow_dispatch:
@@ -15,8 +15,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build_minis:
-    name: Build mini binaries (${{ matrix.runs-on }}, ${{ matrix.target }})
+  build_rpc_mini:
+    name: Build rkat-rpc-mini (${{ matrix.runs-on }}, ${{ matrix.target }})
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
@@ -55,13 +55,12 @@ jobs:
         with:
           key: repair-mini-${{ matrix.target }}
 
-      - name: Build mini binaries
+      - name: Build rkat-rpc-mini binary
         shell: bash
         env:
           CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
-          ./scripts/repo-cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
           ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
@@ -69,11 +68,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat-mini rkat-rpc-mini; do
+          for bin in rkat-rpc-mini; do
             codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
           done
 
-      - name: Package mini artifacts
+      - name: Package rkat-rpc-mini artifact
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
@@ -87,7 +86,7 @@ jobs:
           STAGE_ROOT="$(mktemp -d)"
           trap 'rm -rf "${STAGE_ROOT}"' EXIT
 
-          for bin in rkat-mini rkat-rpc-mini; do
+          for bin in rkat-rpc-mini; do
             if [[ "${RUNNER_OS}" == "Windows" ]]; then
               src="target/${TARGET}/release/${bin}.exe"
               payload_name="${bin}.exe"
@@ -116,24 +115,24 @@ jobs:
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
 
-      - name: Upload mini artifacts
+      - name: Upload rkat-rpc-mini artifact
         uses: actions/upload-artifact@v4
         with:
-          name: meerkat-mini-${{ matrix.target }}
+          name: meerkat-rpc-mini-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-  publish_minis:
-    name: Publish repaired mini release assets
-    needs: [build_minis]
+  publish_rpc_mini:
+    name: Publish repaired rkat-rpc-mini release assets
+    needs: [build_rpc_mini]
     runs-on: ubuntu-latest
     steps:
-      - name: Download mini artifacts
+      - name: Download rkat-rpc-mini artifacts
         uses: actions/download-artifact@v4
         with:
-          path: mini-artifacts
+          path: rpc-mini-artifacts
 
-      - name: Rebuild release checksums and upload minis
+      - name: Rebuild release checksums and upload rkat-rpc-mini
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -145,7 +144,13 @@ jobs:
 
           while IFS= read -r artifact; do
             cp "$artifact" "release-current/$(basename "$artifact")"
-          done < <(find mini-artifacts -type f \( -name 'rkat-mini-*' -o -name 'rkat-rpc-mini-*' \) | sort)
+          done < <(find rpc-mini-artifacts -type f -name 'rkat-rpc-mini-*' | sort)
+
+          while IFS= read -r retired; do
+            asset="$(basename "$retired")"
+            rm -f "$retired"
+            gh release delete-asset "${RELEASE_TAG}" "${asset}" --repo "${REPO}" --yes || true
+          done < <(find release-current -maxdepth 1 -type f -name 'rkat-mini-*' | sort)
 
           (
             cd release-current
@@ -154,8 +159,8 @@ jobs:
             python3 -c 'import json, os; from pathlib import Path; tag = os.environ["RELEASE_TAG"]; artifacts = [p.name for p in sorted(Path(".").iterdir()) if p.is_file() and (p.name.endswith(".tar.gz") or p.name.endswith(".zip"))]; json.dump({"version": tag.lstrip("v"), "tag": tag, "artifacts": artifacts, "checksums": "checksums.sha256"}, open("index.json", "w", encoding="utf-8"), indent=2)'
           )
 
-          mapfile -t mini_files < <(find mini-artifacts -type f \( -name 'rkat-mini-*' -o -name 'rkat-rpc-mini-*' \) | sort)
-          gh release upload "${RELEASE_TAG}" --repo "${REPO}" "${mini_files[@]}" release-current/checksums.sha256 release-current/index.json --clobber
+          mapfile -t rpc_mini_files < <(find rpc-mini-artifacts -type f -name 'rkat-rpc-mini-*' | sort)
+          gh release upload "${RELEASE_TAG}" --repo "${REPO}" "${rpc_mini_files[@]}" release-current/checksums.sha256 release-current/index.json --clobber
 
       - name: Upload repaired manifest artifact
         uses: actions/upload-artifact@v4
@@ -167,8 +172,8 @@ jobs:
           if-no-files-found: error
 
   update_homebrew:
-    name: Update Homebrew tap for repaired minis
-    needs: [publish_minis]
+    name: Update Homebrew tap for repaired rkat-rpc-mini
+    needs: [publish_rpc_mini]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tap
@@ -209,7 +214,7 @@ jobs:
             echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
             echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
             echo ""
-            for r in rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+            for r in rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
               gen_resource "$r" "$target"
               echo ""
             done
@@ -245,7 +250,7 @@ jobs:
             echo '  def install'
             echo '    bin.install "rkat"'
             echo ''
-            echo '    %w[rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
+            echo '    %w[rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
             echo '      resource(name).stage do'
             echo '        bin.install name'
             echo '      end'

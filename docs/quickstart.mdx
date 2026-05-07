@@ -33,7 +33,7 @@ meerkat = "0.6.0"
     ```bash
     cargo install rkat
     ```
-    <Note>`rkat-mini` ships as an official slim binary in release artifacts. For source builds or slim custom builds, see [Mini surfaces](/guides/mini-surfaces).</Note>
+    <Note>For source-built reduced CLI profiles such as `rkat-mini`, see [Mini surfaces](/guides/mini-surfaces).</Note>
   </Tab>
 </Tabs>
 
@@ -101,7 +101,6 @@ Before your first run, set up provider credentials. The fastest path is environm
     ```bash
     export ANTHROPIC_API_KEY=sk-...
     rkat run "What is the capital of France?"
-    rkat-mini "What is the capital of France?"
     ```
   </Tab>
 </Tabs>
@@ -144,7 +143,7 @@ The agent completes its current turn when a limit is hit, then stops.
 - [Examples gallery](/examples/gallery) -- the central real-code hub after your first successful run
 - [Sessions example](/examples/sessions) -- the best next stop if you want the core multi-turn flow first
 - [Auth](/guides/auth) -- environment vars, realms, bindings, and OAuth flows
-- [Mini surfaces](/guides/mini-surfaces) -- shipped slim binaries and custom-build guidance
+- [Mini surfaces](/guides/mini-surfaces) -- shipped RPC mini and source-build guidance
 - [Providers](/concepts/providers) -- model tables and provider parameters
 - [Rust SDK](/rust/overview) / [Python SDK](/sdks/python/overview) / [TypeScript SDK](/sdks/typescript/overview) -- full API reference
 

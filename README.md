@@ -29,7 +29,7 @@ Meerkat is a **library-first, high-performance, modular agent harness** -- compo
 
 That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
-It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formald state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states. 
+It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formald state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
 
 The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
@@ -46,7 +46,7 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
 | **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
 | **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |
-| **Distribution** | Release binaries, Homebrew tap, SDK auto-runtime, mini binaries, crates, PyPI, npm | Runtime plus dependencies |
+| **Distribution** | Release binaries, Homebrew tap, SDK auto-runtime, crates, PyPI, npm | Runtime plus dependencies |
 
 Those tools excel at interactive development with rich terminal UIs. Meerkat is for automated pipelines, embedded agents, multi-agent systems, browser-delivered agents, and applications that need programmatic control over lifecycle, credentials, tools, and runtime events.
 
@@ -66,14 +66,13 @@ npm install @rkat/sdk
 npm install @rkat/web
 ```
 
-Release artifacts include `rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
+Release artifacts include `rkat`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
 
 **Run a one-off prompt** with any provider:
 
 ```bash
 rkat run "What is the capital of France?"
 rkat run --model gpt-5.5 "Explain async/await"
-rkat-mini "Summarize this repository"
 ```
 
 **Share state across processes** with an explicit realm:
@@ -233,7 +232,7 @@ make release-preflight
 
 **Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`.
 
-**Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-mini` and `rkat-rpc-mini` are separate slim release surfaces.
+**Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-rpc-mini` is the slim JSON-RPC release surface.
 
 ## Surfaces
 
@@ -246,7 +245,6 @@ All surfaces share the same session lifecycle and runtime-backed contracts.
 | **TypeScript SDK** | Script agents from Node.js; auto-resolves `rkat-rpc` | [TypeScript SDK](https://docs.rkat.ai/sdks/typescript/overview) |
 | **Web SDK (`@rkat/web`)** | Browser/WASM sessions, mobs, subscriptions, JS tools, provider proxy/auth resolver | [Web/WASM](https://docs.rkat.ai/examples/wasm) |
 | **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
-| **Mini CLI (`rkat-mini`)** | Small task-first binary for run/session/config/blob/skill/models/capabilities/doctor | [Mini surfaces](https://docs.rkat.ai/guides/mini-surfaces) |
 | **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
 | **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional realtime WebSocket bootstrap | [RPC guide](https://docs.rkat.ai/api/rpc) |
 | **Mini RPC (`rkat-rpc-mini`)** | Small JSON-RPC runtime for core session/config/catalog/capabilities methods | [Mini surfaces](https://docs.rkat.ai/guides/mini-surfaces) |

@@ -528,7 +528,7 @@ regen-schemas:
 	@echo "$(GREEN)Schemas and SDK types regenerated$(NC)"
 
 # Full pre-release checklist
-release-preflight: ci verify-schema-freshness check-rust-release-packaging check-mini-skill-size
+release-preflight: ci verify-schema-freshness check-rust-release-packaging
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist:$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"
@@ -546,7 +546,7 @@ release-preflight: ci verify-schema-freshness check-rust-release-packaging check
 
 # Smoke pre-release checklist.
 # Useful for local iteration; skips full feature-matrix expansion.
-release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-packaging check-mini-skill-size
+release-preflight-smoke: ci-smoke verify-schema-freshness check-rust-release-packaging
 	@echo ""
 	@echo "$(GREEN)Pre-release checklist (smoke):$(NC)"
 	@echo "  1. CHANGELOG.md [Unreleased] section populated?"

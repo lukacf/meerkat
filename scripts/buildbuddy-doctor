@@ -410,7 +410,7 @@ fi
 
 release_surface_count="$(
   awk '
-    index($0, "rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin") {
+    index($0, "//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin") {
       count += 1
     }
     END { print count + 0 }
@@ -419,16 +419,15 @@ release_surface_count="$(
 if [[ "${release_surface_count}" -eq 5 ]] &&
   awk '
     /release-build-/ { lane = 1 }
-    lane && /default_target=/ && /rkat_mini_bin|rkat_rpc_mini_bin/ { bad = 1 }
+    lane && /default_target=/ && /rkat_mini|rkat_rpc_mini_bin/ { bad = 1 }
     lane && /;;/ { lane = 0 }
     END { exit bad ? 1 : 0 }
   ' scripts/buildbuddy-bazel-poc &&
-  grep -Fq '[rkat-mini]="meerkat-cli/rkat_mini_surface_mini_providers_skills_bin"' .github/workflows/release.yml &&
   grep -Fq '[rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_surface_mini_bin"' .github/workflows/release.yml &&
   grep -Fq 'MEERKAT_RELEASE_BUILDBUDDY_JOBS' .github/workflows/release.yml; then
-  pass "BuildBuddy release lanes package feature-scoped mini surface targets"
+  pass "BuildBuddy release lanes omit source-only CLI mini and package the feature-scoped RPC mini target"
 else
-  bad "BuildBuddy release lanes are not using feature-scoped mini surface targets"
+  bad "BuildBuddy release lanes are not aligned with the shipped binary surface set"
 fi
 
 if awk '

@@ -104,10 +104,11 @@ The shared-surface/runtime work from this proposal is now reflected in the codeb
 - `e2e-build` proves minimal composed fixtures plus built product surfaces
 - the canonical CLI execution family is centered on `run --resume[=<SESSION>]`
 
-The product-layering work also shipped two official slim binaries:
+The product-layering work also produced one shipped slim binary and one
+source-build-only CLI profile:
 
-- `rkat-mini`
-- `rkat-rpc-mini`
+- `rkat-mini` (source build)
+- `rkat-rpc-mini` (release artifact)
 
 These are static capability-gated builds of the existing CLI/RPC crates, not
 new reimplementations and not runtime-dynamic command subsets. On the CLI side,

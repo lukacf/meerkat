@@ -112,10 +112,6 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
         run: make check-rust-release-packaging
 
-      - name: Check rkat-mini skill size gate
-        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
-        run: make check-mini-skill-size
-
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/v')
         run: make verify-version
@@ -180,7 +176,6 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
-          ./scripts/repo-cargo build -p rkat --bin rkat-mini --release --target "${{ matrix.target }}" --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
           ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
@@ -188,7 +183,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+          for bin in rkat rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
             codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
           done
 
@@ -200,7 +195,7 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-mini" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
+          BINARIES=("rkat" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
@@ -306,14 +301,13 @@ jobs:
 
           declare -A BIN_PATHS=(
             [rkat]="meerkat-cli/rkat"
-            [rkat-mini]="meerkat-cli/rkat_mini_surface_mini_providers_skills_bin"
             [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
             [rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_surface_mini_bin"
             [rkat-rest]="meerkat-rest/rkat_rest_bin"
             [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
           )
 
-          for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+          for bin in rkat rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
             rel_path="${BIN_PATHS[$bin]}"
             src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
             if [[ -z "$src" && "$ARCHIVE_EXT" == "zip" ]]; then
@@ -483,7 +477,7 @@ jobs:
             echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
             echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
             echo ""
-            for r in rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+            for r in rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
               gen_resource "$r" "$target"
               echo ""
             done
@@ -519,7 +513,7 @@ jobs:
             echo '  def install'
             echo '    bin.install "rkat"'
             echo ''
-            echo '    %w[rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
+            echo '    %w[rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
             echo '      resource(name).stage do'
             echo '        bin.install name'
             echo '      end'
@@ -538,6 +532,10 @@ jobs:
           VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
+          if git diff --quiet -- rkat.rb; then
+            echo "Homebrew formula already up to date"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add rkat.rb

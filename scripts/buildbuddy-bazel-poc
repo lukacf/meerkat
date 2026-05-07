@@ -386,31 +386,31 @@ case "${command}" in
   release-build-macos-arm64)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
     ;;
   release-build-macos-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --platforms=//platforms:macos_x86_64)
     ;;
   release-build-linux-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel)
     ;;
   release-build-linux-arm64)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-linux-arm64-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
     extra_args+=(--compilation_mode=opt --remote_download_outputs=toplevel --linkopt=-fuse-ld=bfd)
     ;;
   release-build-windows-x86)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-windows-rbe}"
-    default_target="//meerkat-cli:rkat //meerkat-cli:rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
+    default_target="//meerkat-cli:rkat //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin //meerkat-rest:rkat_rest_bin //meerkat-mcp-server:rkat_mcp_bin"
     msvc_ver="${BUILDBUDDY_WINDOWS_MSVC_VERSION:-14.42.34433}"
     msvc_edition="${BUILDBUDDY_WINDOWS_MSVC_EDITION:-Professional}"
     msvc_root="C:/Program Files/Microsoft Visual Studio/2022/${msvc_edition}"

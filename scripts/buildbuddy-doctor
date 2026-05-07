@@ -177,27 +177,27 @@ else
   printf '%s\n' "${broad_changed_gate_dry_run}" >&2
 fi
 
-if grep -Fq '/vendor/oai-rt-rs' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'original.replace' scripts/buildbuddy-bazel-poc &&
-  grep -Fq -- '--lockfile_mode="${BUILDBUDDY_LOCKFILE_MODE:-error}"' scripts/buildbuddy-bazel-poc &&
+if grep -Fq -- '--lockfile_mode="${BUILDBUDDY_LOCKFILE_MODE:-error}"' scripts/buildbuddy-bazel-poc &&
   ! grep -Fq -- '--lockfile_mode=refresh' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'restore_module_lock' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'local_oai_vendor_build' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'local_oai_vendor_build_backup' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'git -C "${workspace_root}" status --porcelain -- vendor/oai-rt-rs/BUILD.bazel' scripts/buildbuddy-bazel-poc; then
-  pass "BuildBuddy launcher rebases stale local path locks and restores vendored BUILD bytes"
+  ! grep -Fq '/vendor/oai-rt-rs' scripts/buildbuddy-bazel-poc &&
+  ! grep -Fq 'local_oai_vendor' scripts/buildbuddy-bazel-poc; then
+  pass "BuildBuddy launcher restores MODULE.bazel.lock without vendored oai-rt-rs path rewrites"
 else
-  bad "BuildBuddy launcher does not rebase stale local path dependency locks safely"
+  bad "BuildBuddy launcher still carries stale vendored oai-rt-rs lock handling"
 fi
 
-if grep -Fq 'name = "package_runfiles"' vendor/oai-rt-rs/BUILD.bazel &&
-  grep -Fq '//vendor/oai-rt-rs:package_runfiles' BUILD.bazel xtask/BUILD.bazel &&
-  grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
-  grep -Fq 'additive_build_file_content' MODULE.bazel &&
-  grep -Fq 'additive_build_file_content' MODULE.bazel.lock; then
-  pass "Vendored oai-rt-rs runfiles target is declared in checked-in and lock-generated BUILD content"
+if [[ ! -e vendor/oai-rt-rs ]] &&
+  grep -Fq 'oai-rt-rs = "0.3.0"' Cargo.toml &&
+  ! grep -Fq '//vendor/oai-rt-rs:package_runfiles' BUILD.bazel xtask/BUILD.bazel &&
+  ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
+  ! grep -Fq 'additive_build_file_content' MODULE.bazel &&
+  ! grep -Fq 'vendor/oai-rt-rs' MODULE.bazel.lock &&
+  ! grep -Fq 'crates__oai-rt-rs-0.2.1' MODULE.bazel.lock &&
+  grep -Fq 'crates__oai-rt-rs-0.3.0' MODULE.bazel.lock; then
+  pass "oai-rt-rs resolves from crates.io without vendored runfiles plumbing"
 else
-  bad "Vendored oai-rt-rs runfiles target is missing from checked-in or lock-generated BUILD content"
+  bad "oai-rt-rs still appears to use vendored runfiles plumbing"
 fi
 
 if grep -Fq -- '--retry 5' scripts/install-buildbuddy-cli &&

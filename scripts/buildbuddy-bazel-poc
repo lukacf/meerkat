@@ -734,53 +734,24 @@ fi
 
 module_lock_args=()
 lockfile="${workspace_root}/MODULE.bazel.lock"
-local_oai_vendor="${workspace_root}/vendor/oai-rt-rs"
-local_oai_vendor_build="${local_oai_vendor}/BUILD.bazel"
 module_lock_backup=""
-local_oai_vendor_build_backup=""
 restore_module_lock() {
   if [[ -n "${module_lock_backup}" && -f "${module_lock_backup}" ]]; then
     cp -p "${module_lock_backup}" "${lockfile}"
     rm -f "${module_lock_backup}"
   fi
-  if [[ -n "${local_oai_vendor_build_backup}" && -f "${local_oai_vendor_build_backup}" ]]; then
-    cp -p "${local_oai_vendor_build_backup}" "${local_oai_vendor_build}"
-    rm -f "${local_oai_vendor_build_backup}"
-  fi
 }
 if [[ -n "${BUILDBUDDY_KEEP_LOCK_REFRESH:-}" ]]; then
   echo "warning: BUILDBUDDY_KEEP_LOCK_REFRESH is ignored by local BuildBuddy runs; refresh Bazel metadata explicitly outside normal local lanes" >&2
-fi
-if [[ -f "${local_oai_vendor_build}" ]] &&
-  [[ -n "$(git -C "${workspace_root}" status --porcelain -- vendor/oai-rt-rs/BUILD.bazel)" ]]; then
-  echo "error: vendor/oai-rt-rs/BUILD.bazel has local changes" >&2
-  echo "BuildBuddy requires this generated file to match the checked-in bytes exactly." >&2
-  echo "Restore or intentionally regenerate Bazel metadata before running local BuildBuddy lanes." >&2
-  exit 1
 fi
 if [[ -f "${lockfile}" ]]; then
   module_lock_backup="$(mktemp "${TMPDIR:-/tmp}/meerkat-module-lock.XXXXXX")"
   cp -p "${lockfile}" "${module_lock_backup}"
 fi
-if [[ -f "${local_oai_vendor_build}" ]]; then
-  local_oai_vendor_build_backup="$(mktemp "${TMPDIR:-/tmp}/meerkat-oai-build.XXXXXX")"
-  cp -p "${local_oai_vendor_build}" "${local_oai_vendor_build_backup}"
-fi
-if [[ -n "${module_lock_backup}" || -n "${local_oai_vendor_build_backup}" ]]; then
+if [[ -n "${module_lock_backup}" ]]; then
   trap restore_module_lock EXIT
 fi
 module_lock_args+=(--lockfile_mode="${BUILDBUDDY_LOCKFILE_MODE:-error}")
-if [[ -f "${lockfile}" ]] &&
-  grep -Fq '/vendor/oai-rt-rs' "${lockfile}" &&
-  ! grep -Fq "${local_oai_vendor}" "${lockfile}"; then
-  node -e '
-const fs = require("node:fs");
-const [lockfile, localVendor] = process.argv.slice(1);
-const original = fs.readFileSync(lockfile, "utf8");
-const next = original.replace(/\/(?!\/)[^"\\\n/]+(?:\/[^"\\\n/]+)+\/vendor\/oai-rt-rs/g, () => localVendor);
-if (next !== original) fs.writeFileSync(lockfile, next);
-' "${lockfile}" "${local_oai_vendor}"
-fi
 
 common_args=()
 if [[ -z "${BUILDBUDDY_NO_DEFAULT_REPOSITORY_CACHE:-}" ]]; then
@@ -852,7 +823,7 @@ set +e
 status="$?"
 set -e
 
-if [[ -n "${module_lock_backup}" || -n "${local_oai_vendor_build_backup}" ]]; then
+if [[ -n "${module_lock_backup}" ]]; then
   restore_module_lock
   trap - EXIT
 fi

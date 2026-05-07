@@ -47,7 +47,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BUILDBUDDY_ENDPOINT: ${{ vars.BUILDBUDDY_ENDPOINT || secrets.BUILDBUDDY_ENDPOINT }}
+  BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
 
 # Required GitHub Actions secrets for full release:
 #   CARGO_REGISTRY_TOKEN  - crates.io API token

@@ -105,6 +105,7 @@ jobs:
         run: make verify-schema-freshness
 
       - name: Verify Rust release packaging
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
         run: make check-rust-release-packaging
 
       - name: Check rkat-mini skill size gate

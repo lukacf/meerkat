@@ -43,6 +43,7 @@ pub use meerkat_core::{
     // Events
     AgentEvent,
     AgentLlmClient,
+    AgentLlmClientDecorator,
     AgentSessionStore,
     AgentToolDispatcher,
     ArtifactRef,

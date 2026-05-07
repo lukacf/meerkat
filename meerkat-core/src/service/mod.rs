@@ -224,6 +224,11 @@ pub struct SessionBuildOptions {
     ///
     /// Factory builders may downcast this to their concrete client trait.
     pub llm_client_override: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    /// Optional wrapper applied to the final agent-facing LLM client.
+    ///
+    /// This is intentionally provider-agnostic and runs after raw clients are
+    /// adapted into [`AgentLlmClient`].
+    pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     // NOTE: ops_lifecycle_override was removed in Phase 3.
     // Use runtime_build_mode instead.
     pub override_builtins: ToolCategoryOverride,
@@ -669,6 +674,7 @@ impl Default for SessionBuildOptions {
             recoverable_tool_defs: None,
             blob_store_override: None,
             llm_client_override: None,
+            agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
@@ -715,6 +721,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
             .field("blob_store_override", &self.blob_store_override.is_some())
             .field("llm_client_override", &self.llm_client_override.is_some())
+            .field(
+                "agent_llm_client_decorator",
+                &self.agent_llm_client_decorator.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)

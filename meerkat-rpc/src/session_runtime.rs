@@ -1691,6 +1691,7 @@ struct SessionRuntimeLlmReconfigureHost {
     factory: AgentFactory,
     auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
+    agent_llm_client_decorator: Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
 }
 
@@ -1792,7 +1793,16 @@ impl SessionRuntimeLlmReconfigureHost {
             .factory
             .build_llm_adapter(raw_client, identity.model.clone())
             .await;
-        Ok(Arc::new(adapter))
+        let adapter = Arc::new(adapter) as Arc<dyn meerkat_core::AgentLlmClient>;
+        let decorator = self
+            .agent_llm_client_decorator
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        Ok(AgentFactory::decorate_agent_llm_client(
+            adapter,
+            decorator.as_ref(),
+        ))
     }
 
     async fn load_config_for_hot_swap(&self) -> Result<Config, RuntimeDriverError> {
@@ -2169,6 +2179,8 @@ pub struct SessionRuntime {
     max_sessions: usize,
     /// Override LLM client for all sessions (primarily for testing).
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
+    /// Default wrapper applied after all session LLM clients reach the agent boundary.
+    agent_llm_client_decorator: Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
     realm_id: Option<meerkat_core::connection::RealmId>,
     instance_id: Option<String>,
     backend: Option<String>,
@@ -2209,6 +2221,9 @@ pub struct SessionRuntime {
     /// inject scheduler tools into resumed/runtime-backed agent builds.
     pub builder_schedule_tools_slot:
         Arc<StdRwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
+    /// Handle to the builder's default agent LLM client decorator slot.
+    pub builder_agent_llm_client_decorator_slot:
+        Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
     /// Runtime-owned approval records. Surfaces only project decisions into
     /// this service; approval status is service-owned.
     approval_service: meerkat_core::ApprovalService,
@@ -2483,6 +2498,8 @@ impl SessionRuntime {
         let builder = FactoryAgentBuilder::new(factory, config);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
+        let builder_agent_llm_client_decorator_slot =
+            Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
@@ -2509,6 +2526,7 @@ impl SessionRuntime {
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
+                agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
             },
         ));
@@ -2536,6 +2554,7 @@ impl SessionRuntime {
             create_session_after_prepare_bindings_session_id: Arc::new(StdMutex::new(None)),
             max_sessions,
             default_llm_client,
+            agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
             realm_id: None,
             instance_id: None,
             backend: None,
@@ -2559,6 +2578,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
+            builder_agent_llm_client_decorator_slot,
             approval_service,
         }
     }
@@ -2579,6 +2599,8 @@ impl SessionRuntime {
             FactoryAgentBuilder::new_with_config_store(factory, initial_config, config_store);
         let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
         let builder_schedule_tools_slot = Arc::clone(&builder.default_schedule_tools);
+        let builder_agent_llm_client_decorator_slot =
+            Arc::clone(&builder.default_agent_llm_client_decorator);
         let default_llm_client = Arc::new(StdRwLock::new(None));
         let config_runtime = Arc::new(StdRwLock::new(None));
         let staged_sessions = Arc::new(StagedSessionRegistry::new());
@@ -2605,6 +2627,7 @@ impl SessionRuntime {
                 factory: factory_clone.clone(),
                 auth_lease: reconfigure_auth_lease,
                 default_llm_client: Arc::clone(&default_llm_client),
+                agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
                 config_runtime: Arc::clone(&config_runtime),
             },
         ));
@@ -2632,6 +2655,7 @@ impl SessionRuntime {
             create_session_after_prepare_bindings_session_id: Arc::new(StdMutex::new(None)),
             max_sessions,
             default_llm_client,
+            agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
             realm_id: None,
             instance_id: None,
             backend: None,
@@ -2655,6 +2679,7 @@ impl SessionRuntime {
             registered_tools_slot: StdRwLock::new(Arc::new(StdRwLock::new(Vec::new()))),
             builder_mob_tools_slot,
             builder_schedule_tools_slot,
+            builder_agent_llm_client_decorator_slot,
             approval_service,
         }
     }
@@ -3708,6 +3733,21 @@ impl SessionRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = client;
     }
 
+    /// Set the provider-agnostic wrapper applied to every agent LLM client.
+    pub fn set_agent_llm_client_decorator(
+        &mut self,
+        decorator: Option<meerkat_core::AgentLlmClientDecorator>,
+    ) {
+        *self
+            .agent_llm_client_decorator
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = decorator.clone();
+        *self
+            .builder_agent_llm_client_decorator_slot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = decorator;
+    }
+
     /// Build the runtime adapter appropriate for this runtime's persistence mode.
     pub fn runtime_adapter(&self) -> Arc<MeerkatMachine> {
         self.runtime_adapter.clone()
@@ -3849,6 +3889,12 @@ impl SessionRuntime {
                 ),
                 data: None,
             })?;
+        let agent_llm_client_decorator = {
+            self.agent_llm_client_decorator
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
         let recovered = match build_recovered_session(
             session,
             &overrides,
@@ -3856,6 +3902,7 @@ impl SessionRuntime {
                 llm_client_override: self
                     .default_llm_client()
                     .map(encode_llm_client_override_for_service),
+                agent_llm_client_decorator,
                 external_tools: self.recovery_external_tools(),
                 checkpointer: None,
                 runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
@@ -4201,6 +4248,7 @@ impl SessionRuntime {
             factory: self.factory.clone(),
             auth_lease: self.runtime_adapter.auth_lease_handle(),
             default_llm_client: Arc::clone(&self.default_llm_client),
+            agent_llm_client_decorator: Arc::clone(&self.agent_llm_client_decorator),
             config_runtime: Arc::clone(&self.config_runtime),
         }
     }
@@ -8176,6 +8224,58 @@ mod tests {
         }
     }
 
+    struct CountingAgentLlmClient {
+        inner: Arc<dyn meerkat_core::AgentLlmClient>,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::AgentLlmClient for CountingAgentLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[meerkat_core::Message],
+            tools: &[Arc<meerkat_core::ToolDef>],
+            max_tokens: u32,
+            temperature: Option<f32>,
+            provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+            self.stream_calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.inner
+                .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                .await
+        }
+
+        fn provider(&self) -> &'static str {
+            self.inner.provider()
+        }
+
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+
+        fn compile_schema(
+            &self,
+            output_schema: &meerkat_core::OutputSchema,
+        ) -> Result<meerkat_core::CompiledSchema, meerkat_core::SchemaError> {
+            self.inner.compile_schema(output_schema)
+        }
+    }
+
+    fn counting_agent_llm_client_decorator(
+        constructions: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+    ) -> meerkat_core::AgentLlmClientDecorator {
+        Arc::new(move |client| {
+            constructions.fetch_add(1, AtomicOrdering::SeqCst);
+            Arc::new(CountingAgentLlmClient {
+                inner: client,
+                stream_calls: Arc::clone(&stream_calls),
+            })
+        })
+    }
+
     /// A mock LLM client that introduces a delay before responding.
     /// Used to test concurrent access (SESSION_BUSY).
     struct SlowMockLlmClient {
@@ -10825,6 +10925,39 @@ mod tests {
         host.build_adapter_for_llm_identity(&identity)
             .await
             .expect("hot-swap managed-store resolution should receive AuthMachine authority");
+    }
+
+    #[tokio::test]
+    async fn reconfigure_build_adapter_applies_agent_llm_client_decorator() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        runtime.set_agent_llm_client_decorator(Some(counting_agent_llm_client_decorator(
+            Arc::clone(&constructions),
+            Arc::clone(&stream_calls),
+        )));
+
+        let host = runtime.llm_reconfigure_host();
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let adapter = host
+            .build_adapter_for_llm_identity(&identity)
+            .await
+            .expect("hot-swap adapter should build through default client");
+        adapter
+            .stream_response(&[], &[], 64, None, None)
+            .await
+            .expect("decorated hot-swap adapter should remain usable");
+
+        assert_eq!(constructions.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(stream_calls.load(AtomicOrdering::SeqCst), 1);
     }
 
     #[tokio::test]

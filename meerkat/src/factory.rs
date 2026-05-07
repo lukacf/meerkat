@@ -47,10 +47,11 @@ use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
 use meerkat_core::{
-    Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher,
-    AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides, ModelRegistry, OutputSchema,
-    Provider, RealmConnectionSet, RealmId, Session, SessionLlmIdentity, SessionMetadata,
-    SessionToolVisibilityState, SessionTooling, ToolCategoryOverride,
+    Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
+    AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
+    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
+    SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
+    ToolCategoryOverride,
 };
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
@@ -273,6 +274,11 @@ pub struct AgentBuildConfig {
     /// still owns provider defaults, hooks, session metadata, and runtime
     /// setup.
     pub agent_llm_client_override: Option<Arc<dyn AgentLlmClient>>,
+    /// Optional wrapper applied to the final agent-facing LLM client.
+    ///
+    /// Runs after provider resolution and after either raw or pre-adapted
+    /// explicit overrides have reached the `AgentLlmClient` boundary.
+    pub agent_llm_client_decorator: Option<AgentLlmClientDecorator>,
     /// Provider-specific parameters (e.g., thinking config, reasoning effort).
     pub provider_params: Option<serde_json::Value>,
     /// External tool dispatcher to compose with builtins (e.g., MCP callback tools).
@@ -435,6 +441,10 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "agent_llm_client_override",
                 &self.agent_llm_client_override.is_some(),
             )
+            .field(
+                "agent_llm_client_decorator",
+                &self.agent_llm_client_decorator.is_some(),
+            )
             .field("provider_params", &self.provider_params.is_some())
             .field("external_tools", &self.external_tools.is_some())
             .field("recoverable_tool_defs", &self.recoverable_tool_defs)
@@ -508,6 +518,7 @@ impl AgentBuildConfig {
             event_tx: None,
             llm_client_override: None,
             agent_llm_client_override: None,
+            agent_llm_client_decorator: None,
             provider_params: None,
             external_tools: None,
             recoverable_tool_defs: None,
@@ -607,6 +618,7 @@ impl AgentBuildConfig {
             .llm_client_override
             .as_ref()
             .and_then(decode_llm_client_override_from_service);
+        self.agent_llm_client_decorator = build.agent_llm_client_decorator.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
@@ -657,6 +669,7 @@ impl AgentBuildConfig {
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
             override_memory: self.override_memory,
@@ -1963,6 +1976,17 @@ impl AgentFactory {
         }
     }
 
+    /// Apply an optional provider-agnostic wrapper to the final agent LLM client.
+    pub fn decorate_agent_llm_client(
+        client: Arc<dyn AgentLlmClient>,
+        decorator: Option<&AgentLlmClientDecorator>,
+    ) -> Arc<dyn AgentLlmClient> {
+        match decorator {
+            Some(decorator) => decorator(client),
+            None => client,
+        }
+    }
+
     pub async fn build_llm_client_for_identity(
         &self,
         config: &Config,
@@ -3110,6 +3134,10 @@ impl AgentFactory {
             }
             Arc::new(llm_adapter_inner)
         };
+        let llm_adapter = Self::decorate_agent_llm_client(
+            llm_adapter,
+            build_config.agent_llm_client_decorator.as_ref(),
+        );
 
         // 5. Resolve max_tokens
         let max_tokens = build_config.max_tokens.unwrap_or(config.max_tokens);

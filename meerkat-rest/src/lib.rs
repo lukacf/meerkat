@@ -1192,6 +1192,7 @@ async fn apply_runtime_turn(
                             .llm_client_override
                             .clone()
                             .map(encode_llm_client_override_for_service),
+                        agent_llm_client_decorator: None,
                         external_tools: None,
                         checkpointer: None,
                         runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
@@ -1430,6 +1431,7 @@ async fn apply_runtime_turn(
                         .llm_client_override
                         .clone()
                         .map(encode_llm_client_override_for_service),
+                    agent_llm_client_decorator: None,
                     external_tools: None,
                     checkpointer: None,
                     runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
@@ -4055,6 +4057,7 @@ async fn create_session_inner(
             .llm_client_override
             .clone()
             .map(encode_llm_client_override_for_service),
+        agent_llm_client_decorator: None,
         override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(req.enable_shell),
         override_schedule: ToolCategoryOverride::Inherit,
@@ -4881,6 +4884,7 @@ async fn continue_session_inner(
                 .llm_client_override
                 .clone()
                 .map(encode_llm_client_override_for_service),
+            agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,

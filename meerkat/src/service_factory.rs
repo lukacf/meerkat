@@ -431,6 +431,9 @@ pub struct FactoryAgentBuilder {
     config_store: Option<Arc<dyn ConfigStore>>,
     /// Optional default LLM client injected into all builds (for testing).
     pub default_llm_client: Option<Arc<dyn LlmClient>>,
+    /// Optional default wrapper applied to every final agent-facing LLM client.
+    pub default_agent_llm_client_decorator:
+        Arc<std::sync::RwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
     /// Optional default tool dispatcher injected when no override is provided.
     /// Used on wasm32 where filesystem-based tool resolution is unavailable.
     pub default_tool_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
@@ -466,6 +469,7 @@ impl FactoryAgentBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             config_store: None,
             default_llm_client: None,
+            default_agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
             default_tool_dispatcher: None,
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
@@ -489,6 +493,7 @@ impl FactoryAgentBuilder {
             config_snapshot: initial_config,
             config_store: Some(config_store),
             default_llm_client: None,
+            default_agent_llm_client_decorator: Arc::new(std::sync::RwLock::new(None)),
             default_tool_dispatcher: None,
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
@@ -559,6 +564,16 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
             && let Some(ref client) = self.default_llm_client
         {
             build_config.llm_client_override = Some(client.clone());
+        }
+
+        if build_config.agent_llm_client_decorator.is_none()
+            && let Some(decorator) = self
+                .default_agent_llm_client_decorator
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        {
+            build_config.agent_llm_client_decorator = Some(decorator);
         }
 
         // Inject default tool dispatcher if none provided.
@@ -694,7 +709,7 @@ mod tests {
     use meerkat_store::MemoryBlobStore;
     use std::pin::Pin;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     struct MockLlmClient {
@@ -906,6 +921,59 @@ mod tests {
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
             Ok(())
         }
+    }
+
+    struct CountingAgentLlmClient {
+        inner: Arc<dyn meerkat_core::AgentLlmClient>,
+        stream_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl meerkat_core::AgentLlmClient for CountingAgentLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[meerkat_core::Message],
+            tools: &[Arc<meerkat_core::ToolDef>],
+            max_tokens: u32,
+            temperature: Option<f32>,
+            provider_params: Option<
+                &meerkat_core::lifecycle::run_primitive::ProviderParamsOverride,
+            >,
+        ) -> Result<meerkat_core::LlmStreamResult, meerkat_core::AgentError> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                .await
+        }
+
+        fn provider(&self) -> &'static str {
+            self.inner.provider()
+        }
+
+        fn model(&self) -> &str {
+            self.inner.model()
+        }
+
+        fn compile_schema(
+            &self,
+            output_schema: &meerkat_core::OutputSchema,
+        ) -> Result<meerkat_core::CompiledSchema, meerkat_core::SchemaError> {
+            self.inner.compile_schema(output_schema)
+        }
+    }
+
+    fn counting_agent_llm_client_decorator(
+        constructions: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
+    ) -> meerkat_core::AgentLlmClientDecorator {
+        Arc::new(move |client| {
+            constructions.fetch_add(1, Ordering::SeqCst);
+            Arc::new(CountingAgentLlmClient {
+                inner: client,
+                stream_calls: Arc::clone(&stream_calls),
+            })
+        })
     }
 
     #[derive(Default)]
@@ -1123,6 +1191,40 @@ mod tests {
             .session_metadata()
             .ok_or_else(|| "missing session metadata".to_string())?;
         assert_eq!(metadata.provider, Provider::Other);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn factory_builder_default_agent_llm_client_decorator_wraps_default_llm_client()
+    -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("tempdir: {err}"))?;
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+        builder.default_llm_client = Some(Arc::new(MockLlmClient { delta: "default" }));
+        let constructions = Arc::new(AtomicUsize::new(0));
+        let stream_calls = Arc::new(AtomicUsize::new(0));
+        *builder
+            .default_agent_llm_client_decorator
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(counting_agent_llm_client_decorator(
+                Arc::clone(&constructions),
+                Arc::clone(&stream_calls),
+            ));
+
+        let (event_tx, _event_rx) = mpsc::channel(8);
+        let mut agent = builder
+            .build_agent(&make_session_request("mock-model"), event_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+        let (run_tx, _run_rx) = mpsc::channel(8);
+        let result = SessionAgent::run_with_events(&mut agent, "hello".to_string().into(), run_tx)
+            .await
+            .map_err(|err| format!("{err}"))?;
+
+        assert_eq!(result.text, "default");
+        assert_eq!(constructions.load(Ordering::SeqCst), 1);
+        assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
         Ok(())
     }
 

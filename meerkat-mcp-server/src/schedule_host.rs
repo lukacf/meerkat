@@ -189,6 +189,7 @@ impl McpScheduleContext {
             external_tools,
             recoverable_tool_defs: None,
             llm_client_override: None,
+            agent_llm_client_decorator: None,
             override_builtins: meerkat_core::ToolCategoryOverride::Inherit,
             override_shell: meerkat_core::ToolCategoryOverride::Inherit,
             override_memory: meerkat_core::ToolCategoryOverride::Inherit,

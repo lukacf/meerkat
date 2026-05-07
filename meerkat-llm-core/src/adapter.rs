@@ -187,9 +187,20 @@ impl AgentLlmClient for LlmClientAdapter {
             .and_then(|params| params.temperature)
             .or(temperature);
 
+        let projected_messages =
+            self.client
+                .project_replay_messages(messages)
+                .map_err(|error| {
+                    AgentError::llm(
+                        self.client.provider(),
+                        error.failure_reason(),
+                        error.to_string(),
+                    )
+                })?;
+
         let request = LlmRequest {
             model: self.model.clone(),
-            messages: messages.to_vec(),
+            messages: projected_messages,
             tools: tools.to_vec(),
             max_tokens: effective_max_tokens,
             temperature: effective_temperature,
@@ -361,5 +372,100 @@ impl AgentLlmClient for LlmClientAdapter {
 
     fn compile_schema(&self, output_schema: &OutputSchema) -> Result<CompiledSchema, SchemaError> {
         self.client.compile_schema(output_schema)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{LlmError, LlmStream};
+    use futures::stream;
+    use meerkat_core::{
+        AssistantBlock, AssistantImageId, BlobId, BlobRef, MediaType, ProviderImageMetadata,
+        RevisedPromptDisposition, UserMessage,
+    };
+    use std::sync::Mutex;
+
+    struct ProjectionClient {
+        seen: Arc<Mutex<Option<Vec<Message>>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl LlmClient for ProjectionClient {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages
+                .iter()
+                .filter(|message| {
+                    !matches!(
+                        message,
+                        Message::BlockAssistant(assistant)
+                            if assistant
+                                .blocks
+                                .iter()
+                                .any(|block| matches!(block, AssistantBlock::Image { .. }))
+                    )
+                })
+                .cloned()
+                .collect())
+        }
+
+        fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
+            *self.seen.lock().expect("seen lock") = Some(request.messages.clone());
+            Box::pin(stream::iter([Ok(LlmEvent::Done {
+                outcome: LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
+            })]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "projection-test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    fn assistant_image_block() -> AssistantBlock {
+        AssistantBlock::Image {
+            image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),
+            blob_ref: BlobRef {
+                blob_id: BlobId::from("blob-1"),
+                media_type: "image/png".to_string(),
+            },
+            media_type: MediaType::new("image/png"),
+            width: 64,
+            height: 64,
+            revised_prompt: RevisedPromptDisposition::NotRequested,
+            meta: ProviderImageMetadata::NotEmitted,
+        }
+    }
+
+    #[tokio::test]
+    async fn adapter_invokes_provider_replay_projection_before_streaming() {
+        let seen = Arc::new(Mutex::new(None));
+        let client = ProjectionClient {
+            seen: Arc::clone(&seen),
+        };
+        let adapter = LlmClientAdapter::new(Arc::new(client), "test-model".to_string());
+
+        let raw_messages = vec![
+            Message::User(UserMessage::text("continue")),
+            Message::BlockAssistant(meerkat_core::BlockAssistantMessage::new(
+                vec![assistant_image_block()],
+                StopReason::EndTurn,
+            )),
+        ];
+
+        adapter
+            .stream_response(&raw_messages, &[], 1024, None, None)
+            .await
+            .expect("stream response");
+
+        let projected = seen.lock().expect("seen lock").clone().expect("request");
+        assert_eq!(projected.len(), 1);
+        assert!(matches!(projected[0], Message::User(_)));
     }
 }

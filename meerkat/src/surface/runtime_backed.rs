@@ -788,6 +788,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmClient for BlockingClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
             let started = Arc::clone(&self.started);
             let release = Arc::clone(&self.release);
@@ -815,6 +822,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmClient for TerminalLlmFailureClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
             Box::pin(futures::stream::once(async {
                 Err(LlmError::AuthenticationFailed {

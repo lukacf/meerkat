@@ -33,6 +33,22 @@ pub type LlmStream<'a> = Pin<Box<dyn Stream<Item = Result<LlmEvent, LlmError>> +
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait LlmClient: Send + Sync {
+    /// Project canonical Meerkat transcript history into the provider-safe
+    /// replay history for this client.
+    ///
+    /// Core owns canonical messages; provider clients own the policy for which
+    /// blocks can be replayed, transformed, or rejected for their wire API.
+    /// The default fails closed so raw canonical history is never implicitly
+    /// treated as provider-safe.
+    fn project_replay_messages(&self, _messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Err(LlmError::InvalidRequest {
+            message: format!(
+                "{} client does not implement provider replay projection",
+                self.provider()
+            ),
+        })
+    }
+
     /// Stream a completion request
     ///
     /// Returns a stream of normalized events. The stream completes

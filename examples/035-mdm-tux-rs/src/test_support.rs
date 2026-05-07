@@ -28,6 +28,13 @@ impl CaptureClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for CaptureClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         *self.seen_tools.lock().expect("capture lock") =
             request.tools.iter().map(|tool| tool.name.to_string()).collect();

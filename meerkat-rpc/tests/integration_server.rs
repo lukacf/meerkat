@@ -31,6 +31,13 @@ struct MockLlmClient;
 
 #[async_trait]
 impl LlmClient for MockLlmClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(
         &'a self,
         request: &'a meerkat_client::LlmRequest,
@@ -72,6 +79,13 @@ impl RecordingToolClient {
 
 #[async_trait]
 impl LlmClient for RecordingToolClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(
         &'a self,
         request: &'a meerkat_client::LlmRequest,

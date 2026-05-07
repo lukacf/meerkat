@@ -12256,6 +12256,13 @@ default_model = "gemma"
 
     #[async_trait]
     impl LlmClient for CapturingLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             request: &'a LlmRequest,

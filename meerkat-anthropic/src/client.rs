@@ -215,11 +215,11 @@ fn project_anthropic_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistan
             AssistantBlock::Text { text, .. } if text.is_empty() => None,
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
             AssistantBlock::Reasoning { meta, .. } => match meta.as_deref() {
-                Some(meerkat_core::ProviderMeta::Anthropic { .. })
-                | Some(meerkat_core::ProviderMeta::AnthropicRedacted { .. })
-                | Some(meerkat_core::ProviderMeta::AnthropicCompaction { .. }) => {
-                    Some(block.clone())
-                }
+                Some(
+                    meerkat_core::ProviderMeta::Anthropic { .. }
+                    | meerkat_core::ProviderMeta::AnthropicRedacted { .. }
+                    | meerkat_core::ProviderMeta::AnthropicCompaction { .. },
+                ) => Some(block.clone()),
                 _ => None,
             },
             AssistantBlock::ServerToolContent { content, .. }

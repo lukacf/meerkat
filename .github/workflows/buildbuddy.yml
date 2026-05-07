@@ -90,7 +90,7 @@ env:
   CARGO_HOME: /tmp/meerkat-cargo-home
   MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
   MEERKAT_BAZEL_BACKEND: ${{ inputs.backend || 'buildbuddy-hosted' }}
-  BUILDBUDDY_BAZEL_CONFIG: ${{ (inputs.backend || '') == 'gcp-local' && 'gcp-linux' || '' }}
+  BUILDBUDDY_BAZEL_CONFIG: ${{ (inputs.backend || '') == 'gcp-local' && 'gcp-linux' || (inputs.backend || '') == 'gcp-buildbuddy' && 'buildbuddy-linux-rbe' || '' }}
   BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
   BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

@@ -263,7 +263,7 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
             "You are guesser-a, the LEAD guesser. IMPORTANT RULES: \
              1) When you receive an image from the artist, DO NOT guess immediately. \
              2) First, call send_message twice: once to guesser-b and once to guesser-c, describing what you see (literal shapes/objects). \
-             3) WAIT for both guesser-b and guesser-c to reply with their interpretations. \
+             3) WAIT for both guesser-b and guesser-c to reply with their interpretations. They may reply from the artist image directly. \
              4) Only AFTER hearing from both, synthesize a consensus guess and send it to the artist. \
              The send_message tool sends to one peer per call; it does not broadcast. \
              Use handling_mode='steer' for all peer messages. Keep messages to 1-2 sentences.",
@@ -271,7 +271,7 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
         (
             "guesser-b",
             "You are guesser-b. IMPORTANT RULES: \
-             1) When you receive a message from guesser-a about an image, think about the EMOTIONAL/MOOD interpretation. \
+             1) When you receive either an artist image or a message from guesser-a about an image, think about the EMOTIONAL/MOOD interpretation. \
              2) Reply by calling send_message twice: once to guesser-a and once to guesser-c with your interpretation. \
              3) Do NOT send anything to the artist — only guesser-a does that. \
              The send_message tool sends to one peer per call; use handling_mode='steer'. Keep messages to 1-2 sentences.",
@@ -279,7 +279,7 @@ async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Er
         (
             "guesser-c",
             "You are guesser-c. IMPORTANT RULES: \
-             1) When you receive a message from guesser-a about an image, think about the CONTEXT/NARRATIVE interpretation. \
+             1) When you receive either an artist image or a message from guesser-a about an image, think about the CONTEXT/NARRATIVE interpretation. \
              2) Reply by calling send_message twice: once to guesser-a and once to guesser-b with your interpretation. \
              3) Do NOT send anything to the artist — only guesser-a does that. \
              The send_message tool sends to one peer per call; use handling_mode='steer'. Keep messages to 1-2 sentences.",
@@ -1088,7 +1088,9 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 text: format!(
                     "I drew this for Pictionary ({label}). \
                      guesser-a: describe what you see to guesser-b and guesser-c FIRST, \
-                     wait for their replies, THEN send me your consensus guess."
+                     wait for their replies, THEN send me your consensus guess. \
+                     guesser-b and guesser-c: reply to guesser-a with your assigned interpretation; \
+                     also copy the other non-lead guesser."
                 ),
             },
             ContentBlock::Image {
@@ -1101,7 +1103,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             &handle,
             service.as_ref(),
             artist_comms.as_ref(),
-            &["guesser-a"],
+            &["guesser-a", "guesser-b", "guesser-c"],
             label,
             &image_blocks,
             Duration::from_secs(90),

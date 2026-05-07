@@ -28,9 +28,12 @@ import type {
   PeerId,
   PeerResponseTerminalOptions,
   RunResult,
+  SessionForkResult,
   SessionHistory,
   SessionIngressOptions,
   SkillRef,
+  TranscriptEditOptions,
+  TranscriptReplacement,
   TurnOptions,
 } from "./types.js";
 import type { MeerkatClient } from "./client.js";
@@ -113,6 +116,21 @@ export class Session {
     options?: { offset?: number; limit?: number },
   ): Promise<SessionHistory> {
     return this._client.readSessionHistory(this._id, options);
+  }
+
+  async forkAt(
+    messageIndex: number,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    return this._client.forkSessionAt(this._id, messageIndex, options);
+  }
+
+  async forkReplace(
+    messageIndex: number,
+    replacement: TranscriptReplacement,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
   }
 
   async injectContext(
@@ -256,6 +274,21 @@ export class DeferredSession {
     options?: { offset?: number; limit?: number },
   ): Promise<SessionHistory> {
     return this._client.readSessionHistory(this._id, options);
+  }
+
+  async forkAt(
+    messageIndex: number,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    return this._client.forkSessionAt(this._id, messageIndex, options);
+  }
+
+  async forkReplace(
+    messageIndex: number,
+    replacement: TranscriptReplacement,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    return this._client.forkSessionReplace(this._id, messageIndex, replacement, options);
   }
 
   async injectContext(

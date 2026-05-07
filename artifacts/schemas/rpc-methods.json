@@ -29,6 +29,18 @@
       "result_type": "WireSessionHistory"
     },
     {
+      "description": "Fork an idle session at a transcript message index",
+      "name": "session/fork_at",
+      "params_type": "ForkSessionAtParams",
+      "result_type": "SessionForkResult"
+    },
+    {
+      "description": "Fork an idle session and apply a typed transcript replacement",
+      "name": "session/fork_replace",
+      "params_type": "ForkSessionReplaceParams",
+      "result_type": "SessionForkResult"
+    },
+    {
       "description": "Remove session",
       "name": "session/archive",
       "params_type": "ArchiveSessionParams",

@@ -83,6 +83,8 @@ subset.
 | `session/list` | Session | List active sessions |
 | `session/read` | Session | Get session state |
 | `session/history` | Session | Get committed session transcript messages |
+| `session/fork_at` | Session | Fork an idle session at a transcript message index |
+| `session/fork_replace` | Session | Fork an idle session and apply a typed transcript replacement |
 | `blob/get` | Session | Fetch a blob payload by id |
 | `artifact/list` | Artifact | List stable artifact records |
 | `artifact/get` | Artifact | Get one stable artifact record |
@@ -360,25 +362,6 @@ Create a new session and run the first turn. Set `initial_turn` to `"deferred"` 
 ```
 </CodeGroup>
 
-### session/history
-
-Read committed transcript history for an existing session.
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "session/history",
-  "params": {
-    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
-    "offset": 0,
-    "limit": 50
-  }
-}
-```
-
-Returns oldest-to-newest committed messages plus pagination metadata. This method follows the same owner-resolution rules as `session/read`, including mob-owned session IDs when mob support is enabled.
-
 Only `prompt` is required. All other fields are optional and fall back to config defaults. During execution, `session/event` notifications are emitted (see [Notifications](#notifications)).
 
 #### Parameter reference
@@ -468,6 +451,94 @@ Only `prompt` is required. All other fields are optional and fall back to config
 <ResponseField name="schema_warnings" type="array | null">
   Schema compatibility warnings.
 </ResponseField>
+
+### session/history
+
+Read committed transcript history for an existing session.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "session/history",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "offset": 0,
+    "limit": 50
+  }
+}
+```
+
+Returns oldest-to-newest committed messages plus pagination metadata. This method follows the same owner-resolution rules as `session/read`, including mob-owned session IDs when mob support is enabled.
+
+### session/fork_at
+
+Create a new idle session whose transcript is the source session prefix ending before `message_index`. The source session is not mutated.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "session/fork_at",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "message_index": 2,
+    "running_behavior": "reject"
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "result": {
+    "source_session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000009",
+    "message_count": 2
+  }
+}
+```
+
+`running_behavior` currently supports `"reject"`, which returns `SESSION_BUSY` if the source session has active work.
+
+### session/fork_replace
+
+Create a new idle session from the source prefix through `message_index`, replacing the addressed message or block with a typed replacement. Later source messages are intentionally omitted so callers continue from the edited branch instead of replaying stale descendants.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "session/fork_replace",
+  "params": {
+    "session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "message_index": 2,
+    "replacement": {
+      "type": "message",
+      "message": {
+        "role": "user",
+        "content": "Edited follow-up"
+      }
+    },
+    "running_behavior": "reject"
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "result": {
+    "source_session_id": "01936f8a-7b2c-7000-8000-000000000001",
+    "session_id": "01936f8a-7b2c-7000-8000-000000000010",
+    "message_count": 3
+  }
+}
+```
+
+Supported replacement variants are `message`, `user_content_block`, `assistant_block`, and `tool_result_content_block`. Edits always create a new session identity.
 
 ### session/list
 

@@ -1769,6 +1769,82 @@
     "title": "DeviceStartParams",
     "type": "object"
   },
+  "ForkSessionAtParams": {
+    "$defs": {
+      "TranscriptEditRunningBehavior": {
+        "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+        "oneOf": [
+          {
+            "const": "reject",
+            "description": "Reject the request while the source session is active.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/fork_at`.",
+    "properties": {
+      "message_index": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "running_behavior": {
+        "$ref": "#/$defs/TranscriptEditRunningBehavior",
+        "default": "reject"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "message_index"
+    ],
+    "title": "ForkSessionAtParams",
+    "type": "object"
+  },
+  "ForkSessionReplaceParams": {
+    "$defs": {
+      "TranscriptEditRunningBehavior": {
+        "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+        "oneOf": [
+          {
+            "const": "reject",
+            "description": "Reject the request while the source session is active.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Request payload for `session/fork_replace`.",
+    "properties": {
+      "message_index": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "replacement": true,
+      "running_behavior": {
+        "$ref": "#/$defs/TranscriptEditRunningBehavior",
+        "default": "reject"
+      },
+      "session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "session_id",
+      "message_index",
+      "replacement"
+    ],
+    "title": "ForkSessionReplaceParams",
+    "type": "object"
+  },
   "HelpRequest": {
     "$defs": {
       "HelpExecutionMode": {

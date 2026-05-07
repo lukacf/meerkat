@@ -31,9 +31,12 @@ from .types import (
     PeerCorrelationId,
     PeerId,
     RunResult,
+    SessionForkResult,
     SessionHistory,
     SkillKey,
     SkillRef,
+    TranscriptEditRunningBehavior,
+    TranscriptReplacement,
 )
 
 if TYPE_CHECKING:
@@ -274,6 +277,34 @@ class Session:
             limit=limit,
         )
 
+    async def fork_at(
+        self,
+        message_index: int,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork this idle session at a transcript message index."""
+        return await self._client.fork_session_at(  # noqa: SLF001
+            self._id,
+            message_index,
+            running_behavior=running_behavior,
+        )
+
+    async def fork_replace(
+        self,
+        message_index: int,
+        replacement: TranscriptReplacement,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork this idle session and apply a typed transcript replacement."""
+        return await self._client.fork_session_replace(  # noqa: SLF001
+            self._id,
+            message_index,
+            replacement,
+            running_behavior=running_behavior,
+        )
+
     async def subscribe_events(self) -> EventSubscription:
         """Open a standalone session-wide event subscription."""
         return await self._client.subscribe_session_events(self._id)  # noqa: SLF001
@@ -459,6 +490,34 @@ class DeferredSession:
             self._id,
             offset=offset,
             limit=limit,
+        )
+
+    async def fork_at(
+        self,
+        message_index: int,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork this idle session at a transcript message index."""
+        return await self._client.fork_session_at(  # noqa: SLF001
+            self._id,
+            message_index,
+            running_behavior=running_behavior,
+        )
+
+    async def fork_replace(
+        self,
+        message_index: int,
+        replacement: TranscriptReplacement,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork this idle session and apply a typed transcript replacement."""
+        return await self._client.fork_session_replace(  # noqa: SLF001
+            self._id,
+            message_index,
+            replacement,
+            running_behavior=running_behavior,
         )
 
     def __repr__(self) -> str:

@@ -111,6 +111,7 @@ import type {
   ScheduleToolsResult,
   SchemaWarning,
   SessionAssistantBlock,
+  SessionForkResult,
   SessionHistory,
   SessionIngressOptions,
   SessionInfo,
@@ -124,6 +125,8 @@ import type {
   SkillRuntimeDiagnostics,
   SpawnManySpec,
   SpawnSpec,
+  TranscriptEditOptions,
+  TranscriptReplacement,
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
@@ -728,6 +731,40 @@ export class MeerkatClient {
     }
     const raw = await this.request("session/history", params);
     return MeerkatClient.parseSessionHistory(raw);
+  }
+
+  async forkSessionAt(
+    sessionId: string,
+    messageIndex: number,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      message_index: messageIndex,
+    };
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/fork_at", params);
+    return MeerkatClient.parseSessionForkResult(raw);
+  }
+
+  async forkSessionReplace(
+    sessionId: string,
+    messageIndex: number,
+    replacement: TranscriptReplacement,
+    options?: TranscriptEditOptions,
+  ): Promise<SessionForkResult> {
+    const params: Record<string, unknown> = {
+      session_id: sessionId,
+      message_index: messageIndex,
+      replacement: MeerkatClient.serializeTranscriptReplacement(replacement),
+    };
+    if (options?.runningBehavior !== undefined) {
+      params.running_behavior = options.runningBehavior;
+    }
+    const raw = await this.request("session/fork_replace", params);
+    return MeerkatClient.parseSessionForkResult(raw);
   }
 
   // -- Capabilities -------------------------------------------------------
@@ -3019,6 +3056,49 @@ export class MeerkatClient {
       hasMore: Boolean(data.has_more ?? false),
       messages: rawMessages.map((message) => MeerkatClient.parseSessionMessage(message)),
     };
+  }
+
+  static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
+    return {
+      sourceSessionId: String(data.source_session_id ?? ""),
+      sessionId: String(data.session_id ?? ""),
+      sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
+      messageCount: Number(data.message_count ?? 0),
+    };
+  }
+
+  static serializeTranscriptReplacement(
+    replacement: TranscriptReplacement,
+  ): Record<string, unknown> {
+    switch (replacement.type) {
+      case "message":
+        return {
+          type: "message",
+          message: replacement.message,
+        };
+      case "user_content_block":
+        return {
+          type: "user_content_block",
+          block_index: replacement.blockIndex,
+          block: replacement.block,
+        };
+      case "assistant_block":
+        return {
+          type: "assistant_block",
+          block_index: replacement.blockIndex,
+          block: replacement.block,
+        };
+      case "tool_result_content_block":
+        return {
+          type: "tool_result_content_block",
+          result_index: replacement.resultIndex,
+          block_index: replacement.blockIndex,
+          block: replacement.block,
+        };
+    }
+    throw new Error(
+      `Unsupported transcript replacement type: ${(replacement as { type: string }).type}`,
+    );
   }
 
   static parseSessionMessage(data: Record<string, unknown>): SessionMessage {

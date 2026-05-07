@@ -237,6 +237,57 @@ export interface SessionHistory {
   readonly messages: readonly SessionMessage[];
 }
 
+/** Behavior for transcript edit requests when the source session has active work. */
+export type TranscriptEditRunningBehavior = "reject";
+
+/** Options shared by transcript fork/edit APIs. */
+export interface TranscriptEditOptions {
+  readonly runningBehavior?: TranscriptEditRunningBehavior;
+}
+
+/** Canonical message-shaped replacement payload for `session/fork_replace`. */
+export interface TranscriptMessageReplacement {
+  readonly type: "message";
+  readonly message: Record<string, unknown>;
+}
+
+/** Replace one content block in a user message. */
+export interface TranscriptUserContentBlockReplacement {
+  readonly type: "user_content_block";
+  readonly blockIndex: number;
+  readonly block: ContentBlock;
+}
+
+/** Replace one block in a block-assistant message. */
+export interface TranscriptAssistantBlockReplacement {
+  readonly type: "assistant_block";
+  readonly blockIndex: number;
+  readonly block: Record<string, unknown>;
+}
+
+/** Replace one content block inside one tool-result payload. */
+export interface TranscriptToolResultContentBlockReplacement {
+  readonly type: "tool_result_content_block";
+  readonly resultIndex: number;
+  readonly blockIndex: number;
+  readonly block: ContentBlock;
+}
+
+/** Typed transcript replacement used to create an edited session fork. */
+export type TranscriptReplacement =
+  | TranscriptMessageReplacement
+  | TranscriptUserContentBlockReplacement
+  | TranscriptAssistantBlockReplacement
+  | TranscriptToolResultContentBlockReplacement;
+
+/** Result of creating a forked transcript branch. */
+export interface SessionForkResult {
+  readonly sourceSessionId: string;
+  readonly sessionId: string;
+  readonly sessionRef?: string;
+  readonly messageCount: number;
+}
+
 /** Session listing filters for `session/list`. */
 export interface SessionListOptions {
   readonly labels?: Readonly<Record<string, string>>;

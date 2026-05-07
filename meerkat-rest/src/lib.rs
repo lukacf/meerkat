@@ -3511,6 +3511,39 @@ fn callback_pending_api_error(
     }
 }
 
+fn session_created_with_turn_failure_api_error(
+    message: String,
+    session_id: &SessionId,
+    realm: &meerkat_core::RealmId,
+    turn_error_code: Option<String>,
+    turn_error_details: Option<Value>,
+) -> ApiError {
+    let mut details = serde_json::Map::new();
+    details.insert("session_id".to_string(), json!(session_id.to_string()));
+    details.insert(
+        "session_ref".to_string(),
+        json!(format_session_ref(realm, session_id)),
+    );
+    details.insert("session_created".to_string(), json!(true));
+    details.insert("resumable".to_string(), json!(true));
+
+    if let Some(turn_error_code) = turn_error_code {
+        details.insert("turn_error_code".to_string(), json!(turn_error_code));
+    }
+    if let Some(turn_error_details) = turn_error_details {
+        if let Some(error) = turn_error_details.get("error") {
+            details.insert("error".to_string(), error.clone());
+        }
+        details.insert("turn_error_details".to_string(), turn_error_details);
+    }
+
+    ApiError::InternalWithData {
+        message,
+        code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
+        details: Value::Object(details),
+    }
+}
+
 fn completion_outcome_to_api_result(
     outcome: meerkat_runtime::completion::CompletionOutcome,
     session_id: &SessionId,
@@ -3529,16 +3562,35 @@ fn completion_outcome_to_api_result(
             Err(ApiError::RequestCancelled { details: None })
         }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
-            Err(ApiError::Internal(format!("turn abandoned: {reason}")))
+            let message = format!("turn abandoned: {reason}");
+            if session_created {
+                Err(session_created_with_turn_failure_api_error(
+                    message, session_id, realm, None, None,
+                ))
+            } else {
+                Err(ApiError::Internal(message))
+            }
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
-            Err(ApiError::InternalWithData {
-                message: format!("turn abandoned: {reason}"),
-                code: "TURN_ABANDONED".to_string(),
-                details: json!({
-                    "error": error,
-                }),
-            })
+            let message = format!("turn abandoned: {reason}");
+            let details = json!({
+                "error": error,
+            });
+            if session_created {
+                Err(session_created_with_turn_failure_api_error(
+                    message,
+                    session_id,
+                    realm,
+                    Some("TURN_ABANDONED".to_string()),
+                    Some(details),
+                ))
+            } else {
+                Err(ApiError::InternalWithData {
+                    message,
+                    code: "TURN_ABANDONED".to_string(),
+                    details,
+                })
+            }
         }
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
             result,
@@ -4299,16 +4351,13 @@ async fn create_session_inner(
                 ApiError::Internal(msg) => msg,
                 other => return RequestTerminal::Publish(Err(other)),
             };
-            RequestTerminal::Publish(Err(ApiError::InternalWithData {
+            RequestTerminal::Publish(Err(session_created_with_turn_failure_api_error(
                 message,
-                code: "SESSION_CREATED_WITH_TURN_FAILURE".to_string(),
-                details: json!({
-                    "session_id": session_id.to_string(),
-                    "session_ref": format_session_ref(&state.realm, &session_id),
-                    "session_created": true,
-                    "resumable": true,
-                }),
-            }))
+                &session_id,
+                &state.realm,
+                None,
+                None,
+            )))
         }
     }
 }
@@ -11031,6 +11080,9 @@ mod tests {
         assert_eq!(payload["details"]["resumable"], true);
         assert!(payload["details"]["session_id"].is_string());
         assert!(payload["details"]["session_ref"].is_string());
+        assert_eq!(payload["details"]["turn_error_code"], "TURN_ABANDONED");
+        assert_eq!(payload["details"]["error"]["kind"], "llm_failure");
+        assert_eq!(payload["details"]["error"]["terminal"], true);
     }
 
     #[test]
@@ -11209,6 +11261,47 @@ mod tests {
         .expect_err("cancelled completion should map to API cancellation");
 
         assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_preserves_created_session_abandoned_metadata() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                reason: "apply failed: Terminal failure: Failed (LlmFailure)".to_string(),
+                error: meerkat_core::TurnErrorMetadata::terminal(
+                    meerkat_core::TurnTerminalCauseKind::LlmFailure,
+                    meerkat_core::TurnTerminalOutcome::Failed,
+                    "LLM failure terminal turn",
+                ),
+            },
+            &session_id,
+            &realm,
+            true,
+        )
+        .expect_err("created-session abandoned turn should map to resumable session failure");
+
+        let ApiError::InternalWithData {
+            code,
+            details,
+            message,
+        } = err
+        else {
+            panic!("expected created-session turn failure");
+        };
+
+        assert_eq!(code, "SESSION_CREATED_WITH_TURN_FAILURE");
+        assert!(message.contains("turn abandoned: apply failed"));
+        assert_eq!(details["session_created"], true);
+        assert_eq!(details["resumable"], true);
+        assert_eq!(details["turn_error_code"], "TURN_ABANDONED");
+        assert_eq!(details["error"]["kind"], "llm_failure");
+        assert_eq!(details["error"]["terminal"], true);
+        assert_eq!(
+            details["turn_error_details"]["error"]["kind"],
+            "llm_failure"
+        );
     }
 
     #[test]

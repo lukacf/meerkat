@@ -1682,17 +1682,9 @@ impl MobProvisioner for SessionBackend {
                 "runtime-backed hard cancel requested for unregistered runtime session '{session_id}'"
             )));
         }
-        self.session_service
-            .interrupt(&session_id)
-            .await
-            .or_else(|err| match err {
-                SessionError::NotRunning { .. } => Ok(()),
-                err => Err(err),
-            })
-            .map_err(|error| {
-                MobError::Internal(format!("mob session hard cancel failed: {error}"))
-            })?;
-        Ok(())
+        Err(MobError::Internal(format!(
+            "mob session hard cancel for '{session_id}' requires MeerkatMachine runtime authority"
+        )))
     }
 
     async fn start_turn(

@@ -435,7 +435,7 @@ async fn recover_from_store() {
 }
 
 #[tokio::test]
-async fn recover_merges_canonical_and_legacy_session_alias_input_states() {
+async fn recover_ignores_legacy_session_alias_input_states() {
     let store = Arc::new(InMemoryRuntimeStore::new());
     let session_id = SessionId::new();
     let canonical_rid = LogicalRuntimeId::for_session(&session_id);
@@ -464,9 +464,12 @@ async fn recover_merges_canonical_and_legacy_session_alias_input_states() {
     let mut driver = PersistentRuntimeDriver::new(canonical_rid, store, memory_blob_store());
     let report = driver.recover().await.unwrap();
 
-    assert_eq!(report.inputs_recovered, 2);
+    assert_eq!(report.inputs_recovered, 1);
     assert!(driver.input_state(&canonical_input_id).is_some());
-    assert!(driver.input_state(&legacy_input_id).is_some());
+    assert!(
+        driver.input_state(&legacy_input_id).is_none(),
+        "legacy raw session alias input state must not drive recovery"
+    );
 }
 
 #[tokio::test]

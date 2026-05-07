@@ -1361,7 +1361,6 @@ pub(crate) fn machine_validate_run_cancelled(
 pub(crate) async fn machine_normalize_recovered_input_state(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
-    stored_runtime_id: &LogicalRuntimeId,
     mut bundle: StoredInputState,
 ) -> Result<StoredInputState, RuntimeDriverError> {
     let applied_boundary_committed = if matches!(
@@ -1373,16 +1372,12 @@ pub(crate) async fn machine_normalize_recovered_input_state(
                 bundle.seed.last_run_id.clone(),
                 bundle.seed.last_boundary_sequence,
             ) {
-                (Some(run_id), Some(sequence)) => load_boundary_receipt_for_storage_aliases(
-                    store,
-                    runtime_id,
-                    stored_runtime_id == runtime_id,
-                    &run_id,
-                    sequence,
-                )
-                .await
-                .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
-                .is_some(),
+                (Some(run_id), Some(sequence)) => {
+                    load_boundary_receipt_for_runtime(store, runtime_id, &run_id, sequence)
+                        .await
+                        .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
+                        .is_some()
+                }
                 _ => false,
             },
         )
@@ -1395,93 +1390,27 @@ pub(crate) async fn machine_normalize_recovered_input_state(
     Ok(bundle)
 }
 
-pub(super) async fn load_boundary_receipt_for_storage_aliases(
+pub(super) async fn load_boundary_receipt_for_runtime(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
-    canonical_miss_authoritative: bool,
     run_id: &RunId,
     sequence: u64,
 ) -> Result<Option<RunBoundaryReceipt>, crate::store::RuntimeStoreError> {
-    let mut primary_alias_loaded = false;
-    for (candidate_index, candidate) in runtime_id
-        .storage_alias_candidates()
-        .into_iter()
-        .enumerate()
-    {
-        match store
-            .load_boundary_receipt(&candidate, run_id, sequence)
-            .await
-        {
-            Ok(Some(receipt)) => return Ok(Some(receipt)),
-            Ok(None) => {
-                if candidate_index == 0 && canonical_miss_authoritative {
-                    return Ok(None);
-                }
-                if candidate_index == 0 {
-                    primary_alias_loaded = true;
-                }
-            }
-            Err(_err)
-                if candidate_index > 0 && primary_alias_loaded && canonical_miss_authoritative =>
-            {
-                continue;
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    Ok(None)
+    store
+        .load_boundary_receipt(runtime_id, run_id, sequence)
+        .await
 }
 
-async fn load_input_states_for_storage_aliases(
+async fn load_input_states_for_runtime(
     store: &dyn crate::store::RuntimeStore,
     runtime_id: &LogicalRuntimeId,
 ) -> Result<Vec<(LogicalRuntimeId, StoredInputState)>, crate::store::RuntimeStoreError> {
-    let mut merged: Vec<(usize, LogicalRuntimeId, StoredInputState)> = Vec::new();
-    let mut primary_alias_loaded = false;
-
-    for (candidate_index, candidate) in runtime_id
-        .storage_alias_candidates()
-        .into_iter()
-        .enumerate()
-    {
-        let states = match store.load_input_states(&candidate).await {
-            Ok(states) => {
-                if candidate_index == 0 {
-                    primary_alias_loaded = true;
-                }
-                states
-            }
-            Err(_err) if candidate_index > 0 && primary_alias_loaded => continue,
-            Err(err) => return Err(err),
-        };
-        for state in states {
-            let input_id = state.state.input_id.clone();
-            if let Some((existing_index, existing_runtime_id, existing_state)) = merged
-                .iter_mut()
-                .find(|(_, _, existing)| existing.state.input_id == input_id)
-            {
-                let candidate_updated_at = state.state.updated_at();
-                let existing_updated_at = existing_state.state.updated_at();
-                let should_replace = if candidate_index == *existing_index {
-                    candidate_updated_at > existing_updated_at
-                } else {
-                    candidate_index < *existing_index
-                };
-                if should_replace {
-                    *existing_index = candidate_index;
-                    *existing_runtime_id = candidate.clone();
-                    *existing_state = state;
-                }
-            } else {
-                merged.push((candidate_index, candidate.clone(), state));
-            }
-        }
-    }
-
-    Ok(merged
-        .into_iter()
-        .map(|(_, runtime_id, state)| (runtime_id, state))
-        .collect())
+    store.load_input_states(runtime_id).await.map(|states| {
+        states
+            .into_iter()
+            .map(|state| (runtime_id.clone(), state))
+            .collect()
+    })
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -1759,13 +1688,11 @@ pub(crate) async fn machine_recover_persistent_driver(
 ) -> Result<RecoveryReport, RuntimeDriverError> {
     let mut recovered_payloads = Vec::new();
 
-    for (stored_runtime_id, bundle) in load_input_states_for_storage_aliases(store, runtime_id)
+    for (_stored_runtime_id, bundle) in load_input_states_for_runtime(store, runtime_id)
         .await
         .map_err(|e| RuntimeDriverError::Internal(e.to_string()))?
     {
-        let bundle =
-            machine_normalize_recovered_input_state(store, runtime_id, &stored_runtime_id, bundle)
-                .await?;
+        let bundle = machine_normalize_recovered_input_state(store, runtime_id, bundle).await?;
 
         if bundle.state.durability == Some(crate::input::InputDurability::Ephemeral) {
             continue;
@@ -1824,27 +1751,10 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
     }
 
-    let mut recovered_runtime_state = None;
-    let mut primary_runtime_state_loaded = false;
-    for (candidate_index, candidate) in runtime_id
-        .storage_alias_candidates()
-        .into_iter()
-        .enumerate()
-    {
-        match store.load_runtime_state(&candidate).await {
-            Ok(state) => {
-                if candidate_index == 0 {
-                    primary_runtime_state_loaded = true;
-                }
-                recovered_runtime_state = state;
-            }
-            Err(_err) if candidate_index > 0 && primary_runtime_state_loaded => continue,
-            Err(err) => return Err(RuntimeDriverError::Internal(err.to_string())),
-        }
-        if recovered_runtime_state.is_some() {
-            break;
-        }
-    }
+    let recovered_runtime_state = store
+        .load_runtime_state(runtime_id)
+        .await
+        .map_err(|err| RuntimeDriverError::Internal(err.to_string()))?;
     if let Some(runtime_state) = recovered_runtime_state
         && matches!(
             runtime_state,

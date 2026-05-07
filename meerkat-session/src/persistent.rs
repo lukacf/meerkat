@@ -562,20 +562,6 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         LogicalRuntimeId::for_session(id)
     }
 
-    fn legacy_runtime_id_for_session(id: &SessionId) -> LogicalRuntimeId {
-        LogicalRuntimeId::legacy_session_uuid_alias(id)
-    }
-
-    fn runtime_id_candidates_for_session(id: &SessionId) -> Vec<LogicalRuntimeId> {
-        let canonical = Self::runtime_id_for_session(id);
-        let legacy = Self::legacy_runtime_id_for_session(id);
-        if canonical == legacy {
-            vec![canonical]
-        } else {
-            vec![canonical, legacy]
-        }
-    }
-
     #[cfg(test)]
     async fn runtime_input_updates(
         &self,
@@ -587,74 +573,22 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let Some(runtime_store) = self.runtime_store.as_ref() else {
             return Ok(Vec::new());
         };
-        let mut stored_states: Vec<(usize, StoredInputState)> = Vec::new();
-        let mut primary_alias_loaded = false;
-        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
-            .into_iter()
-            .enumerate()
-        {
-            let candidate_states = match runtime_store.load_input_states(&runtime_id).await {
-                Ok(states) => {
-                    if candidate_index == 0 {
-                        primary_alias_loaded = true;
-                    }
-                    states
-                }
-                Err(err)
-                    if candidate_index > 0
-                        && primary_alias_loaded
-                        && contributing_input_ids.iter().all(|input_id| {
-                            stored_states
-                                .iter()
-                                .any(|(_, state)| &state.state.input_id == input_id)
-                        }) =>
-                {
-                    tracing::warn!(
-                        session_id = %id,
-                        runtime_id = %runtime_id,
-                        error = %err,
-                        "ignoring legacy runtime input-state fallback error because canonical input states were already loaded"
-                    );
-                    continue;
-                }
-                Err(err) => {
-                    return Err(SessionError::Agent(
-                        meerkat_core::error::AgentError::InternalError(format!(
-                            "failed to load runtime input states: {err}"
-                        )),
-                    ));
-                }
-            };
-            for state in candidate_states {
-                let input_id = state.state.input_id.clone();
-                if let Some((existing_index, existing_state)) = stored_states
-                    .iter_mut()
-                    .find(|(_, existing)| existing.state.input_id == input_id)
-                {
-                    let candidate_updated_at = state.state.updated_at();
-                    let existing_updated_at = existing_state.state.updated_at();
-                    let should_replace = if candidate_index == *existing_index {
-                        candidate_updated_at > existing_updated_at
-                    } else {
-                        candidate_index < *existing_index
-                    };
-                    if should_replace {
-                        *existing_index = candidate_index;
-                        *existing_state = state;
-                    }
-                } else {
-                    stored_states.push((candidate_index, state));
-                }
-            }
-        }
+        let runtime_id = Self::runtime_id_for_session(id);
+        let stored_states = runtime_store
+            .load_input_states(&runtime_id)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to load runtime input states: {err}"
+                )))
+            })?;
 
         Ok(contributing_input_ids
             .iter()
             .filter_map(|input_id| {
                 let mut bundle = stored_states
                     .iter()
-                    .find(|(_, candidate)| &candidate.state.input_id == input_id)?
-                    .1
+                    .find(|candidate| &candidate.state.input_id == input_id)?
                     .clone();
                 // Stamp receipt metadata and mirror the Consumed terminal on
                 // the persisted snapshot. The authoritative DSL transition
@@ -795,70 +729,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         runtime_store: &Arc<dyn RuntimeStore>,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        let mut selected = None;
-        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
-            .into_iter()
-            .enumerate()
-        {
-            match Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await {
-                Ok(Some(session)) => {
-                    if candidate_index == 0 {
-                        return Ok(Some(session));
-                    }
-                    selected = Some(session);
-                }
-                Ok(None) => {}
-                Err(err) if candidate_index > 0 && selected.is_some() => {
-                    tracing::warn!(
-                        session_id = %id,
-                        runtime_id = %runtime_id,
-                        error = ?err,
-                        "ignoring legacy runtime session snapshot fallback error because canonical authority was already loaded"
-                    );
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(selected)
+        let runtime_id = Self::runtime_id_for_session(id);
+        Self::load_runtime_session_snapshot(runtime_store, &runtime_id).await
     }
 
     async fn load_runtime_state_for_session(
         runtime_store: &Arc<dyn RuntimeStore>,
         id: &SessionId,
     ) -> Result<Option<RuntimeState>, SessionError> {
-        let mut selected = None;
-        for (candidate_index, runtime_id) in Self::runtime_id_candidates_for_session(id)
-            .into_iter()
-            .enumerate()
-        {
-            let loaded = runtime_store
-                .load_runtime_state(&runtime_id)
-                .await
-                .map_err(|err| {
-                    SessionError::Agent(AgentError::InternalError(format!(
-                        "failed to load runtime state: {err}"
-                    )))
-                });
-            match loaded {
-                Ok(Some(state)) => {
-                    if candidate_index == 0 {
-                        return Ok(Some(state));
-                    }
-                    selected = Some(state);
-                }
-                Ok(None) => {}
-                Err(err) if candidate_index > 0 && selected.is_some() => {
-                    tracing::warn!(
-                        session_id = %id,
-                        runtime_id = %runtime_id,
-                        error = ?err,
-                        "ignoring legacy runtime state fallback error because canonical authority was already loaded"
-                    );
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        Ok(selected)
+        let runtime_id = Self::runtime_id_for_session(id);
+        runtime_store
+            .load_runtime_state(&runtime_id)
+            .await
+            .map_err(|err| {
+                SessionError::Agent(AgentError::InternalError(format!(
+                    "failed to load runtime state: {err}"
+                )))
+            })
     }
 
     fn store_only_control_mutation_error(id: &SessionId, operation: &str) -> SessionError {
@@ -9939,7 +9826,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_authoritative_load_accepts_legacy_session_uuid_runtime_alias() {
+    async fn test_runtime_backed_authoritative_load_ignores_legacy_session_uuid_runtime_alias() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -9978,18 +9865,15 @@ mod tests {
         let authoritative = service
             .load_authoritative_session(&id)
             .await
-            .expect("authoritative load should succeed")
-            .expect("legacy runtime alias should remain readable");
-        assert_eq!(
-            authoritative.messages().len(),
-            legacy_runtime_session.messages().len(),
-            "runtime-backed resume must preserve legacy raw alias snapshots"
+            .expect("authoritative load should succeed");
+        assert!(
+            authoritative.is_none(),
+            "legacy raw alias snapshots must not drive runtime-backed resume authority"
         );
     }
 
     #[tokio::test]
-    async fn test_runtime_backed_authoritative_load_keeps_canonical_over_newer_legacy_runtime_alias_snapshot()
-     {
+    async fn test_runtime_backed_authoritative_load_ignores_newer_legacy_runtime_alias_snapshot() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(InMemoryRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -10168,7 +10052,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_input_updates_require_legacy_alias_when_contributor_missing_from_canonical()
+    async fn test_runtime_input_updates_ignores_legacy_alias_when_contributor_missing_from_canonical()
      {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
@@ -10186,22 +10070,19 @@ mod tests {
             .fail_input_state_load_for(LogicalRuntimeId::legacy_session_uuid_alias(&id))
             .await;
 
-        let err = service
+        let updates = service
             .runtime_input_updates(&id, &RunId::new(), 0, std::slice::from_ref(&input_id))
             .await
-            .expect_err(
-                "missing canonical contributor must not be silently dropped when legacy is unreadable",
-            );
+            .expect("legacy input-state load failure must not poison canonical-only updates");
 
         assert!(
-            err.to_string()
-                .contains("synthetic legacy input-state load failure"),
-            "unexpected error: {err}"
+            updates.is_empty(),
+            "missing canonical contributor must not be recovered from the legacy alias"
         );
     }
 
     #[tokio::test]
-    async fn test_runtime_input_updates_prefer_canonical_duplicate_over_newer_stale_legacy_row() {
+    async fn test_runtime_input_updates_ignore_newer_stale_legacy_row() {
         let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
         let runtime_store = Arc::new(GatedSnapshotRuntimeStore::new());
         let service = PersistentSessionService::new(
@@ -10248,7 +10129,7 @@ mod tests {
         let updates = service
             .runtime_input_updates(&id, &RunId::new(), 3, std::slice::from_ref(&input_id))
             .await
-            .expect("runtime input updates should merge duplicate aliases");
+            .expect("runtime input updates should read canonical input state only");
 
         assert_eq!(updates.len(), 1);
         assert_eq!(

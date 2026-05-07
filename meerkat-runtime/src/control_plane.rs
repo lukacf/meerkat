@@ -93,6 +93,62 @@ pub(crate) async fn drain_ready_executor_effects(
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use meerkat_core::lifecycle::core_executor::{
+        CoreApplyOutput, CoreExecutor, CoreExecutorError,
+    };
+    use meerkat_core::lifecycle::{RunId, run_primitive::RunPrimitive};
+
+    pub(crate) struct StopFailingExecutor {
+        stop_calls: Arc<AtomicUsize>,
+        apply_calls: Arc<AtomicUsize>,
+    }
+
+    impl StopFailingExecutor {
+        pub(crate) fn new(stop_calls: Arc<AtomicUsize>, apply_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                stop_calls,
+                apply_calls,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for StopFailingExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            self.apply_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::apply_failed_runtime_turn(
+                "stop failure regression must not apply queued work",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            Err(CoreExecutorError::control_failed_runtime(
+                "synthetic stop effect failure",
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::driver::ephemeral::EphemeralRuntimeDriver;

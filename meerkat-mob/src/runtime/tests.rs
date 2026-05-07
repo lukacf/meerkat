@@ -18492,7 +18492,7 @@ async fn test_interrupt_member_without_adapter_rejects_unsupported_boundary_canc
 
 #[cfg(feature = "runtime-adapter")]
 #[tokio::test]
-async fn test_explicit_hard_cancel_member_without_adapter_still_uses_hard_interrupt() {
+async fn test_explicit_hard_cancel_member_without_adapter_is_rejected() {
     let service = Arc::new(MockSessionService::new());
     let session = service
         .create_session(CreateSessionRequest {
@@ -18518,15 +18518,19 @@ async fn test_explicit_hard_cancel_member_without_adapter_still_uses_hard_interr
     let baseline_boundary = service.cancel_after_boundary_call_count();
     let baseline_interrupts = service.interrupt_call_count();
 
-    provisioner
+    let error = provisioner
         .hard_cancel_member(&member_ref, "explicit no-adapter force cancel")
         .await
-        .expect("no-adapter hard_cancel_member should remain explicit hard cancel");
+        .expect_err("no-adapter hard_cancel_member must not bypass runtime authority");
 
+    assert!(
+        matches!(error, MobError::Internal(ref message) if message.contains("requires MeerkatMachine runtime authority")),
+        "no-adapter hard cancel should fail closed on missing runtime authority, got {error:?}"
+    );
     assert_eq!(
         service.interrupt_call_count(),
-        baseline_interrupts + 1,
-        "explicit no-adapter force cancel should use hard session interrupt"
+        baseline_interrupts,
+        "explicit no-adapter force cancel must not use hard session interrupt"
     );
     assert_eq!(
         service.cancel_after_boundary_call_count(),

@@ -871,10 +871,9 @@ impl MeerkatMachine {
             } => {
                 let _session_id = self.resolve_session_id(&runtime_id).await?;
                 let receipt = match &self.store {
-                    Some(store) => super::driver::load_boundary_receipt_for_storage_aliases(
+                    Some(store) => super::driver::load_boundary_receipt_for_runtime(
                         store.as_ref(),
                         &runtime_id,
-                        false,
                         &run_id,
                         sequence,
                     )

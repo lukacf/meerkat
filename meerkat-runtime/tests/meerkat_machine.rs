@@ -904,7 +904,7 @@ async fn cold_reregister_prefers_canonical_runtime_state_over_stale_legacy_alias
 }
 
 #[tokio::test]
-async fn control_plane_receipt_lookup_uses_canonical_runtime_id_with_legacy_storage_fallback() {
+async fn control_plane_receipt_lookup_ignores_legacy_storage_alias() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();
     let canonical_runtime_id = LogicalRuntimeId::for_session(&sid);
@@ -943,10 +943,9 @@ async fn control_plane_receipt_lookup_uses_canonical_runtime_id_with_legacy_stor
     )
     .await
     .expect("canonical runtime id should be accepted");
-    assert_eq!(
-        loaded.map(|loaded| loaded.run_id),
-        Some(run_id.clone()),
-        "canonical control-plane lookup should read legacy receipt storage"
+    assert!(
+        loaded.is_none(),
+        "canonical control-plane lookup must not read legacy receipt storage"
     );
 
     let raw_alias_err = meerkat_runtime::traits::RuntimeControlPlane::load_boundary_receipt(

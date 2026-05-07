@@ -48,23 +48,6 @@ impl LogicalRuntimeId {
     pub fn legacy_session_uuid_alias(session_id: &SessionId) -> Self {
         Self(session_id.to_string())
     }
-
-    pub fn legacy_session_uuid_storage_alias(&self) -> Option<Self> {
-        self.0
-            .strip_prefix(Self::SESSION_RUNTIME_PREFIX)
-            .map(Self::new)
-    }
-
-    pub fn storage_alias_candidates(&self) -> Vec<Self> {
-        let Some(legacy) = self.legacy_session_uuid_storage_alias() else {
-            return vec![self.clone()];
-        };
-        if legacy == *self {
-            vec![self.clone()]
-        } else {
-            vec![self.clone(), legacy]
-        }
-    }
 }
 
 impl std::fmt::Display for LogicalRuntimeId {

@@ -1132,52 +1132,15 @@ mod tests {
         )
     }
 
-    struct StopFailingExecutor {
-        stop_calls: Arc<AtomicUsize>,
-        apply_calls: Arc<AtomicUsize>,
-    }
-
-    #[async_trait::async_trait]
-    impl meerkat_core::lifecycle::core_executor::CoreExecutor for StopFailingExecutor {
-        async fn apply(
-            &mut self,
-            _run_id: RunId,
-            _primitive: RunPrimitive,
-        ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, CoreExecutorError>
-        {
-            self.apply_calls.fetch_add(1, Ordering::SeqCst);
-            Err(CoreExecutorError::apply_failed_runtime_turn(
-                "stop failure regression must not apply queued work",
-            ))
-        }
-
-        async fn cancel_after_boundary(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            Ok(())
-        }
-
-        async fn stop_runtime_executor(
-            &mut self,
-            _reason: String,
-        ) -> Result<(), CoreExecutorError> {
-            self.stop_calls.fetch_add(1, Ordering::SeqCst);
-            Err(CoreExecutorError::control_failed_runtime(
-                "synthetic stop effect failure",
-            ))
-        }
-    }
-
     #[tokio::test]
     async fn runtime_loop_stop_effect_failure_is_fail_closed_from_helper() {
         let driver = make_shared_ephemeral_driver("stop-helper-fail-closed");
         let stop_calls = Arc::new(AtomicUsize::new(0));
         let apply_calls = Arc::new(AtomicUsize::new(0));
-        let mut executor = StopFailingExecutor {
-            stop_calls: Arc::clone(&stop_calls),
-            apply_calls: Arc::clone(&apply_calls),
-        };
+        let mut executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
 
         let should_stop = stop_runtime_loop_executor_from_dsl_effect(
             &driver,
@@ -1204,10 +1167,10 @@ mod tests {
         let driver = make_shared_ephemeral_driver("drain-effect-fail-closed");
         let stop_calls = Arc::new(AtomicUsize::new(0));
         let apply_calls = Arc::new(AtomicUsize::new(0));
-        let mut executor = StopFailingExecutor {
-            stop_calls: Arc::clone(&stop_calls),
-            apply_calls: Arc::clone(&apply_calls),
-        };
+        let mut executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
         let (effect_tx, mut effect_rx) = tokio::sync::mpsc::channel(1);
         effect_tx
             .send(stop_runtime_executor_effect("drain failure should stop"))
@@ -1233,10 +1196,10 @@ mod tests {
         let driver = make_shared_ephemeral_driver("direct-effect-fail-closed");
         let stop_calls = Arc::new(AtomicUsize::new(0));
         let apply_calls = Arc::new(AtomicUsize::new(0));
-        let executor = StopFailingExecutor {
-            stop_calls: Arc::clone(&stop_calls),
-            apply_calls: Arc::clone(&apply_calls),
-        };
+        let executor = crate::control_plane::test_support::StopFailingExecutor::new(
+            Arc::clone(&stop_calls),
+            Arc::clone(&apply_calls),
+        );
         let (wake_tx, wake_rx) = tokio::sync::mpsc::channel(1);
         let (effect_tx, effect_rx) = tokio::sync::mpsc::channel(1);
         let handle = spawn_runtime_loop_with_completions(

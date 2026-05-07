@@ -42,8 +42,8 @@ use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
     SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, StartTurnRuntimeSemantics,
-    SessionSummary, SessionView,
+    SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    StartTurnRuntimeSemantics,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};

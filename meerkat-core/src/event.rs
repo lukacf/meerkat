@@ -871,6 +871,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::TextDelta { .. } => "text_delta",
         AgentEvent::TextComplete { .. } => "text_complete",
         AgentEvent::ServerToolContent { .. } => "server_tool_content",
+        AgentEvent::AssistantImageAppended { .. } => "assistant_image_appended",
         AgentEvent::ToolCallRequested { .. } => "tool_call_requested",
         AgentEvent::ToolResultReceived { .. } => "tool_result_received",
         AgentEvent::TurnCompleted { .. } => "turn_completed",
@@ -890,6 +891,45 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
+    }
+}
+
+/// Typed public event payload for a canonical assistant image block appended to history.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantImageEvent {
+    pub image_id: crate::AssistantImageId,
+    pub blob_ref: crate::BlobRef,
+    pub media_type: crate::MediaType,
+    pub width: u32,
+    pub height: u32,
+    pub revised_prompt: crate::RevisedPromptDisposition,
+    pub meta: crate::ProviderImageMetadata,
+}
+
+impl AssistantImageEvent {
+    #[must_use]
+    pub fn from_assistant_block(block: &crate::types::AssistantBlock) -> Option<Self> {
+        match block {
+            crate::types::AssistantBlock::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
+            } => Some(Self {
+                image_id: *image_id,
+                blob_ref: blob_ref.clone(),
+                media_type: media_type.clone(),
+                width: *width,
+                height: *height,
+                revised_prompt: revised_prompt.clone(),
+                meta: meta.clone(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -1400,6 +1440,9 @@ pub enum AgentEvent {
         name: String,
         content: Value,
     },
+
+    /// Canonical assistant image block appended to transcript history.
+    AssistantImageAppended { image: AssistantImageEvent },
 
     /// Model requested a tool call
     ToolCallRequested {
@@ -2837,6 +2880,20 @@ mod tests {
             AgentEvent::TextComplete {
                 content: "done".to_string(),
             },
+            AgentEvent::AssistantImageAppended {
+                image: AssistantImageEvent {
+                    image_id: crate::AssistantImageId::new(uuid::Uuid::new_v4()),
+                    blob_ref: crate::BlobRef {
+                        blob_id: crate::BlobId::new("image-1"),
+                        media_type: "image/png".to_string(),
+                    },
+                    media_type: crate::MediaType::new("image/png"),
+                    width: 1024,
+                    height: 1024,
+                    revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                    meta: crate::ProviderImageMetadata::NotEmitted,
+                },
+            },
             AgentEvent::ToolCallRequested {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
@@ -2959,6 +3016,39 @@ mod tests {
             expected_event_count,
             "expected one distinct discriminator per covered event variant"
         );
+    }
+
+    #[test]
+    fn assistant_image_appended_event_serializes_typed_image_fact() {
+        let event = AgentEvent::AssistantImageAppended {
+            image: AssistantImageEvent {
+                image_id: crate::AssistantImageId::new(uuid::Uuid::from_u128(42)),
+                blob_ref: crate::BlobRef {
+                    blob_id: crate::BlobId::new("generated-image"),
+                    media_type: "image/png".to_string(),
+                },
+                media_type: crate::MediaType::new("image/png"),
+                width: 1024,
+                height: 1024,
+                revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                meta: crate::ProviderImageMetadata::NotEmitted,
+            },
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "assistant_image_appended");
+        assert_eq!(json["image"]["blob_ref"]["blob_id"], "generated-image");
+        assert_eq!(json["image"]["media_type"], "image/png");
+
+        let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
+        match roundtrip {
+            AgentEvent::AssistantImageAppended { image } => {
+                assert_eq!(image.blob_ref.blob_id.as_str(), "generated-image");
+                assert_eq!(image.width, 1024);
+                assert_eq!(image.height, 1024);
+            }
+            other => panic!("expected assistant image event, got {other:?}"),
+        }
     }
 
     #[test]

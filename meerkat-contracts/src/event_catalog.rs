@@ -18,6 +18,7 @@ pub const KNOWN_AGENT_EVENT_TYPES: &[&str] = &[
     "reasoning_complete",
     "text_delta",
     "text_complete",
+    "assistant_image_appended",
     "tool_call_requested",
     "tool_result_received",
     "turn_completed",

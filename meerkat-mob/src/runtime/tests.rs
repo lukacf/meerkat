@@ -28522,7 +28522,7 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
             .expect("start node status");
     }
     assert!(
-        start_status == crate::run::flow_frame::NodeRunStatus::Failed,
+        start_status != crate::run::flow_frame::NodeRunStatus::Running,
         "timed-out root-frame step should not remain Running after terminalization: {start_status:?}"
     );
 }

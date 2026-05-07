@@ -5884,7 +5884,7 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
         // prove the wrong thing. The flagship interruption witness needs one
         // long assistant response from one committed user turn.
         let token_explain_pcm =
-            openai_tts_pcm("Repeat the codeword and token over and over until I say stop.").await?;
+            openai_tts_pcm("Keep saying the codeword and token nonstop in a loop forever do not stop talking until I interrupt you.").await?;
         // Keep the barge-in utterance as short as possible so the provider can
         // still commit it while the deterministic looping reply is actively
         // speaking. A longer stop phrase makes the smoke race-y for the wrong
@@ -6308,13 +6308,13 @@ turn3_capture={turn3_capture:?}; error={err}"
                 &turn45_primary_commit,
                 &stop_pcm,
                 120,
-                |_capture| {
-                    // Start barge-in immediately after the turn 4 commit.
-                    // Provider audio is delivered faster than realtime, so
-                    // waiting for output chunks narrows the overlap window
-                    // to the point where the model can finish before the
-                    // barge-in audio lands.
-                    true
+                |capture| {
+                    // Wait for multiple audio chunks to confirm the model
+                    // is actively streaming a response. Starting too early
+                    // (before output begins) means our barge-in arrives
+                    // after the model's short response finishes, turning
+                    // it into a new turn instead of an interruption.
+                    capture_event_count(capture, "output_audio_chunk") >= 2
                 },
             )
             .await {

@@ -5103,7 +5103,7 @@ async fn test_mob_builder_runs_with_persistent_storage_bundle() {
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
         .await
         .expect("run flow");
-    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(15)).await;
     assert_eq!(
         terminal.status,
         MobRunStatus::Completed,

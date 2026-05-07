@@ -255,9 +255,6 @@ jobs:
           - bb_command: release-build-macos-x86
             target: x86_64-apple-darwin
             archive_ext: tar.gz
-          - bb_command: release-build-windows-x86
-            target: x86_64-pc-windows-msvc
-            archive_ext: zip
 
     steps:
       - name: Checkout
@@ -329,6 +326,76 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build_binaries_windows_hosted:
+    name: Build and package Windows surface binaries
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.publish_release_assets_only == 'true' &&
+      github.event.inputs.release_binary_backend == 'buildbuddy'
+    needs: [release_validate]
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add release target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-x86_64-pc-windows-msvc
+
+      - name: Build surface binaries
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: target
+        run: |
+          set -euo pipefail
+          PACKAGES=("rkat" "meerkat-rpc" "meerkat-rest" "meerkat-mcp-server")
+          for pkg in "${PACKAGES[@]}"; do
+            cargo build -p "$pkg" --release --target x86_64-pc-windows-msvc
+          done
+          cargo build -p rkat --bin rkat-mini --release --target x86_64-pc-windows-msvc --no-default-features --features anthropic,openai,gemini,jsonl-store,session-store,skills
+          cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target x86_64-pc-windows-msvc --no-default-features --features mini-surface
+
+      - name: Package artifacts
+        shell: bash
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          BINARIES=("rkat" "rkat-mini" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
+          mkdir -p dist
+          VERSION="${VERSION#v}"
+          VERSION="${VERSION//\//-}"
+
+          for bin in "${BINARIES[@]}"; do
+            src="target/x86_64-pc-windows-msvc/release/${bin}.exe"
+            artifact_name="${bin}-${VERSION}-x86_64-pc-windows-msvc.zip"
+            if [[ ! -f "$src" ]]; then
+              echo "Missing expected binary at $src" >&2
+              exit 1
+            fi
+            7z a -tzip "${GITHUB_WORKSPACE}/dist/${artifact_name}" "$(cygpath -w "$src")"
+            echo "packaged=${bin} -> dist/${artifact_name}"
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meerkat-x86_64-pc-windows-msvc-windows-hosted
+          path: dist/*
+          if-no-files-found: error
+
   publish_github_release:
     name: Publish GitHub release assets
     if: >-
@@ -338,8 +405,9 @@ jobs:
         github.event.inputs.publish_release_assets_only == 'true')) &&
       needs.release_validate.result == 'success' &&
       (needs.build_binaries.result == 'success' ||
-       needs.build_binaries_buildbuddy.result == 'success')
-    needs: [release_validate, build_binaries, build_binaries_buildbuddy]
+       (needs.build_binaries_buildbuddy.result == 'success' &&
+        needs.build_binaries_windows_hosted.result == 'success'))
+    needs: [release_validate, build_binaries, build_binaries_buildbuddy, build_binaries_windows_hosted]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

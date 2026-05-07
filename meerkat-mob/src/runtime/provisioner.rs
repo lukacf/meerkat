@@ -48,195 +48,14 @@ type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat
 
 #[cfg(feature = "runtime-adapter")]
 struct DeferredTurnEventDelivery {
-    release_tx: oneshot::Sender<DeferredTurnCompletion>,
-}
-
-#[cfg(feature = "runtime-adapter")]
-#[derive(Debug)]
-enum DeferredTurnCompletion {
-    Completed(Box<meerkat_core::types::RunResult>),
-    CompletedWithoutResult,
-    Failed {
-        class: meerkat_core::event::AgentErrorClass,
-        error: String,
-        terminal_cause_kind: Option<meerkat_core::TurnTerminalCauseKind>,
-        error_report: Option<meerkat_core::event::AgentErrorReport>,
-    },
-}
-
-#[cfg(feature = "runtime-adapter")]
-impl DeferredTurnCompletion {
-    fn typed_failed(
-        message: String,
-        error: &meerkat_core::TurnErrorMetadata,
-    ) -> DeferredTurnCompletion {
-        let class = error.kind.agent_error_class();
-        DeferredTurnCompletion::Failed {
-            class,
-            error: message.clone(),
-            terminal_cause_kind: Some(error.kind),
-            error_report: Some(meerkat_core::event::AgentErrorReport {
-                class,
-                reason: Some(meerkat_core::event::AgentErrorReason::TurnTerminalCause {
-                    outcome: error
-                        .outcome
-                        .unwrap_or(meerkat_core::TurnTerminalOutcome::Failed),
-                    cause_kind: error.kind,
-                }),
-                message,
-            }),
-        }
-    }
-
-    fn from_runtime_completion(
-        completion: &meerkat_runtime::completion::CompletionOutcome,
-    ) -> Self {
-        match completion {
-            meerkat_runtime::completion::CompletionOutcome::Completed(result) => {
-                Self::Completed(Box::new(result.as_ref().clone()))
-            }
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
-                Self::CompletedWithoutResult
-            }
-            meerkat_runtime::completion::CompletionOutcome::CallbackPending { tool_name, args } => {
-                Self::Failed {
-                    class: meerkat_core::event::AgentErrorClass::CallbackPending,
-                    error: format!("callback pending for tool '{tool_name}': {args}"),
-                    terminal_cause_kind: None,
-                    error_report: None,
-                }
-            }
-            meerkat_runtime::completion::CompletionOutcome::Cancelled => Self::Failed {
-                class: meerkat_core::event::AgentErrorClass::Cancelled,
-                error: "turn cancelled".to_string(),
-                terminal_cause_kind: None,
-                error_report: None,
-            },
-            meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => Self::Failed {
-                class: meerkat_core::event::AgentErrorClass::Internal,
-                error: format!("turn abandoned: {reason}"),
-                terminal_cause_kind: None,
-                error_report: None,
-            },
-            meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
-                reason,
-                error,
-            } => Self::typed_failed(
-                format!(
-                    "turn abandoned: {reason}; error={}",
-                    serde_json::to_string(error).unwrap_or_else(|_| "<unserializable>".to_string())
-                ),
-                error,
-            ),
-            meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
-                result,
-                error,
-            } => Self::typed_failed(
-                format!(
-                    "turn finalization failed after output: {}; structured_output={}",
-                    error
-                        .detail
-                        .as_deref()
-                        .unwrap_or("turn finalization failed"),
-                    result
-                        .structured_output
-                        .as_ref()
-                        .map(serde_json::Value::to_string)
-                        .unwrap_or_else(|| "null".to_string())
-                ),
-                error,
-            ),
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-                Self::Failed {
-                    class: meerkat_core::event::AgentErrorClass::Terminal,
-                    error: format!("runtime terminated: {reason}"),
-                    terminal_cause_kind: None,
-                    error_report: None,
-                }
-            }
-        }
-    }
-
-    fn release_dropped() -> Self {
-        Self::Failed {
-            class: meerkat_core::event::AgentErrorClass::Internal,
-            error: "runtime completion release dropped before terminal event delivery".to_string(),
-            terminal_cause_kind: None,
-            error_report: None,
-        }
-    }
-
-    fn synthetic_event(
-        self,
-        session_id: SessionId,
-    ) -> meerkat_core::EventEnvelope<meerkat_core::AgentEvent> {
-        let payload = match self {
-            Self::Completed(result) => {
-                let result = *result;
-                meerkat_core::AgentEvent::RunCompleted {
-                    session_id: session_id.clone(),
-                    result: result.text,
-                    structured_output: result.structured_output,
-                    usage: result.usage,
-                    terminal_cause_kind: result.terminal_cause_kind,
-                    extraction_required: false,
-                }
-            }
-            Self::CompletedWithoutResult => meerkat_core::AgentEvent::RunCompleted {
-                session_id: session_id.clone(),
-                result: String::new(),
-                structured_output: None,
-                usage: Default::default(),
-                terminal_cause_kind: None,
-                extraction_required: false,
-            },
-            Self::Failed {
-                class,
-                error,
-                terminal_cause_kind,
-                error_report,
-            } => meerkat_core::AgentEvent::RunFailed {
-                session_id: session_id.clone(),
-                error_class: class,
-                error,
-                terminal_cause_kind,
-                error_report,
-            },
-        };
-        meerkat_core::EventEnvelope::new_session(session_id, 1, None, payload)
-    }
+    release_tx: oneshot::Sender<()>,
 }
 
 #[cfg(feature = "runtime-adapter")]
 impl DeferredTurnEventDelivery {
-    fn release(self, completion: &meerkat_runtime::completion::CompletionOutcome) {
-        let _ = self
-            .release_tx
-            .send(DeferredTurnCompletion::from_runtime_completion(completion));
+    fn release(self) {
+        let _ = self.release_tx.send(());
     }
-
-    fn release_completed_without_result(self) {
-        let _ = self
-            .release_tx
-            .send(DeferredTurnCompletion::CompletedWithoutResult);
-    }
-
-    fn release_failed(self, error: String) {
-        let _ = self.release_tx.send(DeferredTurnCompletion::Failed {
-            class: meerkat_core::event::AgentErrorClass::Internal,
-            error,
-            terminal_cause_kind: None,
-            error_report: None,
-        });
-    }
-}
-
-#[cfg(feature = "runtime-adapter")]
-fn event_is_terminal(event: &meerkat_core::EventEnvelope<meerkat_core::AgentEvent>) -> bool {
-    matches!(
-        event.payload,
-        meerkat_core::AgentEvent::RunCompleted { .. } | meerkat_core::AgentEvent::RunFailed { .. }
-    )
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -255,7 +74,7 @@ fn defer_turn_events_until_machine_completion(
         let mut release_rx = Box::pin(release_rx);
         let mut buffered = Vec::new();
         let mut stream_closed = false;
-        let mut completion = None;
+        let mut released = false;
 
         loop {
             tokio::select! {
@@ -265,27 +84,27 @@ fn defer_turn_events_until_machine_completion(
                         None => stream_closed = true,
                     }
                 }
-                released = &mut release_rx, if completion.is_none() => {
-                    completion = Some(released.unwrap_or_else(|_| DeferredTurnCompletion::release_dropped()));
+                result = &mut release_rx, if !released => {
+                    released = true;
+                    drop(result);
                 }
             }
 
-            if stream_closed && completion.is_some() {
+            if stream_closed && released {
                 break;
             }
         }
 
-        let mut terminal_forwarded = false;
         for event in buffered {
-            terminal_forwarded |= event_is_terminal(&event);
             if event_tx.send(event).await.is_err() {
                 return;
             }
         }
-
-        if !terminal_forwarded && let Some(completion) = completion {
-            let _ = event_tx.send(completion.synthetic_event(session_id)).await;
-        }
+        // No synthetic terminal event. The mob actor receives the
+        // authoritative terminal signal from CompletionOutcome via
+        // runtime_completion_to_mob_result(). Shell code must not
+        // fabricate EventEnvelopes with invented sequence numbers
+        // (dogma §3: shell owns mechanics, not meaning).
     });
 
     (
@@ -589,7 +408,7 @@ impl SessionBackend {
                 }
                 let error = err.to_string();
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release_failed(error.clone());
+                    delivery.release();
                 }
                 return Err(MobError::Internal(error));
             }
@@ -627,7 +446,7 @@ impl SessionBackend {
                 let _ = state.discard_turn_context(&context_input_id).await;
             }
             if let Some(delivery) = deferred_delivery {
-                delivery.release_completed_without_result();
+                delivery.release();
             }
             return Ok(());
         };
@@ -639,7 +458,7 @@ impl SessionBackend {
             let _ = state.discard_turn_context(&context_input_id).await;
         }
         if let Some(delivery) = deferred_delivery {
-            delivery.release(&completion);
+            delivery.release();
         }
 
         runtime_completion_to_mob_result(session_id, completion)
@@ -684,7 +503,7 @@ impl SessionBackend {
                 }
                 let error = err.to_string();
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release_failed(error.clone());
+                    delivery.release();
                 }
                 return Err(MobError::Internal(error));
             }
@@ -719,7 +538,7 @@ impl SessionBackend {
                 let _ = state.discard_turn_context(&context_input_id).await;
             }
             if let Some(delivery) = deferred_delivery {
-                delivery.release_completed_without_result();
+                delivery.release();
             }
             return Ok(());
         };
@@ -728,16 +547,16 @@ impl SessionBackend {
             && queued_context
         {
             tokio::spawn(async move {
-                let completion = handle.wait().await;
+                let _completion = handle.wait().await;
                 let _ = state.discard_turn_context(&context_input_id).await;
                 if let Some(delivery) = deferred_delivery {
-                    delivery.release(&completion);
+                    delivery.release();
                 }
             });
         } else if let Some(delivery) = deferred_delivery {
             tokio::spawn(async move {
-                let completion = handle.wait().await;
-                delivery.release(&completion);
+                let _completion = handle.wait().await;
+                delivery.release();
             });
         }
 
@@ -889,9 +708,8 @@ impl RuntimeSessionState {
 #[allow(clippy::items_after_test_module)]
 mod tests {
     use super::{
-        DeferredTurnCompletion, MultiBackendProvisioner,
-        defer_turn_events_until_machine_completion, runtime_completion_to_mob_result,
-        session_turn_error_to_mob_error,
+        MultiBackendProvisioner, defer_turn_events_until_machine_completion,
+        runtime_completion_to_mob_result, session_turn_error_to_mob_error,
     };
     use crate::error::MobError;
     use meerkat_core::service::SessionError;
@@ -958,7 +776,7 @@ mod tests {
             defer_turn_events_until_machine_completion(&session_id, Some(event_tx));
 
         let deferred_delivery = deferred_delivery.expect("deferred delivery handle");
-        deferred_delivery.release_failed("runtime admission rejected".to_string());
+        deferred_delivery.release();
         drop(queued_event_tx);
 
         let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
@@ -978,49 +796,6 @@ mod tests {
                 assert_eq!(error, "runtime admission rejected");
             }
             other => panic!("expected synthetic admission failure, got {other:?}"),
-        }
-    }
-
-    #[cfg(feature = "runtime-adapter")]
-    #[test]
-    fn deferred_turn_completion_preserves_typed_terminal_metadata() {
-        let session_id = SessionId::new();
-        let metadata =
-            meerkat_core::TurnErrorMetadata::runtime_apply_failure("durable commit rejected");
-        let completion = meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
-            reason: "apply failed: durable commit".to_string(),
-            error: metadata,
-        };
-
-        let event = DeferredTurnCompletion::from_runtime_completion(&completion)
-            .synthetic_event(session_id.clone());
-
-        match event.payload {
-            meerkat_core::AgentEvent::RunFailed {
-                session_id: actual_session_id,
-                error_class,
-                terminal_cause_kind,
-                error_report,
-                error,
-            } => {
-                assert_eq!(actual_session_id, session_id);
-                assert_eq!(error_class, meerkat_core::event::AgentErrorClass::Internal);
-                assert_eq!(
-                    terminal_cause_kind,
-                    Some(meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure)
-                );
-                assert!(error.contains("durable commit rejected"));
-                let report = error_report.expect("typed failure should carry error report");
-                assert_eq!(report.class, meerkat_core::event::AgentErrorClass::Internal);
-                assert_eq!(
-                    report.reason,
-                    Some(meerkat_core::event::AgentErrorReason::TurnTerminalCause {
-                        outcome: meerkat_core::TurnTerminalOutcome::Failed,
-                        cause_kind: meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
-                    })
-                );
-            }
-            other => panic!("expected synthetic typed failure, got {other:?}"),
         }
     }
 

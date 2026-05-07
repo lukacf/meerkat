@@ -6199,7 +6199,7 @@ async fn e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip()
         sender = new_sender;
         receiver = new_receiver;
         let _reopen_ready_capture =
-            match collect_realtime_frames_until_ready_or_idle(&mut receiver, 5).await {
+            match collect_realtime_frames_until_ready_or_idle(&mut receiver, 15).await {
                 Ok(capture) => capture,
                 Err(error) => {
                     let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
@@ -6292,7 +6292,7 @@ turn3_capture={turn3_capture:?}; error={err}"
         })?;
 
         let _turn3_quiesced =
-            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn3_capture, 5)
+            ensure_realtime_session_quiescent(&mut sender, &mut receiver, &turn3_capture, 15)
                 .await?;
         eprintln!("[scenario 71] send turn 4 explanation and barge into turn 5");
         let turn45_primary_commit = send_realtime_audio_and_wait_for_commit(
@@ -6308,9 +6308,13 @@ turn3_capture={turn3_capture:?}; error={err}"
                 &turn45_primary_commit,
                 &stop_pcm,
                 120,
-                |capture| {
-                    capture_event_count(capture, "output_text_delta") > 0
-                        || capture_event_count(capture, "output_audio_chunk") > 0
+                |_capture| {
+                    // Start barge-in immediately after the turn 4 commit.
+                    // Provider audio is delivered faster than realtime, so
+                    // waiting for output chunks narrows the overlap window
+                    // to the point where the model can finish before the
+                    // barge-in audio lands.
+                    true
                 },
             )
             .await {

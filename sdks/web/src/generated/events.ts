@@ -69,9 +69,26 @@ export type AgentErrorReport = {
   reason?: AgentErrorReason | null;
 };
 
+export interface AssistantImageEvent {
+  blob_ref: BlobRef;
+  height: number;
+  image_id: AssistantImageId;
+  media_type: string;
+  meta: ProviderImageMetadata;
+  revised_prompt: RevisedPromptDisposition;
+  width: number;
+}
+
+export type AssistantImageId = string;
+
 export type BackgroundJobTerminalStatus = "completed" | "failed" | "aborted" | "cancelled" | "retired" | "terminated";
 
 export type BlobId = string;
+
+export interface BlobRef {
+  blob_id: BlobId;
+  media_type: string;
+}
 
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
@@ -100,6 +117,12 @@ export interface DeferredCatalogDelta {
 }
 
 export type ExternalToolDeltaPhase = "pending" | "applied" | "draining" | "forced" | "failed";
+
+export type GeminiImageMetadata = {
+  continuity_ref?: string | null;
+  response_id?: string | null;
+  target_model: string;
+};
 
 export type HookId = string;
 
@@ -138,7 +161,35 @@ export interface LlmRetrySchedule {
   plan: LlmRetryPlan;
 }
 
+export type OpenAiImageMetadata = {
+  image_generation_call_id?: string | null;
+  response_id?: string | null;
+  target_model: string;
+};
+
+export interface PromptText {
+  content: string;
+}
+
 export type Provider = "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+
+export type ProviderImageMetadata = {
+  provider: "not_emitted";
+} | OpenAiImageMetadata | GeminiImageMetadata;
+
+export type RevisedPromptDisposition = {
+  disposition: "not_requested";
+} | {
+  disposition: "unsupported_by_backend";
+} | {
+  disposition: "unchanged";
+} | {
+  disposition: "revised";
+  source: RevisedPromptSource;
+  text: PromptText;
+};
+
+export type RevisedPromptSource = "provider" | "meerkat_projection";
 
 export interface SchemaWarning {
   message: string;
@@ -355,6 +406,11 @@ export interface ServerToolContentEvent {
   type: "server_tool_content";
 }
 
+export interface AssistantImageAppendedEvent {
+  image: AssistantImageEvent;
+  type: "assistant_image_appended";
+}
+
 export interface ToolCallRequestedEvent {
   args: ToolCallArguments;
   id: string;
@@ -503,6 +559,7 @@ export const KNOWN_AGENT_EVENT_TYPES = [
   "reasoning_complete",
   "text_delta",
   "text_complete",
+  "assistant_image_appended",
   "tool_call_requested",
   "tool_result_received",
   "turn_completed",
@@ -542,6 +599,7 @@ export type AgentEvent =
   TextDeltaEvent |
   TextCompleteEvent |
   ServerToolContentEvent |
+  AssistantImageAppendedEvent |
   ToolCallRequestedEvent |
   ToolResultReceivedEvent |
   TurnCompletedEvent |

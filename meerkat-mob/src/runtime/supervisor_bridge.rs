@@ -225,6 +225,7 @@ impl MobSupervisorBridge {
                 to,
                 intent: intent.to_string(),
                 params,
+                blocks: None,
                 handling_mode: HandlingMode::Queue,
                 stream: InputStreamMode::None,
             })

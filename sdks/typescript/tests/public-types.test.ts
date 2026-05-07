@@ -1,6 +1,8 @@
 import { MeerkatClient } from "../src/index.js";
 import type {
   AgentErrorReport,
+  CommsCommand,
+  ContentBlock,
   MobCreateOptions,
   MobDefinition,
   MobRotateSupervisorResult,
@@ -632,3 +634,58 @@ const generatedMobBadMemberStatus: MobMemberListEntryWire = {
 };
 
 void generatedMobBadMemberStatus;
+
+const sdkCommsImageBlock: ContentBlock = {
+  type: "image",
+  media_type: "image/png",
+  source: "inline",
+  data: "AAAA",
+};
+
+const sdkCommsPeerMessageWithBlocks: CommsCommand = {
+  kind: "peer_message",
+  to: "agent-a",
+  body: "describe",
+  blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+};
+
+const sdkCommsPeerRequestWithBlocks: CommsCommand = {
+  kind: "peer_request",
+  to: "agent-a",
+  intent: "checksum_token",
+  params: { subject: "attached" },
+  blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+};
+
+const sdkCommsSupervisorBridgeWithPublicBlocks: CommsCommand = {
+  kind: "peer_request",
+  to: "agent-a",
+  intent: "supervisor.bridge",
+  params: {
+    command: "deliver_member_input",
+    content: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+    epoch: 1,
+    handling_mode: "steer",
+    input_id: "input-1",
+    protocol_version: 1,
+    supervisor: {
+      address: "inproc://supervisor",
+      name: "supervisor",
+      peer_id: "pictionary/supervisor/supervisor",
+    },
+  },
+  blocks: [{ type: "text", text: "describe" }, sdkCommsImageBlock],
+};
+
+const sdkCommsPeerRequestIntentMismatch: CommsCommand = {
+  kind: "peer_request",
+  to: "agent-a",
+  intent: "supervisor.bridge",
+  // @ts-expect-error supervisor.bridge requests must carry BridgeCommand params.
+  params: { subject: "attached" },
+};
+
+void sdkCommsPeerMessageWithBlocks;
+void sdkCommsPeerRequestWithBlocks;
+void sdkCommsSupervisorBridgeWithPublicBlocks;
+void sdkCommsPeerRequestIntentMismatch;

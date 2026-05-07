@@ -58,6 +58,8 @@ pub enum MessageKind {
         intent: String,
         params: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
     /// A one-way peer lifecycle notification.
@@ -231,16 +233,19 @@ mod tests {
         let req = MessageKind::Request {
             intent: "review-pr".to_string(),
             params: serde_json::json!({"pr": 42}),
+            blocks: None,
             handling_mode: None,
         };
         if let MessageKind::Request {
             intent,
             params,
+            blocks,
             handling_mode,
         } = req
         {
             assert_eq!(intent, "review-pr");
             assert_eq!(params["pr"], 42);
+            assert_eq!(blocks, None);
             assert_eq!(handling_mode, None);
         } else {
             panic!("Expected Request variant");
@@ -321,6 +326,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             MessageKind::Response {

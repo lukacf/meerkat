@@ -187,6 +187,9 @@ pub enum CommsContent {
         intent: MessageIntent,
         /// Parameters for the request.
         params: JsonValue,
+        /// Optional multimodal content blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
     },
     /// A response from a peer to a previous request.
     Response {
@@ -254,10 +257,16 @@ impl CommsMessage {
                 body: body.clone(),
                 blocks: blocks.clone(),
             },
-            MessageKind::Request { intent, params, .. } => CommsContent::Request {
+            MessageKind::Request {
+                intent,
+                params,
+                blocks,
+                ..
+            } => CommsContent::Request {
                 request_id: envelope.id,
                 intent: MessageIntent::from(intent.as_str()),
                 params: params.clone(),
+                blocks: blocks.clone(),
             },
             MessageKind::Lifecycle { .. } => return None,
             MessageKind::Response {
@@ -357,6 +366,7 @@ impl CommsMessage {
                 request_id,
                 intent,
                 params,
+                ..
             } => meerkat_core::format_peer_request_projection(
                 self.from_pubkey.to_peer_id(),
                 Some(&self.from_peer),
@@ -465,6 +475,7 @@ mod tests {
             request_id: Uuid::new_v4(),
             intent: MessageIntent::Review,
             params: serde_json::json!({"pr": 42}),
+            blocks: None,
         };
         // Response
         let _ = CommsContent::Response {
@@ -518,6 +529,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 123}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -531,10 +543,12 @@ mod tests {
                 request_id: rid,
                 intent,
                 params,
+                blocks,
             } => {
                 assert_eq!(rid, request_id);
                 assert_eq!(intent, MessageIntent::Review);
                 assert_eq!(params["pr"], 123);
+                assert_eq!(blocks, None);
             }
             _ => unreachable!("expected Request"),
         }
@@ -553,6 +567,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review-pr".to_string(),
                 params: serde_json::json!({"pr": 456}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -714,6 +729,7 @@ mod tests {
                 request_id,
                 intent: MessageIntent::Review,
                 params: serde_json::json!({"pr": 42}),
+                blocks: None,
             },
         };
 

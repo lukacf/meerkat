@@ -85,7 +85,12 @@ pub enum InteractionContent {
         blocks: Option<Vec<ContentBlock>>,
     },
     /// A request for the agent to perform an action.
-    Request { intent: String, params: Value },
+    Request {
+        intent: String,
+        params: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+    },
     /// A response to a previous request.
     Response {
         in_reply_to: InteractionId,
@@ -1090,6 +1095,7 @@ mod tests {
         let content = InteractionContent::Request {
             intent: "review".to_string(),
             params: serde_json::json!({"pr": 42}),
+            blocks: None,
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["type"], "request");

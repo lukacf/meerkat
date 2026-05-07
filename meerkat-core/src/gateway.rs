@@ -221,6 +221,44 @@ impl AgentToolDispatcher for ToolGateway {
         Err(ToolError::not_found(call.name))
     }
 
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &crate::ToolDispatchContext,
+    ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+        for entry in &self.entries {
+            if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
+                if let Some(catalog_entry) = entry
+                    .dispatcher
+                    .tool_catalog()
+                    .iter()
+                    .find(|entry| entry.tool.name == call.name)
+                {
+                    if let Some(reason) = catalog_entry.callability.unavailable_reason() {
+                        return Err(ToolError::unavailable(call.name, reason));
+                    }
+                    return entry
+                        .dispatcher
+                        .dispatch_with_context(call, context)
+                        .await
+                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+                }
+            } else if entry
+                .dispatcher
+                .tools()
+                .iter()
+                .any(|tool| tool.name == call.name)
+            {
+                return entry
+                    .dispatcher
+                    .dispatch_with_context(call, context)
+                    .await
+                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+            }
+        }
+        Err(ToolError::not_found(call.name))
+    }
+
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
         ToolCatalogCapabilities {
             exact_catalog: self
@@ -467,6 +505,40 @@ impl AgentToolDispatcher for DynamicToolComposite {
             if d.tools().iter().any(|t| t.name == call.name) {
                 return d
                     .dispatch(call)
+                    .await
+                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
+            }
+        }
+        Err(crate::error::ToolError::not_found(call.name))
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: crate::types::ToolCallView<'_>,
+        context: &crate::ToolDispatchContext,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        if self.tool_catalog_capabilities().exact_catalog {
+            for d in &self.dispatchers {
+                if let Some(entry) = d
+                    .tool_catalog()
+                    .iter()
+                    .find(|entry| entry.tool.name == call.name)
+                {
+                    if let Some(reason) = entry.callability.unavailable_reason() {
+                        return Err(crate::error::ToolError::unavailable(call.name, reason));
+                    }
+                    return d.dispatch_with_context(call, context).await.map_err(|err| {
+                        ToolGateway::route_not_found_as_unavailable(call.name, err)
+                    });
+                }
+            }
+            return Err(crate::error::ToolError::not_found(call.name));
+        }
+
+        for d in &self.dispatchers {
+            if d.tools().iter().any(|t| t.name == call.name) {
+                return d
+                    .dispatch_with_context(call, context)
                     .await
                     .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
             }
@@ -743,6 +815,25 @@ mod tests {
         tool: Arc<ToolDef>,
     }
 
+    struct ContextAwareDispatcher {
+        tool: Arc<ToolDef>,
+        exact_catalog: bool,
+    }
+
+    impl ContextAwareDispatcher {
+        fn new(tool_name: &str, exact_catalog: bool) -> Self {
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: tool_name.into(),
+                    description: "context aware tool".into(),
+                    input_schema: empty_object_schema(),
+                    provenance: None,
+                }),
+                exact_catalog,
+            }
+        }
+    }
+
     impl LiveExactMockDispatcher {
         fn new(prefix: &str, tool_name: &str, callable: Arc<AtomicBool>) -> Self {
             Self {
@@ -977,6 +1068,53 @@ mod tests {
             call: ToolCallView<'_>,
         ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
             Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ContextAwareDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::clone(&self.tool)])
+        }
+
+        fn tool_catalog_capabilities(&self) -> crate::ToolCatalogCapabilities {
+            crate::ToolCatalogCapabilities {
+                exact_catalog: self.exact_catalog,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[crate::ToolCatalogEntry]> {
+            Arc::from([crate::ToolCatalogEntry::session_inline(
+                Arc::clone(&self.tool),
+                true,
+            )])
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": false}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &crate::ToolDispatchContext,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                false,
+            )
+            .into())
         }
     }
 
@@ -1462,5 +1600,55 @@ mod tests {
                 .expect("shared entry")
                 .currently_callable()
         );
+    }
+
+    #[tokio::test]
+    async fn tool_gateway_dispatch_with_context_delegates_turn_context() {
+        let dispatcher = Arc::new(ContextAwareDispatcher::new("inspect_context", true));
+        let gateway = ToolGatewayBuilder::new()
+            .add_dispatcher(dispatcher)
+            .build()
+            .expect("gateway should build");
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ctx-1",
+            name: "inspect_context",
+            args: &args_raw,
+        };
+        let context = crate::ToolDispatchContext::from_current_turn_input(
+            &crate::ContentInput::Blocks(vec![crate::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            }]),
+        );
+
+        let outcome = gateway.dispatch_with_context(call, &context).await.unwrap();
+        let payload: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_composite_dispatch_with_context_delegates_turn_context() {
+        let dispatcher = Arc::new(ContextAwareDispatcher::new("inspect_context", false));
+        let composite = DynamicToolComposite::new(vec![dispatcher]);
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ctx-1",
+            name: "inspect_context",
+            args: &args_raw,
+        };
+        let context = crate::ToolDispatchContext::from_current_turn_input(
+            &crate::ContentInput::Blocks(vec![crate::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            }]),
+        );
+
+        let outcome = composite
+            .dispatch_with_context(call, &context)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_str(&outcome.result.text_content()).unwrap();
+        assert_eq!(payload["saw_context_image"], true);
     }
 }

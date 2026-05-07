@@ -1553,12 +1553,20 @@ describe("Comms methods", () => {
       kind: "peer_message",
       to: "agent-a",
       body: "hello",
+      blocks: [
+        { type: "text", text: "hello" },
+        { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
+      ],
     });
     const peers = await client.peers("s1");
 
     assert.equal(sendReceipt.kind, "peer_message_sent");
     assert.deepEqual(peers.peers, [{ name: "agent-a" }]);
     assert.deepEqual(calls.map((call) => call.method), ["comms/send", "comms/peers"]);
+    assert.deepEqual(calls[0].params.blocks, [
+      { type: "text", text: "hello" },
+      { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
+    ]);
   });
 
   it("readSessionHistory routes through session/history and parses typed messages", async () => {

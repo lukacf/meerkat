@@ -566,6 +566,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream,
             } => {
@@ -609,6 +610,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         crate::types::MessageKind::Request {
                             intent,
                             params,
+                            blocks,
                             handling_mode: Some(handling_mode),
                         },
                     )
@@ -751,6 +753,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
             } => {
@@ -788,6 +791,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         crate::types::MessageKind::Request {
                             intent,
                             params,
+                            blocks,
                             handling_mode: Some(handling_mode),
                         },
                     )
@@ -985,18 +989,21 @@ impl CoreCommsRuntime for CommsRuntime {
                             MessageKind::Request {
                                 intent,
                                 params,
+                                blocks,
                                 handling_mode: _,
                             } => {
                                 let typed_intent = MessageIntent::from(intent.as_str());
                                 meerkat_core::InteractionContent::Request {
                                     intent: typed_intent.to_string(),
                                     params,
+                                    blocks,
                                 }
                             }
                             MessageKind::Lifecycle { kind, params } => {
                                 meerkat_core::InteractionContent::Request {
                                     intent: kind.to_string(),
                                     params,
+                                    blocks: None,
                                 }
                             }
                             MessageKind::Response {
@@ -1862,36 +1869,55 @@ impl CommsRuntime {
                 blocks: Some(mut blocks),
                 handling_mode,
             } => {
-                if blocks.iter().any(|block| {
-                    matches!(
-                        block,
-                        meerkat_core::types::ContentBlock::Image {
-                            data: meerkat_core::types::ImageData::Blob { .. },
-                            ..
-                        }
-                    )
-                }) {
-                    let blob_store = self.blob_store.as_ref().ok_or_else(|| {
-                        SendError::Internal(
-                            "blob-backed comms message requires blob store".to_string(),
-                        )
-                    })?;
-                    hydrate_content_blocks(
-                        blob_store.as_ref(),
-                        &mut blocks,
-                        MissingBlobBehavior::Error,
-                    )
-                    .await
-                    .map_err(|err| SendError::Internal(err.to_string()))?;
-                }
+                self.hydrate_blocks_for_transport(&mut blocks, "comms message")
+                    .await?;
                 Ok(crate::types::MessageKind::Message {
                     body,
                     blocks: Some(blocks),
                     handling_mode,
                 })
             }
+            crate::types::MessageKind::Request {
+                intent,
+                params,
+                blocks: Some(mut blocks),
+                handling_mode,
+            } => {
+                self.hydrate_blocks_for_transport(&mut blocks, "comms request")
+                    .await?;
+                Ok(crate::types::MessageKind::Request {
+                    intent,
+                    params,
+                    blocks: Some(blocks),
+                    handling_mode,
+                })
+            }
             other => Ok(other),
         }
+    }
+
+    async fn hydrate_blocks_for_transport(
+        &self,
+        blocks: &mut [meerkat_core::types::ContentBlock],
+        label: &str,
+    ) -> Result<(), SendError> {
+        if !blocks.iter().any(|block| {
+            matches!(
+                block,
+                meerkat_core::types::ContentBlock::Image {
+                    data: meerkat_core::types::ImageData::Blob { .. },
+                    ..
+                }
+            )
+        }) {
+            return Ok(());
+        }
+        let blob_store = self.blob_store.as_ref().ok_or_else(|| {
+            SendError::Internal(format!("blob-backed {label} requires blob store"))
+        })?;
+        hydrate_content_blocks(blob_store.as_ref(), blocks, MissingBlobBehavior::Error)
+            .await
+            .map_err(|err| SendError::Internal(err.to_string()))
     }
 
     pub fn inproc_namespace(&self) -> Option<&str> {
@@ -3477,6 +3503,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 19}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -3525,7 +3552,7 @@ mod tests {
         assert!(interactions.iter().any(|i| {
             matches!(
                 &i.content,
-                meerkat_core::InteractionContent::Request { intent, params }
+                meerkat_core::InteractionContent::Request { intent, params, .. }
                     if intent == "review" && params["pr"] == 19
             )
         }));
@@ -3720,6 +3747,7 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "checksum".to_string(),
                 params: serde_json::json!({"path": "README.md"}),
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::ReserveInteraction,
             },
@@ -3775,6 +3803,7 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-authority".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::None,
             },
@@ -3822,6 +3851,7 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-stream-authority".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::ReserveInteraction,
             },
@@ -4024,6 +4054,7 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 intent: "must-have-complete-authority".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::None,
             },
@@ -4491,6 +4522,7 @@ mod tests {
             crate::types::MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -4645,6 +4677,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -4691,6 +4724,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"scope": "peer"}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -4832,6 +4866,7 @@ mod tests {
             MessageKind::Request {
                 intent: "status".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -5196,6 +5231,78 @@ mod tests {
                 ));
             }
             other => panic!("expected message interaction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_core_send_hydrates_blob_refs_on_peer_request_before_transport() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-request-blob-{suffix}");
+        let receiver_name = format!("receiver-request-blob-{suffix}");
+        let mut sender_runtime = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = blob_store
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+        sender_runtime.set_blob_store(blob_store);
+        let sender = Arc::new(sender_runtime);
+        install_test_peer_request_response_authority(&sender);
+
+        CoreCommsRuntime::add_trusted_peer(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let cmd = CommsCommand::PeerRequest {
+            blocks: Some(vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id,
+                },
+            }]),
+            to: peer_route(&receiver_name, receiver.public_key()),
+            intent: "checksum".to_string(),
+            params: serde_json::json!({"subject": "image"}),
+            handling_mode: meerkat_core::types::HandlingMode::Queue,
+            stream: InputStreamMode::ReserveInteraction,
+        };
+
+        let receipt = CoreCommsRuntime::send(sender.as_ref(), cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerRequestSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Request { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("received blocks");
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Image {
+                        data: ImageData::Inline { data },
+                        ..
+                    } if data == "aGVsbG8="
+                ));
+            }
+            other => panic!("expected request interaction, got {other:?}"),
         }
     }
 
@@ -6153,6 +6260,7 @@ mod tests {
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         intent: "test".to_string(),
                         params: serde_json::json!({}),
+                        blocks: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         stream: InputStreamMode::None,
                     },

@@ -868,6 +868,7 @@ mod tests {
             kind: MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
+                blocks: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),
@@ -1200,6 +1201,7 @@ mod tests {
         envelope.kind = MessageKind::Request {
             intent: "review".to_string(),
             params: serde_json::json!({}),
+            blocks: None,
             handling_mode: None,
         };
 
@@ -1302,6 +1304,7 @@ mod tests {
         envelope.kind = MessageKind::Request {
             intent: "mob.peer_added".to_string(),
             params: serde_json::json!({"peer": "new-agent"}),
+            blocks: None,
             handling_mode: None,
         };
 
@@ -1756,6 +1759,7 @@ mod tests {
             kind: MessageKind::Request {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             sig: crate::identity::Signature::new([0u8; 64]),

@@ -1230,6 +1230,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
             ),
             intent: "terminal-wake-probe".to_string(),
             params: serde_json::json!({"probe": true}),
+            blocks: None,
             handling_mode: HandlingMode::Queue,
             stream: InputStreamMode::ReserveInteraction,
         },
@@ -2242,6 +2243,7 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
     };
     use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
     use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
+    use meerkat_core::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
     use meerkat_runtime::completion::CompletionOutcome;
 
     struct SuccessExecutor;
@@ -2300,8 +2302,14 @@ async fn boundary_commit_failure_terminates_runtime_loop_completion_waiter() {
         .await
         .expect("completion waiter should resolve when the runtime loop exits");
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
-        "boundary commit failure should terminate the waiter when the loop exits, got {result:?}"
+        matches!(
+            result,
+            CompletionOutcome::AbandonedWithError { ref error, .. }
+                if error.kind == TurnTerminalCauseKind::RuntimeApplyFailure
+                    && error.terminal
+                    && error.outcome == Some(TurnTerminalOutcome::Failed)
+        ),
+        "boundary commit failure should abandon the waiter with typed runtime apply failure, got {result:?}"
     );
 }
 

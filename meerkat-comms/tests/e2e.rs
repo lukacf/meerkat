@@ -376,6 +376,7 @@ async fn integration_real_request_response_flow() {
             MessageKind::Request {
                 intent: "review-pr".to_string(),
                 params: json!({"pr": 42}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )

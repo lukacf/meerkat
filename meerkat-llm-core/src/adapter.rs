@@ -411,7 +411,15 @@ mod tests {
         }
 
         fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
-            *self.seen.lock().expect("seen lock") = Some(request.messages.clone());
+            let mut seen = match self.seen.lock() {
+                Ok(seen) => seen,
+                Err(err) => {
+                    return Box::pin(stream::iter([Err(LlmError::Unknown {
+                        message: format!("seen lock poisoned: {err}"),
+                    })]));
+                }
+            };
+            *seen = Some(request.messages.clone());
             Box::pin(stream::iter([Ok(LlmEvent::Done {
                 outcome: LlmDoneOutcome::Success {
                     stop_reason: StopReason::EndTurn,
@@ -444,7 +452,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adapter_invokes_provider_replay_projection_before_streaming() {
+    async fn adapter_invokes_provider_replay_projection_before_streaming() -> Result<(), String> {
         let seen = Arc::new(Mutex::new(None));
         let client = ProjectionClient {
             seen: Arc::clone(&seen),
@@ -462,10 +470,15 @@ mod tests {
         adapter
             .stream_response(&raw_messages, &[], 1024, None, None)
             .await
-            .expect("stream response");
+            .map_err(|err| format!("stream response failed: {err}"))?;
 
-        let projected = seen.lock().expect("seen lock").clone().expect("request");
+        let projected = seen
+            .lock()
+            .map_err(|err| format!("seen lock poisoned: {err}"))?
+            .clone()
+            .ok_or_else(|| "request was not captured".to_string())?;
         assert_eq!(projected.len(), 1);
         assert!(matches!(projected[0], Message::User(_)));
+        Ok(())
     }
 }

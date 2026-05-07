@@ -2044,13 +2044,17 @@ where
                         }
 
                         // Execute all allowed tool calls in parallel using join_all
+                        let tool_dispatch_context = self.tool_dispatch_context.clone();
                         let dispatch_futures: Vec<_> = executable_tool_calls
                             .into_iter()
                             .map(|(tool_index, tc)| {
                                 let tools_ref = Arc::clone(&tools_ref);
+                                let tool_dispatch_context = tool_dispatch_context.clone();
                                 async move {
                                     let start = crate::time_compat::Instant::now();
-                                    let dispatch_result = tools_ref.dispatch(tc.as_view()).await;
+                                    let dispatch_result = tools_ref
+                                        .dispatch_with_context(tc.as_view(), &tool_dispatch_context)
+                                        .await;
                                     let duration_ms = start.elapsed().as_millis() as u64;
                                     (tool_index, tc, dispatch_result, duration_ms)
                                 }

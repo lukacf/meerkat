@@ -410,11 +410,25 @@ impl MobMcpState {
         let _ = path;
 
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(path) = path
-            && let Err(error) = tokio::fs::remove_file(path).await
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(path = %path.display(), error = %error, "failed to remove mob storage file");
+        if let Some(path) = path {
+            let mut last_error = None;
+            let mut delay = Duration::from_millis(10);
+            for attempt in 0..5 {
+                match tokio::fs::remove_file(path).await {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(error) => {
+                        last_error = Some(error);
+                        if attempt < 4 {
+                            ::tokio::time::sleep(delay).await;
+                            delay = delay.saturating_mul(2);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = last_error {
+                tracing::warn!(path = %path.display(), error = %error, "failed to remove mob storage file");
+            }
         }
     }
 

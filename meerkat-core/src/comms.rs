@@ -553,6 +553,8 @@ pub enum CommsCommandRequest {
         #[serde(default)]
         params: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<InputStreamMode>,
@@ -632,12 +634,14 @@ impl CommsCommandRequest {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream,
             } => CommsCommand::PeerRequest {
                 to: PeerRoute::new(to),
                 intent,
                 params,
+                blocks,
                 handling_mode: handling_mode.unwrap_or_default(),
                 stream: stream.unwrap_or(InputStreamMode::None),
             },
@@ -751,6 +755,7 @@ pub enum CommsCommand {
         to: PeerRoute,
         intent: String,
         params: serde_json::Value,
+        blocks: Option<Vec<ContentBlock>>,
         handling_mode: HandlingMode,
         stream: InputStreamMode,
     },

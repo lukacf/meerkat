@@ -3,12 +3,12 @@
 #[cfg(not(target_arch = "wasm32"))]
 use crate::error::DispatchError;
 use async_trait::async_trait;
-use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::types::ToolResult;
 use meerkat_core::types::{ToolCallView, ToolDef};
+use meerkat_core::{AgentToolDispatcher, ToolDispatchContext};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::{ToolCallability, ToolUnavailableReason};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
@@ -223,6 +223,15 @@ impl AgentToolDispatcher for ToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.into(),
@@ -238,10 +247,13 @@ impl AgentToolDispatcher for ToolDispatcher {
         })?;
 
         // Dispatch with timeout to prevent hanging tool calls
-        tokio::time::timeout(self.default_timeout, self.router.dispatch(call))
-            .await
-            .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
-            .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))
+        tokio::time::timeout(
+            self.default_timeout,
+            self.router.dispatch_with_context(call, context),
+        )
+        .await
+        .map_err(|_| ToolError::timeout(call.name, self.default_timeout.as_millis() as u64))?
+        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err))
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
@@ -350,6 +362,15 @@ impl AgentToolDispatcher for FilteredDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         // Wave B (V7): policy-denied calls surface as `AccessDenied`, not
         // `NotFound`. A tool that the inner dispatcher does not know about
         // still returns `NotFound` from the inner dispatcher itself — this
@@ -365,7 +386,7 @@ impl AgentToolDispatcher for FilteredDispatcher {
                 name: call.name.into(),
             });
         }
-        self.inner.dispatch(call).await
+        self.inner.dispatch_with_context(call, context).await
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<meerkat_core::ExternalToolSurfaceSnapshot> {
@@ -461,6 +482,8 @@ mod tests {
         catalog: Arc<[ToolCatalogEntry]>,
     }
 
+    struct ContextAwareDispatcher;
+
     impl ExactMockDispatcher {
         fn new(entries: &[(&str, bool)]) -> Self {
             let catalog = entries
@@ -493,6 +516,35 @@ mod tests {
             )]
             .into();
             Self { catalog }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ContextAwareDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([tool_def("inspect_context")])
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": false}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                false,
+            )
+            .into())
         }
     }
 
@@ -738,6 +790,50 @@ mod tests {
             .dispatch(make_call("denied_hidden", &args_raw))
             .await;
         assert!(matches!(denied_result, Err(ToolError::AccessDenied { .. })));
+    }
+
+    fn image_dispatch_context() -> ToolDispatchContext {
+        ToolDispatchContext::from_current_turn_input(&meerkat_core::ContentInput::Blocks(vec![
+            meerkat_core::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc".into(),
+            },
+        ]))
+    }
+
+    #[tokio::test]
+    async fn tool_dispatcher_preserves_dispatch_context() {
+        let router: Arc<dyn AgentToolDispatcher> = Arc::new(ContextAwareDispatcher);
+        let dispatcher = ToolDispatcher::new(router);
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let context = image_dispatch_context();
+
+        let outcome = dispatcher
+            .dispatch_with_context(make_call("inspect_context", &args_raw), &context)
+            .await
+            .expect("tool dispatcher should dispatch");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("tool result JSON");
+        assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn filtered_dispatcher_preserves_dispatch_context() {
+        let inner: Arc<dyn AgentToolDispatcher> = Arc::new(ContextAwareDispatcher);
+        let filtered = FilteredDispatcher::new(
+            inner,
+            &ToolAccessPolicy::AllowList(["inspect_context"].into_iter().collect()),
+        );
+        let args_raw = serde_json::value::RawValue::from_string(json!({}).to_string()).unwrap();
+        let context = image_dispatch_context();
+
+        let outcome = filtered
+            .dispatch_with_context(make_call("inspect_context", &args_raw), &context)
+            .await
+            .expect("filtered dispatcher should dispatch");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("tool result JSON");
+        assert_eq!(payload["saw_context_image"], true);
     }
 
     #[tokio::test]

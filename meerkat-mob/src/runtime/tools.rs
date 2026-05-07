@@ -1,6 +1,8 @@
 use super::*;
 use meerkat_core::SessionId;
-use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
+use meerkat_core::agent::{
+    BindOutcome, DispatcherCapabilities, OpsLifecycleBindError, ToolDispatchContext,
+};
 use meerkat_core::ops::AsyncOpRef;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::MobToolAuthorityContext;
@@ -47,10 +49,19 @@ impl AgentToolDispatcher for NameFilteredDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         if self.excluded.contains(call.name) {
             return Err(ToolError::not_found(call.name));
         }
-        self.inner.dispatch(call).await
+        self.inner.dispatch_with_context(call, context).await
     }
 
     async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
@@ -136,6 +147,15 @@ impl AgentToolDispatcher for McpProvenanceFilter {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         // Resolve the called tool against the inner catalog so we can apply
         // the same provenance gate at dispatch time. If the tool isn't there,
         // forward to inner and let it produce the canonical NotFound.
@@ -145,7 +165,7 @@ impl AgentToolDispatcher for McpProvenanceFilter {
         {
             return Err(ToolError::not_found(call.name));
         }
-        self.inner.dispatch(call).await
+        self.inner.dispatch_with_context(call, context).await
     }
 
     async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {

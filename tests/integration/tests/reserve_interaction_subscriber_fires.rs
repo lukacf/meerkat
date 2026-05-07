@@ -59,6 +59,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
             ),
             intent: "reservation-contract-probe".to_string(),
             params: serde_json::json!({"probe": true}),
+            blocks: None,
             handling_mode: HandlingMode::Queue,
             stream: InputStreamMode::ReserveInteraction,
         },

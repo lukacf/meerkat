@@ -470,15 +470,27 @@ where
             name: &call.name,
             args: args.as_ref(),
         };
+        let dispatch_context = self.tool_dispatch_context.clone();
         let dispatch_result = match timeout_policy.timeout() {
-            Some(timeout) => match tokio::time::timeout(timeout, self.tools.dispatch(view)).await {
-                Ok(result) => result,
-                Err(_) => Err(crate::error::ToolError::timeout(
-                    call.name.clone(),
-                    timeout_policy.timeout_ms().unwrap_or(u64::MAX),
-                )),
-            },
-            None => self.tools.dispatch(view).await,
+            Some(timeout) => {
+                match tokio::time::timeout(
+                    timeout,
+                    self.tools.dispatch_with_context(view, &dispatch_context),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(crate::error::ToolError::timeout(
+                        call.name.clone(),
+                        timeout_policy.timeout_ms().unwrap_or(u64::MAX),
+                    )),
+                }
+            }
+            None => {
+                self.tools
+                    .dispatch_with_context(view, &dispatch_context)
+                    .await
+            }
         };
 
         match dispatch_result {
@@ -945,7 +957,12 @@ where
             return Err(err);
         }
 
-        match self.run_loop(event_tx.clone()).await {
+        self.tool_dispatch_context =
+            crate::ToolDispatchContext::from_current_turn_input(&run_prompt_input);
+        let loop_result = self.run_loop(event_tx.clone()).await;
+        self.tool_dispatch_context = crate::ToolDispatchContext::default();
+
+        match loop_result {
             Ok(mut result) => {
                 if !self.run_completed_hooks_applied
                     && let Err(err) = self
@@ -987,8 +1004,11 @@ where
         let event_tx = event_tx.or_else(|| self.default_event_tx.clone());
 
         let pending_prompt = self.session.messages().last().and_then(|m| match m {
-            Message::User(u) => Some(u.text_content()),
-            Message::ToolResults { .. } => Some(String::new()),
+            Message::User(u) if u.has_non_text_content() => {
+                Some(ContentInput::Blocks(u.content.clone()))
+            }
+            Message::User(u) => Some(ContentInput::Text(u.text_content())),
+            Message::ToolResults { .. } => Some(ContentInput::Text(String::new())),
             _ => None,
         });
 
@@ -1006,19 +1026,20 @@ where
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
-        self.emit_run_started_event(ContentInput::Text(prompt.clone()), event_tx.as_ref())
+        self.emit_run_started_event(prompt.clone(), event_tx.as_ref())
             .await;
 
-        if let Err(err) = self
-            .run_started_hooks(&ContentInput::Text(prompt.clone()), event_tx.as_ref())
-            .await
-        {
+        if let Err(err) = self.run_started_hooks(&prompt, event_tx.as_ref()).await {
             self.handle_run_failure(&err, event_tx.as_ref()).await;
             self.clear_runtime_execution_kind();
             return Err(err);
         }
 
-        match self.run_loop(event_tx.clone()).await {
+        self.tool_dispatch_context = crate::ToolDispatchContext::from_current_turn_input(&prompt);
+        let loop_result = self.run_loop(event_tx.clone()).await;
+        self.tool_dispatch_context = crate::ToolDispatchContext::default();
+
+        match loop_result {
             Ok(mut result) => {
                 if !self.run_completed_hooks_applied
                     && let Err(err) = self

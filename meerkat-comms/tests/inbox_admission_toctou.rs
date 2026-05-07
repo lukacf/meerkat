@@ -291,6 +291,7 @@ async fn auth_exempt_bridge_request_admits_without_trust_edge() {
         kind: MessageKind::Request {
             intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
             params: serde_json::json!({}),
+            blocks: None,
             handling_mode: None,
         },
         sig: Signature::new([0u8; 64]),

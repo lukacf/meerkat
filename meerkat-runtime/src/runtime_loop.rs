@@ -1902,6 +1902,63 @@ mod tests {
     }
 
     #[test]
+    fn peer_image_only_blocks_preserve_rendered_body_text() -> Result<(), String> {
+        let blocks = vec![meerkat_core::types::ContentBlock::Image {
+            media_type: "image/png".into(),
+            data: "abc123".into(),
+        }];
+        let input = Input::Peer(PeerInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::Peer {
+                    peer_id: "peer-1".into(),
+                    display_identity: None,
+                    runtime_id: None,
+                },
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(crate::input::PeerConvention::Message),
+            body: "[COMMS MESSAGE from peer-1]\nPlease describe the attached image.\n[image: image/png]"
+                .into(),
+            payload: None,
+            blocks: Some(blocks.clone()),
+            handling_mode: None,
+        });
+        let staged = match input_to_primitive(&input, input.id().clone())
+            .expect("single input metadata cannot conflict")
+        {
+            RunPrimitive::StagedInput(staged) => staged,
+            other => return Err(format!("expected staged input, got {other:?}")),
+        };
+
+        match &staged.appends[0].content {
+            CoreRenderable::Blocks { blocks: got } => {
+                assert_eq!(got.len(), 3);
+                assert_eq!(
+                    got[0],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "[COMMS MESSAGE from peer-1]".into(),
+                    }
+                );
+                assert_eq!(
+                    got[1],
+                    meerkat_core::types::ContentBlock::Text {
+                        text: "Please describe the attached image.".into(),
+                    }
+                );
+                assert_eq!(got[2], blocks[0]);
+            }
+            other => return Err(format!("expected blocks content, got {other:?}")),
+        }
+        Ok(())
+    }
+
+    #[test]
     fn flow_step_with_blocks_produces_blocks_renderable() -> Result<(), String> {
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {

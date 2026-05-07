@@ -161,6 +161,7 @@ impl AgentMobToolSurface {
                     "role": role,
                     "description": description,
                 }),
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             })
@@ -2289,6 +2290,7 @@ mod tests {
                     to,
                     intent,
                     params,
+                    blocks,
                     handling_mode: _,
                     stream: _,
                 } => {
@@ -2307,7 +2309,11 @@ mod tests {
                         id: InteractionId(uuid::Uuid::new_v4()),
                         from_route: Some(self.peer_id),
                         from: self.name.clone(),
-                        content: InteractionContent::Request { intent, params },
+                        content: InteractionContent::Request {
+                            intent,
+                            params,
+                            blocks,
+                        },
                         rendered_text: String::new(),
                         handling_mode: HandlingMode::Queue,
                         render_metadata: None,

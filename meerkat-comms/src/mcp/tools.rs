@@ -21,6 +21,7 @@ use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
     CommsSendResult,
 };
+use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
     CommsCommand, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
@@ -29,7 +30,7 @@ use meerkat_core::comms::{
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
-use meerkat_core::types::HandlingMode;
+use meerkat_core::types::{ContentBlock, HandlingMode};
 
 const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
 
@@ -65,6 +66,11 @@ pub struct SendMessageInput {
     pub display_name: Option<String>,
     /// Message body
     pub body: String,
+    /// Optional multimodal blocks. Use image_ref entries such as
+    /// {"type":"image_ref","source":"current_turn","index":0} to forward
+    /// images from the current turn without inlining bytes in the tool call.
+    #[serde(default)]
+    pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
     pub handling_mode: HandlingMode,
 }
@@ -85,6 +91,32 @@ pub struct SendRequestInput {
     pub handling_mode: HandlingMode,
     /// Request parameters
     pub params: CommsPeerRequestParams,
+    /// Optional multimodal blocks. Use image_ref entries such as
+    /// {"type":"image_ref","source":"current_turn","index":0} to forward
+    /// images from the current turn without inlining bytes in the tool call.
+    #[serde(default)]
+    pub blocks: Option<Vec<CommsToolContentBlock>>,
+}
+
+/// Tool-level content block references for comms sends.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommsToolContentBlock {
+    /// Plain text content.
+    Text { text: String },
+    /// Reference to an image in the current admitted turn.
+    ImageRef {
+        /// Source collection for the image reference.
+        source: CommsToolImageReferenceSource,
+        /// Zero-based image index within the current admitted turn.
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommsToolImageReferenceSource {
+    CurrentTurn,
 }
 
 /// Send a response to a previous peer request.
@@ -185,6 +217,16 @@ pub async fn handle_tools_call(
     name: &str,
     args: &Value,
 ) -> Result<Value, String> {
+    handle_tools_call_with_context(ctx, name, args, &ToolDispatchContext::default()).await
+}
+
+/// Handle a comms tool call with dispatch-time turn context.
+pub async fn handle_tools_call_with_context(
+    ctx: &ToolContext,
+    name: &str,
+    args: &Value,
+    dispatch_context: &ToolDispatchContext,
+) -> Result<Value, String> {
     if comms_tool_unavailable_reason(ctx, name).is_some() {
         return Err(runtime_command_authority_unavailable_message());
     }
@@ -194,10 +236,11 @@ pub async fn handle_tools_call(
             let input: SendMessageInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
+            let blocks = resolve_message_blocks(&input.body, input.blocks, dispatch_context)?;
             let command = CommsCommand::PeerMessage {
                 to,
                 body: input.body,
-                blocks: None,
+                blocks,
                 handling_mode: input.handling_mode,
             };
             dispatch(ctx, command).await
@@ -206,10 +249,12 @@ pub async fn handle_tools_call(
             let input: SendRequestInput = serde_json::from_value(args.clone())
                 .map_err(|e| format!("Invalid arguments: {e}"))?;
             let to = peer_route(ctx, input.peer_id, input.display_name.as_deref())?;
+            let blocks = resolve_tool_blocks(input.blocks, dispatch_context)?;
             let typed_request = meerkat_contracts::CommsCommandRequest::PeerRequest {
                 to: input.peer_id,
                 intent: input.intent,
                 params: input.params,
+                blocks,
                 handling_mode: Some(input.handling_mode),
                 stream: Some(InputStreamMode::ReserveInteraction),
             };
@@ -247,6 +292,79 @@ pub async fn handle_tools_call(
     }
 }
 
+fn resolve_tool_blocks(
+    blocks: Option<Vec<CommsToolContentBlock>>,
+    dispatch_context: &ToolDispatchContext,
+) -> Result<Option<Vec<ContentBlock>>, String> {
+    blocks
+        .map(|blocks| {
+            blocks
+                .into_iter()
+                .map(|block| resolve_tool_block(block, dispatch_context))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .transpose()
+}
+
+fn resolve_message_blocks(
+    body: &str,
+    blocks: Option<Vec<CommsToolContentBlock>>,
+    dispatch_context: &ToolDispatchContext,
+) -> Result<Option<Vec<ContentBlock>>, String> {
+    let Some(mut blocks) = resolve_tool_blocks(blocks, dispatch_context)? else {
+        return Ok(None);
+    };
+    let body = body.trim();
+    if !body.is_empty() && !blocks_text_contains(&blocks, body) {
+        blocks.insert(
+            0,
+            ContentBlock::Text {
+                text: body.to_string(),
+            },
+        );
+    }
+    Ok(Some(blocks))
+}
+
+fn blocks_text_contains(blocks: &[ContentBlock], expected: &str) -> bool {
+    if blocks
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { text } if text.trim() == expected))
+    {
+        return true;
+    }
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        == expected
+}
+
+fn resolve_tool_block(
+    block: CommsToolContentBlock,
+    dispatch_context: &ToolDispatchContext,
+) -> Result<ContentBlock, String> {
+    match block {
+        CommsToolContentBlock::Text { text } => Ok(ContentBlock::Text { text }),
+        CommsToolContentBlock::ImageRef {
+            source: CommsToolImageReferenceSource::CurrentTurn,
+            index,
+        } => dispatch_context
+            .current_turn_image(index)
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "image_ref_unavailable: current_turn image {index} did not resolve to a current-turn image"
+                )
+            }),
+    }
+}
+
 fn project_peer_request_command(
     request: meerkat_contracts::CommsCommandRequest,
     to: PeerRoute,
@@ -259,6 +377,7 @@ fn project_peer_request_command(
     let meerkat_core::comms::CommsCommandRequest::PeerRequest {
         intent,
         params,
+        blocks,
         handling_mode,
         stream,
         ..
@@ -270,6 +389,7 @@ fn project_peer_request_command(
         to,
         intent,
         params,
+        blocks,
         handling_mode: handling_mode.unwrap_or_default(),
         stream: stream.unwrap_or(InputStreamMode::None),
     })
@@ -680,6 +800,12 @@ mod tests {
             cmd: CommsCommand,
         ) -> Result<meerkat_core::comms::SendReceipt, meerkat_core::comms::SendError> {
             let receipt = match &cmd {
+                CommsCommand::PeerMessage { .. } => {
+                    meerkat_core::comms::SendReceipt::PeerMessageSent {
+                        envelope_id: uuid::Uuid::from_u128(5),
+                        acked: false,
+                    }
+                }
                 CommsCommand::PeerRequest { stream, .. } => {
                     meerkat_core::comms::SendReceipt::PeerRequestSent {
                         envelope_id: uuid::Uuid::from_u128(1),
@@ -788,6 +914,13 @@ mod tests {
         assert!(required_names.contains(&"peer_id"));
         assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"body"));
+        assert!(!required_names.contains(&"blocks"));
+        assert!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("blocks")
+        );
     }
 
     #[test]
@@ -803,6 +936,228 @@ mod tests {
         assert!(!required_names.contains(&"display_name"));
         assert!(required_names.contains(&"intent"));
         assert!(required_names.contains(&"params"));
+        assert!(!required_names.contains(&"blocks"));
+        assert!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("blocks")
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_resolves_current_turn_image_ref_to_peer_message_blocks() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![
+                meerkat_core::ContentBlock::Text {
+                    text: "please forward this".to_string(),
+                },
+                meerkat_core::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "iVBORw0KGgo=".into(),
+                },
+            ]),
+        );
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "Please describe the attached image.",
+                "blocks": [
+                    {"type": "text", "text": "Please describe the attached image."},
+                    {"type": "image_ref", "source": "current_turn", "index": 0}
+                ],
+                "handling_mode": "steer"
+            }),
+            &dispatch_context,
+        )
+        .await
+        .expect("send_message should resolve current-turn image refs");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                body,
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        assert_eq!(body, "Please describe the attached image.");
+        assert!(matches!(
+            &blocks[0],
+            meerkat_core::ContentBlock::Text { text }
+                if text == "Please describe the attached image."
+        ));
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Inline { data }
+            } if media_type == "image/png" && data == "iVBORw0KGgo="
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_request_resolves_current_turn_image_ref_to_peer_request_blocks() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".into(),
+            }]),
+        );
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "checksum_token",
+                "params": {"subject": "describe-image"},
+                "blocks": [
+                    {"type": "text", "text": "Please describe the attached image."},
+                    {"type": "image_ref", "source": "current_turn", "index": 0}
+                ],
+                "handling_mode": "steer"
+            }),
+            &dispatch_context,
+        )
+        .await
+        .expect("send_request should resolve current-turn image refs");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerRequest {
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer request with blocks, got {sent:?}");
+        };
+        assert!(matches!(
+            &blocks[0],
+            meerkat_core::ContentBlock::Text { text }
+                if text == "Please describe the attached image."
+        ));
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Inline { data }
+            } if media_type == "image/png" && data == "iVBORw0KGgo="
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_message_synthesizes_body_text_when_blocks_only_reference_image() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let dispatch_context = meerkat_core::ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "iVBORw0KGgo=".into(),
+            }]),
+        );
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "Please describe the attached image.",
+                "blocks": [
+                    {"type": "image_ref", "source": "current_turn", "index": 0}
+                ],
+                "handling_mode": "steer"
+            }),
+            &dispatch_context,
+        )
+        .await
+        .expect("send_message should resolve image-only blocks");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        assert_eq!(
+            blocks.first(),
+            Some(&meerkat_core::ContentBlock::Text {
+                text: "Please describe the attached image.".into()
+            })
+        );
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Inline { data }
+            } if media_type == "image/png" && data == "iVBORw0KGgo="
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_message_does_not_duplicate_body_when_text_blocks_split_it() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "Please describe\nthe attached image.",
+                "blocks": [
+                    {"type": "text", "text": "Please describe"},
+                    {"type": "text", "text": "the attached image."}
+                ],
+                "handling_mode": "steer"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_message should accept split text blocks");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            &blocks[0],
+            meerkat_core::ContentBlock::Text { text } if text == "Please describe"
+        ));
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Text { text } if text == "the attached image."
+        ));
     }
 
     #[test]

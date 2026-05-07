@@ -177,6 +177,62 @@ pub struct ExternalToolUpdate {
     pub background_completions: Vec<DetachedOpCompletion>,
 }
 
+/// Typed context supplied by the agent loop when dispatching a tool call.
+///
+/// This is a dispatch-time projection of the already-admitted turn input. It
+/// lets tool surfaces resolve typed turn-scoped references, such as a
+/// `source=current_turn, index=0` image ref, without writing surface-local
+/// metadata into canonical transcript history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolDispatchContext {
+    current_turn: Option<CurrentTurnContent>,
+}
+
+impl ToolDispatchContext {
+    pub fn from_current_turn_input(input: &crate::types::ContentInput) -> Self {
+        let blocks = match input {
+            crate::types::ContentInput::Text(_) => None,
+            crate::types::ContentInput::Blocks(blocks) => Some(blocks.clone()),
+        };
+        Self {
+            current_turn: blocks.map(CurrentTurnContent::new),
+        }
+    }
+
+    pub fn current_turn(&self) -> Option<&CurrentTurnContent> {
+        self.current_turn.as_ref()
+    }
+
+    pub fn current_turn_image(&self, index: usize) -> Option<&crate::types::ContentBlock> {
+        self.current_turn
+            .as_ref()
+            .and_then(|current_turn| current_turn.image(index))
+    }
+}
+
+/// Multimodal content from the currently admitted turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentTurnContent {
+    blocks: Vec<crate::types::ContentBlock>,
+}
+
+impl CurrentTurnContent {
+    pub fn new(blocks: Vec<crate::types::ContentBlock>) -> Self {
+        Self { blocks }
+    }
+
+    pub fn blocks(&self) -> &[crate::types::ContentBlock] {
+        &self.blocks
+    }
+
+    pub fn image(&self, index: usize) -> Option<&crate::types::ContentBlock> {
+        self.blocks
+            .iter()
+            .filter(|block| matches!(block, crate::types::ContentBlock::Image { .. }))
+            .nth(index)
+    }
+}
+
 /// Completion notice for a detached background operation, projected from
 /// canonical ops-lifecycle terminal state plus dispatcher-owned display metadata.
 ///
@@ -289,6 +345,19 @@ pub trait AgentToolDispatcher: Send + Sync {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError>;
+
+    /// Execute a tool call with the current turn's typed dispatch context.
+    ///
+    /// Most tools do not need turn-local context and inherit the plain
+    /// `dispatch` behavior. Context-sensitive surfaces override this method
+    /// rather than reaching into session history or prompt text.
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        _context: &ToolDispatchContext,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        self.dispatch(call).await
+    }
 
     /// Poll for external tool updates from background operations (e.g. async MCP loading).
     ///
@@ -484,6 +553,15 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if !self.allowed_tools.contains(call.name) {
             let inner_knows_tool = if self.inner.tool_catalog_capabilities().exact_catalog {
                 self.inner
@@ -498,7 +576,7 @@ impl<T: AgentToolDispatcher + ?Sized + 'static> AgentToolDispatcher for Filtered
             }
             return Err(crate::error::ToolError::access_denied(call.name));
         }
-        self.inner.dispatch(call).await
+        self.inner.dispatch_with_context(call, context).await
     }
 
     fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
@@ -1025,23 +1103,68 @@ where
     pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
     /// Last published pending catalog sources.
     pub(crate) last_pending_catalog_sources: BTreeSet<String>,
+    /// Dispatch-time projection of the current turn input for contextual tools.
+    pub(crate) tool_dispatch_context: ToolDispatchContext,
 }
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::{
-        CommsRuntime, DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS, InlinePeerNotificationPolicy,
+        AgentToolDispatcher, CommsRuntime, DEFAULT_MAX_INLINE_PEER_NOTIFICATIONS,
+        FilteredToolDispatcher, InlinePeerNotificationPolicy, ToolDispatchContext,
     };
     use crate::comms::{
         PeerAddress, PeerId, PeerName, PeerTransport, SendError, TrustedPeerDescriptor,
     };
+    use crate::types::{ContentBlock, ContentInput, ToolCallView, ToolDef, ToolResult};
     use async_trait::async_trait;
+    use serde_json::json;
     use std::sync::Arc;
     use tokio::sync::Notify;
 
     struct NoopCommsRuntime {
         notify: Arc<Notify>,
+    }
+
+    struct ContextAwareToolDispatcher;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentToolDispatcher for ContextAwareToolDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([Arc::new(ToolDef {
+                name: "inspect_context".into(),
+                description: "inspect context".to_string(),
+                input_schema: json!({"type": "object"}),
+                provenance: None,
+            })])
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": false}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                false,
+            )
+            .into())
+        }
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -1081,6 +1204,33 @@ mod tests {
         let result =
             <NoopCommsRuntime as CommsRuntime>::remove_trusted_peer(&runtime, &peer_id).await;
         assert!(matches!(result, Err(SendError::Unsupported(_))));
+    }
+
+    #[tokio::test]
+    async fn filtered_tool_dispatcher_preserves_dispatch_context() {
+        let dispatcher =
+            FilteredToolDispatcher::new(Arc::new(ContextAwareToolDispatcher), ["inspect_context"]);
+        let args = serde_json::value::RawValue::from_string("{}".to_string())
+            .expect("empty object should be valid JSON");
+        let call = ToolCallView {
+            id: "ctx-1",
+            name: "inspect_context",
+            args: &args,
+        };
+        let context = ToolDispatchContext::from_current_turn_input(&ContentInput::Blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc".into(),
+            },
+        ]));
+
+        let outcome = dispatcher
+            .dispatch_with_context(call, &context)
+            .await
+            .expect("filtered wrapper should dispatch");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).expect("tool result JSON");
+        assert_eq!(payload["saw_context_image"], true);
     }
 
     #[test]

@@ -107,6 +107,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         to: inproc_peer_route(&receiver_name, receiver.as_ref()).expect("valid peer route"),
         intent: "mob.ping".to_string(),
         params: serde_json::json!({"seq": 1}),
+        blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
@@ -151,7 +152,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     );
 
     let request_id = match &request_interaction.content {
-        meerkat_core::InteractionContent::Request { intent, params } => {
+        meerkat_core::InteractionContent::Request { intent, params, .. } => {
             assert_eq!(intent, "mob.ping");
             assert_eq!(params["seq"], 1);
             assert_eq!(
@@ -280,6 +281,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
         to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
         intent: "mob.ping".into(),
         params: serde_json::json!({"seq": 1}),
+        blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: InputStreamMode::ReserveInteraction,
     };
@@ -437,6 +439,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
             to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
             intent: "mob.ping".into(),
             params: serde_json::json!({"seq": 2}),
+            blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: InputStreamMode::None,
         },
@@ -1097,6 +1100,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         to: inproc_peer_route(&b_name, &comms_b).expect("valid peer route"),
         intent: "mob.contract.before".to_string(),
         params: serde_json::json!({"step": "before_turn"}),
+        blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
@@ -1138,6 +1142,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
         to: inproc_peer_route(&a_name, &comms_a).expect("valid peer route"),
         intent: "mob.contract.after".to_string(),
         params: serde_json::json!({"step": "after_turn"}),
+        blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };

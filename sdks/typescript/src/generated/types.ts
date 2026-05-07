@@ -1510,6 +1510,7 @@ export interface CommsCommandPeerLifecycle {
 }
 
 export interface CommsCommandPeerRequest {
+  blocks?: ContentBlock[];
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";
@@ -1765,6 +1766,7 @@ export interface CommsSendParamsPeerLifecycle {
 }
 
 export interface CommsSendParamsPeerRequest {
+  blocks?: ContentBlock[];
   handling_mode?: HandlingMode;
   intent: CommsPeerRequestIntent;
   kind: "peer_request";

@@ -260,8 +260,10 @@ impl IngressClassificationContext {
                     MessageKind::Message { body, blocks, .. } => {
                         content_shape_for_text_and_blocks(body, blocks.as_deref())
                     }
-                    MessageKind::Lifecycle { .. } => PeerContentShape::Text,
-                    MessageKind::Request { .. }
+                    MessageKind::Request { blocks, .. } => {
+                        content_shape_for_text_and_blocks("", blocks.as_deref())
+                    }
+                    MessageKind::Lifecycle { .. }
                     | MessageKind::Response { .. }
                     | MessageKind::Ack { .. } => PeerContentShape::Text,
                 };
@@ -658,6 +660,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -698,6 +701,7 @@ mod tests {
                 MessageKind::Request {
                     intent: "review".to_string(),
                     params: serde_json::json!({"pr": 42}),
+                    blocks: None,
                     handling_mode: None,
                 },
             ),
@@ -706,6 +710,7 @@ mod tests {
                 MessageKind::Request {
                     intent: "probe.silent".to_string(),
                     params: serde_json::json!({}),
+                    blocks: None,
                     handling_mode: None,
                 },
             ),
@@ -714,6 +719,7 @@ mod tests {
                 MessageKind::Request {
                     intent: "mob.peer_added".to_string(),
                     params: serde_json::json!({"peer": "worker-1"}),
+                    blocks: None,
                     handling_mode: None,
                 },
             ),
@@ -729,6 +735,7 @@ mod tests {
                 MessageKind::Request {
                     intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::json!({}),
+                    blocks: None,
                     handling_mode: None,
                 },
             ),
@@ -862,6 +869,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -932,6 +940,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -951,6 +960,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_retired".to_string(),
                 params: serde_json::json!({"peer": "old-agent"}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -970,6 +980,7 @@ mod tests {
             MessageKind::Request {
                 intent: "my-silent-intent".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -990,6 +1001,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1040,6 +1052,7 @@ mod tests {
                     "expected_peer_id": "peer-id",
                     "expected_address": "inproc://peer"
                 }),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1080,6 +1093,7 @@ mod tests {
             MessageKind::Request {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1104,6 +1118,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1128,11 +1143,13 @@ mod tests {
             MessageKind::Request {
                 intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({"peer": "new-agent"}),
+                blocks: None,
                 handling_mode: None,
             },
             MessageKind::Response {
@@ -1194,6 +1211,7 @@ mod tests {
                 MessageKind::Request {
                     intent: meerkat_core::SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::json!({}),
+                    blocks: None,
                     handling_mode: None,
                 },
             ),
@@ -1229,6 +1247,7 @@ mod tests {
                     MessageKind::Request {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
+                        blocks: None,
                         handling_mode: None,
                     },
                 ),
@@ -1290,6 +1309,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.runtime.bind_member".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1320,6 +1340,7 @@ mod tests {
                     MessageKind::Request {
                         intent: "review".to_string(),
                         params: serde_json::json!({}),
+                        blocks: None,
                         handling_mode: None,
                     },
                 ),
@@ -1334,6 +1355,7 @@ mod tests {
                     MessageKind::Request {
                         intent: "mob.peer_added".to_string(),
                         params: serde_json::json!({"peer": "new-agent"}),
+                        blocks: None,
                         handling_mode: None,
                     },
                 ),
@@ -1360,6 +1382,7 @@ mod tests {
             MessageKind::Request {
                 intent: "review".to_string(),
                 params: serde_json::json!({"pr": 42}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -1474,6 +1497,7 @@ mod tests {
             MessageKind::Request {
                 intent: "mob.peer_added".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );

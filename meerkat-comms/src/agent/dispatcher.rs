@@ -1,8 +1,8 @@
 //! CommsToolDispatcher - Implements AgentToolDispatcher for comms tools.
 
 use crate::mcp::tools::{
-    RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason, handle_tools_call,
-    tools_list,
+    RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason,
+    handle_tools_call_with_context, tools_list,
 };
 use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
@@ -11,6 +11,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolCallability;
 use meerkat_core::ToolCatalogCapabilities;
 use meerkat_core::ToolCatalogEntry;
+use meerkat_core::ToolDispatchContext;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
@@ -153,6 +154,15 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
@@ -161,12 +171,13 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result = handle_tools_call(&self.tool_context, call.name, &args)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            let result =
+                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else if let Some(inner) = &self.inner {
-            inner.dispatch(call).await
+            inner.dispatch_with_context(call, context).await
         } else {
             Err(ToolError::NotFound {
                 name: call.name.into(),
@@ -288,6 +299,15 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
@@ -296,12 +316,13 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result = handle_tools_call(&self.tool_context, call.name, &args)
-                .await
-                .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            let result =
+                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
+                    .await
+                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
             Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
         } else {
-            self.inner.dispatch(call).await
+            self.inner.dispatch_with_context(call, context).await
         }
     }
 
@@ -374,6 +395,10 @@ mod tests {
         polled: AtomicBool,
     }
 
+    struct ContextAwareDispatcher {
+        tool: Arc<ToolDef>,
+    }
+
     impl ExactDeferredDispatcher {
         fn new() -> Self {
             Self {
@@ -384,6 +409,19 @@ mod tests {
                     provenance: None,
                 }),
                 polled: AtomicBool::new(false),
+            }
+        }
+    }
+
+    impl ContextAwareDispatcher {
+        fn new() -> Self {
+            Self {
+                tool: Arc::new(ToolDef {
+                    name: "inspect_context".into(),
+                    description: "Inspect dispatch context".to_string(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                    provenance: None,
+                }),
             }
         }
     }
@@ -417,6 +455,36 @@ mod tests {
                 "callback:secret_lookup".to_string(),
             )]
             .into()
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ContextAwareDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            vec![Arc::clone(&self.tool)].into()
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                serde_json::json!({"saw_context_image": false}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                serde_json::json!({"saw_context_image": context.current_turn_image(0).is_some()})
+                    .to_string(),
+                false,
+            )
+            .into())
         }
     }
 
@@ -476,6 +544,68 @@ mod tests {
 
         dispatcher.poll_external_updates().await;
         assert!(inner.polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn comms_wrapper_preserves_dispatch_context_for_inner_tools() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::with_inner(
+            router,
+            trusted_peers,
+            Arc::new(ContextAwareDispatcher::new()),
+        );
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string())
+            .expect("empty object should be valid raw JSON");
+        let call = ToolCallView {
+            id: "ctx-1",
+            name: "inspect_context",
+            args: &args_raw,
+        };
+        let context = ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            }]),
+        );
+
+        let outcome = dispatcher
+            .dispatch_with_context(call, &context)
+            .await
+            .expect("wrapped inner tool should dispatch");
+        let payload: serde_json::Value = serde_json::from_str(&outcome.result.text_content())
+            .expect("tool result should be JSON");
+        assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn dyn_comms_wrapper_preserves_dispatch_context_for_inner_tools() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = DynCommsToolDispatcher::new(
+            router,
+            trusted_peers,
+            Arc::new(ContextAwareDispatcher::new()),
+        );
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string())
+            .expect("empty object should be valid raw JSON");
+        let call = ToolCallView {
+            id: "ctx-1",
+            name: "inspect_context",
+            args: &args_raw,
+        };
+        let context = ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            }]),
+        );
+
+        let outcome = dispatcher
+            .dispatch_with_context(call, &context)
+            .await
+            .expect("wrapped inner tool should dispatch");
+        let payload: serde_json::Value = serde_json::from_str(&outcome.result.text_content())
+            .expect("tool result should be JSON");
+        assert_eq!(payload["saw_context_image"], true);
     }
 
     #[tokio::test]

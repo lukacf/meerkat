@@ -116,6 +116,7 @@ fn make_request(from: &str, intent: &str) -> InboxInteraction {
         content: InteractionContent::Request {
             intent: intent.into(),
             params: serde_json::json!({}),
+            blocks: None,
         },
         rendered_text: format!("[{from}]: request ({intent})"),
         handling_mode: meerkat_core::types::HandlingMode::Queue,

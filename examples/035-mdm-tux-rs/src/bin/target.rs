@@ -745,6 +745,7 @@ fn spawn_heartbeat(
                 meerkat_comms::MessageKind::Request {
                     intent: "heartbeat".into(),
                     params: serde_json::json!(null),
+                    blocks: None,
                     handling_mode: None,
                 },
             );

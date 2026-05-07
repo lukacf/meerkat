@@ -5,6 +5,7 @@
  */
 
 import type {
+  CommsChecksumTokenParams as WireCommsChecksumTokenParams,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
   MobFlowSpecInput,
@@ -533,6 +534,7 @@ export type CommsResponseStatus = "accepted" | "completed" | "failed";
 export interface CommsInputCommand {
   kind: "input";
   body: string;
+  blocks?: readonly ContentBlock[];
   source?: CommsInputSource;
   stream?: CommsInputStreamMode;
   handling_mode?: CommsHandlingMode;
@@ -543,6 +545,7 @@ export interface CommsPeerMessageCommand {
   kind: "peer_message";
   to: string;
   body: string;
+  blocks?: readonly ContentBlock[];
   handling_mode?: CommsHandlingMode;
 }
 
@@ -553,14 +556,112 @@ export interface CommsPeerLifecycleCommand {
   params?: unknown;
 }
 
-export interface CommsPeerRequestCommand {
+export type BridgeProtocolVersion = number;
+
+export type BridgeBootstrapToken = string;
+
+export interface BridgePeerSpec {
+  readonly address: string;
+  readonly name: string;
+  readonly peer_id: string;
+  readonly pubkey?: readonly number[];
+}
+
+interface BridgeCommandBase {
+  readonly epoch: number;
+  readonly protocol_version: BridgeProtocolVersion;
+  readonly supervisor: BridgePeerSpec;
+}
+
+export interface BridgeCommandBindMember extends BridgeCommandBase {
+  readonly command: "bind_member";
+  readonly bootstrap_token: BridgeBootstrapToken;
+  readonly expected_address: string;
+  readonly expected_peer_id: string;
+}
+
+export interface BridgeCommandAuthorizeSupervisor extends BridgeCommandBase {
+  readonly command: "authorize_supervisor";
+}
+
+export interface BridgeCommandRevokeSupervisor extends BridgeCommandBase {
+  readonly command: "revoke_supervisor";
+}
+
+export interface BridgeCommandDeliverMemberInput extends BridgeCommandBase {
+  readonly command: "deliver_member_input";
+  readonly content: ContentInput;
+  readonly handling_mode: CommsHandlingMode;
+  readonly input_id: string;
+}
+
+export interface BridgeCommandObserveMember extends BridgeCommandBase {
+  readonly command: "observe_member";
+}
+
+export interface BridgeCommandInterruptMember extends BridgeCommandBase {
+  readonly command: "interrupt_member";
+}
+
+export interface BridgeCommandHardCancelMember extends BridgeCommandBase {
+  readonly command: "hard_cancel_member";
+  readonly reason: string;
+}
+
+export interface BridgeCommandRetireMember extends BridgeCommandBase {
+  readonly command: "retire_member";
+}
+
+export interface BridgeCommandDestroyMember extends BridgeCommandBase {
+  readonly command: "destroy_member";
+}
+
+export interface BridgeCommandWireMember extends BridgeCommandBase {
+  readonly command: "wire_member";
+  readonly peer_spec: BridgePeerSpec;
+}
+
+export interface BridgeCommandUnwireMember extends BridgeCommandBase {
+  readonly command: "unwire_member";
+  readonly peer_spec: BridgePeerSpec;
+}
+
+export type BridgeCommand =
+  | BridgeCommandBindMember
+  | BridgeCommandAuthorizeSupervisor
+  | BridgeCommandRevokeSupervisor
+  | BridgeCommandDeliverMemberInput
+  | BridgeCommandObserveMember
+  | BridgeCommandInterruptMember
+  | BridgeCommandHardCancelMember
+  | BridgeCommandRetireMember
+  | BridgeCommandDestroyMember
+  | BridgeCommandWireMember
+  | BridgeCommandUnwireMember;
+
+export interface CommsChecksumTokenPeerRequestCommand {
   kind: "peer_request";
   to: string;
-  intent: string;
-  params?: Record<string, unknown>;
+  intent: "checksum_token";
+  params: WireCommsChecksumTokenParams;
+  blocks?: readonly ContentBlock[];
   handling_mode?: CommsHandlingMode;
   stream?: CommsInputStreamMode;
 }
+
+export interface CommsSupervisorBridgePeerRequestCommand {
+  kind: "peer_request";
+  to: string;
+  intent: "supervisor.bridge";
+  params: BridgeCommand;
+  blocks?: readonly ContentBlock[];
+  handling_mode?: CommsHandlingMode;
+  stream?: CommsInputStreamMode;
+}
+
+export type CommsPeerRequestCommand =
+  | CommsChecksumTokenPeerRequestCommand
+  | CommsSupervisorBridgePeerRequestCommand;
 
 export interface CommsPeerResponseCommand {
   kind: "peer_response";

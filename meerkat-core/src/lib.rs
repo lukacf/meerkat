@@ -81,9 +81,9 @@ pub mod types;
 pub use agent::{
     Agent, AgentBuildPolicyError, AgentBuilder, AgentExecutionSnapshot, AgentLlmClient,
     AgentLlmClientDecorator, AgentRunner, AgentSessionStore, AgentToolDispatcher, BindOutcome,
-    CommsCapabilityError, CommsRuntime, DispatcherCapabilities, ExternalToolUpdate,
-    FilteredToolDispatcher, LlmStreamResult, select_tool_catalog_mode,
-    should_compose_tool_catalog_control_plane,
+    CommsCapabilityError, CommsRuntime, CurrentTurnContent, DispatcherCapabilities,
+    ExternalToolUpdate, FilteredToolDispatcher, LlmStreamResult, ToolDispatchContext,
+    select_tool_catalog_mode, should_compose_tool_catalog_control_plane,
 };
 pub use approval::{
     ApprovalActionKind, ApprovalDecision, ApprovalDecisionRecord, ApprovalError, ApprovalId,

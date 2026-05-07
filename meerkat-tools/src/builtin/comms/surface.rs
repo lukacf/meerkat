@@ -3,9 +3,10 @@
 use async_trait::async_trait;
 use meerkat_comms::{
     Router, RuntimeCommsCommandHandle, ToolContext, TrustedPeers, comms_tool_defs,
-    comms_tool_unavailable_reason, handle_tools_call,
+    comms_tool_unavailable_reason, handle_tools_call_with_context,
 };
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolDispatchContext;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{
@@ -121,6 +122,15 @@ impl AgentToolDispatcher for CommsToolSurface {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
         let is_comms = self.tool_defs.iter().any(|t| t.name == call.name);
         if !is_comms {
             return Err(ToolError::NotFound {
@@ -133,7 +143,7 @@ impl AgentToolDispatcher for CommsToolSurface {
 
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        let result = handle_tools_call(&self.tool_context, call.name, &args)
+        let result = handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
             .await
             .map_err(|e| ToolError::ExecutionFailed { message: e })?;
         Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())

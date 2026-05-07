@@ -714,6 +714,48 @@ fn rendered_message_prefix(body: &str) -> Option<String> {
     }
 }
 
+fn rendered_message_body_text(body: &str, prefix: &str) -> Option<String> {
+    let text = body
+        .lines()
+        .skip_while(|line| line.trim() != prefix)
+        .skip(1)
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_media_projection_line(line))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.is_empty() { None } else { Some(text) }
+}
+
+fn is_media_projection_line(line: &str) -> bool {
+    (line.starts_with("[image:") || line.starts_with("[video:")) && line.ends_with(']')
+}
+
+fn blocks_include_text_projection(
+    blocks: &[meerkat_core::types::ContentBlock],
+    expected: &str,
+) -> bool {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return true;
+    }
+    if blocks
+        .iter()
+        .any(|block| matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == expected))
+    {
+        return true;
+    }
+    let joined = blocks
+        .iter()
+        .filter_map(|block| match block {
+            meerkat_core::types::ContentBlock::Text { text } => Some(text.trim()),
+            _ => None,
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    joined == expected
+}
+
 pub(crate) fn input_prompt_text(input: &Input) -> String {
     match input {
         Input::Prompt(p) => p.text.clone(),
@@ -764,7 +806,14 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         Input::Peer(p) if p.blocks.is_some() => {
             let raw_blocks = p.blocks.clone().unwrap_or_default();
             if let Some(prefix) = peer_block_prefix_text(p) {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text { text: prefix }];
+                let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
+                    text: prefix.clone(),
+                }];
+                if let Some(body_text) = rendered_message_body_text(&p.body, &prefix)
+                    && !blocks_include_text_projection(&raw_blocks, &body_text)
+                {
+                    blocks.push(meerkat_core::types::ContentBlock::Text { text: body_text });
+                }
                 blocks.extend(raw_blocks);
                 CoreRenderable::Blocks { blocks }
             } else {

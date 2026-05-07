@@ -1494,6 +1494,15 @@
           {
             "additionalProperties": false,
             "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/ContentBlock"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
               "handling_mode": {
                 "anyOf": [
                   {

@@ -11,6 +11,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::ToolCategoryOverride;
+use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::{BindOutcome, DispatcherCapabilities, OpsLifecycleBindError};
 use meerkat_core::error::ToolError;
 use meerkat_core::ops::ToolDispatchOutcome;
@@ -428,6 +429,15 @@ impl AgentToolDispatcher for CompositeDispatcher {
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        self.dispatch_with_context(call, &ToolDispatchContext::default())
+            .await
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
         let args: Value =
             serde_json::from_str(call.args.get()).map_err(|e| ToolError::InvalidArguments {
                 name: call.name.into(),
@@ -548,10 +558,10 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     if let Some(reason) = entry.callability.unavailable_reason() {
                         return Err(ToolError::unavailable(call.name, reason));
                     }
-                    return ext.dispatch(call).await;
+                    return ext.dispatch_with_context(call, context).await;
                 }
             } else if ext.tools().iter().any(|t| t.name == call.name) {
-                return ext.dispatch(call).await;
+                return ext.dispatch_with_context(call, context).await;
             }
         }
 
@@ -712,6 +722,10 @@ mod tests {
         catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
     }
 
+    struct ContextAwareExactExternalDispatcher {
+        catalog: Arc<[meerkat_core::ToolCatalogEntry]>,
+    }
+
     impl ExactExternalDispatcher {
         fn new(entries: &[(&str, bool)]) -> Self {
             let catalog: Vec<meerkat_core::ToolCatalogEntry> = entries
@@ -734,6 +748,26 @@ mod tests {
                 .collect();
             Self {
                 catalog: catalog.into(),
+            }
+        }
+    }
+
+    impl ContextAwareExactExternalDispatcher {
+        fn new() -> Self {
+            Self {
+                catalog: Arc::from([meerkat_core::ToolCatalogEntry::session_inline(
+                    Arc::new(ToolDef {
+                        name: "inspect_context".into(),
+                        description: "inspect context".to_string(),
+                        input_schema: json!({
+                            "type": "object",
+                            "properties": {},
+                            "required": []
+                        }),
+                        provenance: None,
+                    }),
+                    true,
+                )]),
             }
         }
     }
@@ -769,6 +803,51 @@ mod tests {
                 return Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into());
             }
             Err(ToolError::not_found(call.name))
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for ContextAwareExactExternalDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            self.catalog
+                .iter()
+                .filter(|entry| entry.currently_callable())
+                .map(|entry| Arc::clone(&entry.tool))
+                .collect::<Vec<_>>()
+                .into()
+        }
+
+        fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+            meerkat_core::ToolCatalogCapabilities {
+                exact_catalog: true,
+                may_require_catalog_control_plane: false,
+            }
+        }
+
+        fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+            Arc::clone(&self.catalog)
+        }
+
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": false}).to_string(),
+                false,
+            )
+            .into())
+        }
+
+        async fn dispatch_with_context(
+            &self,
+            call: ToolCallView<'_>,
+            context: &ToolDispatchContext,
+        ) -> Result<ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::new(
+                call.id.to_string(),
+                json!({"saw_context_image": context.current_turn_image(0).is_some()}).to_string(),
+                false,
+            )
+            .into())
         }
     }
 
@@ -985,6 +1064,44 @@ mod tests {
             .await
             .expect("external tool dispatch should succeed");
         assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_context_forwards_context_to_exact_external_tool() {
+        let store = Arc::new(MemoryTaskStore::new());
+        let external: Arc<dyn AgentToolDispatcher> =
+            Arc::new(ContextAwareExactExternalDispatcher::new());
+        let dispatcher = CompositeDispatcher::new(
+            store,
+            &BuiltinToolConfig::default(),
+            None,
+            None,
+            Some(external),
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "ext-ctx",
+            name: "inspect_context",
+            args: &call_json,
+        };
+        let context = ToolDispatchContext::from_current_turn_input(
+            &meerkat_core::ContentInput::Blocks(vec![meerkat_core::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc".into(),
+            }]),
+        );
+
+        let result = dispatcher
+            .dispatch_with_context(call, &context)
+            .await
+            .expect("external tool dispatch should succeed");
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).expect("tool result JSON");
+        assert_eq!(payload["saw_context_image"], true);
     }
 
     #[tokio::test]

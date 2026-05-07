@@ -116,7 +116,7 @@ where
 fn should_ack(kind: &MessageKind) -> bool {
     matches!(
         kind,
-        MessageKind::Message { blocks: None, .. } | MessageKind::Request { .. }
+        MessageKind::Message { .. } | MessageKind::Request { .. }
     )
 }
 
@@ -567,6 +567,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ack_for_multimodal_message() {
+        let sender_keypair = make_keypair();
+        let receiver_keypair = make_keypair();
+        let trusted = make_trusted_peers(&sender_keypair.public_key());
+        let (_inbox, inbox_sender) = Inbox::new();
+
+        let envelope = make_signed_envelope(
+            &sender_keypair,
+            receiver_keypair.public_key(),
+            MessageKind::Message {
+                blocks: Some(vec![meerkat_core::ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: "abc".into(),
+                }]),
+                body: "hello".to_string(),
+                handling_mode: None,
+            },
+        );
+        let original_id = envelope.id;
+        let bytes = envelope_to_bytes(&envelope).await;
+
+        let (client, server) = tokio::io::duplex(4096);
+        let (mut client_read, mut client_write) = tokio::io::split(client);
+
+        tokio::spawn(async move {
+            client_write.write_all(&bytes).await.unwrap();
+        });
+
+        let handle = tokio::spawn(async move {
+            handle_connection(server, true, &receiver_keypair, &trusted, &inbox_sender).await
+        });
+
+        let ack = read_one_envelope(&mut client_read).await.unwrap();
+        handle.await.unwrap().unwrap();
+
+        match ack.kind {
+            MessageKind::Ack { in_reply_to } => assert_eq!(in_reply_to, original_id),
+            _ => panic!("expected Ack for multimodal Message"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_ack_for_request() {
         let sender_keypair = make_keypair();
         let receiver_keypair = make_keypair();
@@ -579,6 +621,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".to_string(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         );

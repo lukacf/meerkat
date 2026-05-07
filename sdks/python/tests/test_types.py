@@ -1855,12 +1855,23 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
 
     client._request = fake_request  # type: ignore[method-assign]
 
-    send_receipt = await client.send("s1", kind="peer_message", to="agent-a", body="hello")
+    blocks = [
+        {"type": "text", "text": "hello"},
+        {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
+    ]
+    send_receipt = await client.send(
+        "s1",
+        kind="peer_message",
+        to="agent-a",
+        body="hello",
+        blocks=blocks,
+    )
     peers = await client.peers("s1")
 
     assert send_receipt["kind"] == "peer_message_sent"
     assert peers["peers"] == [{"name": "agent-a"}]
     assert [m for m, _ in calls] == ["comms/send", "comms/peers"]
+    assert calls[0][1]["blocks"] == blocks
 
 
 @pytest.mark.asyncio

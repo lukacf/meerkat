@@ -1257,6 +1257,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             false,
@@ -1273,6 +1274,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             false,
@@ -1314,6 +1316,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             false,
@@ -1364,6 +1367,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             false,
@@ -1416,6 +1420,7 @@ mod tests {
             MessageKind::Request {
                 intent: "test".into(),
                 params: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
             false,

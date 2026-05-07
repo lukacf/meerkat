@@ -523,6 +523,7 @@ async fn integration_real_router_transport_only_send_request_frame() {
             MessageKind::Request {
                 intent: "review-pr".to_string(),
                 params: serde_json::json!({"pr": 42}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )
@@ -812,6 +813,7 @@ async fn integration_real_router_inproc_transport_only_request_frame() {
             MessageKind::Request {
                 intent: "analyze".to_string(),
                 params: serde_json::json!({"file": "main.rs"}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )

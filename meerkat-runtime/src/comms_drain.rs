@@ -989,7 +989,7 @@ async fn try_handle_supervisor_bridge_command(
     comms_runtime: &Arc<dyn CommsRuntime>,
     candidate: &PeerInputCandidate,
 ) -> bool {
-    let InteractionContent::Request { intent, params } = &candidate.interaction.content else {
+    let InteractionContent::Request { intent, params, .. } = &candidate.interaction.content else {
         return false;
     };
 
@@ -2180,6 +2180,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: intent.clone(),
                     params: json!({ "ok": true }),
+                    blocks: None,
                 },
                 rendered_text: String::new(),
                 handling_mode: HandlingMode::Queue,
@@ -2532,6 +2533,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::to_value(command).expect("serialize bridge command"),
+                    blocks: None,
                 },
                 rendered_text: String::new(),
                 handling_mode: HandlingMode::Queue,
@@ -2918,6 +2920,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: intent.to_string(),
                     params,
+                    blocks: None,
                 },
                 rendered_text: String::new(),
                 handling_mode: HandlingMode::Queue,
@@ -3309,6 +3312,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params,
+                    blocks: None,
                 },
                 rendered_text: String::new(),
                 handling_mode: HandlingMode::Queue,
@@ -4264,6 +4268,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: SUPERVISOR_BRIDGE_INTENT.to_string(),
                     params: serde_json::to_value(command).expect("serialize bridge command"),
+                    blocks: None,
                 },
                 rendered_text: String::new(),
                 handling_mode: HandlingMode::Queue,

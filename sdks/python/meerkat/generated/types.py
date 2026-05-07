@@ -2669,6 +2669,7 @@ class CommsCommandPeerLifecycle(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsCommandPeerRequest(TypedDict, total=False):
+    blocks: NotRequired[list[ContentBlock]]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]
@@ -2931,6 +2932,7 @@ class CommsSendParamsPeerLifecycle(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsSendParamsPeerRequest(TypedDict, total=False):
+    blocks: NotRequired[list[ContentBlock]]
     handling_mode: NotRequired[HandlingMode]
     intent: Required[CommsPeerRequestIntent]
     kind: Required[Literal['peer_request']]

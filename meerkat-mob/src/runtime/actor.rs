@@ -11806,6 +11806,7 @@ impl MobActor {
                 to: peer_route,
                 intent: intent.to_string(),
                 params,
+                blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: meerkat_core::comms::InputStreamMode::None,
             },

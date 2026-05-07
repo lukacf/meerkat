@@ -6,8 +6,10 @@
 //! A mob of 4 agents (3 different LLM providers) plays Pictionary:
 //!
 //! - **Test harness** generates images via Gemini flash-image-preview (raw reqwest)
-//! - **Test harness** injects images into guessers as multimodal content
-//!   via `MemberHandle::send(ContentInput::Blocks)` — tests runtime ingress with image blocks
+//! - **Test harness** injects images into the artist as current-turn multimodal content
+//!   via `MemberHandle::send(ContentInput::Blocks)`
+//! - **Artist** forwards the current-turn image through the agent-facing `send_message`
+//!   tool using typed `image_ref` blocks
 //! - **Guesser A** (Claude Opus 4.6) — lead guesser, literal/shapes perspective
 //! - **Guesser B** (Gemini 3.1 Pro) — emotions/mood perspective
 //! - **Guesser C** (GPT-5.4) — context/narrative perspective
@@ -26,8 +28,9 @@
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
 use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
 use meerkat_mob::{
-    AgentIdentity, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
-    MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec, ToolConfig,
+    AgentIdentity, MemberHandle, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode,
+    MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec,
+    ToolConfig,
     definition::{RoleWiringRule, WiringRules},
 };
 use meerkat_session::PersistentSessionService;
@@ -516,84 +519,121 @@ async fn missing_guessers_for_artist_image(
     missing
 }
 
-async fn send_peer_message(
-    comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
-    peer_name: &str,
-    body: &str,
-    blocks: &[ContentBlock],
-) -> Result<bool, String> {
-    let to = comms_runtime
-        .peers()
-        .await
-        .into_iter()
-        .find(|entry| entry.name.as_str() == peer_name)
-        .map(|entry| meerkat_core::comms::PeerRoute::with_display_name(entry.peer_id, entry.name))
-        .ok_or_else(|| format!("peer not found: {peer_name}"))?;
-    match comms_runtime
-        .send(meerkat_core::comms::CommsCommand::PeerMessage {
-            to,
-            body: body.to_string(),
-            blocks: Some(blocks.to_vec()),
-            handling_mode: HandlingMode::Steer,
-        })
-        .await
-    {
-        Ok(meerkat_core::comms::SendReceipt::PeerMessageSent { acked, .. }) => Ok(acked),
-        Ok(other) => Err(format!("unexpected receipt: {other:?}")),
-        Err(err) => Err(format!("send error: {err}")),
-    }
+fn artist_forward_body(label: &str) -> String {
+    format!("Pictionary {label} - guess what I drew!")
+}
+
+fn artist_forward_text_block(label: &str) -> String {
+    format!(
+        "I drew this for Pictionary ({label}). \
+         guesser-a: describe what you see to guesser-b and guesser-c FIRST, \
+         wait for their replies, THEN send me your consensus guess."
+    )
+}
+
+fn artist_forward_instruction(label: &str, attempt: usize) -> String {
+    let retry_note = if attempt == 1 {
+        "This is the only task for this turn."
+    } else {
+        "Retry now because guesser-a's history did not yet show the image."
+    };
+    let body = artist_forward_body(label);
+    let text = artist_forward_text_block(label);
+    let blocks_example = serde_json::json!([
+        { "type": "text", "text": text },
+        { "type": "image_ref", "source": "current_turn", "index": 0 }
+    ])
+    .to_string();
+    format!(
+        "Forward the attached Pictionary image to guesser-a using the send_message tool. \
+         {retry_note}\n\n\
+         Exact steps:\n\
+         1. Call peers if you need the peer_id for pictionary/guesser-a/guesser-a.\n\
+         2. Call send_message with peer_id set to pictionary/guesser-a/guesser-a's peer_id, \
+         handling_mode \"steer\", body \"{body}\", and blocks exactly:\n\
+         {blocks_example}\n\n\
+         Do not reveal the secret word, describe the image, or guess it yourself. Only forward \
+         the attached image block through the comms tool."
+    )
+}
+
+fn artist_forward_blocks(
+    label: &str,
+    media_type: &str,
+    image_data: &str,
+    attempt: usize,
+) -> Vec<ContentBlock> {
+    vec![
+        ContentBlock::Text {
+            text: artist_forward_instruction(label, attempt),
+        },
+        ContentBlock::Image {
+            media_type: media_type.to_string(),
+            data: image_data.to_string().into(),
+        },
+    ]
+}
+
+#[test]
+fn artist_forward_instruction_uses_typed_current_turn_image_ref() {
+    let prompt = artist_forward_instruction("Round \"quoted\"", 1);
+    assert!(prompt.contains("send_message"));
+    assert!(prompt.contains("\"type\":\"image_ref\""));
+    assert!(prompt.contains("\"source\":\"current_turn\""));
+    assert!(prompt.contains("\"index\":0"));
+    assert!(!prompt.contains("current_turn:image"));
+
+    let blocks = artist_forward_blocks("Round \"quoted\"", "image/png", "abc123", 1);
+    assert_eq!(blocks.len(), 2);
+    assert!(matches!(blocks.first(), Some(ContentBlock::Text { .. })));
+    assert!(matches!(blocks.get(1), Some(ContentBlock::Image { .. })));
+}
+
+struct ArtistForwardImage<'a> {
+    label: &'a str,
+    media_type: &'a str,
+    data: &'a str,
 }
 
 async fn ensure_artist_image_delivery(
     handle: &MobHandle,
     service: &dyn MobSessionService,
-    comms_runtime: &dyn meerkat_core::agent::CommsRuntime,
-    recipients: &[&'static str],
-    label: &str,
-    image_blocks: &[ContentBlock],
+    artist: &MemberHandle,
+    recipient: &'static str,
+    image: ArtistForwardImage<'_>,
     timeout: Duration,
 ) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
-    let mut last_outcomes = std::collections::BTreeMap::new();
-    let mut last_send_at = std::collections::BTreeMap::new();
-    let slow_retry_after = Duration::from_secs(15);
-    let fast_retry_after = Duration::from_secs(5);
+    let recipients = [recipient];
+    let mut attempt = 1;
+    let mut last_sent_at = Instant::now();
+    let retry_after = Duration::from_secs(20);
 
-    for guesser in recipients {
-        let peer_name = format!("pictionary/{guesser}/{guesser}");
-        last_send_at.insert(*guesser, Instant::now());
-        match send_peer_message(
-            comms_runtime,
-            &peer_name,
-            &format!("Pictionary {label} — guess what I drew!"),
-            image_blocks,
+    let mut last_outcome = match artist
+        .send(
+            ContentInput::Blocks(artist_forward_blocks(
+                image.label,
+                image.media_type,
+                image.data,
+                attempt,
+            )),
+            HandlingMode::Steer,
         )
         .await
-        {
-            Ok(acked) => {
-                last_outcomes.insert(*guesser, format!("initial send acked={acked}"));
-            }
-            Err(err) => {
-                last_outcomes.insert(*guesser, err);
-            }
-        }
-    }
+    {
+        Ok(receipt) => format!("initial artist turn {receipt:?}"),
+        Err(err) => format!("artist turn error: {err}"),
+    };
 
     loop {
-        let missing = missing_guessers_for_artist_image(handle, service, recipients).await;
+        let missing = missing_guessers_for_artist_image(handle, service, &recipients).await;
         if missing.is_empty() {
             return Ok(());
         }
         if Instant::now() > deadline {
             let detail = missing
                 .iter()
-                .map(|guesser| {
-                    let outcome = last_outcomes
-                        .get(guesser)
-                        .cloned()
-                        .unwrap_or_else(|| "no send attempt recorded".to_string());
-                    format!("{guesser} ({outcome})")
-                })
+                .map(|guesser| format!("{guesser} ({last_outcome})"))
                 .collect::<Vec<_>>()
                 .join(", ");
             return Err(format!(
@@ -605,39 +645,31 @@ async fn ensure_artist_image_delivery(
         sleep(Duration::from_secs(2)).await;
         let now = Instant::now();
         for guesser in missing {
-            let Some(last_sent_at) = last_send_at.get(guesser).copied() else {
-                continue;
-            };
-            let outcome = last_outcomes
-                .get(guesser)
-                .cloned()
-                .unwrap_or_else(|| "no send attempt recorded".to_string());
-            let retry_after = if outcome.starts_with("send error:") {
-                fast_retry_after
-            } else {
-                slow_retry_after
-            };
-            if now.duration_since(last_sent_at) < retry_after {
-                continue;
-            }
-            let peer_name = format!("pictionary/{guesser}/{guesser}");
-            match send_peer_message(
-                comms_runtime,
-                &peer_name,
-                &format!("Pictionary {label} — guess what I drew!"),
-                image_blocks,
-            )
-            .await
-            {
-                Ok(acked) => {
-                    println!("  [DEBUG] retrying artist image to {guesser} (acked={acked})");
-                    last_send_at.insert(guesser, now);
-                    last_outcomes.insert(guesser, format!("retry send acked={acked}"));
-                }
-                Err(err) => {
-                    println!("  [DEBUG] retrying artist image to {guesser} failed: {err}");
-                    last_send_at.insert(guesser, now);
-                    last_outcomes.insert(guesser, err);
+            if now.duration_since(last_sent_at) >= retry_after {
+                attempt += 1;
+                last_sent_at = now;
+                match artist
+                    .send(
+                        ContentInput::Blocks(artist_forward_blocks(
+                            image.label,
+                            image.media_type,
+                            image.data,
+                            attempt,
+                        )),
+                        HandlingMode::Steer,
+                    )
+                    .await
+                {
+                    Ok(receipt) => {
+                        println!("  [DEBUG] retrying artist image turn for {guesser}: {receipt:?}");
+                        last_outcome = format!("retry artist turn {receipt:?}");
+                    }
+                    Err(err) => {
+                        println!(
+                            "  [DEBUG] retrying artist image turn for {guesser} failed: {err}"
+                        );
+                        last_outcome = format!("artist turn error: {err}");
+                    }
                 }
             }
         }
@@ -1071,47 +1103,25 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             .expect("artist brief");
         println!("  Artist briefed [{:.1}s]", t.elapsed().as_secs_f64());
 
-        // 3. Send image to all guessers via peer-to-peer comms (from artist)
+        // 3. Give the image to the artist, who must forward it via send_message
         let t = Instant::now();
-        println!("  [3/4] Sending image to guessers via artist's comms...");
-        let artist_session_id = handle
-            .resolve_bridge_session_id(&AgentIdentity::from("artist"))
-            .await
-            .expect("artist session_id");
-        let artist_comms = service
-            .comms_runtime(&artist_session_id)
-            .await
-            .expect("artist comms runtime");
-
-        let image_blocks = vec![
-            ContentBlock::Text {
-                text: format!(
-                    "I drew this for Pictionary ({label}). \
-                     guesser-a: describe what you see to guesser-b and guesser-c FIRST, \
-                     wait for their replies, THEN send me your consensus guess. \
-                     guesser-b and guesser-c: reply to guesser-a with your assigned interpretation; \
-                     also copy the other non-lead guesser."
-                ),
-            },
-            ContentBlock::Image {
-                media_type: mime.clone(),
-                data: img_data.clone().into(),
-            },
-        ];
-
+        println!("  [3/4] Asking artist to forward image via send_message...");
         ensure_artist_image_delivery(
             &handle,
             service.as_ref(),
-            artist_comms.as_ref(),
-            &["guesser-a", "guesser-b", "guesser-c"],
-            label,
-            &image_blocks,
+            &artist,
+            "guesser-a",
+            ArtistForwardImage {
+                label,
+                media_type: &mime,
+                data: &img_data,
+            },
             Duration::from_secs(90),
         )
         .await
         .unwrap_or_else(|e| panic!("artist image delivery failed: {e}"));
 
-        println!("  Images sent [{:.1}s]", t.elapsed().as_secs_f64());
+        println!("  Image forwarded [{:.1}s]", t.elapsed().as_secs_f64());
         for guesser_name in ["guesser-a", "guesser-b", "guesser-c"] {
             let guesser_identity = AgentIdentity::from(guesser_name);
             let members = handle.list_members().await;

@@ -247,6 +247,7 @@ fn peer_rendered_body(interaction: &InboxInteraction) -> String {
 fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types::ContentBlock>> {
     match &interaction.content {
         InteractionContent::Message { blocks, .. } => blocks.clone(),
+        InteractionContent::Request { blocks, .. } => blocks.clone(),
         _ => None,
     }
 }
@@ -262,7 +263,7 @@ fn peer_payload(interaction: &InboxInteraction) -> Option<serde_json::Value> {
 fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
     match &interaction.content {
         InteractionContent::Message { body, .. } => serde_json::json!({ "body": body }),
-        InteractionContent::Request { intent, params } => {
+        InteractionContent::Request { intent, params, .. } => {
             serde_json::json!({ "intent": intent, "params": params })
         }
         InteractionContent::Response {
@@ -282,6 +283,7 @@ fn external_event_blocks(
 ) -> Option<Vec<meerkat_core::types::ContentBlock>> {
     match &interaction.content {
         InteractionContent::Message { blocks, .. } => blocks.clone(),
+        InteractionContent::Request { blocks, .. } => blocks.clone(),
         _ => None,
     }
 }
@@ -438,6 +440,7 @@ mod tests {
             content: InteractionContent::Request {
                 intent: "mob.peer_added".into(),
                 params: serde_json::json!({"name": "agent-1"}),
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
@@ -476,6 +479,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: "interpret_image".into(),
                     params: serde_json::json!({"description": "tower with a light"}),
+                    blocks: None,
                 },
                 id: request_id,
                 rendered_text: "[COMMS REQUEST stale helper prose]".into(),
@@ -631,6 +635,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: "review".into(),
                     params: serde_json::json!({"pr": 42}),
+                    blocks: None,
                 },
                 id,
                 rendered_text: "[COMMS REQUEST from display-agent]".into(),
@@ -708,6 +713,7 @@ mod tests {
             content: InteractionContent::Request {
                 intent: "mob.peer_added".into(),
                 params: serde_json::json!({"peer":"agent-1"}),
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
@@ -754,6 +760,67 @@ mod tests {
         if let Input::Peer(peer) = input {
             assert_eq!(peer.body, "[COMMS MESSAGE from peer-1]\nsee image");
             assert_eq!(peer.blocks, Some(blocks));
+        } else {
+            panic!("Expected PeerInput");
+        }
+    }
+
+    #[test]
+    fn request_blocks_are_preserved_on_peer_input() {
+        let blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "describe this image".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
+        let interaction_id = make_interaction_id();
+        let peer_id = PeerId::new();
+        let classified = PeerInputCandidate {
+            interaction: InboxInteraction {
+                from_route: Some(peer_id),
+                from: "vision-peer".into(),
+                content: InteractionContent::Request {
+                    intent: "checksum_token".into(),
+                    params: serde_json::json!({"subject": "describe-image"}),
+                    blocks: Some(blocks.clone()),
+                },
+                id: interaction_id,
+                rendered_text: String::new(),
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                render_metadata: None,
+            },
+            ingress: PeerIngressFact::peer(
+                interaction_id,
+                PeerInputClass::ActionableRequest,
+                PeerIngressKind::Request,
+                Some(meerkat_core::interaction::PeerIngressAuthDecision::Required),
+                PeerIngressIdentity::new(
+                    peer_id,
+                    "vision-peer",
+                    meerkat_core::interaction::PeerIngressConvention::Request {
+                        request_id: interaction_id.to_string(),
+                        intent: "checksum_token".to_string(),
+                    },
+                ),
+            ),
+            lifecycle_peer: None,
+            response_terminality: None,
+        };
+
+        let input = classified_interaction_to_runtime_input(
+            &classified,
+            &LogicalRuntimeId::new("runtime-a"),
+        )
+        .expect("classified request should project");
+        if let Input::Peer(peer) = input {
+            assert_eq!(peer.blocks, Some(blocks));
+            assert_eq!(
+                peer.payload,
+                Some(serde_json::json!({"subject": "describe-image"}))
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -1259,6 +1326,7 @@ mod tests {
                 content: InteractionContent::Request {
                     intent: "i".into(),
                     params: serde_json::json!({}),
+                    blocks: None,
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),

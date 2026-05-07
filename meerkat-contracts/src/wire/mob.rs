@@ -1737,7 +1737,7 @@ mod member_status_capability_tests {
     use super::*;
 
     #[test]
-    fn member_status_result_round_trips_resolved_capabilities() {
+    fn member_status_result_round_trips_resolved_capabilities() -> Result<(), serde_json::Error> {
         let capabilities = crate::wire::WireResolvedModelCapabilities {
             vision: true,
             image_input: true,
@@ -1761,11 +1761,11 @@ mod member_status_capability_tests {
             resolved_capabilities: Some(capabilities.clone()),
         };
 
-        let json = serde_json::to_string(&result).expect("serialize member status");
+        let json = serde_json::to_string(&result)?;
         assert!(json.contains("\"resolved_capabilities\""));
-        let parsed: MobMemberStatusResult =
-            serde_json::from_str(&json).expect("deserialize member status");
+        let parsed: MobMemberStatusResult = serde_json::from_str(&json)?;
         assert_eq!(parsed.resolved_capabilities, Some(capabilities));
+        Ok(())
     }
 }
 

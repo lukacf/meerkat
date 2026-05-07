@@ -36,7 +36,8 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    HandlingMode, Message, RunResult, SessionId, ToolCallView, ToolDef, ToolResult, Usage,
+    HandlingMode, Message, RunResult, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult,
+    Usage,
 };
 use meerkat_core::{
     AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
@@ -3457,7 +3458,11 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
 
             for candidate in candidates {
                 match &candidate.interaction.content {
-                    meerkat_core::interaction::InteractionContent::Request { intent, params } => {
+                    meerkat_core::interaction::InteractionContent::Request {
+                        intent,
+                        params,
+                        ..
+                    } => {
                         responder_received_intents
                             .write()
                             .await
@@ -24134,6 +24139,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
             to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
             intent: "interpret_image".to_string(),
             params: serde_json::json!({"description":"tower with a light"}),
+            blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             stream: meerkat_core::InputStreamMode::ReserveInteraction,
         },
@@ -24440,6 +24446,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             .await,
             intent: "ping".to_string(),
             params: serde_json::json!({"message":"ping"}),
+            blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             stream: meerkat_core::InputStreamMode::ReserveInteraction,
         },
@@ -24901,6 +24908,7 @@ async fn test_wire_enables_peer_request_delivery() {
         to: test_peer_route(&*comms_a, &comms_name_b).await,
         intent: "mob.test_ping".to_string(),
         params: serde_json::json!({"test": true}),
+        blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
     };
@@ -24922,7 +24930,7 @@ async fn test_wire_enables_peer_request_delivery() {
         "w-1 should have received exactly one interaction after wire"
     );
     match &interactions[0].content {
-        meerkat_core::InteractionContent::Request { intent, params } => {
+        meerkat_core::InteractionContent::Request { intent, params, .. } => {
             assert_eq!(intent, "mob.test_ping");
             assert_eq!(params["test"], true);
         }
@@ -26125,6 +26133,65 @@ impl AgentToolDispatcher for MultiToolDispatcher {
     }
 }
 
+struct ContextRecordingDispatcher {
+    defs: Arc<[Arc<ToolDef>]>,
+    saw_context_image: Arc<AtomicBool>,
+}
+
+impl ContextRecordingDispatcher {
+    fn new(defs: Vec<Arc<ToolDef>>, saw_context_image: Arc<AtomicBool>) -> Self {
+        Self {
+            defs: Arc::from(defs),
+            saw_context_image,
+        }
+    }
+}
+
+#[async_trait]
+impl AgentToolDispatcher for ContextRecordingDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.defs)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if self.defs.iter().any(|d| d.name.as_str() == call.name) {
+            Ok(ToolResult::new(call.id.to_string(), "{}".to_string(), false).into())
+        } else {
+            Err(ToolError::not_found(call.name))
+        }
+    }
+
+    async fn dispatch_with_context(
+        &self,
+        call: ToolCallView<'_>,
+        context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<ToolDispatchOutcome, ToolError> {
+        self.saw_context_image
+            .store(context.current_turn_image(0).is_some(), Ordering::SeqCst);
+        self.dispatch(call).await
+    }
+}
+
+fn context_recording_tool(name: &str, provenance: Option<ToolProvenance>) -> Arc<ToolDef> {
+    Arc::new(ToolDef {
+        name: name.into(),
+        description: format!("Tool {name}"),
+        input_schema: serde_json::Value::Object(serde_json::Map::new()),
+        provenance,
+    })
+}
+
+fn image_dispatch_context() -> meerkat_core::ToolDispatchContext {
+    meerkat_core::ToolDispatchContext::from_current_turn_input(
+        &meerkat_core::types::ContentInput::Blocks(vec![
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".to_string().into(),
+            },
+        ]),
+    )
+}
+
 #[tokio::test]
 async fn test_name_filtered_dispatcher() {
     use super::tools::NameFilteredDispatcher;
@@ -26164,6 +26231,38 @@ async fn test_name_filtered_dispatcher() {
         })
         .await;
     assert!(result.is_ok(), "non-excluded tool should delegate to inner");
+}
+
+#[tokio::test]
+async fn name_filtered_dispatcher_preserves_dispatch_context() {
+    use super::tools::NameFilteredDispatcher;
+
+    let saw_context_image = Arc::new(AtomicBool::new(false));
+    let inner = Arc::new(ContextRecordingDispatcher::new(
+        vec![context_recording_tool("visible", None)],
+        Arc::clone(&saw_context_image),
+    ));
+    let excluded: HashSet<String> = ["hidden".to_string()].into_iter().collect();
+    let filtered = NameFilteredDispatcher::new(inner, excluded);
+    let raw_args = RawValue::from_string("{}".to_string()).unwrap();
+    let context = image_dispatch_context();
+
+    filtered
+        .dispatch_with_context(
+            ToolCallView {
+                id: "call-visible",
+                name: "visible",
+                args: &raw_args,
+            },
+            &context,
+        )
+        .await
+        .expect("visible tool should dispatch");
+
+    assert!(
+        saw_context_image.load(Ordering::SeqCst),
+        "name filter must forward ToolDispatchContext to inner dispatcher"
+    );
 }
 
 #[tokio::test]
@@ -26259,6 +26358,70 @@ async fn mcp_provenance_filter_scopes_only_mcp_tools_to_allowlist() {
         })
         .await;
     assert!(ok.is_ok(), "visible MCP tool must dispatch to inner");
+}
+
+#[tokio::test]
+async fn mcp_provenance_filter_preserves_dispatch_context() {
+    use super::tools::McpProvenanceFilter;
+    use meerkat_core::types::{ToolProvenance, ToolSourceId, ToolSourceKind};
+
+    let saw_context_image = Arc::new(AtomicBool::new(false));
+    let inner = Arc::new(ContextRecordingDispatcher::new(
+        vec![
+            context_recording_tool(
+                "search",
+                Some(ToolProvenance {
+                    kind: ToolSourceKind::Mcp,
+                    source_id: ToolSourceId::new("linear"),
+                }),
+            ),
+            context_recording_tool(
+                "hidden",
+                Some(ToolProvenance {
+                    kind: ToolSourceKind::Mcp,
+                    source_id: ToolSourceId::new("github"),
+                }),
+            ),
+        ],
+        Arc::clone(&saw_context_image),
+    )) as Arc<dyn AgentToolDispatcher>;
+    let allowlist: HashSet<String> = ["linear".to_string()].into_iter().collect();
+    let filter = McpProvenanceFilter::new(inner, allowlist);
+    let raw_args = RawValue::from_string("{}".to_string()).unwrap();
+    let context = image_dispatch_context();
+
+    let hidden = filter
+        .dispatch_with_context(
+            ToolCallView {
+                id: "call-hidden",
+                name: "hidden",
+                args: &raw_args,
+            },
+            &context,
+        )
+        .await;
+    assert!(matches!(hidden, Err(ToolError::NotFound { .. })));
+    assert!(
+        !saw_context_image.load(Ordering::SeqCst),
+        "hidden MCP tools must not dispatch to inner"
+    );
+
+    filter
+        .dispatch_with_context(
+            ToolCallView {
+                id: "call-search",
+                name: "search",
+                args: &raw_args,
+            },
+            &context,
+        )
+        .await
+        .expect("visible MCP tool should dispatch");
+
+    assert!(
+        saw_context_image.load(Ordering::SeqCst),
+        "MCP provenance filter must forward ToolDispatchContext to inner dispatcher"
+    );
 }
 
 // ── RuntimeBinding TDD tests ────────────────────────────────────────────

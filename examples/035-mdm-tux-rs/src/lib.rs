@@ -112,6 +112,7 @@ pub fn direct_control_request(
     Ok(meerkat_comms::MessageKind::Request {
         intent: DIRECT_CONTROL_INTENT.into(),
         params,
+        blocks: None,
         handling_mode: None,
     })
 }

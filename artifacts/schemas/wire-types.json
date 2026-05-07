@@ -761,6 +761,23 @@
             "type": "object"
           },
           {
+            "description": "Canonical assistant image block appended to transcript history.",
+            "properties": {
+              "image": {
+                "$ref": "#/$defs/AssistantImageEvent"
+              },
+              "type": {
+                "const": "assistant_image_appended",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "image"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Model requested a tool call",
             "properties": {
               "args": {
@@ -1300,6 +1317,49 @@
           }
         ]
       },
+      "AssistantImageEvent": {
+        "description": "Typed public event payload for a canonical assistant image block appended to history.",
+        "properties": {
+          "blob_ref": {
+            "$ref": "#/$defs/BlobRef"
+          },
+          "height": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "image_id": {
+            "$ref": "#/$defs/AssistantImageId"
+          },
+          "media_type": {
+            "type": "string"
+          },
+          "meta": {
+            "$ref": "#/$defs/ProviderImageMetadata"
+          },
+          "revised_prompt": {
+            "$ref": "#/$defs/RevisedPromptDisposition"
+          },
+          "width": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "image_id",
+          "blob_ref",
+          "media_type",
+          "width",
+          "height",
+          "revised_prompt",
+          "meta"
+        ],
+        "type": "object"
+      },
+      "AssistantImageId": {
+        "type": "string"
+      },
       "BackgroundJobTerminalStatus": {
         "enum": [
           "completed",
@@ -1314,6 +1374,22 @@
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
         "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
       },
       "BudgetType": {
         "description": "Type of budget being tracked",
@@ -1579,6 +1655,29 @@
         ],
         "type": "string"
       },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
       "HookId": {
         "description": "Stable identifier for a configured hook.",
         "type": "string"
@@ -1744,6 +1843,40 @@
         ],
         "type": "object"
       },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.",
         "enum": [
@@ -1752,6 +1885,115 @@
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
         ],
         "type": "string"
       },
@@ -6385,6 +6627,15 @@
       {
         "additionalProperties": false,
         "properties": {
+          "blocks": {
+            "items": {
+              "$ref": "#/$defs/ContentBlock"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "handling_mode": {
             "anyOf": [
               {

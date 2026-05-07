@@ -64,7 +64,7 @@ pub use agent::dispatcher::{
 };
 pub use mcp::tools::{
     RuntimeCommsCommandHandle, ToolContext, comms_tool_unavailable_reason, handle_tools_call,
-    tools_list,
+    handle_tools_call_with_context, tools_list,
 };
 
 // Capability registration

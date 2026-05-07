@@ -2352,6 +2352,7 @@ class MeerkatClient:
         kind: "MeerkatClient._CommsKind",
         to: str | None = None,
         body: str | None = None,
+        blocks: list[ContentBlock] | None = None,
         lifecycle_kind: "MeerkatClient._PeerLifecycleKind | None" = None,
         intent: str | None = None,
         params: dict[str, Any] | None = None,
@@ -2378,6 +2379,7 @@ class MeerkatClient:
         fields: dict[str, Any] = {
             "to": to,
             "body": body,
+            "blocks": blocks,
             "lifecycle_kind": lifecycle_kind,
             "intent": intent,
             "params": params,

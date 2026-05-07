@@ -68,7 +68,7 @@ fn assistant_image_block_projects_to_wire_image_not_unknown() {
 }
 
 #[test]
-fn assistant_image_block_remains_typed_in_wire_history() {
+fn assistant_image_block_remains_typed_in_wire_history() -> Result<(), String> {
     let page = SessionHistoryPage {
         session_id: meerkat_core::SessionId::new(),
         offset: 0,
@@ -93,23 +93,31 @@ fn assistant_image_block_remains_typed_in_wire_history() {
     };
 
     let wire = WireSessionHistory::from(page);
-    match &wire.messages[0] {
-        WireSessionMessage::BlockAssistant { blocks, .. } => match &blocks[0] {
-            WireAssistantBlock::Image {
-                blob_ref,
-                media_type,
-                width,
-                height,
-                ..
-            } => {
-                assert_eq!(blob_ref.blob_id.as_str(), "generated-history-image");
-                assert_eq!(media_type.as_str(), "image/png");
-                assert_eq!((*width, *height), (1024, 1024));
-            }
-            other => panic!("expected assistant image block, got {other:?}"),
-        },
-        other => panic!("expected block assistant history message, got {other:?}"),
-    }
+    let Some(message) = wire.messages.first() else {
+        return Err("expected block assistant history message, got none".to_string());
+    };
+    let WireSessionMessage::BlockAssistant { blocks, .. } = message else {
+        return Err(format!(
+            "expected block assistant history message, got {message:?}"
+        ));
+    };
+    let Some(block) = blocks.first() else {
+        return Err("expected assistant image block, got none".to_string());
+    };
+    let WireAssistantBlock::Image {
+        blob_ref,
+        media_type,
+        width,
+        height,
+        ..
+    } = block
+    else {
+        return Err(format!("expected assistant image block, got {block:?}"));
+    };
+    assert_eq!(blob_ref.blob_id.as_str(), "generated-history-image");
+    assert_eq!(media_type.as_str(), "image/png");
+    assert_eq!((*width, *height), (1024, 1024));
+    Ok(())
 }
 
 #[test]

@@ -534,6 +534,7 @@ impl AgentBuilder {
             extraction_state: super::extraction::ExtractionState::default(),
             last_hidden_deferred_catalog_names: Default::default(),
             last_pending_catalog_sources: Default::default(),
+            tool_dispatch_context: Default::default(),
         };
 
         let has_canonical_visibility_state = agent

@@ -210,6 +210,8 @@ pub enum CommsCommandRequest {
         intent: CommsPeerRequestIntent,
         params: CommsPeerRequestParams,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stream: Option<InputStreamMode>,
@@ -281,6 +283,7 @@ impl CommsCommandRequest {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream,
             } => {
@@ -298,6 +301,7 @@ impl CommsCommandRequest {
                             source,
                         )
                     })?,
+                    blocks,
                     handling_mode,
                     stream,
                 }
@@ -373,6 +377,8 @@ pub enum CommsSendParams {
         to: PeerId,
         intent: CommsPeerRequestIntent,
         params: CommsPeerRequestParams,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<meerkat_core::ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -456,6 +462,7 @@ impl CommsSendParams {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream,
                 ..
@@ -463,6 +470,7 @@ impl CommsSendParams {
                 to,
                 intent,
                 params,
+                blocks,
                 handling_mode,
                 stream,
             },

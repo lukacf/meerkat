@@ -225,6 +225,7 @@ pub use staged_sessions::{
 
 // Session service
 pub use meerkat_core::service::InitialTurnPolicy;
+pub use meerkat_core::service::StartTurnRuntimeSemantics;
 pub use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus, BlobStore,
     CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,

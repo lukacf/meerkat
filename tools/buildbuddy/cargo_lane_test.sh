@@ -7,8 +7,17 @@ work_root="${TEST_TMPDIR:?}/workspace"
 
 find_tool() {
   local name="$1"
-  find "${TEST_SRCDIR}" -path "*rust_macos_aarch64__aarch64-apple-darwin__stable_tools*/bin/${name}" \( -type f -o -type l \) | head -1
+  find "${TEST_SRCDIR}" -path "*${host_triple}__stable_tools*/bin/${name}" \( -type f -o -type l \) | head -1
 }
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) host_triple="aarch64-apple-darwin" ;;
+  Linux-x86_64) host_triple="x86_64-unknown-linux-gnu" ;;
+  *)
+    echo "unsupported BuildBuddy cargo lane host: $(uname -s)-$(uname -m)" >&2
+    exit 127
+    ;;
+esac
 
 cargo_bin="$(find_tool cargo)"
 rustc_bin="$(find_tool rustc)"
@@ -23,12 +32,10 @@ fi
 
 rm -rf "${work_root}"
 mkdir -p "${work_root}"
-rsync -aL \
-  --exclude '.git' \
-  --exclude 'bazel-*' \
-  --exclude 'target' \
-  --exclude 'target-*' \
-  "${runfiles_root}/" "${work_root}/"
+(
+  cd "${runfiles_root}"
+  tar -chf - --exclude='.git' --exclude='bazel-*' --exclude='target' --exclude='target-*' .
+) | tar -xf - -C "${work_root}"
 
 export CARGO="${cargo_bin}"
 export RUSTC="${rustc_bin}"

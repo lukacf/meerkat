@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) tool_env_prefix="MEERKAT_E2E_DARWIN" ;;
+  Linux-x86_64) tool_env_prefix="MEERKAT_E2E_LINUX" ;;
+  *) tool_env_prefix="" ;;
+esac
+
+select_host_tool_env() {
+  local generic="$1"
+  local suffix="$2"
+  local specific="${tool_env_prefix}_${suffix}"
+  if [[ -z "${!generic:-}" && -n "${tool_env_prefix}" && -n "${!specific:-}" ]]; then
+    export "${generic}=${!specific}"
+  fi
+}
+
+select_host_tool_env MEERKAT_E2E_NODE_BIN NODE_BIN
+select_host_tool_env MEERKAT_E2E_NPM_CLI NPM_CLI
+select_host_tool_env MEERKAT_E2E_NPX_CLI NPX_CLI
+select_host_tool_env MEERKAT_E2E_PYTHON_BIN PYTHON_BIN
+select_host_tool_env MEERKAT_E2E_WASM_PACK_BIN WASM_PACK_BIN
+
 workspace_root_from_runfiles() {
   if [[ -n "${RUNFILES_DIR:-}" && -d "${RUNFILES_DIR}/_main" ]]; then
     printf '%s\n' "${RUNFILES_DIR}/_main"
@@ -87,6 +108,8 @@ prepend_runfile_tool_dir() {
   local execroot
   if execroot="$(execroot_from_runfiles)"; then
     for candidate in \
+      "${execroot}/external/+http_archive+node_linux_x86_64/bin/${tool}" \
+      "${execroot}/external/node_linux_x86_64/bin/${tool}" \
       "${execroot}/external/+http_archive+node_darwin_arm64/bin/${tool}" \
       "${execroot}/external/node_darwin_arm64/bin/${tool}"; do
       prepend_path_dir "${candidate}"
@@ -104,13 +127,21 @@ prepend_runfile_tool_dir() {
   fi
   for candidate in \
     "${RUNFILES_DIR:-}/+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${RUNFILES_DIR:-}/+http_archive+node_linux_x86_64/bin/${tool}" \
     "${RUNFILES_DIR:-}/node_darwin_arm64/bin/${tool}" \
+    "${RUNFILES_DIR:-}/node_linux_x86_64/bin/${tool}" \
     "${RUNFILES_DIR:-}/_main/external/+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${RUNFILES_DIR:-}/_main/external/+http_archive+node_linux_x86_64/bin/${tool}" \
     "${RUNFILES_DIR:-}/rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools/rust_toolchain/bin/${tool}" \
+    "${RUNFILES_DIR:-}/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/${tool}" \
     "${RUNFILES_DIR:-}/_main/external/rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools/rust_toolchain/bin/${tool}" \
+    "${RUNFILES_DIR:-}/_main/external/rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/${tool}" \
     "${workspace_root}/../+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${workspace_root}/../+http_archive+node_linux_x86_64/bin/${tool}" \
     "${workspace_root}/../rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools/rust_toolchain/bin/${tool}" \
-    "${workspace_root}/external/+http_archive+node_darwin_arm64/bin/${tool}"; do
+    "${workspace_root}/../rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools/rust_toolchain/bin/${tool}" \
+    "${workspace_root}/external/+http_archive+node_darwin_arm64/bin/${tool}" \
+    "${workspace_root}/external/+http_archive+node_linux_x86_64/bin/${tool}"; do
     prepend_path_dir "${candidate}"
     if command -v "${tool}" >/dev/null 2>&1; then
       return 0
@@ -118,7 +149,7 @@ prepend_runfile_tool_dir() {
   done
   candidate="$(
     find -L "${RUNFILES_DIR:-${workspace_root}}" \
-      \( -path "*/node_darwin_arm64/bin/${tool}" -o -path "*/rust_toolchain/bin/${tool}" -o -path "*/bin/${tool}" \) \
+      \( -path "*/node_darwin_arm64/bin/${tool}" -o -path "*/node_linux_x86_64/bin/${tool}" -o -path "*/rust_toolchain/bin/${tool}" -o -path "*/bin/${tool}" \) \
       2>/dev/null |
       head -n 1
   )"
@@ -138,17 +169,26 @@ install_node_tool_wrappers() {
   if [[ -n "${MEERKAT_E2E_NODE_BIN:-}" ]]; then
     node_bin="$(absolute_runfile "${MEERKAT_E2E_NODE_BIN}")"
   else
-    node_bin="$(runfile_path_matching "*/node_darwin_arm64/bin/node")"
+    node_bin="$(runfile_path_matching "*/node_linux_x86_64/bin/node")"
+    if [[ -z "${node_bin}" ]]; then
+      node_bin="$(runfile_path_matching "*/node_darwin_arm64/bin/node")"
+    fi
   fi
   if [[ -n "${MEERKAT_E2E_NPM_CLI:-}" ]]; then
     npm_cli="$(absolute_runfile "${MEERKAT_E2E_NPM_CLI}")"
   else
-    npm_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npm-cli.js")"
+    npm_cli="$(runfile_path_matching "*/node_linux_x86_64/lib/node_modules/npm/bin/npm-cli.js")"
+    if [[ -z "${npm_cli}" ]]; then
+      npm_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npm-cli.js")"
+    fi
   fi
   if [[ -n "${MEERKAT_E2E_NPX_CLI:-}" ]]; then
     npx_cli="$(absolute_runfile "${MEERKAT_E2E_NPX_CLI}")"
   else
-    npx_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npx-cli.js")"
+    npx_cli="$(runfile_path_matching "*/node_linux_x86_64/lib/node_modules/npm/bin/npx-cli.js")"
+    if [[ -z "${npx_cli}" ]]; then
+      npx_cli="$(runfile_path_matching "*/node_darwin_arm64/lib/node_modules/npm/bin/npx-cli.js")"
+    fi
   fi
   if [[ -z "${node_bin}" || -z "${npm_cli}" || -z "${npx_cli}" ]]; then
     echo "warning: unable to install node tool wrappers; node_bin=${node_bin:-<missing>} npm_cli=${npm_cli:-<missing>} npx_cli=${npx_cli:-<missing>}" >&2
@@ -175,7 +215,7 @@ prepend_python_runtime() {
   else
     python_bin="$(
       find -L "${RUNFILES_DIR:-${workspace_root}}" \
-        \( -path "*/python_darwin_arm64*/bin/python3" -o -path "*/python_darwin_arm64*/python/bin/python3" \) \
+        \( -path "*/python_linux_x86_64*/bin/python3" -o -path "*/python_linux_x86_64*/python/bin/python3" -o -path "*/python_darwin_arm64*/bin/python3" -o -path "*/python_darwin_arm64*/python/bin/python3" \) \
         2>/dev/null |
         head -n 1
     )"

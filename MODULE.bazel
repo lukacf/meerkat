@@ -21,8 +21,14 @@ http_archive(
 )
 
 http_archive(
-    name = "node_darwin_arm64",
-    build_file_content = '''
+    name = "cargo_deny_linux_x86_64",
+    build_file_content = 'exports_files(["cargo-deny"])',
+    sha256 = "3bd58b784e83715b86ddbc9deac591890372ec77fda5741bb0826970b958506f",
+    strip_prefix = "cargo-deny-0.19.4-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.4/cargo-deny-0.19.4-x86_64-unknown-linux-musl.tar.gz"],
+)
+
+NODE_BUILD_FILE = '''
 filegroup(
     name = "node",
     srcs = glob(["**/*"]),
@@ -44,10 +50,22 @@ exports_files([
     "lib/node_modules/npm/bin/npm-cli.js",
     "lib/node_modules/npm/bin/npx-cli.js",
 ], visibility = ["//visibility:public"])
-''',
+'''
+
+http_archive(
+    name = "node_darwin_arm64",
+    build_file_content = NODE_BUILD_FILE,
     sha256 = "db4b275b83736df67533529a18cc55de2549a8329ace6c7bcc68f8d22d3c9000",
     strip_prefix = "node-v22.22.2-darwin-arm64",
     urls = ["https://nodejs.org/dist/v22.22.2/node-v22.22.2-darwin-arm64.tar.gz"],
+)
+
+http_archive(
+    name = "node_linux_x86_64",
+    build_file_content = NODE_BUILD_FILE,
+    sha256 = "88fd1ce767091fd8d4a99fdb2356e98c819f93f3b1f8663853a2dee9b438068a",
+    strip_prefix = "node-v22.22.2-linux-x64",
+    urls = ["https://nodejs.org/dist/v22.22.2/node-v22.22.2-linux-x64.tar.xz"],
 )
 
 http_archive(
@@ -61,11 +79,29 @@ exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
 )
 
 http_archive(
+    name = "python_linux_x86_64",
+    build_file_content = '''
+filegroup(name = "python", srcs = glob(["**/*"]), visibility = ["//visibility:public"])
+exports_files(["python/bin/python3"], visibility = ["//visibility:public"])
+''',
+    sha256 = "fe9a9c32d13870af632cbac3dfc7528ae53597e94472aa4c7d6a42e8166136cd",
+    urls = ["https://github.com/astral-sh/python-build-standalone/releases/download/20260414/cpython-3.14.4%2B20260414-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"],
+)
+
+http_archive(
     name = "wasm_pack_darwin_arm64",
     build_file_content = 'exports_files(["wasm-pack"])',
     sha256 = "9d0e70c6b229de18f0abfe910f2963e8f09ebae218250e9b09a1c3fdd955bef9",
     strip_prefix = "wasm-pack-v0.14.0-aarch64-apple-darwin",
     urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-aarch64-apple-darwin.tar.gz"],
+)
+
+http_archive(
+    name = "wasm_pack_linux_x86_64",
+    build_file_content = 'exports_files(["wasm-pack"])',
+    sha256 = "278a8d668085821f4d1a637bd864f1713f872b0ae3a118c77562a308c0abfe8d",
+    strip_prefix = "wasm-pack-v0.14.0-x86_64-unknown-linux-musl",
+    urls = ["https://github.com/wasm-bindgen/wasm-pack/releases/download/v0.14.0/wasm-pack-v0.14.0-x86_64-unknown-linux-musl.tar.gz"],
 )
 
 http_archive(

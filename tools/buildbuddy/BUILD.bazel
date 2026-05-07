@@ -20,6 +20,16 @@ RUST_TOOLCHAIN_DATA = [
     "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rust-lld",
     "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustdoc",
     "@@rules_rust++rust+rust_macos_aarch64__aarch64-apple-darwin__stable_tools//:rustfmt",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:cargo",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:cargo_clippy_bin",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:clippy_driver_bin",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rustc",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rustc_lib",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rust_std-x86_64-unknown-linux-gnu",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rust-objcopy",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rust-lld",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rustdoc",
+    "@@rules_rust++rust+rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools//:rustfmt",
 ]
 
 WASM_RUST_TOOLCHAIN_DATA = [
@@ -37,7 +47,9 @@ WASM_RUST_TOOLCHAIN_DATA = [
 
 SDK_TOOL_DATA = [
     "@node_darwin_arm64//:node",
+    "@node_linux_x86_64//:node",
     "@python_darwin_arm64//:python",
+    "@python_linux_x86_64//:python",
 ]
 
 sh_test(
@@ -73,6 +85,7 @@ sh_test(
     data = [
         "//:workspace_runfiles",
         "@cargo_deny_darwin_arm64//:cargo-deny",
+        "@cargo_deny_linux_x86_64//:cargo-deny",
     ] + RUST_TOOLCHAIN_DATA,
     size = "large",
     timeout = "long",
@@ -110,6 +123,7 @@ sh_test(
     data = [
         "//:workspace_runfiles",
         "@wasm_pack_darwin_arm64//:wasm-pack",
+        "@wasm_pack_linux_x86_64//:wasm-pack",
     ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA,
     size = "enormous",
     timeout = "eternal",
@@ -123,6 +137,7 @@ sh_test(
     data = [
         "//:workspace_runfiles",
         "@wasm_pack_darwin_arm64//:wasm-pack",
+        "@wasm_pack_linux_x86_64//:wasm-pack",
     ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
     size = "enormous",
     timeout = "eternal",

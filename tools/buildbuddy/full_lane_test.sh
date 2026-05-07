@@ -16,15 +16,38 @@ find_rust_tool() {
   find_runfile "*${toolchain}*/bin/${name}"
 }
 
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64)
+    host_triple="aarch64-apple-darwin"
+    host_rust_toolchain="rust_macos_aarch64__aarch64-apple-darwin__stable_tools"
+    wasm_rust_toolchain="rust_macos_aarch64__wasm32-unknown-unknown__stable_tools"
+    node_repo="node_darwin_arm64"
+    python_repo="python_darwin_arm64"
+    cargo_deny_repo="cargo_deny_darwin_arm64"
+    wasm_pack_repo="wasm_pack_darwin_arm64"
+    ;;
+  Linux-x86_64)
+    host_triple="x86_64-unknown-linux-gnu"
+    host_rust_toolchain="rust_linux_x86_64__x86_64-unknown-linux-gnu__stable_tools"
+    wasm_rust_toolchain="rust_linux_x86_64__wasm32-unknown-unknown__stable_tools"
+    node_repo="node_linux_x86_64"
+    python_repo="python_linux_x86_64"
+    cargo_deny_repo="cargo_deny_linux_x86_64"
+    wasm_pack_repo="wasm_pack_linux_x86_64"
+    ;;
+  *)
+    echo "unsupported BuildBuddy full lane host: $(uname -s)-$(uname -m)" >&2
+    exit 127
+    ;;
+esac
+
 copy_workspace() {
   rm -rf "${work_root}"
   mkdir -p "${work_root}"
-  rsync -aL \
-    --exclude '.git' \
-    --exclude 'bazel-*' \
-    --exclude 'target' \
-    --exclude 'target-*' \
-    "${runfiles_root}/" "${work_root}/"
+  (
+    cd "${runfiles_root}"
+    tar -chf - --exclude='.git' --exclude='bazel-*' --exclude='target' --exclude='target-*' .
+  ) | tar -xf - -C "${work_root}"
 }
 
 prepend_path() {
@@ -91,7 +114,7 @@ configure_rust() {
 
 configure_rust_with_wasm_target() {
   local host_cargo_bin wasm_std_dir toolchain_root sandbox_toolchain
-  host_cargo_bin="$(find_rust_tool "aarch64-apple-darwin__stable_tools" cargo)"
+  host_cargo_bin="$(find_rust_tool "${host_rust_toolchain}" cargo)"
   wasm_std_dir="$(find "${TEST_SRCDIR}" -path "*wasm32-unknown-unknown__stable_tools*/lib/rustlib/wasm32-unknown-unknown" -type d | head -1)"
   if [[ -z "${host_cargo_bin}" || -z "${wasm_std_dir}" ]]; then
     echo "host Rust toolchain or wasm32 std runfiles were not found" >&2
@@ -102,17 +125,17 @@ configure_rust_with_wasm_target() {
   sandbox_toolchain="${TEST_TMPDIR}/rust-toolchain-host-plus-wasm"
   rm -rf "${sandbox_toolchain}"
   mkdir -p "${sandbox_toolchain}"
-  rsync -aL "${toolchain_root}/" "${sandbox_toolchain}/"
+  cp -a "${toolchain_root}/." "${sandbox_toolchain}/"
   rm -rf "${sandbox_toolchain}/lib/rustlib/wasm32-unknown-unknown"
   mkdir -p "${sandbox_toolchain}/lib/rustlib"
-  rsync -aL "${wasm_std_dir}" "${sandbox_toolchain}/lib/rustlib/"
+  cp -a "${wasm_std_dir}" "${sandbox_toolchain}/lib/rustlib/"
 
   export CARGO="${sandbox_toolchain}/bin/cargo"
   export RUSTC="${sandbox_toolchain}/bin/rustc"
   export RUSTDOC="${sandbox_toolchain}/bin/rustdoc"
   export RUSTFMT="${sandbox_toolchain}/bin/rustfmt"
   prepend_path "${sandbox_toolchain}/bin"
-  prepend_path "${sandbox_toolchain}/lib/rustlib/aarch64-apple-darwin/bin"
+  prepend_path "${sandbox_toolchain}/lib/rustlib/${host_triple}/bin"
   export CARGO_HOME="${TEST_TMPDIR}/cargo-home"
   export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target"
   export CARGO_INCREMENTAL=0
@@ -121,8 +144,8 @@ configure_rust_with_wasm_target() {
 
 configure_node() {
   local node_bin npm_cli wrapper_dir
-  node_bin="$(find_runfile "*node_darwin_arm64/bin/node")"
-  npm_cli="$(find_runfile "*node_darwin_arm64/lib/node_modules/npm/bin/npm-cli.js")"
+  node_bin="$(find_runfile "*${node_repo}/bin/node")"
+  npm_cli="$(find_runfile "*${node_repo}/lib/node_modules/npm/bin/npm-cli.js")"
   if [[ -z "${node_bin}" || -z "${npm_cli}" ]]; then
     echo "pinned Node/npm runfiles were not found" >&2
     exit 127
@@ -139,7 +162,7 @@ configure_node() {
 
 configure_python() {
   local python_bin
-  python_bin="$(find_runfile "*python_darwin_arm64/python/bin/python3.14")"
+  python_bin="$(find_runfile "*${python_repo}/python/bin/python3.14")"
   if [[ -z "${python_bin}" ]]; then
     echo "pinned Python 3.14 runfiles were not found" >&2
     exit 127
@@ -151,7 +174,7 @@ configure_python() {
 
 configure_cargo_deny() {
   local cargo_deny_bin
-  cargo_deny_bin="$(find_runfile "*cargo_deny_darwin_arm64/cargo-deny")"
+  cargo_deny_bin="$(find_runfile "*${cargo_deny_repo}/cargo-deny")"
   if [[ -z "${cargo_deny_bin}" ]]; then
     echo "pinned cargo-deny runfile was not found" >&2
     exit 127
@@ -161,7 +184,7 @@ configure_cargo_deny() {
 
 configure_wasm_pack() {
   local wasm_pack_bin
-  wasm_pack_bin="$(find_runfile "*wasm_pack_darwin_arm64/wasm-pack")"
+  wasm_pack_bin="$(find_runfile "*${wasm_pack_repo}/wasm-pack")"
   if [[ -z "${wasm_pack_bin}" ]]; then
     echo "pinned wasm-pack runfile was not found" >&2
     exit 127
@@ -200,12 +223,12 @@ cd "${work_root}"
 
 case "${lane}" in
   security-audit)
-    configure_rust "aarch64-apple-darwin__stable_tools"
+    configure_rust "${host_rust_toolchain}"
     configure_cargo_deny
     "${CARGO_DENY}" check
     ;;
   release-validate)
-    configure_rust "aarch64-apple-darwin__stable_tools"
+    configure_rust "${host_rust_toolchain}"
     configure_node
     configure_python
     "${CARGO}" build -p meerkat-rpc
@@ -237,7 +260,7 @@ case "${lane}" in
     wait_parallel_jobs
     ;;
   sdk-suites)
-    configure_rust "aarch64-apple-darwin__stable_tools"
+    configure_rust "${host_rust_toolchain}"
     configure_node
     configure_python
     "${CARGO}" build -p meerkat-rpc

@@ -103,6 +103,7 @@ impl SessionDefaults {
 #[derive(Clone, Default)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
+    pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
     pub runtime_build_mode: Option<RuntimeBuildMode>,
@@ -382,6 +383,7 @@ pub fn resolve_effective_turn_config(
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
         blob_store_override: None,
         llm_client_override: context.llm_client_override,
+        agent_llm_client_decorator: context.agent_llm_client_decorator,
         override_builtins: overrides
             .override_builtins
             .map(ToolCategoryOverride::from_effective)

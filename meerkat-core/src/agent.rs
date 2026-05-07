@@ -93,6 +93,14 @@ pub trait AgentLlmClient: Send + Sync {
     }
 }
 
+/// Hook for wrapping the final agent-facing LLM client.
+///
+/// Factories and runtimes apply this after provider/raw-client adaptation so
+/// embedders can compose cross-cutting behavior without provider-specific
+/// registry hooks.
+pub type AgentLlmClientDecorator =
+    Arc<dyn Fn(Arc<dyn AgentLlmClient>) -> Arc<dyn AgentLlmClient> + Send + Sync + 'static>;
+
 /// Result of streaming from the LLM
 pub struct LlmStreamResult {
     blocks: Vec<AssistantBlock>,

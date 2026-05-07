@@ -3105,6 +3105,7 @@ async fn handle_meerkat_run(
         recoverable_tool_defs: (!input.tools.is_empty())
             .then(|| recoverable_callback_tool_defs(&input.tools)),
         llm_client_override: None,
+        agent_llm_client_decorator: None,
         runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
         initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(None)),
         override_builtins: ToolCategoryOverride::from_override(input.enable_builtins),
@@ -3456,6 +3457,7 @@ async fn handle_meerkat_resume(
             recoverable_tool_defs: (!input.tools.is_empty())
                 .then(|| recoverable_callback_tool_defs(&input.tools)),
             llm_client_override: None,
+            agent_llm_client_decorator: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(runtime_bindings),
             initial_turn_metadata: Some(meerkat_runtime::runtime_stamped_prompt_turn_metadata(
                 None,

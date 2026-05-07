@@ -10,14 +10,17 @@
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::stream;
-use meerkat::BuildAgentError;
 use meerkat::{AgentBuildConfig, AgentFactory, LlmDoneOutcome, LlmEvent, LlmRequest};
+use meerkat::{AgentError, AgentLlmClient, BuildAgentError, CompiledSchema, LlmStreamResult};
 use meerkat_client::{LlmClient, TestClient};
 #[cfg(feature = "comms")]
 use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Keypair};
+use meerkat_core::AssistantBlock;
+use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
 use meerkat_core::{
     AgentToolDispatcher, Config, Provider, SelfHostedApiStyle, SelfHostedModelConfig,
@@ -70,6 +73,94 @@ impl LlmClient for MockLlmClient {
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
         Ok(())
     }
+}
+
+struct MockAgentLlmClient {
+    model: String,
+}
+
+#[async_trait]
+impl AgentLlmClient for MockAgentLlmClient {
+    async fn stream_response(
+        &self,
+        _messages: &[meerkat::Message],
+        _tools: &[Arc<ToolDef>],
+        _max_tokens: u32,
+        _temperature: Option<f32>,
+        _provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        Ok(LlmStreamResult::new(
+            vec![AssistantBlock::Text {
+                text: "Hello from agent override".to_string(),
+                meta: None,
+            }],
+            meerkat_core::StopReason::EndTurn,
+            meerkat_core::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+        ))
+    }
+
+    fn provider(&self) -> &'static str {
+        "mock"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+struct CountingAgentLlmClient {
+    inner: Arc<dyn AgentLlmClient>,
+    stream_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl AgentLlmClient for CountingAgentLlmClient {
+    async fn stream_response(
+        &self,
+        messages: &[meerkat::Message],
+        tools: &[Arc<ToolDef>],
+        max_tokens: u32,
+        temperature: Option<f32>,
+        provider_params: Option<&ProviderParamsOverride>,
+    ) -> Result<LlmStreamResult, AgentError> {
+        self.stream_calls.fetch_add(1, Ordering::SeqCst);
+        self.inner
+            .stream_response(messages, tools, max_tokens, temperature, provider_params)
+            .await
+    }
+
+    fn provider(&self) -> &'static str {
+        self.inner.provider()
+    }
+
+    fn model(&self) -> &str {
+        self.inner.model()
+    }
+
+    fn compile_schema(
+        &self,
+        output_schema: &meerkat::OutputSchema,
+    ) -> Result<CompiledSchema, meerkat::SchemaError> {
+        self.inner.compile_schema(output_schema)
+    }
+}
+
+fn counting_agent_llm_client_decorator(
+    constructions: Arc<AtomicUsize>,
+    stream_calls: Arc<AtomicUsize>,
+) -> meerkat::AgentLlmClientDecorator {
+    Arc::new(move |client| {
+        constructions.fetch_add(1, Ordering::SeqCst);
+        Arc::new(CountingAgentLlmClient {
+            inner: client,
+            stream_calls: Arc::clone(&stream_calls),
+        })
+    })
 }
 
 #[derive(Default)]
@@ -255,6 +346,99 @@ async fn build_agent_with_mock_client_produces_runnable_agent() {
         "Agent should produce text from mock client, got: {}",
         result.text
     );
+}
+
+#[tokio::test]
+async fn agent_llm_client_decorator_wraps_registry_resolved_provider_client() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let mut config = Config::default();
+    config.realm.insert(
+        "default".to_string(),
+        meerkat_core::RealmConfigSection::from_inline_api_keys(&[("openai", "test-openai-key")]),
+    );
+    let constructions = Arc::new(AtomicUsize::new(0));
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+
+    let agent = factory
+        .build_agent(
+            AgentBuildConfig {
+                agent_llm_client_decorator: Some(counting_agent_llm_client_decorator(
+                    Arc::clone(&constructions),
+                    Arc::clone(&stream_calls),
+                )),
+                ..AgentBuildConfig::new("gpt-5.4")
+            },
+            &config,
+        )
+        .await
+        .expect("registry-resolved provider client should build");
+
+    drop(agent);
+    assert_eq!(constructions.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        stream_calls.load(Ordering::SeqCst),
+        0,
+        "registry test should prove construction without making a provider call"
+    );
+}
+
+#[tokio::test]
+async fn agent_llm_client_decorator_wraps_raw_llm_client_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let constructions = Arc::new(AtomicUsize::new(0));
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+
+    let mut agent = factory
+        .build_agent(
+            AgentBuildConfig {
+                llm_client_override: Some(Arc::new(MockLlmClient)),
+                agent_llm_client_decorator: Some(counting_agent_llm_client_decorator(
+                    Arc::clone(&constructions),
+                    Arc::clone(&stream_calls),
+                )),
+                ..AgentBuildConfig::new("claude-sonnet-4-5")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("raw llm override should build");
+
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
+    assert!(result.text.contains("Hello from mock"));
+    assert_eq!(constructions.load(Ordering::SeqCst), 1);
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn agent_llm_client_decorator_wraps_agent_llm_client_override() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let constructions = Arc::new(AtomicUsize::new(0));
+    let stream_calls = Arc::new(AtomicUsize::new(0));
+
+    let mut agent = factory
+        .build_agent(
+            AgentBuildConfig {
+                agent_llm_client_override: Some(Arc::new(MockAgentLlmClient {
+                    model: "agent-override-model".to_string(),
+                })),
+                agent_llm_client_decorator: Some(counting_agent_llm_client_decorator(
+                    Arc::clone(&constructions),
+                    Arc::clone(&stream_calls),
+                )),
+                ..AgentBuildConfig::new("agent-override-model")
+            },
+            &Config::default(),
+        )
+        .await
+        .expect("agent llm override should build");
+
+    let result = agent.run("Hello".to_string().into()).await.unwrap();
+    assert!(result.text.contains("Hello from agent override"));
+    assert_eq!(constructions.load(Ordering::SeqCst), 1);
+    assert_eq!(stream_calls.load(Ordering::SeqCst), 1);
 }
 
 /// 2. `build_agent` without LLM override fails when no API key is set.

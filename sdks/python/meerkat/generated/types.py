@@ -679,6 +679,7 @@ class MobMemberStatusResult:
     output_preview: Optional[str] = None
     peer_connectivity: Optional[Any] = None
     realtime_attachment_status: Optional[str] = None
+    resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
 @dataclass
@@ -1657,6 +1658,23 @@ class ScheduleOccurrencesResult:
 
 
 @dataclass
+class WireResolvedModelCapabilities:
+    """Stable resolved model/session/member capability projection.
+
+This is the UI-facing capability shape for already-resolved identities.
+Static catalog entries can expose the same bits, but callers should read
+this projection from session/member surfaces when identity can change at
+runtime."""
+    image_generation: Optional[bool] = None
+    image_input: Optional[bool] = None
+    image_tool_results: Optional[bool] = None
+    inline_video: Optional[bool] = None
+    realtime: Optional[bool] = None
+    vision: Optional[bool] = None
+    web_search: Optional[bool] = None
+
+
+@dataclass
 class WireSessionInfo:
     """Canonical session info for wire protocol."""
     created_at: int
@@ -1668,6 +1686,7 @@ class WireSessionInfo:
     updated_at: int
     labels: Optional[dict[str, str]] = None
     last_assistant_text: Optional[str] = None
+    resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
     session_ref: Optional[str] = None
 
 
@@ -1719,14 +1738,19 @@ class ModelsCatalogResponse:
 @dataclass
 class WireModelProfile:
     """Runtime profile for a model — capabilities and parameter schema."""
-    inline_video: bool
     model_family: str
     params_schema: Any
     supports_reasoning: bool
     supports_temperature: bool
     supports_thinking: bool
     beta_headers: Optional[list[dict[str, Any]]] = None
+    image_generation: Optional[bool] = None
+    image_input: Optional[bool] = None
+    image_tool_results: Optional[bool] = None
+    inline_video: Optional[bool] = None
+    realtime: Optional[bool] = None
     supports_web_search: Optional[bool] = None
+    vision: Optional[bool] = None
 
 
 @dataclass

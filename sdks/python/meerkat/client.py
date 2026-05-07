@@ -107,6 +107,7 @@ from .types import (
     EventEnvelope,
     EventSourceIdentity,
     McpLiveOpResponse,
+    ResolvedModelCapabilities,
     RunResult,
     SchemaWarning,
     SessionDetails,
@@ -1653,6 +1654,9 @@ class MeerkatClient:
             "mob/member_status",
             {"mob_id": mob_id, "agent_identity": agent_identity},
         )
+        resolved_capabilities = self._parse_resolved_model_capabilities(
+            result.get("resolved_capabilities")
+        )
         return {
             "status": self._require_string_field(
                 result,
@@ -1682,6 +1686,11 @@ class MeerkatClient:
             **(
                 {"realtime_attachment_status": str(result["realtime_attachment_status"])}
                 if result.get("realtime_attachment_status") is not None
+                else {}
+            ),
+            **(
+                {"resolved_capabilities": resolved_capabilities}
+                if resolved_capabilities is not None
                 else {}
             ),
             **(
@@ -3083,7 +3092,26 @@ class MeerkatClient:
                 if s.get("last_assistant_text") is not None
                 else None
             ),
+            resolved_capabilities=MeerkatClient._parse_resolved_model_capabilities(
+                s.get("resolved_capabilities")
+            ),
         )
+
+    @staticmethod
+    def _parse_resolved_model_capabilities(
+        raw: Any,
+    ) -> ResolvedModelCapabilities | None:
+        if not isinstance(raw, dict):
+            return None
+        return {
+            "vision": bool(raw.get("vision", False)),
+            "image_input": bool(raw.get("image_input", False)),
+            "image_tool_results": bool(raw.get("image_tool_results", False)),
+            "inline_video": bool(raw.get("inline_video", False)),
+            "realtime": bool(raw.get("realtime", False)),
+            "web_search": bool(raw.get("web_search", False)),
+            "image_generation": bool(raw.get("image_generation", False)),
+        }
 
     @staticmethod
     def _parse_models_catalog(data: dict[str, Any]) -> ModelsCatalogResponse:

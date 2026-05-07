@@ -180,6 +180,29 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
+    async fn resolved_session_llm_capabilities(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionLlmCapabilitySurface>, RuntimeDriverError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::ResolvedSessionLlmCapabilities {
+                    session_id: session_id.clone(),
+                },
+            )
+            .await
+            .map_err(MeerkatMachine::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::ResolvedSessionLlmCapabilities(capabilities) => {
+                Ok(capabilities)
+            }
+            other => Err(RuntimeDriverError::Internal(format!(
+                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::resolved_session_llm_capabilities: {other:?}"
+            ))),
+        }
+    }
+
     /// Fully-projected public channel status. Reads DSL state (attachment plus
     /// machine-owned reconnect lifecycle/progress) and returns a
     /// ready-to-serialize `RealtimeChannelStatus`.

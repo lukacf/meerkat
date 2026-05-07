@@ -187,6 +187,7 @@ export interface SessionInfo {
   readonly model?: string;
   readonly provider?: string;
   readonly lastAssistantText?: string;
+  readonly resolvedCapabilities?: ResolvedModelCapabilities;
   readonly labels: Readonly<Record<string, string>>;
 }
 
@@ -580,12 +581,28 @@ export type CommsCommand =
 
 export type ModelTier = "recommended" | "supported";
 
+export interface ResolvedModelCapabilities {
+  readonly vision: boolean;
+  readonly imageInput: boolean;
+  readonly imageToolResults: boolean;
+  readonly inlineVideo: boolean;
+  readonly realtime: boolean;
+  readonly webSearch: boolean;
+  readonly imageGeneration: boolean;
+}
+
 export interface ModelProfile {
   readonly modelFamily: string;
+  readonly vision: boolean;
+  readonly imageInput: boolean;
+  readonly imageToolResults: boolean;
   readonly supportsTemperature: boolean;
   readonly supportsThinking: boolean;
   readonly supportsReasoning: boolean;
   readonly inlineVideo: boolean;
+  readonly realtime: boolean;
+  readonly webSearch: boolean;
+  readonly imageGeneration: boolean;
   readonly paramsSchema: unknown;
 }
 

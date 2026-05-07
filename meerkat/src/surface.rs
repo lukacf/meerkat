@@ -317,7 +317,12 @@ pub fn build_models_catalog_response(
                         supports_thinking: model_profile.supports_thinking,
                         supports_reasoning: model_profile.supports_reasoning,
                         supports_web_search: model_profile.supports_web_search,
+                        vision: model_profile.vision,
+                        image_input: model_profile.image_input,
+                        image_tool_results: model_profile.image_tool_results,
                         inline_video: model_profile.inline_video,
+                        realtime: model_profile.realtime,
+                        image_generation: model_profile.image_generation,
                         params_schema: model_profile.params_schema.clone(),
                         beta_headers: model_profile
                             .beta_headers
@@ -709,5 +714,41 @@ family = "gemma-4"
             unreachable!("asserted invalid catalog config fails above");
         };
         assert!(err.to_string().contains("unknown server"));
+    }
+
+    #[test]
+    fn build_models_catalog_response_exposes_stable_capability_bits() {
+        let catalog = build_models_catalog_response(&Config::default()).expect("catalog response");
+        let find_profile = |provider: &str, model: &str| {
+            catalog
+                .providers
+                .iter()
+                .find(|p| p.provider == provider)
+                .and_then(|p| p.models.iter().find(|m| m.id == model))
+                .and_then(|m| m.profile.as_ref())
+                .unwrap_or_else(|| panic!("missing profile for {provider}:{model}"))
+        };
+
+        let claude = find_profile("anthropic", "claude-sonnet-4-5");
+        assert!(claude.vision);
+        assert!(claude.image_input);
+        assert!(claude.image_tool_results);
+        assert!(!claude.inline_video);
+        assert!(!claude.realtime);
+        assert!(claude.supports_web_search);
+        assert!(!claude.image_generation);
+
+        let gpt = find_profile("openai", "gpt-5.4");
+        assert!(gpt.vision);
+        assert!(gpt.image_input);
+        assert!(!gpt.image_tool_results);
+        assert!(!gpt.inline_video);
+        assert!(!gpt.realtime);
+        assert!(gpt.supports_web_search);
+        assert!(gpt.image_generation);
+
+        let realtime = find_profile("openai", "gpt-realtime");
+        assert!(!realtime.image_input);
+        assert!(realtime.realtime);
     }
 }

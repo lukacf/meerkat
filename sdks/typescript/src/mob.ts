@@ -9,6 +9,7 @@ import type {
   MobLifecycleAction,
   MobMember,
   MobMemberRef,
+  ResolvedModelCapabilities,
   MobSpawnResult,
   MobStatus,
   SpawnManySpec,
@@ -64,6 +65,7 @@ export interface MobMemberSnapshot {
   tokensUsed: number;
   isFinal: boolean;
   liveAttachmentStatus?: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
+  resolvedCapabilities?: ResolvedModelCapabilities;
   peerConnectivity?: {
     reachablePeerCount: number;
     unknownPeerCount: number;

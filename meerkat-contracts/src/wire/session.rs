@@ -106,6 +106,8 @@ pub struct WireSessionInfo {
     pub provider: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_assistant_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_capabilities: Option<crate::wire::WireResolvedModelCapabilities>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub labels: BTreeMap<String, String>,
 }
@@ -130,6 +132,7 @@ impl From<SessionInfo> for WireSessionInfo {
             model: info.model,
             provider: info.provider.as_str().to_string(),
             last_assistant_text: info.last_assistant_text,
+            resolved_capabilities: None,
             labels: info.labels,
         }
     }
@@ -825,11 +828,43 @@ mod tests {
             model: "claude-sonnet-4-5".to_string(),
             provider: "anthropic".to_string(),
             last_assistant_text: None,
+            resolved_capabilities: None,
             labels: labels.clone(),
         };
         let json = serde_json::to_string(&wire).unwrap();
         let parsed: WireSessionInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.labels, labels);
+    }
+
+    #[test]
+    fn test_wire_session_info_resolved_capabilities_roundtrip() {
+        let capabilities = crate::wire::WireResolvedModelCapabilities {
+            vision: true,
+            image_input: true,
+            image_tool_results: true,
+            inline_video: false,
+            realtime: true,
+            web_search: true,
+            image_generation: true,
+        };
+        let wire = WireSessionInfo {
+            session_id: SessionId::new(),
+            session_ref: None,
+            created_at: 1000,
+            updated_at: 2000,
+            message_count: 3,
+            is_active: true,
+            model: "gpt-realtime".to_string(),
+            provider: "openai".to_string(),
+            last_assistant_text: None,
+            labels: BTreeMap::new(),
+            resolved_capabilities: Some(capabilities.clone()),
+        };
+
+        let json = serde_json::to_string(&wire).unwrap();
+        assert!(json.contains("\"resolved_capabilities\""));
+        let parsed: WireSessionInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.resolved_capabilities, Some(capabilities));
     }
 
     #[test]

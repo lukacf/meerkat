@@ -352,6 +352,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let models = serde_json::json!({
         "WireModelTier": schema_for!(crate::wire::WireModelTier),
         "WireModelProfile": schema_for!(crate::wire::WireModelProfile),
+        "WireResolvedModelCapabilities": schema_for!(crate::wire::WireResolvedModelCapabilities),
         "CatalogModelEntry": schema_for!(crate::wire::CatalogModelEntry),
         "ProviderCatalog": schema_for!(crate::wire::ProviderCatalog),
         "ModelsCatalogResponse": schema_for!(crate::wire::ModelsCatalogResponse),

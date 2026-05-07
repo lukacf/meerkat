@@ -42,6 +42,16 @@ export interface MobHelperResult {
   tokens_used: number;
 }
 
+export interface WireResolvedModelCapabilities {
+  image_generation?: boolean;
+  image_input?: boolean;
+  image_tool_results?: boolean;
+  inline_video?: boolean;
+  realtime?: boolean;
+  vision?: boolean;
+  web_search?: boolean;
+}
+
 export interface MobMemberStatusResult {
   current_session_id?: string;
   error?: string;
@@ -51,6 +61,7 @@ export interface MobMemberStatusResult {
   output_preview?: string;
   peer_connectivity?: unknown;
   realtime_attachment_status?: string;
+  resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
 }

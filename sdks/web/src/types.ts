@@ -392,6 +392,16 @@ export interface MobPeerConnectivitySnapshot {
   unreachable_peers: MobUnreachablePeer[];
 }
 
+export interface ResolvedModelCapabilities {
+  vision: boolean;
+  image_input: boolean;
+  image_tool_results: boolean;
+  inline_video: boolean;
+  realtime: boolean;
+  web_search: boolean;
+  image_generation: boolean;
+}
+
 /** Point-in-time execution snapshot for a mob member. */
 export interface MobMemberSnapshot {
   status: WireMobMemberStatus;
@@ -402,6 +412,7 @@ export interface MobMemberSnapshot {
   is_final: boolean;
   current_session_id?: string;
   realtime_attachment_status?: string;
+  resolved_capabilities?: ResolvedModelCapabilities;
   external_member?: unknown;
   kickoff?: Record<string, unknown>;
   peer_connectivity?: MobPeerConnectivitySnapshot;

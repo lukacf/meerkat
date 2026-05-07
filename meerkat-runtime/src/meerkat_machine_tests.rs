@@ -16091,8 +16091,10 @@ fn test_llm_capability_surface(image_tool_results: bool) -> SessionLlmCapability
         supports_reasoning: true,
         inline_video: false,
         vision: true,
+        image_input: true,
         image_tool_results,
         supports_web_search: true,
+        image_generation: false,
         realtime: false,
         call_timeout_secs: Some(60),
     }
@@ -16105,8 +16107,10 @@ fn test_llm_capability_surface_realtime() -> SessionLlmCapabilitySurface {
         supports_reasoning: false,
         inline_video: false,
         vision: false,
+        image_input: false,
         image_tool_results: false,
         supports_web_search: false,
+        image_generation: false,
         realtime: true,
         call_timeout_secs: None,
     }
@@ -20037,6 +20041,12 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         }
         MeerkatMachineCommandResult::RealtimeAttachmentStatus(status) => {
             format!("realtime_attachment_status:{status:?}")
+        }
+        MeerkatMachineCommandResult::ResolvedSessionLlmCapabilities(capabilities) => {
+            format!(
+                "resolved_session_llm_capabilities:{}",
+                capabilities.is_some()
+            )
         }
         MeerkatMachineCommandResult::RealtimeChannelStatus(status) => {
             format!("realtime_channel_status:{status:?}")

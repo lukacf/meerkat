@@ -160,6 +160,7 @@ fn wire_session_info_required_fields() {
         model: "claude-sonnet-4-5".to_string(),
         provider: "anthropic".to_string(),
         last_assistant_text: None,
+        resolved_capabilities: None,
         labels: Default::default(),
     };
     let value = serde_json::to_value(&wire).unwrap();

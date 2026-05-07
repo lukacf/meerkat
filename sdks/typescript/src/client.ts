@@ -102,6 +102,7 @@ import type {
   PeerCorrelationId,
   PeerId,
   PeerResponseTerminalOptions,
+  ResolvedModelCapabilities,
   RunResult,
   Schedule,
   ScheduleListOptions,
@@ -1387,6 +1388,7 @@ export class MeerkatClient {
       unknownPeerCount: number;
       unreachablePeers: Array<{ peer: string; reason?: string }>;
     };
+    resolvedCapabilities?: ResolvedModelCapabilities;
     /**
      * Phase 5G/T5i identity-first realtime routing: session id of the
      * member's current bridge session. Consumers navigate
@@ -1436,6 +1438,9 @@ export class MeerkatClient {
               : [],
           }
         : undefined,
+      resolvedCapabilities: MeerkatClient.parseResolvedModelCapabilities(
+        result.resolved_capabilities,
+      ),
       currentSessionId:
         typeof result.current_session_id === "string" && result.current_session_id.length > 0
           ? result.current_session_id
@@ -2779,7 +2784,26 @@ export class MeerkatClient {
       provider: data.provider != null ? String(data.provider) : undefined,
       lastAssistantText:
         data.last_assistant_text != null ? String(data.last_assistant_text) : undefined,
+      resolvedCapabilities: MeerkatClient.parseResolvedModelCapabilities(
+        data.resolved_capabilities,
+      ),
       labels,
+    };
+  }
+
+  static parseResolvedModelCapabilities(data: unknown): ResolvedModelCapabilities | undefined {
+    if (!data || typeof data !== "object") {
+      return undefined;
+    }
+    const raw = data as Record<string, unknown>;
+    return {
+      vision: Boolean(raw.vision),
+      imageInput: Boolean(raw.image_input),
+      imageToolResults: Boolean(raw.image_tool_results),
+      inlineVideo: Boolean(raw.inline_video),
+      realtime: Boolean(raw.realtime),
+      webSearch: Boolean(raw.web_search),
+      imageGeneration: Boolean(raw.image_generation),
     };
   }
 
@@ -2871,8 +2895,22 @@ export class MeerkatClient {
                       supportsReasoning: Boolean(
                         (model.profile as Record<string, unknown>).supports_reasoning,
                       ),
+                      vision: Boolean((model.profile as Record<string, unknown>).vision),
+                      imageInput: Boolean(
+                        (model.profile as Record<string, unknown>).image_input,
+                      ),
+                      imageToolResults: Boolean(
+                        (model.profile as Record<string, unknown>).image_tool_results,
+                      ),
                       inlineVideo: Boolean(
                         (model.profile as Record<string, unknown>).inline_video,
+                      ),
+                      realtime: Boolean((model.profile as Record<string, unknown>).realtime),
+                      webSearch: Boolean(
+                        (model.profile as Record<string, unknown>).supports_web_search,
+                      ),
+                      imageGeneration: Boolean(
+                        (model.profile as Record<string, unknown>).image_generation,
                       ),
                       paramsSchema: (model.profile as Record<string, unknown>).params_schema,
                     }

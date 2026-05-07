@@ -117,7 +117,7 @@ pub use mob::{
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
-    WireModelProfile, WireModelTier,
+    WireModelProfile, WireModelTier, WireResolvedModelCapabilities,
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{

@@ -759,6 +759,15 @@ test('Mob result decoders preserve generated result truth after validation', asy
         is_final: false,
         current_session_id: 'session-1',
         realtime_attachment_status: 'attached',
+        resolved_capabilities: {
+          vision: false,
+          image_input: false,
+          image_tool_results: false,
+          inline_video: false,
+          realtime: true,
+          web_search: false,
+          image_generation: false,
+        },
         external_member: { provider: 'external' },
       });
     },
@@ -783,6 +792,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
   const snapshot = await deliveryMob.memberStatus('worker-1');
   assert.equal(snapshot.current_session_id, 'session-1');
   assert.equal(snapshot.realtime_attachment_status, 'attached');
+  assert.equal(snapshot.resolved_capabilities.realtime, true);
   assert.deepEqual(snapshot.external_member, { provider: 'external' });
 
   const flowStatus = await deliveryMob.flowStatus('run-1');

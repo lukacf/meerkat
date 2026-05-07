@@ -50,6 +50,8 @@ pub struct ModelProfile {
     pub inline_video: bool,
     /// Whether the model accepts image content in user messages.
     pub vision: bool,
+    /// Whether user messages may include image input blocks.
+    pub image_input: bool,
     /// Whether the model can process image blocks in tool results.
     /// When false, `view_image` is hidden from the tool list.
     pub image_tool_results: bool,
@@ -59,6 +61,8 @@ pub struct ModelProfile {
     pub realtime: bool,
     /// Whether the model supports provider-native web search tools.
     pub supports_web_search: bool,
+    /// Whether the provider/model can use Meerkat image generation.
+    pub image_generation: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
     /// Beta headers authorized by the model capability catalog.
@@ -120,8 +124,10 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         supports_web_search: caps.supports_web_search,
         inline_video: caps.inline_video,
         vision: caps.vision,
+        image_input: caps.vision,
         image_tool_results: caps.image_tool_results,
         realtime: caps.realtime,
+        image_generation: catalog::default_image_generation_model(caps.provider).is_some(),
         params_schema: schema_builder::build_params_schema(caps),
         beta_headers: caps
             .beta_headers

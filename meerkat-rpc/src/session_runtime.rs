@@ -1678,8 +1678,10 @@ fn profile_to_capability_surface(
         supports_reasoning: profile.supports_reasoning,
         inline_video: profile.inline_video,
         vision: profile.vision,
+        image_input: profile.image_input,
         image_tool_results: profile.image_tool_results,
         supports_web_search: profile.supports_web_search,
+        image_generation: profile.image_generation,
         realtime: profile.realtime,
         call_timeout_secs: profile.call_timeout_secs,
     }
@@ -3929,6 +3931,49 @@ impl SessionRuntime {
             message: format!("Failed to resolve model registry: {e}"),
             data: None,
         })
+    }
+
+    async fn wire_resolved_capabilities_for_identity(
+        &self,
+        identity: &SessionLlmIdentity,
+    ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
+        let registry = self.model_registry().await.ok()?;
+        let profile = registry.profile_for_provider(identity.provider, &identity.model)?;
+        Some(profile_to_capability_surface(&profile).to_wire_resolved())
+    }
+
+    async fn wire_resolved_capabilities_for_session(
+        &self,
+        session_id: &SessionId,
+        identity: &SessionLlmIdentity,
+    ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
+        if let Ok(Some(surface)) = self
+            .runtime_adapter
+            .resolved_session_llm_capabilities(session_id)
+            .await
+        {
+            return Some(surface.to_wire_resolved());
+        }
+
+        self.wire_resolved_capabilities_for_identity(identity).await
+    }
+
+    async fn attach_resolved_capabilities_to_wire_info(
+        &self,
+        info: &mut meerkat_contracts::WireSessionInfo,
+    ) {
+        let provider = meerkat_core::Provider::parse_strict(&info.provider)
+            .unwrap_or(meerkat_core::Provider::Other);
+        let identity = SessionLlmIdentity {
+            model: info.model.clone(),
+            provider,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        info.resolved_capabilities = self
+            .wire_resolved_capabilities_for_session(&info.session_id, &identity)
+            .await;
     }
 
     async fn llm_identity_from_pending_build(
@@ -7100,7 +7145,7 @@ impl SessionRuntime {
     ) -> Option<meerkat_contracts::WireSessionInfo> {
         // Check pending sessions first.
         if let Some(info) = self.staged_sessions.info(session_id).await {
-            return Some(meerkat_contracts::WireSessionInfo {
+            let mut wire = meerkat_contracts::WireSessionInfo {
                 session_id: session_id.clone(),
                 session_ref: None,
                 created_at: info.created_at_secs,
@@ -7110,8 +7155,14 @@ impl SessionRuntime {
                 model: info.effective_llm_identity.model.clone(),
                 provider: info.effective_llm_identity.provider.as_str().to_string(),
                 last_assistant_text: None,
+                resolved_capabilities: self
+                    .wire_resolved_capabilities_for_identity(&info.effective_llm_identity)
+                    .await,
                 labels: info.labels,
-            });
+            };
+            self.attach_resolved_capabilities_to_wire_info(&mut wire)
+                .await;
+            return Some(wire);
         }
 
         // Try list() first — non-blocking (uses watch receivers).
@@ -7122,7 +7173,10 @@ impl SessionRuntime {
                         // Idle session: safe to call read() without blocking,
                         // which provides last_assistant_text.
                         if let Ok(view) = self.service.read(session_id).await {
-                            return Some(view.state.into());
+                            let mut info = view.state.into();
+                            self.attach_resolved_capabilities_to_wire_info(&mut info)
+                                .await;
+                            return Some(info);
                         }
                     }
                     // Active session: return summary without last_assistant_text
@@ -7133,7 +7187,7 @@ impl SessionRuntime {
                         .live_session_llm_identity(session_id)
                         .await
                         .ok()?;
-                    return Some(meerkat_contracts::WireSessionInfo {
+                    let mut info = meerkat_contracts::WireSessionInfo {
                         session_id: wire.session_id,
                         session_ref: None,
                         created_at: wire.created_at,
@@ -7143,15 +7197,22 @@ impl SessionRuntime {
                         model: llm_identity.model,
                         provider: llm_identity.provider.as_str().to_string(),
                         last_assistant_text: None,
+                        resolved_capabilities: None,
                         labels: wire.labels,
-                    });
+                    };
+                    self.attach_resolved_capabilities_to_wire_info(&mut info)
+                        .await;
+                    return Some(info);
                 }
             }
         }
 
         // Fallback: try read() for archived/persisted sessions not in the live list.
         if let Ok(view) = self.service.read(session_id).await {
-            return Some(view.state.into());
+            let mut info = view.state.into();
+            self.attach_resolved_capabilities_to_wire_info(&mut info)
+                .await;
+            return Some(info);
         }
 
         None
@@ -17909,6 +17970,44 @@ mod tests {
             .expect("pending session should be readable");
         assert_eq!(info.model, "claude-sonnet-4-5");
         assert_eq!(info.provider, "anthropic");
+        let capabilities = info
+            .resolved_capabilities
+            .expect("pending sessions should expose resolved capabilities");
+        assert!(capabilities.vision);
+        assert!(capabilities.image_input);
+        assert!(capabilities.image_tool_results);
+        assert!(!capabilities.inline_video);
+        assert!(!capabilities.realtime);
+        assert!(capabilities.web_search);
+        assert!(
+            !capabilities.image_generation,
+            "Anthropic sessions should not advertise auto image generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_realtime_session_read_reports_realtime_capability() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let mut build = AgentBuildConfig::new("gpt-realtime");
+        build.provider = Some(meerkat_core::Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = runtime.create_session(build, None, None).await.unwrap();
+
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .expect("pending realtime session should be readable");
+        let capabilities = info
+            .resolved_capabilities
+            .expect("realtime session should expose resolved capabilities");
+        assert_eq!(info.model, "gpt-realtime");
+        assert_eq!(info.provider, "openai");
+        assert!(capabilities.realtime);
+        assert!(!capabilities.image_input);
+        assert!(!capabilities.image_tool_results);
+        assert!(!capabilities.web_search);
     }
 
     #[tokio::test]
@@ -18329,6 +18428,24 @@ mod tests {
             )
             .await
             .unwrap();
+
+        let info = runtime
+            .read_session_rich(&session_id)
+            .await
+            .expect("hot-swapped session should be readable");
+        let capabilities = info
+            .resolved_capabilities
+            .expect("hot-swapped session should expose resolved capabilities");
+        assert_eq!(info.model, "gpt-5.4");
+        assert_eq!(info.provider, "openai");
+        assert!(capabilities.vision);
+        assert!(capabilities.image_input);
+        assert!(
+            !capabilities.image_tool_results,
+            "OpenAI hot-swap should update resolved image tool-result support"
+        );
+        assert!(capabilities.web_search);
+        assert!(capabilities.image_generation);
 
         // Export the session and check that the capability-owned visibility
         // state blocks view_image without mutating the external overlay.

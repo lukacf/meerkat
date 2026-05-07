@@ -215,8 +215,12 @@ pub struct SessionLlmCapabilitySurface {
     pub supports_reasoning: bool,
     pub inline_video: bool,
     pub vision: bool,
+    #[serde(default)]
+    pub image_input: bool,
     pub image_tool_results: bool,
     pub supports_web_search: bool,
+    #[serde(default)]
+    pub image_generation: bool,
     /// Whether the resolved model exposes a realtime bidirectional streaming
     /// transport. Drives capability-based auto attach/detach in
     /// `reconfigure_live_topology` and `apply_capability_driven_realtime_transport`.
@@ -224,6 +228,21 @@ pub struct SessionLlmCapabilitySurface {
     pub realtime: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_timeout_secs: Option<u64>,
+}
+
+impl SessionLlmCapabilitySurface {
+    #[must_use]
+    pub fn to_wire_resolved(&self) -> meerkat_contracts::WireResolvedModelCapabilities {
+        meerkat_contracts::WireResolvedModelCapabilities {
+            vision: self.vision,
+            image_input: self.image_input,
+            image_tool_results: self.image_tool_results,
+            inline_video: self.inline_video,
+            realtime: self.realtime,
+            web_search: self.supports_web_search,
+            image_generation: self.image_generation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -482,6 +501,9 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeRealtimeAttachmentStatus {
         session_id: SessionId,
     },
+    ResolvedSessionLlmCapabilities {
+        session_id: SessionId,
+    },
     /// Fully-projected public channel status. Returns attachment state plus
     /// machine-owned reconnect lifecycle/progress collapsed into a
     /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
@@ -604,6 +626,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
     RealtimeAttachmentStatus(RealtimeAttachmentStatus),
+    ResolvedSessionLlmCapabilities(Option<SessionLlmCapabilitySurface>),
     RealtimeChannelStatus(RealtimeChannelStatus),
     SessionModelRoutingStatus(SessionModelRoutingStatus),
     SwitchTurnControlResult(SwitchTurnControlResult),
@@ -1308,6 +1331,7 @@ impl MeerkatMachineCommandVariant {
         match self {
             Self::ConfigureModelRoutingBaseline
             | Self::RequestSwitchTurn
+            | Self::ResolvedSessionLlmCapabilities
             | Self::RuntimeRealtimeChannelStatus
             | Self::SessionModelRoutingStatus
             | Self::PrepareLocalSessionBindings => None,
@@ -1420,6 +1444,11 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::RuntimeRealtimeChannelStatus => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus,
+            )
+        }
+        MeerkatMachineCommandVariant::ResolvedSessionLlmCapabilities => {
+            MeerkatMachineCommandClassification::ShellMechanic(
+                MeerkatMachineShellMechanicReason::SessionModelRoutingObservation,
             )
         }
         MeerkatMachineCommandVariant::SessionModelRoutingStatus => {

@@ -112,6 +112,18 @@ def test_contract_version_matches_package_version():
     assert CONTRACT_VERSION == data["project"]["version"]
 
 
+def test_model_profile_type_uses_wire_web_search_key():
+    from meerkat import ModelProfile
+    from meerkat.types import ResolvedModelCapabilities
+
+    model_profile_fields = set(ModelProfile.__annotations__)
+    assert "supports_web_search" in model_profile_fields
+    assert "web_search" not in model_profile_fields
+
+    resolved_fields = set(ResolvedModelCapabilities.__annotations__)
+    assert "web_search" in resolved_fields
+
+
 def test_generated_realtime_types_include_open_info_shape():
     info = GeneratedRealtimeOpenInfo(
         ws_url="ws://localhost:9999/realtime/ws",
@@ -1934,6 +1946,15 @@ async def test_client_read_session_parses_details_shape():
             "model": "claude-sonnet-4-6",
             "provider": "anthropic",
             "last_assistant_text": "hello",
+            "resolved_capabilities": {
+                "vision": True,
+                "image_input": True,
+                "image_tool_results": True,
+                "inline_video": False,
+                "realtime": False,
+                "web_search": True,
+                "image_generation": True,
+            },
         }
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -1944,6 +1965,15 @@ async def test_client_read_session_parses_details_shape():
     assert details.model == "claude-sonnet-4-6"
     assert details.provider == "anthropic"
     assert details.last_assistant_text == "hello"
+    assert details.resolved_capabilities == {
+        "vision": True,
+        "image_input": True,
+        "image_tool_results": True,
+        "inline_video": False,
+        "realtime": False,
+        "web_search": True,
+        "image_generation": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -1964,7 +1994,31 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
         if method == "models/catalog":
             return {
                 "contract_version": {"major": 0, "minor": 5, "patch": 1},
-                "providers": [],
+                "providers": [
+                    {
+                        "provider": "anthropic",
+                        "default_model_id": "claude-sonnet-4-6",
+                        "models": [
+                            {
+                                "id": "claude-sonnet-4-6",
+                                "profile": {
+                                    "model_family": "claude",
+                                    "vision": True,
+                                    "image_input": True,
+                                    "image_tool_results": True,
+                                    "inline_video": False,
+                                    "realtime": False,
+                                    "supports_web_search": True,
+                                    "image_generation": True,
+                                    "supports_temperature": True,
+                                    "supports_thinking": True,
+                                    "supports_reasoning": True,
+                                    "params_schema": {},
+                                },
+                            }
+                        ],
+                    }
+                ],
             }
         if method == "schedule/list":
             return {"schedules": []}
@@ -1988,6 +2042,10 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
 
     models = await client.get_models_catalog()
     assert models["contract_version"] == {"major": 0, "minor": 5, "patch": 1}
+    profile = models["providers"][0]["models"][0]["profile"]
+    assert profile["supports_web_search"] is True
+    assert "web_search" not in profile
+    assert profile["image_generation"] is True
 
     await client.create_schedule({"name": "test"})
     await client.get_schedule("sch_1")
@@ -2317,6 +2375,15 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "agent_runtime_id": {"identity": "agent-a", "generation": 1},
                 "fence_token": 7,
                 "realtime_attachment_status": "binding_ready",
+                "resolved_capabilities": {
+                    "vision": False,
+                    "image_input": False,
+                    "image_tool_results": False,
+                    "inline_video": False,
+                    "realtime": True,
+                    "web_search": False,
+                    "image_generation": False,
+                },
             }
         if method == "mob/respawn":
             return {
@@ -2412,6 +2479,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     assert "agent_runtime_id" not in status
     assert "fence_token" not in status
     assert status["realtime_attachment_status"] == "binding_ready"
+    assert status["resolved_capabilities"]["realtime"] is True
 
     runtime_status = await client.runtime_realtime_attachment_status("session-1")
     assert runtime_status.status == "binding_ready"

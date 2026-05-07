@@ -808,17 +808,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        if let Some(runtime_store) = self.runtime_store.as_ref()
-            && let Some(runtime) =
-                Self::load_runtime_session_snapshot_for_session(runtime_store, id).await?
-        {
-            return Ok(Some(runtime));
+        if self.runtime_store.is_some() {
+            return self
+                .load_runtime_authority_session_for_control(id, "archive")
+                .await;
         }
 
-        self.store
-            .load(id)
-            .await
-            .map_err(|e| SessionError::Store(Box::new(e)))
+        self.load_persisted_session_for_control(id, "archive").await
     }
 
     async fn live_session_authority(
@@ -10836,7 +10832,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_machine_authorized_archive_routes_store_only_projection() {
+    async fn test_machine_authorized_archive_rejects_store_only_projection() {
         for runtime_backed in [true, false] {
             let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
             let runtime_store = runtime_backed.then(|| Arc::new(InMemoryRuntimeStore::new()));
@@ -10865,22 +10861,28 @@ mod tests {
             } else {
                 meerkat_runtime::MeerkatMachine::ephemeral()
             };
-            service
+            let err = service
                 .archive_with_machine_protocol(
                     &id,
                     MachineSessionArchiveProtocol::from_machine(&machine),
                 )
                 .await
-                .expect("machine-routed archive should own the store-only transition");
+                .expect_err("machine-routed archive must not promote store-only projection truth");
+            assert!(
+                matches!(err, SessionError::Unsupported(ref message)
+                    if message.contains("store-only compatibility projection")
+                        && message.contains("machine snapshot")),
+                "unexpected store-only archive error: {err:?}"
+            );
 
             let raw = store
                 .load(&id)
                 .await
                 .expect("raw store load should succeed")
-                .expect("archived projection should remain present");
+                .expect("store-only projection should remain present");
             assert!(
-                metadata_marks_archived(raw.metadata()),
-                "machine-routed archive should persist archived lifecycle metadata"
+                !metadata_marks_archived(raw.metadata()),
+                "machine-routed archive rejection must not persist archived lifecycle metadata"
             );
             assert!(
                 raw.system_context_state().is_none(),
@@ -10891,17 +10893,15 @@ mod tests {
                 "archive must not add deferred-turn control state"
             );
             if let Some(runtime_store) = runtime_store {
-                let archived = runtime_store
-                    .load_session_snapshot(
-                        &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
-                    )
-                    .await
-                    .expect("runtime snapshot load should succeed")
-                    .and_then(|bytes| serde_json::from_slice::<Session>(&bytes).ok())
-                    .expect("machine-routed archive should write runtime authority");
                 assert!(
-                    metadata_marks_archived(archived.metadata()),
-                    "runtime-backed machine archive should persist archived runtime authority"
+                    runtime_store
+                        .load_session_snapshot(
+                            &PersistentSessionService::<DummyBuilder>::runtime_id_for_session(&id),
+                        )
+                        .await
+                        .expect("runtime snapshot load should succeed")
+                        .is_none(),
+                    "store-only machine archive rejection must not create runtime authority"
                 );
                 assert_eq!(
                     runtime_store
@@ -10910,8 +10910,8 @@ mod tests {
                         )
                         .await
                         .expect("runtime state load should succeed"),
-                    Some(RuntimeState::Retired),
-                    "archive must first persist the machine-owned retired lifecycle"
+                    None,
+                    "store-only machine archive rejection must not create retired lifecycle"
                 );
             }
         }

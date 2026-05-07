@@ -39,54 +39,19 @@ impl MeerkatMachine {
             (entry.effect_sender(), entry.boundary_handle())
         };
 
-        let Some(effect_tx) = effect_tx else {
-            let state = self
-                .existing_session_runtime_state(session_id)
-                .await
-                .unwrap_or(RuntimeState::Destroyed);
+        if let Err(err) = self
+            .dispatch_interrupt_yielding_runtime_effect(
+                session_id,
+                effect_tx,
+                boundary_handle,
+                projected_effect,
+                "CancelAfterBoundary",
+            )
+            .await
+        {
             self.restore_session_dsl_state(session_id, staged.previous_state)
                 .await;
-            return Err(RuntimeDriverError::NotReady { state });
-        };
-
-        let reason = projected_effect.reason().to_string();
-        if let Some(boundary_handle) = boundary_handle {
-            if let Err(err) = boundary_handle.cancel_after_boundary(reason.clone()).await {
-                self.restore_session_dsl_state(session_id, staged.previous_state)
-                    .await;
-                return Err(RuntimeDriverError::Internal(format!(
-                    "failed to apply live boundary cancel: {err}"
-                )));
-            }
-
-            match effect_tx.try_send(projected_effect.into_effect()) {
-                Ok(()) => {}
-                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                    tracing::debug!(
-                        %session_id,
-                        "runtime effect channel full after live boundary cancel; live wake already delivered"
-                    );
-                }
-                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                    tracing::warn!(
-                        %session_id,
-                        "runtime effect channel closed after live boundary cancel; live wake already delivered"
-                    );
-                    let mut sessions = self.sessions.write().await;
-                    if let Some(entry) = sessions.get_mut(session_id) {
-                        entry.clear_dead_attachment();
-                    }
-                }
-            }
-            return Ok(());
-        }
-
-        if let Err(err) = effect_tx.send(projected_effect.into_effect()).await {
-            self.restore_session_dsl_state(session_id, staged.previous_state)
-                .await;
-            return Err(RuntimeDriverError::Internal(format!(
-                "failed to send runtime effect: {err}"
-            )));
+            return Err(err);
         }
 
         Ok(())

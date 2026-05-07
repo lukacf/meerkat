@@ -139,9 +139,11 @@ pub trait RuntimeStore: Send + Sync {
     /// Atomically persist session delta + receipt + input state updates.
     ///
     /// All writes MUST commit in a single atomic operation.
-    /// If `session_store_key` is `Some`, also writes the session snapshot
-    /// to the sessions table (the same table `SessionStore` uses), providing
-    /// a unified boundary commit across both stores.
+    /// If `session_store_key` is `Some`, validates that the snapshot belongs
+    /// to that session and, for stores that physically share a `SessionStore`
+    /// table, writes that table in the same transaction. Runtime snapshot
+    /// authority remains keyed only by `runtime_id`; `session_store_key` must
+    /// not create a raw session UUID runtime alias.
     async fn atomic_apply(
         &self,
         runtime_id: &LogicalRuntimeId,

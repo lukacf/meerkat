@@ -155,8 +155,10 @@ impl MeerkatMachine {
                         }
                     }
                 };
-                let (signal, runtime_effect) = if let Some(input_id) = accepted_input_id {
-                    let (_, effects) = self
+                let (signal, runtime_effect, effect_previous_dsl_state) = if let Some(input_id) =
+                    accepted_input_id
+                {
+                    let (previous_dsl_state, effects) = self
                         .apply_session_dsl_input(
                             &session_id,
                             crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -191,9 +193,9 @@ impl MeerkatMachine {
                                 "canonical AcceptWithCompletion emitted invalid runtime effect facts: {reason}"
                             ))
                         })?;
-                    (signal, runtime_effect)
+                    (signal, runtime_effect, Some(previous_dsl_state))
                 } else {
-                    (signal, None)
+                    (signal, None, None)
                 };
 
                 if signal.should_wake()
@@ -201,24 +203,22 @@ impl MeerkatMachine {
                 {
                     let _ = wake_tx.try_send(());
                 }
-                if signal.should_interrupt_yielding()
-                    && let (Some(tx), Some(projected_effect)) = (&effect_tx, runtime_effect.clone())
+                if let Some(projected_effect) = runtime_effect
+                    && let Err(err) = self
+                        .dispatch_interrupt_yielding_runtime_effect(
+                            &session_id,
+                            effect_tx,
+                            boundary_handle,
+                            projected_effect,
+                            "AcceptWithCompletion",
+                        )
+                        .await
                 {
-                    let _ = tx.try_send(projected_effect.into_effect());
-                }
-                if signal.should_interrupt_yielding()
-                    && let (Some(boundary_handle), Some(projected_effect)) =
-                        (boundary_handle, runtime_effect)
-                {
-                    let result = boundary_handle
-                        .cancel_after_boundary(projected_effect.reason().to_string())
-                        .await;
-                    if let Err(err) = result {
-                        tracing::trace!(
-                            error = %err,
-                            "out-of-band boundary cancel was not applied"
-                        );
+                    if let Some(previous_dsl_state) = effect_previous_dsl_state {
+                        self.restore_session_dsl_state(&session_id, previous_dsl_state)
+                            .await;
                     }
+                    return Err(err);
                 }
 
                 Ok(MeerkatMachineCommandResult::AcceptWithCompletion {

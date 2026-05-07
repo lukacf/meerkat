@@ -5890,7 +5890,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_live_wake_is_not_blocked_by_full_effect_channel() {
+async fn cancel_after_boundary_full_effect_channel_fails_closed_after_live_wake() {
     struct BlockingExecutor {
         live_boundary_cancel_calls: Arc<AtomicUsize>,
         queued_boundary_cancel_calls: Arc<AtomicUsize>,
@@ -6015,17 +6015,21 @@ async fn cancel_after_boundary_live_wake_is_not_blocked_by_full_effect_channel()
         "runtime loop is still blocked inside apply, so queued effects have not drained"
     );
 
-    tokio::time::timeout(
+    let err = tokio::time::timeout(
         Duration::from_millis(500),
         adapter.cancel_after_boundary(&session_id),
     )
     .await
     .expect("live boundary cancel must not wait for capacity in the bounded effect channel")
-    .expect("live boundary cancel should succeed after best-effort enqueue");
+    .expect_err("full effect channel must fail closed instead of dropping the queued effect");
+    assert!(
+        err.to_string().contains("runtime effect channel full"),
+        "unexpected cancel error: {err}"
+    );
     assert_eq!(
         live_boundary_cancel_calls.load(Ordering::SeqCst),
         17,
-        "saturated effect channel must not prevent the live cooperative wake"
+        "saturated effect channel reports failure after attempting the live cooperative wake"
     );
 
     allow_finish.notify_waiters();

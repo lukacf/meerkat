@@ -45,9 +45,14 @@ pub(crate) async fn apply_executor_effect(
 ) -> Result<bool, RuntimeDriverError> {
     match effect.into_inner() {
         RuntimeEffectInner::CancelAfterBoundary { reason } => {
-            if let Err(err) = executor.cancel_after_boundary(reason).await {
-                tracing::warn!(error = %err, "failed to apply runtime executor effect");
-            }
+            executor
+                .cancel_after_boundary(reason)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "failed to apply cancel-after-boundary executor effect: {err}"
+                    ))
+                })?;
             Ok(false)
         }
         RuntimeEffectInner::StopRuntimeExecutor { reason } => {
@@ -177,6 +182,7 @@ mod tests {
         boundary_calls: Arc<AtomicUsize>,
         stop_calls: Arc<AtomicUsize>,
         cleanup_calls: Arc<AtomicUsize>,
+        fail_boundary: bool,
     }
 
     #[async_trait::async_trait]
@@ -194,6 +200,11 @@ mod tests {
             _reason: String,
         ) -> Result<(), CoreExecutorError> {
             self.boundary_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_boundary {
+                return Err(CoreExecutorError::control_failed_runtime(
+                    "synthetic boundary cancel failure",
+                ));
+            }
             Ok(())
         }
 
@@ -222,6 +233,7 @@ mod tests {
             boundary_calls: Arc::clone(&boundary_calls),
             stop_calls: Arc::clone(&stop_calls),
             cleanup_calls: Arc::clone(&cleanup_calls),
+            fail_boundary: false,
         };
         let driver = shared_driver();
 
@@ -256,5 +268,35 @@ mod tests {
             1,
             "post-stop cleanup must run only after machine-owned terminalization succeeds"
         );
+    }
+
+    #[tokio::test]
+    async fn apply_executor_effect_boundary_cancel_failure_is_fail_closed() {
+        let boundary_calls = Arc::new(AtomicUsize::new(0));
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        let cleanup_calls = Arc::new(AtomicUsize::new(0));
+        let mut executor = RecordingExecutor {
+            boundary_calls: Arc::clone(&boundary_calls),
+            stop_calls,
+            cleanup_calls,
+            fail_boundary: true,
+        };
+        let driver = shared_driver();
+
+        let err = apply_executor_effect(
+            &driver,
+            None,
+            &mut executor,
+            runtime_effect(RuntimeEffectKind::CancelAfterBoundary, "boundary"),
+        )
+        .await
+        .expect_err("boundary cancel effect failure must not be warn-only");
+
+        assert!(
+            err.to_string()
+                .contains("failed to apply cancel-after-boundary executor effect"),
+            "unexpected error: {err}"
+        );
+        assert_eq!(boundary_calls.load(Ordering::SeqCst), 1);
     }
 }

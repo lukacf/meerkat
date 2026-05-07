@@ -718,6 +718,55 @@ impl MeerkatMachine {
         Ok(())
     }
 
+    async fn clear_dead_runtime_attachment(&self, session_id: &SessionId) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(entry) = sessions.get_mut(session_id) {
+            entry.clear_dead_attachment();
+        }
+    }
+
+    async fn dispatch_interrupt_yielding_runtime_effect(
+        &self,
+        session_id: &SessionId,
+        effect_tx: Option<mpsc::Sender<crate::effect::RuntimeEffect>>,
+        boundary_handle: Option<Arc<dyn meerkat_core::lifecycle::CoreExecutorBoundaryHandle>>,
+        projected_effect: crate::effect::ProjectedRuntimeEffect,
+        context: &str,
+    ) -> Result<(), RuntimeDriverError> {
+        let Some(effect_tx) = effect_tx else {
+            let state = self
+                .existing_session_runtime_state(session_id)
+                .await
+                .unwrap_or(RuntimeState::Destroyed);
+            return Err(RuntimeDriverError::NotReady { state });
+        };
+
+        let reason = projected_effect.reason().to_string();
+        if let Some(boundary_handle) = boundary_handle {
+            boundary_handle
+                .cancel_after_boundary(reason)
+                .await
+                .map_err(|err| {
+                    RuntimeDriverError::Internal(format!(
+                        "{context}: failed to apply live boundary cancel: {err}"
+                    ))
+                })?;
+        }
+
+        match effect_tx.try_send(projected_effect.into_effect()) {
+            Ok(()) => Ok(()),
+            Err(mpsc::error::TrySendError::Full(_)) => Err(RuntimeDriverError::Internal(format!(
+                "{context}: runtime effect channel full after accepted boundary cancel"
+            ))),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.clear_dead_runtime_attachment(session_id).await;
+                Err(RuntimeDriverError::NotReady {
+                    state: RuntimeState::Idle,
+                })
+            }
+        }
+    }
+
     async fn restore_session_dsl_state(
         &self,
         session_id: &SessionId,

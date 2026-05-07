@@ -38,7 +38,7 @@ struct Inner {
     input_states: HashMap<String, IndexMap<InputId, StoredInputState>>,
     /// Receipt storage.
     receipts: HashMap<ReceiptKey, RunBoundaryReceipt>,
-    /// Session snapshots (opaque bytes).
+    /// Runtime session snapshots keyed by canonical runtime id.
     sessions: HashMap<String, Vec<u8>>,
     /// Persisted runtime state.
     runtime_states: HashMap<String, RuntimeState>,
@@ -142,10 +142,6 @@ impl RuntimeStore for InMemoryRuntimeStore {
                         actual: session.id().clone(),
                     });
                 }
-                inner.sessions.insert(
-                    session_store_key.to_string(),
-                    delta.session_snapshot.clone(),
-                );
             }
             inner.sessions.insert(rid.clone(), delta.session_snapshot);
         }
@@ -401,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn atomic_apply_honors_session_store_key() {
+    async fn atomic_apply_validates_session_store_key_without_aliasing_snapshot() {
         let store = InMemoryRuntimeStore::new();
         let rid = LogicalRuntimeId::new("runtime-key");
         let session = meerkat_core::Session::new();
@@ -422,11 +418,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(
+            store.load_session_snapshot(&rid).await.unwrap(),
+            Some(snapshot)
+        );
+        assert!(
             store
                 .load_session_snapshot(&LogicalRuntimeId::legacy_session_uuid_alias(&session_id))
                 .await
-                .unwrap(),
-            Some(snapshot)
+                .unwrap()
+                .is_none(),
+            "session_store_key must validate the snapshot identity, not create a raw UUID runtime alias"
         );
     }
 

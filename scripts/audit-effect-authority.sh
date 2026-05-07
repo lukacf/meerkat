@@ -109,6 +109,27 @@ async fn bad(executor: &mut dyn CoreExecutor) {
 }
 EOF
 
+  expect_audit_failure "warn-only cancel-after-boundary effect" "meerkat-runtime/src/control_plane.rs" <<'EOF'
+async fn bad(executor: &mut dyn CoreExecutor) -> Result<bool, Error> {
+    if let Err(err) = executor.cancel_after_boundary("bad".to_string()).await {
+        tracing::warn!(error = %err, "failed to apply runtime executor effect");
+    }
+    Ok(false)
+}
+EOF
+
+  expect_audit_failure "dropped interrupt-yielding effect send" "meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" <<'EOF'
+fn bad(tx: Sender, projected_effect: ProjectedRuntimeEffect) {
+    let _ = tx.try_send(projected_effect.into_effect());
+}
+EOF
+
+  expect_audit_failure "trace-only boundary cancel failure" "meerkat-runtime/src/meerkat_machine/dispatch_control.rs" <<'EOF'
+fn bad() {
+    tracing::trace!("out-of-band Ingest boundary cancel was not applied");
+}
+EOF
+
   expect_audit_failure "RuntimeEffect::from_fact" "meerkat-runtime/src/runtime_loop.rs" <<'EOF'
 fn bad(fact: RuntimeEffectFact) {
     let _ = RuntimeEffect::from_fact(fact);
@@ -798,6 +819,26 @@ if [[ -f "$root/meerkat-runtime/src/runtime_loop.rs" ]]; then
   runtime_loop_direct_stop="$(capture_rg -n 'stop_runtime_executor[[:space:]]*\(' "$root/meerkat-runtime/src/runtime_loop.rs")"
   report_matches "runtime_loop must not call executor stop_runtime_executor directly" "$runtime_loop_direct_stop"
 fi
+
+if [[ -f "$root/meerkat-runtime/src/control_plane.rs" ]]; then
+  warn_only_boundary_cancel="$(capture_rg -n 'failed to apply runtime executor effect|if[[:space:]]+let[[:space:]]+Err\(err\)[[:space:]]*=[[:space:]]*executor\.cancel_after_boundary' "$root/meerkat-runtime/src/control_plane.rs")"
+  report_matches "cancel-after-boundary executor effects must fail closed, not warn-only" "$warn_only_boundary_cancel"
+fi
+
+interrupt_effect_drop_matches=""
+for interrupt_effect_file in \
+  "$root/meerkat-runtime/src/meerkat_machine/dispatch_ingress.rs" \
+  "$root/meerkat-runtime/src/meerkat_machine/dispatch_control.rs" \
+  "$root/meerkat-runtime/src/meerkat_machine/runtime_control.rs"
+do
+  if [[ -f "$interrupt_effect_file" ]]; then
+    found="$(capture_rg -n 'let[[:space:]]+_[[:space:]]*=[[:space:]]*tx\.try_send\(projected_effect\.into_effect\(\)\)|boundary cancel was not applied|runtime effect channel full after live boundary cancel|runtime effect channel closed after live boundary cancel' "$interrupt_effect_file")"
+    if [[ -n "$found" ]]; then
+      interrupt_effect_drop_matches+="$interrupt_effect_file"$'\n'"$found"$'\n'
+    fi
+  fi
+done
+report_matches "interrupt-yielding runtime effects must not be dropped or trace-only" "$interrupt_effect_drop_matches"
 
 if [[ -f "$root/meerkat-runtime/src/effect.rs" ]]; then
   visible_runtime_effect_fact="$(capture_rg -n 'pub(\([^)]*\))?[[:space:]]+enum[[:space:]]+RuntimeEffectFact|pub(\([^)]*\))?[[:space:]]+fn[[:space:]]+from_fact[[:space:]]*\(' "$root/meerkat-runtime/src/effect.rs")"

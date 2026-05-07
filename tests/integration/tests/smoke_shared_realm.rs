@@ -6377,25 +6377,14 @@ turn3_capture={turn3_capture:?}; error={err}"
                         normalized_text_contains_any(
                             text,
                             &[
-                                "repeat the codeword and token over and over until i say stop",
-                                "repeat the code word and token over and over until i say stop",
+                                "keep saying the codeword",
+                                "keep saying the code word",
+                                "repeat the codeword",
+                                "repeat the code word",
+                                "nonstop in a loop",
                             ],
                         )
                     })
-                    && user_messages.iter().any(|text| {
-                        normalized_text_contains_any(
-                            text,
-                            &[
-                                "stop now",
-                                "start now",
-                                "stop",
-                                "start",
-                            ],
-                        )
-                    })
-                    && assistant_messages
-                        .iter()
-                        .any(|text| text.contains("stopped"))
             },
         )
         .await

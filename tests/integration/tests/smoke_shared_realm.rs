@@ -696,7 +696,7 @@ async fn collect_realtime_frames_until_turn_completed_or_idle(
     Ok(capture)
 }
 
-async fn collect_realtime_frames_until_barge_in_preemption_and_second_commit<F>(
+async fn collect_realtime_frames_until_barge_in_preemption<F>(
     sender: &mut meerkat::RealtimeConnectionSender,
     receiver: &mut meerkat::RealtimeConnectionReceiver,
     seed_capture: &RealtimeFrameCapture,
@@ -772,7 +772,7 @@ where
             Ok(result) => result?,
             Err(_) if started_barge_in && next_barge_in_send_at.is_some() => continue,
             Err(_) => return Err(format!(
-                "timed out waiting for barge-in preemption + post-barge commit: capture={capture:?}"
+                "timed out waiting for barge-in preemption (interrupted event): capture={capture:?}"
             )
             .into()),
         };
@@ -788,22 +788,14 @@ where
 
         if started_barge_in {
             let barge_in_complete = next_barge_in_chunk == barge_in_chunks.len();
-            let interrupted_index = capture_event_index(&capture, "interrupted");
-            if let Some(interrupt_idx) = interrupted_index {
-                let has_post_interrupt_commit = capture
-                    .event_kinds
-                    .iter()
-                    .enumerate()
-                    .any(|(idx, kind)| idx > interrupt_idx && kind == "turn_committed");
-                if barge_in_complete && has_post_interrupt_commit {
-                    return Ok(capture);
-                }
+            if barge_in_complete && capture.saw_interrupted {
+                return Ok(capture);
             }
         }
     }
 
     Err(format!(
-        "timed out waiting for barge-in preemption + post-barge commit: capture={capture:?}"
+        "timed out waiting for barge-in preemption (interrupted event): capture={capture:?}"
     )
     .into())
 }
@@ -6299,7 +6291,7 @@ turn3_capture={turn3_capture:?}; error={err}"
             120,
         )
         .await?;
-        let turn45_preemption_capture = match collect_realtime_frames_until_barge_in_preemption_and_second_commit(
+        let turn45_preemption_capture = match collect_realtime_frames_until_barge_in_preemption(
                 &mut sender,
                 &mut receiver,
                 &turn45_primary_commit,

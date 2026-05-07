@@ -1832,10 +1832,18 @@ fn interaction_terminal_event(
             interaction_id,
             error: "cancelled".to_string(),
         },
-        CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::Abandoned(reason)
+        | CompletionOutcome::AbandonedWithError { reason, .. }
+        | CompletionOutcome::RuntimeTerminated(reason) => AgentEvent::InteractionFailed {
+            interaction_id,
+            error: reason,
+        },
+        CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
             AgentEvent::InteractionFailed {
                 interaction_id,
-                error: reason,
+                error: error
+                    .detail
+                    .unwrap_or_else(|| "turn finalization failed".to_string()),
             }
         }
     }

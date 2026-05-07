@@ -510,6 +510,53 @@ class SessionHistory:
     messages: list[SessionMessage] = field(default_factory=list)
 
 
+TranscriptEditRunningBehavior = Literal["reject"]
+"""Behavior for transcript edit requests when the source session has active work."""
+
+
+class TranscriptMessageReplacement(TypedDict):
+    type: Literal["message"]
+    message: dict[str, Any]
+
+
+class TranscriptUserContentBlockReplacement(TypedDict):
+    type: Literal["user_content_block"]
+    block_index: int
+    block: ContentBlock
+
+
+class TranscriptAssistantBlockReplacement(TypedDict):
+    type: Literal["assistant_block"]
+    block_index: int
+    block: dict[str, Any]
+
+
+class TranscriptToolResultContentBlockReplacement(TypedDict):
+    type: Literal["tool_result_content_block"]
+    result_index: int
+    block_index: int
+    block: ContentBlock
+
+
+TranscriptReplacement = (
+    TranscriptMessageReplacement
+    | TranscriptUserContentBlockReplacement
+    | TranscriptAssistantBlockReplacement
+    | TranscriptToolResultContentBlockReplacement
+)
+"""Typed transcript replacement used to create an edited session fork."""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionForkResult:
+    """Result of creating a forked transcript branch."""
+
+    source_session_id: str = ""
+    session_id: str = ""
+    session_ref: str | None = None
+    message_count: int = 0
+
+
 @dataclass(frozen=True, slots=True)
 class EventSourceIdentity:
     """Typed source identity for session or runtime event semantics."""

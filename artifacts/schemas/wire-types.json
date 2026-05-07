@@ -20187,6 +20187,36 @@
     ],
     "title": "SessionExternalEventEnvelope"
   },
+  "SessionForkResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Result of creating an edited transcript branch.",
+    "properties": {
+      "message_count": {
+        "format": "uint",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "type": "string"
+      },
+      "session_ref": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_session_id": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "source_session_id",
+      "session_id",
+      "message_count"
+    ],
+    "title": "SessionForkResult",
+    "type": "object"
+  },
   "SessionStreamCloseResult": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Response payload for `session/stream_close`.",
@@ -20635,6 +20665,18 @@
     ],
     "title": "SupervisorRotationReportWire",
     "type": "object"
+  },
+  "TranscriptEditRunningBehavior": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Explicit behavior for transcript fork/edit requests when the source\nsession has active work.",
+    "oneOf": [
+      {
+        "const": "reject",
+        "description": "Reject the request while the source session is active.",
+        "type": "string"
+      }
+    ],
+    "title": "TranscriptEditRunningBehavior"
   },
   "WireAssistantBlock": {
     "$defs": {

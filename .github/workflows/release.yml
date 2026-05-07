@@ -58,7 +58,10 @@ env:
 jobs:
   release_validate:
     name: Validate release state
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_web_sdk_only != 'true' }}
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      (github.event.inputs.publish_web_sdk_only != 'true' &&
+       github.event.inputs.publish_release_assets_only != 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -127,7 +130,6 @@ jobs:
         github.event.inputs.publish_release_assets_only == 'true')) &&
       !(github.event_name == 'workflow_dispatch' &&
         github.event.inputs.release_binary_backend == 'buildbuddy')
-    needs: [release_validate]
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
@@ -274,11 +276,12 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
-          BUILDBUDDY_ENDPOINT: ${{ matrix.bb_command == 'release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT || '' }}
+          BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
-        run: scripts/buildbuddy-bazel-poc --jobs=512
+          BUILDBUDDY_RELEASE_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64' }}
+        run: scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}"
 
       - name: Package artifacts
         shell: bash
@@ -293,12 +296,14 @@ jobs:
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
           BAZEL_BIN="${BB_OUTPUT_BASE}/execroot/_main/bazel-out"
+          STAGE_ROOT="$(mktemp -d)"
+          trap 'rm -rf "${STAGE_ROOT}"' EXIT
 
           declare -A BIN_PATHS=(
             [rkat]="meerkat-cli/rkat"
-            [rkat-mini]="meerkat-cli/rkat_mini_bin"
+            [rkat-mini]="meerkat-cli/rkat_mini_surface_mini_providers_skills_bin"
             [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
-            [rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_bin"
+            [rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_surface_mini_bin"
             [rkat-rest]="meerkat-rest/rkat_rest_bin"
             [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
           )
@@ -317,10 +322,20 @@ jobs:
               exit 1
             fi
 
+            stage_dir="${STAGE_ROOT}/${bin}"
+            mkdir -p "${stage_dir}"
+            payload_name="${bin}"
             if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-              7z a -tzip "dist/${artifact_name}" "$src"
+              payload_name="${bin}.exe"
+            fi
+            cp "$src" "${stage_dir}/${payload_name}"
+            chmod +x "${stage_dir}/${payload_name}" || true
+            archive_path="${PWD}/dist/${artifact_name}"
+
+            if [[ "$ARCHIVE_EXT" == "zip" ]]; then
+              (cd "${stage_dir}" && 7z a -tzip "${archive_path}" "${payload_name}")
             else
-              tar -czf "dist/${artifact_name}" -C "$(dirname "$src")" "$(basename "$src")"
+              tar -czf "${archive_path}" -C "${stage_dir}" "${payload_name}"
             fi
             echo "packaged=${bin} -> dist/${artifact_name}"
           done
@@ -344,7 +359,10 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true')) &&
-      needs.release_validate.result == 'success' &&
+      (needs.release_validate.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_assets_only == 'true' &&
+        needs.release_validate.result == 'skipped')) &&
       (needs.build_binaries.result == 'success' ||
        needs.build_binaries_buildbuddy.result == 'success')
     needs: [release_validate, build_binaries, build_binaries_buildbuddy]

@@ -132,6 +132,18 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "WireSessionHistory",
         ),
         RpcMethodDescriptor::typed(
+            "session/fork_at",
+            "Fork an idle session at a transcript message index",
+            "ForkSessionAtParams",
+            "SessionForkResult",
+        ),
+        RpcMethodDescriptor::typed(
+            "session/fork_replace",
+            "Fork an idle session and apply a typed transcript replacement",
+            "ForkSessionReplaceParams",
+            "SessionForkResult",
+        ),
+        RpcMethodDescriptor::typed(
             "session/archive",
             "Remove session",
             "ArchiveSessionParams",

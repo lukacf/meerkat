@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 
+use meerkat_core::TurnErrorMetadata;
 use meerkat_core::lifecycle::InputId;
 use meerkat_core::types::RunResult;
 use serde_json::Value;
@@ -32,6 +33,17 @@ pub enum CompletionOutcome {
     Cancelled,
     /// The input was abandoned before completing.
     Abandoned(String),
+    /// The input was abandoned before completing, with typed failure metadata.
+    AbandonedWithError {
+        reason: String,
+        error: TurnErrorMetadata,
+    },
+    /// The turn produced a valid result, but a later runtime finalization step
+    /// failed. Consumers can use the result while handling the mechanics error.
+    CompletedWithFinalizationFailure {
+        result: Box<RunResult>,
+        error: TurnErrorMetadata,
+    },
     /// The runtime was stopped or destroyed while the input was pending.
     RuntimeTerminated(String),
 }
@@ -121,6 +133,23 @@ impl CompletionHandle {
     }
 }
 
+impl CompletionOutcome {
+    pub fn abandoned_reason(&self) -> Option<&str> {
+        match self {
+            Self::Abandoned(reason) | Self::AbandonedWithError { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    pub fn error_metadata(&self) -> Option<&TurnErrorMetadata> {
+        match self {
+            Self::AbandonedWithError { error, .. }
+            | Self::CompletedWithFinalizationFailure { error, .. } => Some(error),
+            _ => None,
+        }
+    }
+}
+
 /// Registry of pending completion waiters, keyed by InputId.
 ///
 /// Uses `Vec<Sender>` per InputId to support multiple waiters for the same input
@@ -201,6 +230,41 @@ impl CompletionRegistry {
         if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
                 let _ = tx.send(CompletionOutcome::Abandoned(reason.clone()));
+            }
+        }
+    }
+
+    /// Resolve all waiters for an abandoned input with typed failure metadata.
+    pub(crate) fn resolve_abandoned_with_error(
+        &mut self,
+        input_id: &InputId,
+        reason: String,
+        error: TurnErrorMetadata,
+    ) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            for tx in senders {
+                let _ = tx.send(CompletionOutcome::AbandonedWithError {
+                    reason: reason.clone(),
+                    error: error.clone(),
+                });
+            }
+        }
+    }
+
+    /// Resolve all waiters for a turn whose output exists but finalization
+    /// failed after output production.
+    pub(crate) fn resolve_completed_with_finalization_failure(
+        &mut self,
+        input_id: &InputId,
+        result: RunResult,
+        error: TurnErrorMetadata,
+    ) {
+        if let Some(senders) = self.take_waiters(input_id) {
+            for tx in senders {
+                let _ = tx.send(CompletionOutcome::CompletedWithFinalizationFailure {
+                    result: Box::new(result.clone()),
+                    error: error.clone(),
+                });
             }
         }
     }

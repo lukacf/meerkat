@@ -825,6 +825,8 @@ impl FlowEngine {
                                     FailureLedgerEntry {
                                         step_id: step_id.clone(),
                                         reason: reason.clone(),
+                                        error_report: None,
+                                        error: None,
                                         timestamp: Utc::now(),
                                     },
                                 )
@@ -833,15 +835,21 @@ impl FlowEngine {
                         }
                     }
                 }
-                Ok(FlowTurnOutcome::Failed { reason }) => {
+                Ok(FlowTurnOutcome::Failed {
+                    reason,
+                    error_report,
+                    error,
+                }) => {
                     if attempt < max_retries {
                         attempt += 1;
                         self.emitter
-                            .step_target_failed(
+                            .step_target_failed_with_error(
                                 run_id.clone(),
                                 step_id.clone(),
                                 target.clone(),
                                 reason.clone(),
+                                error_report.clone(),
+                                error.clone(),
                             )
                             .await?;
                         continue;
@@ -859,11 +867,13 @@ impl FlowEngine {
                         )
                         .await?;
                     self.emitter
-                        .step_target_failed(
+                        .step_target_failed_with_error(
                             run_id.clone(),
                             step_id.clone(),
                             target.clone(),
                             reason.clone(),
+                            error_report.clone(),
+                            error.clone(),
                         )
                         .await?;
                     self.run_store
@@ -872,6 +882,8 @@ impl FlowEngine {
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
                                 reason: reason.clone(),
+                                error_report,
+                                error,
                                 timestamp: Utc::now(),
                             },
                         )
@@ -909,6 +921,8 @@ impl FlowEngine {
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
                                 reason: cancel_reason.clone(),
+                                error_report: None,
+                                error: None,
                                 timestamp: Utc::now(),
                             },
                         )
@@ -974,6 +988,8 @@ impl FlowEngine {
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
                                 reason: timeout_reason.clone(),
+                                error_report: None,
+                                error: None,
                                 timestamp: Utc::now(),
                             },
                         )
@@ -1043,6 +1059,8 @@ impl FlowEngine {
                             FailureLedgerEntry {
                                 step_id: step_id.clone(),
                                 reason: reason.clone(),
+                                error_report: None,
+                                error: None,
                                 timestamp: Utc::now(),
                             },
                         )
@@ -1134,6 +1152,8 @@ impl FlowEngine {
                     FailureLedgerEntry {
                         step_id: step_id.clone(),
                         reason,
+                        error_report: None,
+                        error: None,
                         timestamp: Utc::now(),
                     },
                 )

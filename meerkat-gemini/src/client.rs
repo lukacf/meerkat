@@ -7,9 +7,9 @@ use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{GeminiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarning};
 use meerkat_core::{
-    ContentBlock, GeminiImageMetadata, ImageData, ImageGenerationIntent,
-    ImageOperationTerminalClass, Message, OutputSchema, Provider, ProviderImageMetadata,
-    ProviderTextDisposition, StopReason, Usage,
+    AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
+    ImageGenerationIntent, ImageOperationTerminalClass, Message, OutputSchema, Provider,
+    ProviderImageMetadata, ProviderTextDisposition, StopReason, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -20,7 +20,7 @@ use meerkat_llm_core::{
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::image_generation::{GeminiImageOutputOptions, GeminiImageTurnPlan};
 
@@ -57,6 +57,212 @@ fn code_assist_model(model: &str) -> &str {
         "gemini-3.1-flash-lite" | "gemini-3.1-flash-lite-preview" => "gemini-2.5-flash",
         other => other,
     }
+}
+
+fn invalid_replay(message: impl Into<String>) -> LlmError {
+    LlmError::InvalidRequest {
+        message: message.into(),
+    }
+}
+
+fn project_gemini_content_blocks(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { .. } => block.clone(),
+            ContentBlock::Image {
+                data: ImageData::Inline { .. },
+                ..
+            } => block.clone(),
+            ContentBlock::Video { .. } => block.clone(),
+            ContentBlock::Image { .. } => ContentBlock::Text {
+                text: block.text_projection().into_owned(),
+            },
+            _ => ContentBlock::Text {
+                text: block.text_projection().into_owned(),
+            },
+        })
+        .collect()
+}
+
+fn project_gemini_tool_result(result: &ToolResult) -> Result<ToolResult, LlmError> {
+    if result.has_video() {
+        return Err(invalid_replay(
+            "video blocks are not supported in Gemini tool results",
+        ));
+    }
+    Ok(ToolResult::with_blocks(
+        result.tool_use_id.clone(),
+        project_gemini_content_blocks(&result.content),
+        result.is_error,
+    ))
+}
+
+fn project_gemini_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBlock> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            AssistantBlock::Text { text, .. } if text.is_empty() => None,
+            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            AssistantBlock::Reasoning { text, .. } if !text.is_empty() => {
+                Some(AssistantBlock::Text {
+                    text: format!("[Reasoning: {text}]"),
+                    meta: None,
+                })
+            }
+            AssistantBlock::Reasoning { .. }
+            | AssistantBlock::ServerToolContent { .. }
+            | AssistantBlock::Image { .. } => None,
+            _ => None,
+        })
+        .collect()
+}
+
+fn legacy_assistant_to_gemini_blocks(
+    assistant: &meerkat_core::AssistantMessage,
+) -> Result<Vec<AssistantBlock>, LlmError> {
+    let mut blocks = Vec::new();
+    if !assistant.content.is_empty() {
+        blocks.push(AssistantBlock::Text {
+            text: assistant.content.clone(),
+            meta: None,
+        });
+    }
+    for tool_call in &assistant.tool_calls {
+        let args = serde_json::to_string(&tool_call.args)
+            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
+        let args = serde_json::value::RawValue::from_string(args)
+            .map_err(|error| invalid_replay(format!("invalid legacy tool args: {error}")))?;
+        blocks.push(AssistantBlock::ToolUse {
+            id: tool_call.id.clone(),
+            name: tool_call.name.clone(),
+            args,
+            meta: None,
+        });
+    }
+    Ok(blocks)
+}
+
+fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
+    match message {
+        Message::Assistant(assistant) => assistant
+            .tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.clone())
+            .collect(),
+        Message::BlockAssistant(assistant) => assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => HashSet::new(),
+    }
+}
+
+fn validate_tool_results(
+    provider: &str,
+    pending: HashSet<String>,
+    results: &[ToolResult],
+) -> Result<(), LlmError> {
+    let actual: HashSet<String> = results
+        .iter()
+        .map(|result| result.tool_use_id.clone())
+        .collect();
+    if actual == pending {
+        Ok(())
+    } else {
+        Err(invalid_replay(format!(
+            "{provider} replay projection found tool results that are not adjacent to matching tool uses"
+        )))
+    }
+}
+
+fn project_gemini_replay_messages(messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+    let mut projected = Vec::with_capacity(messages.len());
+    let mut pending_tool_ids: Option<HashSet<String>> = None;
+
+    for message in messages {
+        if let Message::ToolResults {
+            results,
+            created_at,
+        } = message
+        {
+            let Some(pending) = pending_tool_ids.take() else {
+                return Err(invalid_replay(
+                    "Gemini replay projection found tool results without preceding tool use",
+                ));
+            };
+            validate_tool_results("Gemini", pending, results)?;
+            let results = results
+                .iter()
+                .map(project_gemini_tool_result)
+                .collect::<Result<Vec<_>, _>>()?;
+            projected.push(Message::ToolResults {
+                results,
+                created_at: *created_at,
+            });
+            continue;
+        }
+
+        if pending_tool_ids.is_some() {
+            return Err(invalid_replay(
+                "Gemini replay projection found a tool use without adjacent tool results",
+            ));
+        }
+
+        let next_message = match message {
+            Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
+            Message::User(user) => Some(Message::User(UserMessage {
+                content: project_gemini_content_blocks(&user.content),
+                render_metadata: user.render_metadata.clone(),
+                created_at: user.created_at,
+            })),
+            Message::Assistant(assistant) => {
+                let blocks = legacy_assistant_to_gemini_blocks(assistant)?;
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
+                        blocks,
+                        stop_reason: assistant.stop_reason,
+                        created_at: assistant.created_at,
+                    }))
+                }
+            }
+            Message::BlockAssistant(assistant) => {
+                let blocks = project_gemini_assistant_blocks(&assistant.blocks);
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
+                        blocks,
+                        stop_reason: assistant.stop_reason,
+                        created_at: assistant.created_at,
+                    }))
+                }
+            }
+            Message::ToolResults { .. } => unreachable!("handled above"),
+        };
+
+        if let Some(message) = next_message {
+            let tool_ids = tool_ids_from_assistant(&message);
+            if !tool_ids.is_empty() {
+                pending_tool_ids = Some(tool_ids);
+            }
+            projected.push(message);
+        }
+    }
+
+    if pending_tool_ids.is_some() {
+        return Err(invalid_replay(
+            "Gemini replay projection found a trailing tool use without tool results",
+        ));
+    }
+
+    Ok(projected)
 }
 
 impl GeminiClient {
@@ -1265,8 +1471,15 @@ fn join_index(prefix: &str, index: usize) -> String {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for GeminiClient {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_gemini_replay_messages(messages)
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let mut projected_request = request.clone();
+            projected_request.messages = self.project_replay_messages(&request.messages)?;
+            let request = &projected_request;
             let body = self.build_stream_request_body(request)?;
             let url = self.stream_generate_content_url(&request.model);
 
@@ -1499,11 +1712,28 @@ mod tests {
     use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
     use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel;
     use meerkat_core::{
-        AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
+        AssistantBlock, AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ContentBlock,
+        ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
+        ToolResult, UserMessage, VideoData,
     };
     use meerkat_llm_core::ImageGenerationExecutor;
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
+
+    fn assistant_image_block() -> AssistantBlock {
+        AssistantBlock::Image {
+            image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),
+            blob_ref: BlobRef {
+                blob_id: BlobId::from("gemini-image"),
+                media_type: "image/png".to_string(),
+            },
+            media_type: MediaType::new("image/png"),
+            width: 128,
+            height: 128,
+            revised_prompt: RevisedPromptDisposition::NotRequested,
+            meta: ProviderImageMetadata::NotEmitted,
+        }
+    }
 
     #[derive(Clone)]
     struct GeminiImageStubState {
@@ -1531,6 +1761,143 @@ mod tests {
     ) -> impl IntoResponse {
         state.seen.lock().expect("seen mutex").push(body);
         ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    #[test]
+    fn replay_projection_policy_handles_gemini_history_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let tool_args = serde_json::value::RawValue::from_string(r#"{"query":"m"}"#.to_string())?;
+        let messages = vec![
+            Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 1_000,
+                    data: VideoData::Inline {
+                        data: "BBBB".to_string(),
+                    },
+                },
+            ])),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::Reasoning {
+                        text: "model thought".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: None,
+                        name: "google_search".to_string(),
+                        content: serde_json::json!({
+                            "groundingChunks": []
+                        }),
+                        meta: None,
+                    },
+                    assistant_image_block(),
+                    AssistantBlock::Text {
+                        text: "answer".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: tool_args,
+                        meta: Some(Box::new(ProviderMeta::Gemini {
+                            thought_signature: "sig_1".to_string(),
+                        })),
+                    },
+                ],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tool_1".to_string(),
+                vec![
+                    ContentBlock::Text {
+                        text: "tool text".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "CCCC".to_string(),
+                        },
+                    },
+                ],
+                false,
+            )]),
+        ];
+
+        let projected = client.project_replay_messages(&messages)?;
+
+        let Message::User(user) = &projected[0] else {
+            panic!("expected user message");
+        };
+        assert!(
+            user.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. })),
+            "Gemini should retain inline user images"
+        );
+        assert!(
+            user.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Video { .. })),
+            "Gemini should retain inline user video"
+        );
+
+        let Message::BlockAssistant(assistant) = &projected[1] else {
+            panic!("expected assistant message");
+        };
+        assert!(
+            assistant.blocks.iter().any(|block| matches!(
+                block,
+                AssistantBlock::Text { text, .. } if text == "[Reasoning: model thought]"
+            )),
+            "Gemini should project reasoning into text context"
+        );
+        assert!(
+            !assistant
+                .blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::ServerToolContent { .. })),
+            "Gemini should drop server grounding metadata from replay"
+        );
+        assert!(
+            !assistant
+                .blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Image { .. })),
+            "assistant images must be removed from Gemini replay"
+        );
+
+        let Message::ToolResults { results, .. } = &projected[2] else {
+            panic!("expected tool results");
+        };
+        assert!(
+            results[0].has_images(),
+            "Gemini should retain inline image tool results"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_projection_rejects_gemini_orphan_tool_results() {
+        let client = GeminiClient::new("test-key".to_string());
+        let err = client
+            .project_replay_messages(&[Message::tool_results(vec![ToolResult::new(
+                "tool_1".to_string(),
+                "orphaned".to_string(),
+                false,
+            )])])
+            .expect_err("orphan tool results must be rejected");
+        assert!(matches!(err, LlmError::InvalidRequest { .. }));
     }
 
     async fn spawn_gemini_image_stub(

@@ -77,6 +77,10 @@ platform(
     ],
     exec_properties = {
         "Arch": "arm64",
+        # The release binary graph includes Rustc actions with large generated
+        # machine-schema inputs. Public arm64 RBE executors can otherwise pick a
+        # too-small default slot and stall inside rustc instead of failing fast.
+        "EstimatedComputeUnits": "8",
         "OSFamily": "linux",
         "container-image": "docker://docker.io/library/buildpack-deps:22.04",
     },

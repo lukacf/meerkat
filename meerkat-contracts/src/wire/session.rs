@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    VideoData,
+    TranscriptEditRunningBehavior, TranscriptReplacement, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -64,6 +64,30 @@ pub struct SessionStreamCloseResult {
     pub stream_id: String,
     pub closed: bool,
     pub already_closed: bool,
+}
+
+/// Request payload for `session/fork_at`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ForkSessionAtParams {
+    pub session_id: String,
+    pub message_index: usize,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Request payload for `session/fork_replace`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ForkSessionReplaceParams {
+    pub session_id: String,
+    pub message_index: usize,
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    pub replacement: TranscriptReplacement,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
 }
 
 /// Canonical session info for wire protocol.
@@ -704,8 +728,47 @@ mod tests {
     use super::*;
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::{
-        AssistantMessage, BlockAssistantMessage, SystemMessage, ToolCall, UserMessage,
+        AssistantMessage, BlockAssistantMessage, Message, SystemMessage, ToolCall, UserMessage,
     };
+
+    #[test]
+    fn test_fork_session_params_roundtrip_typed_replacement() {
+        let fork_at: ForkSessionAtParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "message_index": 2,
+            "running_behavior": "reject"
+        }))
+        .unwrap();
+        assert_eq!(fork_at.session_id, "session_123");
+        assert_eq!(fork_at.message_index, 2);
+        assert_eq!(
+            fork_at.running_behavior,
+            TranscriptEditRunningBehavior::Reject
+        );
+
+        let fork_replace: ForkSessionReplaceParams = serde_json::from_value(serde_json::json!({
+            "session_id": "session_123",
+            "message_index": 2,
+            "replacement": {
+                "type": "message",
+                "message": {
+                    "role": "user",
+                    "content": "edited follow up"
+                }
+            }
+        }))
+        .unwrap();
+        assert!(matches!(
+            &fork_replace.replacement,
+            TranscriptReplacement::Message {
+                message: Message::User(user),
+            } if user.text_content() == "edited follow up"
+        ));
+
+        let json = serde_json::to_value(&fork_replace).unwrap();
+        assert_eq!(json["replacement"]["type"], "message");
+        assert_eq!(json["running_behavior"], "reject");
+    }
 
     #[test]
     fn test_wire_session_summary_labels_roundtrip() {

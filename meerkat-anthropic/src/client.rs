@@ -9,12 +9,16 @@ use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, AnthropicThinkingConfig, ProviderTag,
 };
 use meerkat_core::schema::{CompiledSchema, SchemaError};
-use meerkat_core::{ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage};
+use meerkat_core::{
+    AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
+    Provider, StopReason, ToolResult, Usage,
+};
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::time::Duration;
 
 /// Default connect timeout
@@ -157,6 +161,193 @@ fn catalog_context_beta_value(request: &LlmRequest) -> Option<&'static str> {
     .context_window_beta?
     .header;
     header.strip_prefix("anthropic-beta: ")
+}
+
+fn invalid_replay(message: impl Into<String>) -> LlmError {
+    LlmError::InvalidRequest {
+        message: message.into(),
+    }
+}
+
+fn project_anthropic_content_blocks(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { .. } => block.clone(),
+            ContentBlock::Image {
+                data: ImageData::Inline { .. },
+                ..
+            } => block.clone(),
+            ContentBlock::Image { .. } | ContentBlock::Video { .. } => ContentBlock::Text {
+                text: block.text_projection().into_owned(),
+            },
+            _ => ContentBlock::Text {
+                text: block.text_projection().into_owned(),
+            },
+        })
+        .collect()
+}
+
+fn project_anthropic_tool_result(result: &ToolResult) -> Result<ToolResult, LlmError> {
+    if result.has_video() {
+        return Err(invalid_replay(
+            "video blocks are not supported in Anthropic tool results",
+        ));
+    }
+    Ok(ToolResult::with_blocks(
+        result.tool_use_id.clone(),
+        project_anthropic_content_blocks(&result.content),
+        result.is_error,
+    ))
+}
+
+fn anthropic_server_tool_content_replayable(content: &Value) -> bool {
+    matches!(
+        content.get("type").and_then(Value::as_str),
+        Some("server_tool_use" | "web_search_tool_result")
+    )
+}
+
+fn project_anthropic_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBlock> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            AssistantBlock::Text { text, .. } if text.is_empty() => None,
+            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            AssistantBlock::Reasoning { meta, .. } => match meta.as_deref() {
+                Some(meerkat_core::ProviderMeta::Anthropic { .. })
+                | Some(meerkat_core::ProviderMeta::AnthropicRedacted { .. })
+                | Some(meerkat_core::ProviderMeta::AnthropicCompaction { .. }) => {
+                    Some(block.clone())
+                }
+                _ => None,
+            },
+            AssistantBlock::ServerToolContent { content, .. }
+                if anthropic_server_tool_content_replayable(content) =>
+            {
+                Some(block.clone())
+            }
+            AssistantBlock::Image { .. } | AssistantBlock::ServerToolContent { .. } => None,
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
+    match message {
+        Message::Assistant(assistant) => assistant
+            .tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.clone())
+            .collect(),
+        Message::BlockAssistant(assistant) => assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => HashSet::new(),
+    }
+}
+
+fn validate_tool_results(
+    provider: &str,
+    pending: HashSet<String>,
+    results: &[ToolResult],
+) -> Result<(), LlmError> {
+    let actual: HashSet<String> = results
+        .iter()
+        .map(|result| result.tool_use_id.clone())
+        .collect();
+    if actual == pending {
+        Ok(())
+    } else {
+        Err(invalid_replay(format!(
+            "{provider} replay projection found tool results that are not adjacent to matching tool uses"
+        )))
+    }
+}
+
+fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+    let mut projected = Vec::with_capacity(messages.len());
+    let mut pending_tool_ids: Option<HashSet<String>> = None;
+
+    for message in messages {
+        if let Message::ToolResults {
+            results,
+            created_at,
+        } = message
+        {
+            let Some(pending) = pending_tool_ids.take() else {
+                return Err(invalid_replay(
+                    "Anthropic replay projection found tool results without preceding tool use",
+                ));
+            };
+            validate_tool_results("Anthropic", pending, results)?;
+            let results = results
+                .iter()
+                .map(project_anthropic_tool_result)
+                .collect::<Result<Vec<_>, _>>()?;
+            projected.push(Message::ToolResults {
+                results,
+                created_at: *created_at,
+            });
+            continue;
+        }
+
+        if pending_tool_ids.is_some() {
+            return Err(invalid_replay(
+                "Anthropic replay projection found a tool use without adjacent tool results",
+            ));
+        }
+
+        let next_message = match message {
+            Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
+            Message::User(user) => Some(Message::User(meerkat_core::UserMessage {
+                content: project_anthropic_content_blocks(&user.content),
+                render_metadata: user.render_metadata.clone(),
+                created_at: user.created_at,
+            })),
+            Message::Assistant(assistant) => {
+                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(Message::Assistant(assistant.clone()))
+                }
+            }
+            Message::BlockAssistant(assistant) => {
+                let blocks = project_anthropic_assistant_blocks(&assistant.blocks);
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
+                        blocks,
+                        stop_reason: assistant.stop_reason,
+                        created_at: assistant.created_at,
+                    }))
+                }
+            }
+            Message::ToolResults { .. } => unreachable!("handled above"),
+        };
+
+        if let Some(message) = next_message {
+            let tool_ids = tool_ids_from_assistant(&message);
+            if !tool_ids.is_empty() {
+                pending_tool_ids = Some(tool_ids);
+            }
+            projected.push(message);
+        }
+    }
+
+    if pending_tool_ids.is_some() {
+        return Err(invalid_replay(
+            "Anthropic replay projection found a trailing tool use without tool results",
+        ));
+    }
+
+    Ok(projected)
 }
 
 impl AnthropicClient {
@@ -660,8 +851,15 @@ fn merge_usage(target: &mut Usage, update: &AnthropicUsage) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for AnthropicClient {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_anthropic_replay_messages(messages)
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
+            let mut projected_request = request.clone();
+            projected_request.messages = self.project_replay_messages(&request.messages)?;
+            let request = &projected_request;
             let body = self.build_request_body(request)?;
 
             // Collect beta headers based on request features
@@ -1210,12 +1408,196 @@ struct AnthropicUsage {
 mod tests {
     use super::*;
     use meerkat_core::{
-        AssistantBlock, BlockAssistantMessage, ContentBlock, ProviderMeta, UserMessage,
+        AssistantBlock, AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ContentBlock,
+        ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
+        ToolResult, UserMessage,
     };
+
+    fn assistant_image_block() -> AssistantBlock {
+        AssistantBlock::Image {
+            image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),
+            blob_ref: BlobRef {
+                blob_id: BlobId::from("anthropic-image"),
+                media_type: "image/png".to_string(),
+            },
+            media_type: MediaType::new("image/png"),
+            width: 128,
+            height: 128,
+            revised_prompt: RevisedPromptDisposition::NotRequested,
+            meta: ProviderImageMetadata::NotEmitted,
+        }
+    }
 
     // =========================================================================
     // Thinking block SSE parsing tests (spec section 3.5)
     // =========================================================================
+
+    #[test]
+    fn replay_projection_policy_handles_anthropic_history_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let tool_args = serde_json::value::RawValue::from_string(r#"{"query":"m"}"#.to_string())?;
+        let messages = vec![
+            Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look at this".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+                ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 1_000,
+                    data: meerkat_core::VideoData::Inline {
+                        data: "BBBB".to_string(),
+                    },
+                },
+            ])),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::Reasoning {
+                        text: "signed plan".to_string(),
+                        meta: Some(Box::new(ProviderMeta::Anthropic {
+                            signature: "sig_1".to_string(),
+                        })),
+                    },
+                    AssistantBlock::Reasoning {
+                        text: "unsigned plan".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: Some("srv_1".to_string()),
+                        name: "web_search".to_string(),
+                        content: serde_json::json!({
+                            "type": "server_tool_use",
+                            "input": {"query": "m"}
+                        }),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: None,
+                        name: "web_search_citations".to_string(),
+                        content: serde_json::json!({
+                            "type": "text_citations",
+                            "citations": []
+                        }),
+                        meta: None,
+                    },
+                    assistant_image_block(),
+                    AssistantBlock::Text {
+                        text: "answer".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: tool_args,
+                        meta: None,
+                    },
+                ],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tool_1".to_string(),
+                vec![
+                    ContentBlock::Text {
+                        text: "tool text".to_string(),
+                    },
+                    ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "CCCC".to_string(),
+                        },
+                    },
+                ],
+                false,
+            )]),
+        ];
+
+        let projected = client.project_replay_messages(&messages)?;
+
+        let Message::User(user) = &projected[0] else {
+            panic!("expected user message");
+        };
+        assert!(
+            user.content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Image { .. })),
+            "Anthropic should retain inline user images"
+        );
+        assert!(
+            user.content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text } if text == "[video: video/mp4]"
+            )),
+            "Anthropic should degrade user video to text"
+        );
+        assert!(
+            !user
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::Video { .. })),
+            "Anthropic projection should not leave video blocks"
+        );
+
+        let Message::BlockAssistant(assistant) = &projected[1] else {
+            panic!("expected assistant message");
+        };
+        assert!(assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::Reasoning {
+                text,
+                meta: Some(meta),
+            } if text == "signed plan"
+                && matches!(meta.as_ref(), ProviderMeta::Anthropic { .. })
+        )));
+        assert!(!assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::Reasoning { text, .. } if text == "unsigned plan"
+        )));
+        assert!(assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::ServerToolContent { content, .. }
+                if content.get("type").and_then(Value::as_str) == Some("server_tool_use")
+        )));
+        assert!(!assistant.blocks.iter().any(|block| matches!(
+            block,
+            AssistantBlock::ServerToolContent { content, .. }
+                if content.get("type").and_then(Value::as_str) == Some("text_citations")
+        )));
+        assert!(
+            !assistant
+                .blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Image { .. })),
+            "assistant images must be removed from Anthropic replay"
+        );
+
+        let Message::ToolResults { results, .. } = &projected[2] else {
+            panic!("expected tool results");
+        };
+        assert!(
+            results[0].has_images(),
+            "Anthropic should retain inline image tool results"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn replay_projection_rejects_anthropic_orphan_tool_results() {
+        let client = AnthropicClient::new("test-key".to_string()).expect("client");
+        let err = client
+            .project_replay_messages(&[Message::tool_results(vec![ToolResult::new(
+                "tool_1".to_string(),
+                "orphaned".to_string(),
+                false,
+            )])])
+            .expect_err("orphan tool results must be rejected");
+        assert!(matches!(err, LlmError::InvalidRequest { .. }));
+    }
 
     #[test]
     fn test_anthropic_content_block_parses_thinking_type() {

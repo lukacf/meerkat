@@ -121,10 +121,58 @@ function localDependencyLabel(consumerKey, depPackage) {
   return packageLabel(depPackage);
 }
 
-function localDeps(pkg, procMacroOnly, includeDev = false, consumerKey = packageKey(pkg)) {
+function optionalDependencyNamesEnabledByFeatures(pkg, features) {
+  if (features === null || features === undefined) return null;
+
+  const optionalNames = new Set(
+    pkg.dependencies
+      .filter((dep) => dep.optional)
+      .map((dep) => dep.name),
+  );
+  const enabled = new Set();
+  const seenFeatures = new Set();
+
+  const visit = (feature) => {
+    if (!feature) return;
+    if (feature.startsWith("dep:")) {
+      const depName = feature.slice(4);
+      if (optionalNames.has(depName)) enabled.add(depName);
+      return;
+    }
+
+    const slashIndex = feature.indexOf("/");
+    if (slashIndex !== -1) {
+      const depName = feature.slice(0, slashIndex);
+      if (optionalNames.has(depName)) enabled.add(depName);
+      return;
+    }
+
+    if (optionalNames.has(feature)) enabled.add(feature);
+    if (seenFeatures.has(feature)) return;
+    seenFeatures.add(feature);
+    for (const expansion of pkg.features?.[feature] ?? []) {
+      visit(expansion);
+    }
+  };
+
+  for (const feature of features) {
+    visit(feature);
+  }
+  return enabled;
+}
+
+function localDeps(
+  pkg,
+  procMacroOnly,
+  includeDev = false,
+  consumerKey = packageKey(pkg),
+  enabledFeatures = null,
+) {
+  const enabledOptionalDeps = optionalDependencyNamesEnabledByFeatures(pkg, enabledFeatures);
   const labels = [];
   for (const dep of pkg.dependencies) {
     if (!includeDev && dep.kind === "dev") continue;
+    if (dep.optional && enabledOptionalDeps && !enabledOptionalDeps.has(dep.name)) continue;
     if (dep.source !== null) continue;
     const local = byName.get(dep.name);
     if (!local) continue;
@@ -1156,6 +1204,14 @@ for (const pkg of localPackages.values()) {
           internalAttrs[rustcEnvIndex] = `    rustc_env = {\n        "CARGO_MANIFEST_DIR": "./meerkat-core",\n        "MEERKAT_AGENT_FACTORY_POLICY_BRIDGE_SYMBOL_SUFFIX": ${q(agentFactoryBridgeSymbolSuffix)},\n    },`;
         }
       }
+      if (key === "meerkat-machine-schema" || key === "meerkat-runtime") {
+        const editionIndex = internalAttrs.indexOf(`    edition = "2024",`);
+        internalAttrs.splice(
+          editionIndex + 1,
+          0,
+          `    rustc_flags = ["-Copt-level=0"],`,
+        );
+      }
       rules.push(`rust_library(\n${internalAttrs.join("\n")}\n)`);
     }
     if (rule === "rust_library") {
@@ -1289,10 +1345,10 @@ for (const pkg of localPackages.values()) {
           ? `${crateName(target.name)}_${spec.name}`
           : `${crateName(target.name)}_${spec.name}_bin`;
         const localDependencyLabels = target.kind.includes("bin") && primaryLibVariantName
-          ? [...new Set([`:${primaryLibVariantName}`, ...localDeps(pkg, false, true)])]
+          ? [...new Set([`:${primaryLibVariantName}`, ...localDeps(pkg, false, true, key, spec.features)])]
           : target.kind.includes("bin")
-          ? localDeps(pkg, false, true)
-          : localDeps(pkg, false);
+          ? localDeps(pkg, false, true, key, spec.features)
+          : localDeps(pkg, false, false, key, spec.features);
         const targetDeps = shouldRewriteAgentFactoryDepsFor(key, false)
           ? rewriteAgentFactoryDeps(localDependencyLabels)
           : localDependencyLabels;

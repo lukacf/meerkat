@@ -32,6 +32,13 @@ impl Default for TestClient {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for TestClient {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
         let events = self.events.clone();
         crate::streaming::ensure_terminal_done(Box::pin(futures::stream::iter(

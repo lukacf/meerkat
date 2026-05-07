@@ -516,6 +516,136 @@ impl AgentErrorReport {
     }
 }
 
+/// Stable machine-readable metadata for a turn failure.
+///
+/// Human-readable diagnostics remain in `detail`; consumers should key
+/// behavior off `kind`/`terminal` instead of parsing display strings.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnErrorMetadata {
+    /// Closed failure classifier, serialized as `llm_failure`,
+    /// `runtime_apply_failure`, etc.
+    pub kind: TurnTerminalCauseKind,
+    /// Whether this error terminated the turn/runtime boundary.
+    #[serde(default)]
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<TurnTerminalOutcome>,
+    /// Original operator-facing diagnostic text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+impl TurnErrorMetadata {
+    pub fn terminal(
+        kind: TurnTerminalCauseKind,
+        outcome: TurnTerminalOutcome,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            terminal: true,
+            outcome: Some(outcome),
+            detail: Some(detail.into()),
+            provider: None,
+            model: None,
+            retryable: None,
+        }
+    }
+
+    pub fn runtime_apply_failure(detail: impl Into<String>) -> Self {
+        Self::terminal(
+            TurnTerminalCauseKind::RuntimeApplyFailure,
+            TurnTerminalOutcome::Failed,
+            detail,
+        )
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        match error {
+            AgentError::Llm {
+                provider,
+                reason,
+                message,
+            } => {
+                let mut metadata = Self::terminal(
+                    TurnTerminalCauseKind::LlmFailure,
+                    TurnTerminalOutcome::Failed,
+                    message.clone(),
+                );
+                metadata.provider = Some((*provider).to_string());
+                metadata.retryable = Some(error.is_recoverable());
+                if let LlmFailureReason::InvalidModel(model) = reason {
+                    metadata.model = Some(model.clone());
+                }
+                Some(metadata)
+            }
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } if cause_kind.is_specific_failure_cause() => {
+                Some(Self::terminal(*cause_kind, *outcome, message.clone()))
+            }
+            _ => {
+                let kind = TurnTerminalCauseKind::from_agent_error(error);
+                kind.is_specific_failure_cause()
+                    .then(|| Self::terminal(kind, TurnTerminalOutcome::Failed, error.to_string()))
+            }
+        }
+    }
+
+    pub fn from_agent_error_report(
+        report: &AgentErrorReport,
+        detail: impl Into<String>,
+    ) -> Option<Self> {
+        let detail = detail.into();
+        match &report.reason {
+            Some(AgentErrorReason::TurnTerminalCause {
+                outcome,
+                cause_kind,
+            }) => Some(Self::terminal(*cause_kind, *outcome, detail)),
+            Some(reason) if report.class == AgentErrorClass::Llm => {
+                let mut metadata = Self::terminal(
+                    TurnTerminalCauseKind::LlmFailure,
+                    TurnTerminalOutcome::Failed,
+                    detail,
+                );
+                match reason {
+                    AgentErrorReason::LlmRateLimited { .. }
+                    | AgentErrorReason::LlmNetworkTimeout { .. }
+                    | AgentErrorReason::LlmCallTimeout { .. } => {
+                        metadata.retryable = Some(true);
+                    }
+                    AgentErrorReason::LlmProviderError {
+                        provider_error_retryability,
+                        ..
+                    } => {
+                        metadata.retryable = Some(provider_error_retryability.is_retryable());
+                    }
+                    AgentErrorReason::LlmContextExceeded { .. }
+                    | AgentErrorReason::LlmAuthError => {
+                        metadata.retryable = Some(false);
+                    }
+                    AgentErrorReason::LlmInvalidModel { model } => {
+                        metadata.retryable = Some(false);
+                        metadata.model = Some(model.clone());
+                    }
+                    _ => {}
+                }
+                Some(metadata)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "reason_type", rename_all = "snake_case")]
@@ -871,6 +1001,7 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::TextDelta { .. } => "text_delta",
         AgentEvent::TextComplete { .. } => "text_complete",
         AgentEvent::ServerToolContent { .. } => "server_tool_content",
+        AgentEvent::AssistantImageAppended { .. } => "assistant_image_appended",
         AgentEvent::ToolCallRequested { .. } => "tool_call_requested",
         AgentEvent::ToolResultReceived { .. } => "tool_result_received",
         AgentEvent::TurnCompleted { .. } => "turn_completed",
@@ -890,6 +1021,45 @@ pub fn agent_event_type(event: &AgentEvent) -> &'static str {
         AgentEvent::StreamTruncated { .. } => "stream_truncated",
         AgentEvent::ToolConfigChanged { .. } => "tool_config_changed",
         AgentEvent::BackgroundJobCompleted { .. } => "background_job_completed",
+    }
+}
+
+/// Typed public event payload for a canonical assistant image block appended to history.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantImageEvent {
+    pub image_id: crate::AssistantImageId,
+    pub blob_ref: crate::BlobRef,
+    pub media_type: crate::MediaType,
+    pub width: u32,
+    pub height: u32,
+    pub revised_prompt: crate::RevisedPromptDisposition,
+    pub meta: crate::ProviderImageMetadata,
+}
+
+impl AssistantImageEvent {
+    #[must_use]
+    pub fn from_assistant_block(block: &crate::types::AssistantBlock) -> Option<Self> {
+        match block {
+            crate::types::AssistantBlock::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
+            } => Some(Self {
+                image_id: *image_id,
+                blob_ref: blob_ref.clone(),
+                media_type: media_type.clone(),
+                width: *width,
+                height: *height,
+                revised_prompt: revised_prompt.clone(),
+                meta: meta.clone(),
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -1400,6 +1570,9 @@ pub enum AgentEvent {
         name: String,
         content: Value,
     },
+
+    /// Canonical assistant image block appended to transcript history.
+    AssistantImageAppended { image: AssistantImageEvent },
 
     /// Model requested a tool call
     ToolCallRequested {
@@ -2837,6 +3010,20 @@ mod tests {
             AgentEvent::TextComplete {
                 content: "done".to_string(),
             },
+            AgentEvent::AssistantImageAppended {
+                image: AssistantImageEvent {
+                    image_id: crate::AssistantImageId::new(uuid::Uuid::new_v4()),
+                    blob_ref: crate::BlobRef {
+                        blob_id: crate::BlobId::new("image-1"),
+                        media_type: "image/png".to_string(),
+                    },
+                    media_type: crate::MediaType::new("image/png"),
+                    width: 1024,
+                    height: 1024,
+                    revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                    meta: crate::ProviderImageMetadata::NotEmitted,
+                },
+            },
             AgentEvent::ToolCallRequested {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
@@ -2959,6 +3146,39 @@ mod tests {
             expected_event_count,
             "expected one distinct discriminator per covered event variant"
         );
+    }
+
+    #[test]
+    fn assistant_image_appended_event_serializes_typed_image_fact() {
+        let event = AgentEvent::AssistantImageAppended {
+            image: AssistantImageEvent {
+                image_id: crate::AssistantImageId::new(uuid::Uuid::from_u128(42)),
+                blob_ref: crate::BlobRef {
+                    blob_id: crate::BlobId::new("generated-image"),
+                    media_type: "image/png".to_string(),
+                },
+                media_type: crate::MediaType::new("image/png"),
+                width: 1024,
+                height: 1024,
+                revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                meta: crate::ProviderImageMetadata::NotEmitted,
+            },
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "assistant_image_appended");
+        assert_eq!(json["image"]["blob_ref"]["blob_id"], "generated-image");
+        assert_eq!(json["image"]["media_type"], "image/png");
+
+        let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
+        match roundtrip {
+            AgentEvent::AssistantImageAppended { image } => {
+                assert_eq!(image.blob_ref.blob_id.as_str(), "generated-image");
+                assert_eq!(image.width, 1024);
+                assert_eq!(image.height, 1024);
+            }
+            other => panic!("expected assistant image event, got {other:?}"),
+        }
     }
 
     #[test]

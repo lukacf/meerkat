@@ -2846,6 +2846,9 @@ impl MobActor {
                 agent_identity,
                 match outcome {
                     meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                    | meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                        ..
+                    }
                     | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult => {
                         mob_dsl::MobMachineInput::KickoffResolveStarted {
                             member_id: agent_identity.to_string(),
@@ -2863,6 +2866,10 @@ impl MobActor {
                         }
                     }
                     meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
+                    | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
+                        reason: error,
+                        ..
+                    }
                     | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
                             member_id: agent_identity.to_string(),

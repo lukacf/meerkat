@@ -158,10 +158,11 @@ pub use schedule::{
     ScheduleOccurrencesResult, UpdateScheduleParams,
 };
 pub use session::{
-    SessionStreamCloseParams, SessionStreamCloseResult, SessionStreamOpenParams,
-    SessionStreamOpenResult, WireAssistantBlock, WireContentBlock, WireContentInput,
-    WireProviderMeta, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
-    WireStopReason, WireToolCall, WireToolResult, WireToolResultContent,
+    ForkSessionAtParams, ForkSessionReplaceParams, SessionStreamCloseParams,
+    SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult, WireAssistantBlock,
+    WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
+    WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall, WireToolResult,
+    WireToolResultContent,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{

@@ -212,6 +212,8 @@ impl FlowTerminalizationAuthority {
                 FailureLedgerEntry {
                     step_id: flow_system_step_id(),
                     reason: reason.clone(),
+                    error_report: None,
+                    error: None,
                     timestamp: Utc::now(),
                 },
             )

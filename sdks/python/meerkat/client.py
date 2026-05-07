@@ -111,6 +111,7 @@ from .types import (
     SchemaWarning,
     SessionDetails,
     SessionAssistantBlock,
+    SessionForkResult,
     SessionHistory,
     SessionSummary,
     SessionMessage,
@@ -122,6 +123,8 @@ from .types import (
     SkillRuntimeDiagnostics,
     SourceHealthSnapshot,
     StoredMobProfile,
+    TranscriptEditRunningBehavior,
+    TranscriptReplacement,
 )
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
@@ -903,6 +906,42 @@ class MeerkatClient:
             params["limit"] = limit
         raw = await self._request("session/history", params)
         return self._parse_session_history(raw)
+
+    async def fork_session_at(
+        self,
+        session_id: str,
+        message_index: int,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork an idle session at a transcript message index."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "message_index": message_index,
+        }
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/fork_at", params)
+        return self._parse_session_fork_result(raw)
+
+    async def fork_session_replace(
+        self,
+        session_id: str,
+        message_index: int,
+        replacement: TranscriptReplacement,
+        *,
+        running_behavior: TranscriptEditRunningBehavior | None = None,
+    ) -> SessionForkResult:
+        """Fork an idle session and apply a typed transcript replacement."""
+        params: dict[str, Any] = {
+            "session_id": session_id,
+            "message_index": message_index,
+            "replacement": replacement,
+        }
+        if running_behavior is not None:
+            params["running_behavior"] = running_behavior
+        raw = await self._request("session/fork_replace", params)
+        return self._parse_session_fork_result(raw)
 
     async def get_blob(self, blob_id: str) -> BlobPayload:
         raw = await self._request("blob/get", {"blob_id": blob_id})
@@ -2895,6 +2934,15 @@ class MeerkatClient:
                 MeerkatClient._parse_session_message(message)
                 for message in data.get("messages", [])
             ],
+        )
+
+    @staticmethod
+    def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
+        return SessionForkResult(
+            source_session_id=str(data.get("source_session_id", "")),
+            session_id=str(data.get("session_id", "")),
+            session_ref=data.get("session_ref"),
+            message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
         )
 
     @staticmethod

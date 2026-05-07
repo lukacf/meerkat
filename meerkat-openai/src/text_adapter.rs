@@ -27,7 +27,8 @@ use async_stream::try_stream;
 use async_trait::async_trait;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage,
+    AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
+    StopReason, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream};
 
@@ -36,6 +37,7 @@ use oai_rt_rs::protocol::models::{
     SessionUpdate, SessionUpdateConfig, Temperature, Tool, Usage as OaiUsage,
 };
 use oai_rt_rs::{ClientEvent, RealtimeClient, ServerEvent};
+use std::collections::HashSet;
 
 /// OpenAI's Realtime API caps `response.max_output_tokens` at 4096 for
 /// integer values; larger values fail with `integer above maximum value`.
@@ -59,6 +61,164 @@ pub struct OpenAiRealtimeTextAdapter {
     api_key: String,
 }
 
+fn invalid_replay(message: impl Into<String>) -> LlmError {
+    LlmError::InvalidRequest {
+        message: message.into(),
+    }
+}
+
+fn project_realtime_content_blocks(blocks: &[ContentBlock]) -> Vec<ContentBlock> {
+    blocks
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { .. } => block.clone(),
+            _ => ContentBlock::Text {
+                text: block.text_projection().into_owned(),
+            },
+        })
+        .collect()
+}
+
+fn project_realtime_tool_result(result: &ToolResult) -> Result<ToolResult, LlmError> {
+    if result.has_video() {
+        return Err(invalid_replay(
+            "video blocks are not supported in OpenAI realtime tool results",
+        ));
+    }
+    Ok(ToolResult::new(
+        result.tool_use_id.clone(),
+        result.text_content(),
+        result.is_error,
+    ))
+}
+
+fn project_realtime_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBlock> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            AssistantBlock::Text { text, .. } if text.is_empty() => None,
+            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            AssistantBlock::Reasoning { .. }
+            | AssistantBlock::ServerToolContent { .. }
+            | AssistantBlock::Image { .. } => None,
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
+    match message {
+        Message::Assistant(assistant) => assistant
+            .tool_calls
+            .iter()
+            .map(|tool_call| tool_call.id.clone())
+            .collect(),
+        Message::BlockAssistant(assistant) => assistant
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantBlock::ToolUse { id, .. } => Some(id.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => HashSet::new(),
+    }
+}
+
+fn validate_tool_results(pending: HashSet<String>, results: &[ToolResult]) -> Result<(), LlmError> {
+    let actual: HashSet<String> = results
+        .iter()
+        .map(|result| result.tool_use_id.clone())
+        .collect();
+    if actual == pending {
+        Ok(())
+    } else {
+        Err(invalid_replay(
+            "OpenAI realtime replay projection found tool results that are not adjacent to matching tool uses",
+        ))
+    }
+}
+
+fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+    let mut projected = Vec::with_capacity(messages.len());
+    let mut pending_tool_ids: Option<HashSet<String>> = None;
+
+    for message in messages {
+        if let Message::ToolResults {
+            results,
+            created_at,
+        } = message
+        {
+            let Some(pending) = pending_tool_ids.take() else {
+                return Err(invalid_replay(
+                    "OpenAI realtime replay projection found tool results without preceding tool use",
+                ));
+            };
+            validate_tool_results(pending, results)?;
+            let results = results
+                .iter()
+                .map(project_realtime_tool_result)
+                .collect::<Result<Vec<_>, _>>()?;
+            projected.push(Message::ToolResults {
+                results,
+                created_at: *created_at,
+            });
+            continue;
+        }
+
+        if pending_tool_ids.is_some() {
+            return Err(invalid_replay(
+                "OpenAI realtime replay projection found a tool use without adjacent tool results",
+            ));
+        }
+
+        let next_message = match message {
+            Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
+            Message::User(user) => Some(Message::User(UserMessage {
+                content: project_realtime_content_blocks(&user.content),
+                render_metadata: user.render_metadata.clone(),
+                created_at: user.created_at,
+            })),
+            Message::Assistant(assistant) => {
+                if assistant.content.is_empty() && assistant.tool_calls.is_empty() {
+                    None
+                } else {
+                    Some(Message::Assistant(assistant.clone()))
+                }
+            }
+            Message::BlockAssistant(assistant) => {
+                let blocks = project_realtime_assistant_blocks(&assistant.blocks);
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
+                        blocks,
+                        stop_reason: assistant.stop_reason,
+                        created_at: assistant.created_at,
+                    }))
+                }
+            }
+            Message::ToolResults { .. } => unreachable!("handled above"),
+        };
+
+        if let Some(message) = next_message {
+            let tool_ids = tool_ids_from_assistant(&message);
+            if !tool_ids.is_empty() {
+                pending_tool_ids = Some(tool_ids);
+            }
+            projected.push(message);
+        }
+    }
+
+    if pending_tool_ids.is_some() {
+        return Err(invalid_replay(
+            "OpenAI realtime replay projection found a trailing tool use without tool results",
+        ));
+    }
+
+    Ok(projected)
+}
+
 impl OpenAiRealtimeTextAdapter {
     /// Create a new adapter bound to the given API key. Callers should
     /// acquire the key through
@@ -73,9 +233,16 @@ impl OpenAiRealtimeTextAdapter {
 
 #[async_trait]
 impl LlmClient for OpenAiRealtimeTextAdapter {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        project_realtime_replay_messages(messages)
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let api_key = self.api_key.clone();
         Box::pin(try_stream! {
+            let mut projected_request = request.clone();
+            projected_request.messages = self.project_replay_messages(&request.messages)?;
+            let request = &projected_request;
             let (instructions, history_items) = convert_messages(&request.messages)?;
             let tools = build_tools(request);
 
@@ -508,7 +675,11 @@ fn map_server_error(err: oai_rt_rs::error::ServerError) -> LlmError {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::{AssistantMessage, SystemMessage, ToolCall, ToolResult, UserMessage};
+    use meerkat_core::{
+        AssistantImageId, AssistantMessage, BlobId, BlobRef, BlockAssistantMessage, ImageData,
+        MediaType, ProviderImageMetadata, RevisedPromptDisposition, SystemMessage, ToolCall,
+        ToolResult, UserMessage,
+    };
 
     fn sys(text: &str) -> Message {
         Message::System(SystemMessage::new(text.to_string()))
@@ -526,6 +697,117 @@ mod tests {
             usage: Usage::default(),
             created_at: meerkat_core::types::message_timestamp_now(),
         })
+    }
+
+    fn assistant_image_block() -> AssistantBlock {
+        AssistantBlock::Image {
+            image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),
+            blob_ref: BlobRef {
+                blob_id: BlobId::from("realtime-image"),
+                media_type: "image/png".to_string(),
+            },
+            media_type: MediaType::new("image/png"),
+            width: 64,
+            height: 64,
+            revised_prompt: RevisedPromptDisposition::NotRequested,
+            meta: ProviderImageMetadata::NotEmitted,
+        }
+    }
+
+    #[test]
+    fn replay_projection_policy_handles_realtime_history_blocks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tool_args = serde_json::value::RawValue::from_string(r#"{"query":"m"}"#.to_string())?;
+        let messages = vec![
+            Message::User(UserMessage::with_blocks(vec![
+                ContentBlock::Text {
+                    text: "look".to_string(),
+                },
+                ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                },
+            ])),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::Reasoning {
+                        text: "plan".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ServerToolContent {
+                        id: None,
+                        name: "web_search".to_string(),
+                        content: serde_json::json!({"type": "web_search_call"}),
+                        meta: None,
+                    },
+                    assistant_image_block(),
+                    AssistantBlock::Text {
+                        text: "answer".to_string(),
+                        meta: None,
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".to_string(),
+                        name: "lookup".to_string(),
+                        args: tool_args,
+                        meta: None,
+                    },
+                ],
+                StopReason::ToolUse,
+            )),
+            Message::tool_results(vec![ToolResult::with_blocks(
+                "tool_1".to_string(),
+                vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Inline {
+                        data: "BBBB".to_string(),
+                    },
+                }],
+                false,
+            )]),
+        ];
+
+        let projected = project_realtime_replay_messages(&messages)?;
+        let Message::User(user) = &projected[0] else {
+            panic!("expected user");
+        };
+        assert!(
+            user.content
+                .iter()
+                .all(|block| matches!(block, ContentBlock::Text { .. })),
+            "Realtime replay should text-project multimodal user content"
+        );
+
+        let Message::BlockAssistant(assistant) = &projected[1] else {
+            panic!("expected assistant");
+        };
+        assert!(
+            assistant.blocks.iter().all(|block| matches!(
+                block,
+                AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. }
+            )),
+            "Realtime replay should only keep assistant text and tool-use blocks"
+        );
+
+        let Message::ToolResults { results, .. } = &projected[2] else {
+            panic!("expected tool results");
+        };
+        assert!(!results[0].has_images());
+        assert!(results[0].text_content().contains("[image: image/png]"));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_projection_rejects_realtime_orphan_tool_results() {
+        let err =
+            project_realtime_replay_messages(&[Message::tool_results(vec![ToolResult::new(
+                "tool_1".to_string(),
+                "orphaned".to_string(),
+                false,
+            )])])
+            .expect_err("orphan tool results must be rejected");
+        assert!(matches!(err, LlmError::InvalidRequest { .. }));
     }
 
     #[test]

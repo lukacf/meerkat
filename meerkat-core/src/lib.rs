@@ -156,11 +156,12 @@ pub use config_store::{
 };
 pub use error::{AgentError, ToolError};
 pub use event::{
-    AgentErrorClass, AgentErrorReport, AgentEvent, BudgetType, EventEnvelope, EventSourceIdentity,
-    ExternalToolDelta, ExternalToolDeltaPhase, ScopedAgentEvent, SkillResolutionFailureReason,
-    StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, VerboseEventConfig, agent_event_type,
-    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
+    AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType, EventEnvelope,
+    EventSourceIdentity, ExternalToolDelta, ExternalToolDeltaPhase, ScopedAgentEvent,
+    SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError,
+    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, TurnErrorMetadata,
+    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
+    format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -246,10 +247,12 @@ pub use schema::{
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
     CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
+    SessionBuildOptions, SessionControlError, SessionError, SessionForkAtRequest,
+    SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage, SessionHistoryQuery,
+    SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
+    SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptReplacement, TurnToolOverlay,
 };
 pub use session::{
     DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,

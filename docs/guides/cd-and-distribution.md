@@ -61,13 +61,14 @@ Build targets:
 
 Publish as release assets, for example:
 
-- `rkat-rpc-vX.Y.Z-x86_64-apple-darwin.tar.gz`
-- `rkat-rest-vX.Y.Z-x86_64-unknown-linux-gnu.zip`
+- `rkat-rpc-X.Y.Z-x86_64-apple-darwin.tar.gz`
+- `rkat-rest-X.Y.Z-x86_64-unknown-linux-gnu.tar.gz`
+- `rkat-X.Y.Z-x86_64-pc-windows-msvc.zip`
 
 Include a checksum manifest with all artifacts:
 
-- `dist/checksums.sha256`
-- `dist/index.json`
+- `checksums.sha256`
+- `index.json`
 
 ### 2) Python SDK distribution
 
@@ -104,11 +105,52 @@ For MCP-style tooling (`claude mcp add`, `npx`), provide a CLI entrypoint packag
 
 ### Job 2 — Build matrix
 
+- The public, contributor-facing release path is GitHub Actions.
 - Use GH hosted runners for:
   - `macos-latest`
   - `ubuntu-latest`
   - `windows-latest`
 - Build release binaries for all required targets.
+
+### Owner-only BuildBuddy binary recovery path
+
+BuildBuddy release binaries are an owner-only acceleration/recovery path, not
+the public default. Keep GitHub Actions as the standard release interface for
+contributors and public observers. Repository owners with BuildBuddy access may
+dispatch `release.yml` with `release_binary_backend=buildbuddy`, which routes
+the binary matrix through the generated Bazel release lanes:
+
+- `release-build-linux-x86`
+- `release-build-linux-arm64`
+- `release-build-macos-arm64`
+- `release-build-macos-x86`
+- `release-build-windows-x86`
+
+Those release lanes build the same public binary set as the GitHub-hosted path:
+`rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
+The mini binaries must use the generated surface feature-matrix targets
+(`rkat_mini_surface_mini_providers_skills_bin` and
+`rkat_rpc_mini_surface_mini_bin`) so BuildBuddy does not compile the optional
+full mob/RPC surface for mini release artifacts.
+
+Do not commit private BuildBuddy endpoint names or enterprise infrastructure
+details. Supply endpoint overrides through secrets or local environment only;
+the public repository should document the variable shape, not the private
+value.
+
+`MEERKAT_RELEASE_BUILDBUDDY_JOBS` may be set as a repository variable to tune
+release build fanout for owner-only BuildBuddy dispatches. The workflow defaults
+to `64` jobs when the variable is unset; keep this knob public and endpoint
+values private.
+
+Linux arm64 release binaries use extra RBE care because the release graph has a
+few very large generated Rust libraries and AArch64 `ld.gold` can fail during
+final binary links. The BuildBuddy lane requests a larger arm64 executor slot
+and uses the system `bfd` linker for Linux arm64 release links. The generated
+Bazel agent-factory bridge variants for `meerkat-machine-schema` and
+`meerkat-runtime` compile at `opt-level=0` to avoid remote optimizer stalls in
+that bridge graph; this is scoped to the generated Bazel release facade and does
+not change the public Cargo release path.
 
 ### Job 3 — Publish GitHub release
 

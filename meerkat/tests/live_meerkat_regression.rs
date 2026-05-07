@@ -219,6 +219,13 @@ mod image_generation_substrate {
 
     #[async_trait]
     impl LlmClient for ScriptedImageToolCallClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             _request: &'a LlmRequest,

@@ -26,7 +26,10 @@ pub use capability::{
 };
 pub use error::{CapabilityHint, ErrorCategory, ErrorCode, WireError};
 pub use event_catalog::KNOWN_AGENT_EVENT_TYPES;
-pub use meerkat_core::{ExecutionPlacement, ExecutionPlacementIdentity};
+pub use meerkat_core::{
+    ExecutionPlacement, ExecutionPlacementIdentity, SessionForkResult,
+    TranscriptEditRunningBehavior, TranscriptReplacement,
+};
 pub use protocol::Protocol;
 pub use request_lifecycle::{
     MCP_TOOL_REQUEST_LIFECYCLE_CATALOG, McpToolRequestLifecycleCatalog,
@@ -116,6 +119,8 @@ pub use wire::{
     EventsSnapshotBody,
     EventsSnapshotParams,
     EventsSnapshotResult,
+    ForkSessionAtParams,
+    ForkSessionReplaceParams,
     GrantAction,
     GrantScope,
     HelpExecutionMode,

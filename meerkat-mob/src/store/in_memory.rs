@@ -1470,6 +1470,8 @@ mod tests {
                 FailureLedgerEntry {
                     step_id: StepId::from("s1"),
                     reason: "failed".to_string(),
+                    error_report: None,
+                    error: None,
                     timestamp: Utc::now(),
                 },
             )

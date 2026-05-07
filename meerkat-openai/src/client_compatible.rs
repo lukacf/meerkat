@@ -15,6 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiCompatibleMode {
     Responses,
@@ -382,6 +384,14 @@ fn ensure_additional_properties_false(value: &mut Value) {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl LlmClient for OpenAiCompatibleClient {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        let mode = match self.mode {
+            OpenAiCompatibleMode::Responses => OpenAiReplayProjectionMode::Responses,
+            OpenAiCompatibleMode::ChatCompletions => OpenAiReplayProjectionMode::ChatCompletions,
+        };
+        project_openai_replay_messages(messages, mode)
+    }
+
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         match self.mode {
             OpenAiCompatibleMode::Responses => {
@@ -395,7 +405,8 @@ impl LlmClient for OpenAiCompatibleClient {
                     return inner;
                 };
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-                    let translated = self.request_with_remote_model(request);
+                    let mut translated = self.request_with_remote_model(request);
+                    translated.messages = self.project_replay_messages(&request.messages)?;
                     let mut stream = delegate.stream(&translated);
                     while let Some(event) = stream.next().await {
                         yield event?;
@@ -405,7 +416,9 @@ impl LlmClient for OpenAiCompatibleClient {
             }
             OpenAiCompatibleMode::ChatCompletions => {
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-                    let body = self.build_chat_completions_body(request)?;
+                    let mut projected_request = request.clone();
+                    projected_request.messages = self.project_replay_messages(&request.messages)?;
+                    let body = self.build_chat_completions_body(&projected_request)?;
                     let response = self
                         .apply_auth(
                             self.http.post(format!("{}/chat/completions", self.base_url)),

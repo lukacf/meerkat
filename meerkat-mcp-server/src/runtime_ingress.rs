@@ -188,9 +188,17 @@ fn wrap_mcp_runtime_pre_admission_cleanup(
 
 fn completion_outcome_requires_mcp_runtime_cleanup(outcome: &CompletionOutcome) -> bool {
     match outcome {
-        CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::Abandoned(reason)
+        | CompletionOutcome::AbandonedWithError { reason, .. }
+        | CompletionOutcome::RuntimeTerminated(reason) => {
             reason.contains("runtime boundary commit failed")
                 || reason.contains("runtime loop commit failed")
+        }
+        CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
+            error.detail.as_deref().is_some_and(|reason| {
+                reason.contains("runtime boundary commit failed")
+                    || reason.contains("runtime loop commit failed")
+            })
         }
         CompletionOutcome::Completed(_)
         | CompletionOutcome::CompletedWithoutResult
@@ -201,9 +209,10 @@ fn completion_outcome_requires_mcp_runtime_cleanup(outcome: &CompletionOutcome) 
 
 fn completion_outcome_is_mcp_apply_failure(outcome: &CompletionOutcome) -> bool {
     match outcome {
-        CompletionOutcome::Abandoned(reason) | CompletionOutcome::RuntimeTerminated(reason) => {
-            reason.starts_with("apply failed:")
-        }
+        CompletionOutcome::Abandoned(reason)
+        | CompletionOutcome::AbandonedWithError { reason, .. }
+        | CompletionOutcome::RuntimeTerminated(reason) => reason.starts_with("apply failed:"),
+        CompletionOutcome::CompletedWithFinalizationFailure { .. } => false,
         CompletionOutcome::Completed(_)
         | CompletionOutcome::CompletedWithoutResult
         | CompletionOutcome::Cancelled

@@ -31,6 +31,13 @@ struct MockLlmClientWithStructuredOutput {
 
 #[async_trait]
 impl LlmClient for MockLlmClientWithStructuredOutput {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(
         &'a self,
         _request: &'a LlmRequest,
@@ -88,6 +95,13 @@ struct MockLlmClientWithNamedWrapper {
 
 #[async_trait]
 impl LlmClient for MockLlmClientWithNamedWrapper {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(
         &'a self,
         _request: &'a LlmRequest,
@@ -133,6 +147,13 @@ impl LlmClient for MockLlmClientWithNamedWrapper {
 
 #[async_trait]
 impl LlmClient for MockLlmClientWithRetry {
+    fn project_replay_messages(
+        &self,
+        messages: &[meerkat_core::Message],
+    ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+        Ok(messages.to_vec())
+    }
+
     fn stream<'a>(
         &'a self,
         _request: &'a LlmRequest,

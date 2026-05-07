@@ -4505,6 +4505,10 @@ impl StepRunStatus {
 pub struct FailureLedgerEntry {
     pub step_id: StepId,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_report: Option<meerkat_core::event::AgentErrorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<meerkat_core::event::TurnErrorMetadata>,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -5083,6 +5087,8 @@ mod tests {
             failure_ledger: vec![FailureLedgerEntry {
                 step_id: StepId::from("step-2"),
                 reason: "boom".to_string(),
+                error_report: None,
+                error: None,
                 timestamp: now,
             }],
             frames: BTreeMap::new(),

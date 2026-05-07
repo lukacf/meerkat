@@ -61,6 +61,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [],
     edition = "2024",
+    rustc_flags = ["-Copt-level=0"],
     compile_data = [
         "Cargo.toml",
     ],

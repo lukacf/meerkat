@@ -849,8 +849,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -894,8 +892,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -941,8 +937,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -987,8 +981,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -1035,8 +1027,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -1085,8 +1075,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -1130,8 +1118,6 @@ rust_library(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",
@@ -1177,8 +1163,6 @@ rust_binary(
         proc_macro = True,
     ),
     deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
         "//meerkat:meerkat",
         "//meerkat:meerkat_anthropic_agent_factory_build",
         "//meerkat:meerkat_client_agent_factory_build",

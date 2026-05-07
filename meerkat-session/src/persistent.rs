@@ -39,10 +39,11 @@ use meerkat_core::lifecycle::run_primitive::RunApplyBoundary;
 use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
-    MobToolAuthorityContext, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    MobToolAuthorityContext, SessionControlError, SessionError, SessionForkAtRequest,
+    SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage, SessionHistoryQuery,
+    SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
+    SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
@@ -934,6 +935,54 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
     pub async fn export_live_session(&self, id: &SessionId) -> Result<Session, SessionError> {
         self.export_session_with_labels(id).await
+    }
+
+    async fn source_session_for_transcript_edit(
+        &self,
+        id: &SessionId,
+    ) -> Result<Session, SessionError> {
+        match self.inner.join_active_runtime_context_admission(id).await {
+            Ok(Some(active_admission)) => {
+                drop(active_admission);
+                return Err(SessionError::Busy { id: id.clone() });
+            }
+            Ok(None) | Err(SessionError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        let view = self.read(id).await?;
+        if view.state.is_active {
+            return Err(SessionError::Busy { id: id.clone() });
+        }
+
+        let session = match self.export_session_with_labels(id).await {
+            Ok(session) => session,
+            Err(SessionError::NotFound { .. }) => {
+                self.load_authoritative_session_base(id)
+                    .await?
+                    .ok_or_else(|| SessionError::NotFound { id: id.clone() })?
+            }
+            Err(err) => return Err(err),
+        };
+
+        self.reject_if_archived_session(id, &session)
+            .await
+            .map_err(control_error_into_session_error)?;
+        Ok(session)
+    }
+
+    async fn persist_transcript_fork(
+        &self,
+        source_session_id: SessionId,
+        forked: Session,
+    ) -> Result<SessionForkResult, SessionError> {
+        let saved = self.save_normalized_session(forked).await?;
+        Ok(SessionForkResult {
+            source_session_id,
+            session_id: saved.id().clone(),
+            message_count: saved.messages().len(),
+            session_ref: None,
+        })
     }
 
     pub async fn wait_for_session_mutation_after(
@@ -2542,6 +2591,43 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for PersistentSe
 }
 
 #[async_trait]
+impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
+    for PersistentSessionService<B>
+{
+    async fn fork_session_at(
+        &self,
+        id: &SessionId,
+        req: SessionForkAtRequest,
+    ) -> Result<SessionForkResult, SessionError> {
+        let _ = req.running_behavior;
+        let source = self.source_session_for_transcript_edit(id).await?;
+        if req.message_index > source.messages().len() {
+            return Err(meerkat_core::TranscriptEditError::MessageIndexOutOfBounds {
+                message_index: req.message_index,
+                message_count: source.messages().len(),
+            }
+            .into_session_error());
+        }
+
+        let forked = source.fork_at(req.message_index);
+        self.persist_transcript_fork(id.clone(), forked).await
+    }
+
+    async fn fork_session_replace(
+        &self,
+        id: &SessionId,
+        req: SessionForkReplaceRequest,
+    ) -> Result<SessionForkResult, SessionError> {
+        let _ = req.running_behavior;
+        let source = self.source_session_for_transcript_edit(id).await?;
+        let forked = source
+            .fork_replacing(req.message_index, req.replacement)
+            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        self.persist_transcript_fork(id.clone(), forked).await
+    }
+}
+
+#[async_trait]
 impl<B: SessionAgentBuilder + 'static> SessionServiceCommsExt for PersistentSessionService<B> {
     async fn comms_runtime(
         &self,
@@ -3097,8 +3183,10 @@ mod tests {
     use meerkat_core::checkpoint::SessionCheckpointer;
     use meerkat_core::event::AgentEvent;
     use meerkat_core::service::{
-        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionService,
-        SessionServiceControlExt, StageToolResultsRequest,
+        DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions, SessionForkAtRequest,
+        SessionForkReplaceRequest, SessionService, SessionServiceControlExt,
+        SessionServiceTranscriptEditExt, StageToolResultsRequest, TranscriptEditRunningBehavior,
+        TranscriptReplacement,
     };
     use meerkat_core::session::SESSION_METADATA_KEY;
     use meerkat_core::types::{
@@ -5669,6 +5757,169 @@ mod tests {
         assert_eq!(archived.message_count, 4);
         assert!(!archived.has_more);
         assert_eq!(archived.messages.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_fork_at_creates_new_idle_session_without_shrinking_parent() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let parent_id = created.session_id;
+        service
+            .start_turn(&parent_id, start_turn_request("follow up"))
+            .await
+            .expect("second turn should succeed");
+
+        let forked = service
+            .fork_session_at(
+                &parent_id,
+                SessionForkAtRequest {
+                    message_index: 2,
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("fork_at should create a branch session");
+
+        assert_ne!(forked.session_id, parent_id);
+        assert_eq!(forked.message_count, 2);
+
+        let parent_history = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("parent history should remain readable");
+        assert_eq!(parent_history.message_count, 4);
+
+        let fork_history = service
+            .read_history(&forked.session_id, SessionHistoryQuery::default())
+            .await
+            .expect("fork history should be persisted");
+        assert_eq!(fork_history.message_count, 2);
+        assert_eq!(fork_history.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_persistent_fork_replace_message_creates_changed_branch() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let service = PersistentSessionService::new(
+            DummyBuilder,
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        );
+
+        let created = service
+            .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+            .await
+            .expect("create_session should succeed");
+        let parent_id = created.session_id;
+        service
+            .start_turn(&parent_id, start_turn_request("follow up"))
+            .await
+            .expect("second turn should succeed");
+
+        let forked = service
+            .fork_session_replace(
+                &parent_id,
+                SessionForkReplaceRequest {
+                    message_index: 2,
+                    replacement: TranscriptReplacement::Message {
+                        message: Message::User(UserMessage::text("edited follow up")),
+                    },
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await
+            .expect("fork_replace should create a branch session");
+
+        assert_ne!(forked.session_id, parent_id);
+        assert_eq!(forked.message_count, 3);
+
+        let fork_history = service
+            .read_history(&forked.session_id, SessionHistoryQuery::default())
+            .await
+            .expect("fork history should be persisted");
+        assert_eq!(fork_history.message_count, 3);
+        assert!(matches!(
+            &fork_history.messages[2],
+            Message::User(user) if user.text_content() == "edited follow up"
+        ));
+
+        let parent_history = service
+            .read_history(&parent_id, SessionHistoryQuery::default())
+            .await
+            .expect("parent history should remain unchanged");
+        assert!(matches!(
+            &parent_history.messages[2],
+            Message::User(user) if user.text_content() == "follow up"
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_persistent_fork_at_rejects_running_session() {
+        let store: Arc<dyn SessionStore> = Arc::new(MemoryStore::new());
+        let builder = BlockingRunBuilder::new();
+        let service = Arc::new(PersistentSessionService::new(
+            builder.clone(),
+            4,
+            Arc::clone(&store),
+            None,
+            memory_blob_store(),
+        ));
+
+        let service_for_create = Arc::clone(&service);
+        let initial_turn = tokio::spawn(async move {
+            service_for_create
+                .create_session(create_request("hello", InitialTurnPolicy::RunImmediately))
+                .await
+        });
+        builder.entered_notify.notified().await;
+        builder.release_notify.notify_waiters();
+        let created = initial_turn
+            .await
+            .expect("initial turn task should join")
+            .expect("initial turn should create a session");
+        let parent_id = created.session_id;
+
+        let service_for_turn = Arc::clone(&service);
+        let session_for_turn = parent_id.clone();
+        let active_turn = tokio::spawn(async move {
+            service_for_turn
+                .start_turn(&session_for_turn, start_turn_request("slow follow up"))
+                .await
+        });
+        builder.entered_notify.notified().await;
+
+        let rejected = service
+            .fork_session_at(
+                &parent_id,
+                SessionForkAtRequest {
+                    message_index: 1,
+                    running_behavior: TranscriptEditRunningBehavior::Reject,
+                },
+            )
+            .await;
+        assert!(
+            matches!(rejected, Err(SessionError::Busy { ref id }) if id == &parent_id),
+            "fork_at should reject a running session: {rejected:?}"
+        );
+
+        builder.release_notify.notify_waiters();
+        active_turn
+            .await
+            .expect("active turn task should join")
+            .expect("active turn should complete after fork rejection");
     }
 
     #[tokio::test]

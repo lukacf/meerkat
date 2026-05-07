@@ -37,9 +37,10 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
-    SessionError, SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
+    SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
+    SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -3009,10 +3010,17 @@ impl SessionRuntime {
     ) -> bool {
         match outcome {
             meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
             | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
                 reason.contains("runtime boundary commit failed")
                     || reason.contains("runtime loop commit failed")
             }
+            meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure {
+                error, ..
+            } => error.detail.as_deref().is_some_and(|reason| {
+                reason.contains("runtime boundary commit failed")
+                    || reason.contains("runtime loop commit failed")
+            }),
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
             | meerkat_runtime::CompletionOutcome::Cancelled
@@ -3023,9 +3031,11 @@ impl SessionRuntime {
     fn completion_outcome_is_apply_failure(outcome: &meerkat_runtime::CompletionOutcome) -> bool {
         match outcome {
             meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
             | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
                 reason.starts_with("apply failed:")
             }
+            meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure { .. } => false,
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
             | meerkat_runtime::CompletionOutcome::Cancelled
@@ -7339,6 +7349,75 @@ impl SessionRuntime {
             .map(Into::into)
     }
 
+    async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        let runtime_running = self
+            .runtime_adapter
+            .runtime_state(session_id)
+            .await
+            .is_ok_and(|state| matches!(state, RuntimeState::Running));
+        let has_active_inputs = self
+            .runtime_adapter
+            .list_active_inputs(session_id)
+            .await
+            .is_ok_and(|inputs| !inputs.is_empty());
+        if runtime_running || has_active_inputs {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is active; transcript fork uses running_behavior=reject"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Fork an idle materialized session at a transcript index.
+    pub async fn fork_session_at(
+        &self,
+        session_id: &SessionId,
+        req: SessionForkAtRequest,
+    ) -> Result<SessionForkResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .fork_session_at(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    /// Fork an idle materialized session and apply a typed transcript replacement.
+    pub async fn fork_session_replace(
+        &self,
+        session_id: &SessionId,
+        req: SessionForkReplaceRequest,
+    ) -> Result<SessionForkResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .fork_session_replace(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
     /// Get the event injector for a session, if available.
     pub async fn event_injector(
         &self,
@@ -8032,6 +8111,35 @@ fn completion_outcome_to_rpc_result(
             message: format!("turn abandoned: {reason}"),
             data: None,
         }),
+        CompletionOutcome::AbandonedWithError {
+            reason,
+            error: turn_error,
+        } => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("turn abandoned: {reason}"),
+            data: Some(serde_json::json!({
+                "error": turn_error,
+            })),
+        }),
+        CompletionOutcome::CompletedWithFinalizationFailure {
+            result,
+            error: turn_error,
+        } => {
+            let wire_result = meerkat_contracts::WireRunResult::from(*result);
+            let structured_output = wire_result.structured_output.clone();
+            Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: turn_error
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "turn finalization failed".to_string()),
+                data: Some(serde_json::json!({
+                    "error": turn_error,
+                    "run_result": wire_result,
+                    "structured_output": structured_output,
+                })),
+            })
+        }
         CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime terminated: {reason}"),
@@ -8196,6 +8304,13 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for MockLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
@@ -8290,6 +8405,13 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for SlowMockLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
@@ -8327,6 +8449,13 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for BlockingMockLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
@@ -8373,6 +8502,13 @@ mod tests {
 
     #[async_trait]
     impl LlmClient for FailAfterFirstMockLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
         fn stream<'a>(
             &'a self,
             _request: &'a meerkat_client::LlmRequest,
@@ -19226,6 +19362,47 @@ mod tests {
 
         assert_eq!(err.code, error::REQUEST_CANCELLED);
         assert_eq!(err.message, "request cancelled");
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_surfaces_output_and_finalization_error() {
+        let session_id = SessionId::new();
+        let run_result = meerkat_core::RunResult {
+            text: "{\"gate\":\"green\"}".to_string(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: Some(serde_json::json!({ "gate": "green" })),
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+        let err = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                result: Box::new(run_result),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "runtime loop commit failed: synthetic finalization failure",
+                ),
+            },
+            &session_id,
+        )
+        .expect_err("finalization failure should map to an RPC error");
+
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert!(err.message.contains("synthetic finalization failure"));
+        let data = err.data.expect("finalization failure error data");
+        assert_eq!(data["error"]["kind"], "runtime_apply_failure");
+        assert_eq!(data["error"]["terminal"], true);
+        assert_eq!(
+            data["run_result"]["structured_output"],
+            serde_json::json!({ "gate": "green" })
+        );
+        assert_eq!(
+            data["structured_output"],
+            serde_json::json!({ "gate": "green" })
+        );
     }
 
     #[test]

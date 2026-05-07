@@ -21,6 +21,16 @@ on:
         required: false
         default: false
         type: boolean
+      publish_release_assets_only:
+        description: "Recovery lane: build surface binaries and publish GitHub release assets only"
+        required: false
+        default: false
+        type: boolean
+      release_tag:
+        description: "Release tag for recovery lanes, for example v0.6.1"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -99,7 +109,10 @@ jobs:
 
   build_binaries:
     name: Build and package surface binaries
-    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_web_sdk_only != 'true' }}
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.publish_release_assets_only == 'true')
     needs: [release_validate]
     runs-on: ${{ matrix.runs-on }}
     strategy:
@@ -164,7 +177,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
@@ -208,7 +221,10 @@ jobs:
 
   publish_github_release:
     name: Publish GitHub release assets
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.publish_release_assets_only == 'true')
     needs: [build_binaries]
     runs-on: ubuntu-latest
     steps:
@@ -224,8 +240,14 @@ jobs:
 
       - name: Build checksum manifest
         working-directory: release-artifacts
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
+          if [[ -z "${RELEASE_TAG}" ]]; then
+            echo "release_tag is required for release asset recovery" >&2
+            exit 1
+          fi
           find . -type f \( -name "*.tar.gz" -o -name "*.zip" \) | sort > manifest_files.txt
           if [[ ! -s manifest_files.txt ]]; then
             echo "No release artifacts found" >&2
@@ -243,7 +265,7 @@ jobs:
               if p.is_file() and (p.name.endswith(".tar.gz") or p.name.endswith(".zip"))
           ]
 
-          tag = os.environ["GITHUB_REF_NAME"]
+          tag = os.environ["RELEASE_TAG"]
           manifest = {
               "version": tag.lstrip("v"),
               "tag": tag,
@@ -266,10 +288,14 @@ jobs:
           draft: false
           fail_on_unmatched_files: true
           generate_release_notes: true
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
 
   update_homebrew:
     name: Update Homebrew tap formula
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.publish_release_assets_only == 'true')
     needs: [publish_github_release]
     runs-on: ubuntu-latest
     steps:
@@ -281,18 +307,19 @@ jobs:
           path: homebrew-meerkat
 
       - name: Download checksums
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
-          curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${GITHUB_REF_NAME}/checksums.sha256" -o checksums.sha256
+          curl -fsSL "https://github.com/lukacf/meerkat/releases/download/${RELEASE_TAG}/checksums.sha256" -o checksums.sha256
 
       - name: Generate updated formula
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           VERSION="${VERSION#v}"
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}"
           BASE="https://github.com/lukacf/meerkat/releases/download/${TAG}"
 
           get_sha() { grep "$1" checksums.sha256 | awk '{print $1}'; }
@@ -361,12 +388,14 @@ jobs:
 
       - name: Commit and push formula
         working-directory: homebrew-meerkat
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add rkat.rb
-          git commit -m "Update rkat to ${GITHUB_REF_NAME#v}"
+          git commit -m "Update rkat to ${VERSION#v}"
           git push
 
   # Registry publishing runs automatically on tag pushes alongside binary

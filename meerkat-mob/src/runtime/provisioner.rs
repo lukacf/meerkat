@@ -769,7 +769,7 @@ mod tests {
 
     #[cfg(feature = "runtime-adapter")]
     #[tokio::test]
-    async fn deferred_turn_delivery_releases_admission_error() {
+    async fn deferred_turn_delivery_closes_channel_without_synthetic_events() {
         let session_id = SessionId::new();
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
         let (queued_event_tx, deferred_delivery) =
@@ -779,24 +779,13 @@ mod tests {
         deferred_delivery.release();
         drop(queued_event_tx);
 
-        let event = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), event_rx.recv())
             .await
-            .expect("deferred delivery should emit")
-            .expect("deferred delivery should keep event stream open long enough to emit");
-
-        match event.payload {
-            meerkat_core::AgentEvent::RunFailed {
-                session_id: actual_session_id,
-                error_class,
-                error,
-                ..
-            } => {
-                assert_eq!(actual_session_id, session_id);
-                assert_eq!(error_class, meerkat_core::event::AgentErrorClass::Internal);
-                assert_eq!(error, "runtime admission rejected");
-            }
-            other => panic!("expected synthetic admission failure, got {other:?}"),
-        }
+            .expect("channel should close promptly after release");
+        assert!(
+            result.is_none(),
+            "deferred buffer must not fabricate events; channel should close empty"
+        );
     }
 
     #[cfg(feature = "runtime-adapter")]
@@ -1083,15 +1072,12 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .state
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
-        let runtime_render_metadata = primitive
-            .turn_metadata()
-            .and_then(|meta| meta.render_metadata.clone());
         // The runtime has already resolved handling_mode routing (Queue vs
         // Steer) before the executor fires. The session-service start_turn
         // path only supports Queue — Steer semantics are realized by the
-        // runtime ingress, not by the executor. Render metadata is carried on
-        // the flattened request while stripped from turn_metadata so session
-        // implementations cannot re-extract metadata and override the request.
+        // runtime ingress, not by the executor. render_metadata is
+        // runtime-owned and must not leak into the session-service path;
+        // strip it from turn_metadata and pass None at the request level.
         let executor_turn_metadata = primitive.turn_metadata().map(|meta| {
             let mut m = meta.clone();
             m.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
@@ -1103,7 +1089,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             system_prompt: None,
             event_tx: queued_context.map(|context| context.event_tx),
             runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
-                runtime_render_metadata,
+                None,
                 meerkat_core::types::HandlingMode::Queue,
                 primitive
                     .turn_metadata()

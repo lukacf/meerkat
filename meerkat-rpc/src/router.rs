@@ -5104,7 +5104,7 @@ args = [{}]
 
     #[cfg(feature = "mob")]
     #[tokio::test]
-    async fn mob_member_send_host_route_preserves_steer_mode_rejection() {
+    async fn mob_member_send_host_route_accepts_steer_mode() {
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -5157,15 +5157,14 @@ args = [{}]
             ))
             .await
             .unwrap();
-        let err = send_resp
-            .error
-            .expect("steer send should fail on direct path");
         assert!(
-            err.message
-                .contains("handling_mode Steer requires a runtime-backed surface"),
-            "unexpected error: {}",
-            err.message
+            send_resp.error.is_none(),
+            "steer send should be accepted by mob member_send; the provisioner flattens to Queue: {:?}",
+            send_resp.error
         );
+        let result = send_resp.result.expect("expected success result");
+        let result: serde_json::Value = serde_json::from_str(result.get()).unwrap();
+        assert_eq!(result["agent_identity"], "worker-1");
     }
 
     #[cfg(feature = "mob")]

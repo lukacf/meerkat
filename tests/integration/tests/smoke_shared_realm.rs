@@ -789,18 +789,15 @@ where
         if started_barge_in {
             let barge_in_complete = next_barge_in_chunk == barge_in_chunks.len();
             let interrupted_index = capture_event_index(&capture, "interrupted");
-            let post_barge_commit_index = capture
-                .event_kinds
-                .iter()
-                .enumerate()
-                .rfind(|(_, kind)| *kind == "turn_committed")
-                .map(|(index, _)| index);
-            if barge_in_complete
-                && interrupted_index
-                    .zip(post_barge_commit_index)
-                    .is_some_and(|(interrupt_index, commit_index)| interrupt_index < commit_index)
-            {
-                return Ok(capture);
+            if let Some(interrupt_idx) = interrupted_index {
+                let has_post_interrupt_commit = capture
+                    .event_kinds
+                    .iter()
+                    .enumerate()
+                    .any(|(idx, kind)| idx > interrupt_idx && kind == "turn_committed");
+                if barge_in_complete && has_post_interrupt_commit {
+                    return Ok(capture);
+                }
             }
         }
     }
@@ -6308,13 +6305,12 @@ turn3_capture={turn3_capture:?}; error={err}"
                 &turn45_primary_commit,
                 &stop_pcm,
                 120,
-                |capture| {
-                    // Wait for multiple audio chunks to confirm the model
-                    // is actively streaming a response. Starting too early
-                    // (before output begins) means our barge-in arrives
-                    // after the model's short response finishes, turning
-                    // it into a new turn instead of an interruption.
-                    capture_event_count(capture, "output_audio_chunk") >= 2
+                |_capture| {
+                    // Start barge-in immediately. The realtime model
+                    // delivers audio faster than realtime — even waiting
+                    // for turn_started lets the model finish before our
+                    // first audio chunk arrives.
+                    true
                 },
             )
             .await {

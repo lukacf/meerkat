@@ -127,6 +127,7 @@ async fn wait_for_runtime_state(
 struct HarnessRuntimeStore {
     inner: meerkat_runtime::store::InMemoryRuntimeStore,
     fail_atomic_apply: bool,
+    fail_commit_machine_lifecycle_now: AtomicBool,
     /// Fail commit_machine_lifecycle after N successful calls (None = never fail).
     fail_commit_machine_lifecycle_after: Option<usize>,
     /// Delay commit_machine_lifecycle after N successful calls (None = never delay).
@@ -140,10 +141,11 @@ struct HarnessRuntimeStore {
 }
 
 impl HarnessRuntimeStore {
-    fn failing_atomic_apply() -> Self {
+    fn new() -> Self {
         Self {
             inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
-            fail_atomic_apply: true,
+            fail_atomic_apply: false,
+            fail_commit_machine_lifecycle_now: AtomicBool::new(false),
             fail_commit_machine_lifecycle_after: None,
             delay_commit_machine_lifecycle_after: None,
             commit_machine_lifecycle_delay: Duration::ZERO,
@@ -155,18 +157,17 @@ impl HarnessRuntimeStore {
         }
     }
 
+    fn failing_atomic_apply() -> Self {
+        Self {
+            fail_atomic_apply: true,
+            ..Self::new()
+        }
+    }
+
     fn delayed_recover(delay: Duration) -> Self {
         Self {
-            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
-            fail_atomic_apply: false,
-            fail_commit_machine_lifecycle_after: None,
-            delay_commit_machine_lifecycle_after: None,
-            commit_machine_lifecycle_delay: Duration::ZERO,
-            commit_machine_lifecycle_calls: AtomicUsize::new(0),
             load_input_states_delay: delay,
-            fail_persist_input_state_after: None,
-            persist_input_state_calls: AtomicUsize::new(0),
-            runtime_state_overrides: Mutex::new(HashMap::new()),
+            ..Self::new()
         }
     }
 
@@ -176,53 +177,35 @@ impl HarnessRuntimeStore {
 
     fn failing_lifecycle_commit_after(successful_calls: usize) -> Self {
         Self {
-            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
-            fail_atomic_apply: false,
             fail_commit_machine_lifecycle_after: Some(successful_calls),
-            delay_commit_machine_lifecycle_after: None,
-            commit_machine_lifecycle_delay: Duration::ZERO,
-            commit_machine_lifecycle_calls: AtomicUsize::new(0),
-            load_input_states_delay: Duration::ZERO,
-            fail_persist_input_state_after: None,
-            persist_input_state_calls: AtomicUsize::new(0),
-            runtime_state_overrides: Mutex::new(HashMap::new()),
+            ..Self::new()
         }
     }
 
     fn failing_terminal_snapshot() -> Self {
         Self {
-            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
-            fail_atomic_apply: false,
             // Recovery calls commit_machine_lifecycle once (call 0 succeeds),
             // the terminal event call (call 1) fails.
             fail_commit_machine_lifecycle_after: Some(1),
-            delay_commit_machine_lifecycle_after: None,
-            commit_machine_lifecycle_delay: Duration::ZERO,
-            commit_machine_lifecycle_calls: AtomicUsize::new(0),
-            load_input_states_delay: Duration::ZERO,
-            fail_persist_input_state_after: None,
-            persist_input_state_calls: AtomicUsize::new(0),
-            runtime_state_overrides: Mutex::new(HashMap::new()),
+            ..Self::new()
         }
     }
 
     fn delayed_terminal_lifecycle_commit(delay: Duration) -> Self {
         Self {
-            inner: meerkat_runtime::store::InMemoryRuntimeStore::new(),
-            fail_atomic_apply: false,
-            fail_commit_machine_lifecycle_after: None,
             delay_commit_machine_lifecycle_after: Some(1),
             commit_machine_lifecycle_delay: delay,
-            commit_machine_lifecycle_calls: AtomicUsize::new(0),
-            load_input_states_delay: Duration::ZERO,
-            fail_persist_input_state_after: None,
-            persist_input_state_calls: AtomicUsize::new(0),
-            runtime_state_overrides: Mutex::new(HashMap::new()),
+            ..Self::new()
         }
     }
 
     fn commit_machine_lifecycle_calls(&self) -> usize {
         self.commit_machine_lifecycle_calls.load(Ordering::SeqCst)
+    }
+
+    fn set_fail_commit_machine_lifecycle_now(&self, fail: bool) {
+        self.fail_commit_machine_lifecycle_now
+            .store(fail, Ordering::SeqCst);
     }
 
     fn seed_runtime_state_projection(
@@ -353,6 +336,14 @@ impl RuntimeStore for HarnessRuntimeStore {
         let call_index = self
             .commit_machine_lifecycle_calls
             .fetch_add(1, Ordering::SeqCst);
+        if self
+            .fail_commit_machine_lifecycle_now
+            .load(Ordering::SeqCst)
+        {
+            return Err(RuntimeStoreError::WriteFailed(
+                "synthetic commit_machine_lifecycle failure".to_string(),
+            ));
+        }
         if self
             .fail_commit_machine_lifecycle_after
             .is_some_and(|fail_after| call_index >= fail_after)
@@ -527,6 +518,58 @@ async fn destroy_lifecycle_commit_failure_restores_staged_session_dsl_state() {
             .await
             .is_err(),
         "failed destroy must not terminate completion waiters",
+    );
+}
+
+#[tokio::test]
+async fn service_turn_terminal_lifecycle_commit_failure_rolls_back_turn_completion() {
+    let store = Arc::new(HarnessRuntimeStore::new());
+    let adapter = Arc::new(MeerkatMachine::persistent(
+        store.clone() as Arc<dyn RuntimeStore>,
+        memory_blob_store(),
+    ));
+    let sid = SessionId::new();
+    let bindings = adapter
+        .prepare_bindings(sid.clone())
+        .await
+        .expect("prepare runtime bindings");
+    let run_id = RunId::new();
+    bindings
+        .turn_state()
+        .start_immediate_append(run_id.clone())
+        .expect("start service turn through runtime handle");
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Running,
+        "service turn should put the machine in a running lifecycle before terminal commit"
+    );
+
+    store.set_fail_commit_machine_lifecycle_now(true);
+    let err = adapter
+        .commit_service_turn_terminal_receipt(&sid)
+        .await
+        .expect_err("terminal lifecycle commit failure should surface");
+    assert!(
+        err.to_string()
+            .contains("synthetic commit_machine_lifecycle failure"),
+        "unexpected error: {err}",
+    );
+
+    let snapshot = bindings.turn_state().snapshot();
+    assert_eq!(snapshot.active_run_id, Some(run_id));
+    assert_eq!(
+        snapshot.turn_phase,
+        meerkat_core::turn_execution_authority::TurnPhase::ApplyingPrimitive,
+        "failed durable service-turn receipt must roll back visible terminal turn state"
+    );
+    assert_eq!(
+        snapshot.terminal_outcome, None,
+        "failed durable service-turn receipt must not leave a terminal outcome projection"
+    );
+    assert_eq!(
+        adapter.runtime_state(&sid).await.unwrap(),
+        RuntimeState::Running,
+        "failed durable service-turn receipt must preserve the running lifecycle"
     );
 }
 

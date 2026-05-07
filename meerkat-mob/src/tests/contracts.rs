@@ -1125,13 +1125,8 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
             StartTurnRequest {
                 prompt: "follow up".to_string().into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
             },
         )
         .await
@@ -1201,13 +1196,8 @@ async fn contract_mob_007_session_archive_removes_from_active_list() {
             StartTurnRequest {
                 prompt: "should fail".to_string().into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
             },
         )
         .await;

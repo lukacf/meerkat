@@ -6310,8 +6310,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             update {
-                self.turn_phase = TurnPhase::Completed;
-                self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
+                if self.turn_phase != TurnPhase::Completed
+                    && self.turn_phase != TurnPhase::Failed
+                    && self.turn_phase != TurnPhase::Cancelled
+                {
+                    self.turn_phase = TurnPhase::Completed;
+                    self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
+                }
             }
             to Running
         }

@@ -18,7 +18,7 @@ use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, SessionBuildOptions,
 };
 use meerkat_core::types::HandlingMode;
-use meerkat_core::{ContentInput, Session, SessionId};
+use meerkat_core::{ContentInput, SessionId};
 use meerkat_mcp::{McpRouter, McpRouterAdapter};
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpScheduleHost;
@@ -263,8 +263,20 @@ impl McpScheduleContext {
         match result {
             Ok(_) => Ok(session_id),
             Err(error) => {
-                if session_exists {
-                    let _ = self.service.archive(&session_id).await;
+                if session_exists
+                    && let Err(archive_error) = self
+                        .service
+                        .archive_with_machine_protocol(
+                            &session_id,
+                            meerkat::MachineSessionArchiveProtocol::from_machine(
+                                self.runtime_adapter.as_ref(),
+                            ),
+                        )
+                        .await
+                {
+                    return Err(ScheduleDomainError::Internal(format!(
+                        "schedule create failed ({error}); machine archive cleanup failed: {archive_error}"
+                    )));
                 }
                 self.ingress_context().clear_session(&session_id).await;
                 Err(ScheduleDomainError::Internal(error.to_string()))
@@ -482,14 +494,6 @@ async fn update_peer_ingress_context(_context: &McpScheduleContext, _session_id:
             .update_peer_ingress_context(_session_id, keep_alive, comms_rt)
             .await;
     }
-}
-
-fn session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -1162,7 +1162,9 @@ impl MobBuilder {
             if session_service
                 .session_belongs_to_mob(session_id, &definition.id)
                 .await
-                && let Err(error) = session_service.archive(session_id).await
+                && let Err(error) = session_service
+                    .archive_with_mob_lifecycle_authority(session_id)
+                    .await
                 && !matches!(error, meerkat_core::service::SessionError::NotFound { .. })
             {
                 return Err(error.into());
@@ -1579,13 +1581,9 @@ impl MobBuilder {
                             meerkat_core::service::StartTurnRequest {
                                 prompt: resume_message.into(),
                                 system_prompt: None,
-                                render_metadata: None,
-                                handling_mode: meerkat_core::types::HandlingMode::Queue,
                                 event_tx: None,
-                                skill_references: None,
-                                flow_tool_overlay: None,
-                                pre_turn_context_appends: Vec::new(),
-                                turn_metadata: None,
+                                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(
+                                ),
                             },
                         )
                         .await?;

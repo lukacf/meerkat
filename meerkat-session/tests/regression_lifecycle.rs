@@ -609,13 +609,8 @@ fn turn_req(prompt: &str) -> StartTurnRequest {
     StartTurnRequest {
         prompt: prompt.to_string().into(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: None,
-        flow_tool_overlay: None,
-        pre_turn_context_appends: Vec::new(),
-        turn_metadata: None,
+        runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
     }
 }
 
@@ -1185,16 +1180,18 @@ async fn start_turn_forwards_handling_mode_and_render_metadata() {
             StartTurnRequest {
                 prompt: "steer me".into(),
                 system_prompt: None,
-                render_metadata: Some(RenderMetadata {
-                    class: RenderClass::ExternalEvent,
-                    salience: RenderSalience::Urgent,
-                }),
-                handling_mode: HandlingMode::Steer,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                    Some(RenderMetadata {
+                        class: RenderClass::ExternalEvent,
+                        salience: RenderSalience::Urgent,
+                    }),
+                    HandlingMode::Steer,
+                    None,
+                    None,
+                    Vec::new(),
+                    None,
+                ),
             },
         )
         .await

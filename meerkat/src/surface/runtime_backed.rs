@@ -7,7 +7,9 @@ use meerkat_core::lifecycle::core_executor::{
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunPrimitive, RuntimeTurnMetadata,
 };
-use meerkat_core::service::{DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest};
+use meerkat_core::service::{
+    DeferredPromptPolicy, InitialTurnPolicy, StartTurnRequest, StartTurnRuntimeSemantics,
+};
 use meerkat_core::types::HandlingMode;
 use meerkat_core::{
     AgentEvent, EventEnvelope, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryOverrides,
@@ -19,6 +21,8 @@ use tokio::sync::mpsc;
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use crate::JsonlStore;
+#[cfg(test)]
+use crate::MachineSessionArchiveProtocol;
 use crate::{
     CreateSessionRequest, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
     PersistentSessionService, RunResult, Session, SessionError, SessionId,
@@ -27,14 +31,6 @@ use crate::{
 use meerkat_store::MemoryBlobStore;
 
 const DEFAULT_RUNTIME_BACKED_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
-
-fn session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
 
 #[cfg(feature = "session-store")]
 pub fn build_runtime_backed_service(
@@ -157,16 +153,18 @@ fn start_turn_request_from_initial_turn(
     StartTurnRequest {
         prompt: initial_turn.prompt,
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: initial_turn
-            .turn_metadata
-            .handling_mode
-            .unwrap_or(HandlingMode::Queue),
         event_tx: initial_turn.event_tx,
-        skill_references: None,
-        flow_tool_overlay: None,
-        pre_turn_context_appends: Vec::new(),
-        turn_metadata: Some(initial_turn.turn_metadata),
+        runtime: StartTurnRuntimeSemantics::new(
+            None,
+            initial_turn
+                .turn_metadata
+                .handling_mode
+                .unwrap_or(HandlingMode::Queue),
+            None,
+            None,
+            Vec::new(),
+            Some(initial_turn.turn_metadata),
+        ),
     }
 }
 
@@ -563,13 +561,15 @@ fn start_turn_request_from_primitive(
     Ok(meerkat_core::service::StartTurnRequest {
         prompt: primitive.extract_content_input(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: None,
-        flow_tool_overlay: None,
-        pre_turn_context_appends,
-        turn_metadata: metadata.cloned(),
+        runtime: StartTurnRuntimeSemantics::new(
+            None,
+            HandlingMode::Queue,
+            None,
+            None,
+            pre_turn_context_appends,
+            metadata.cloned(),
+        ),
     })
 }
 
@@ -635,7 +635,14 @@ impl CoreExecutor for PersistentRuntimeExecutor {
                                 self.session_id
                             ))
                         })?;
-                    if session_metadata_marks_archived(&session) {
+                    if self
+                        .service
+                        .session_archived_by_authority(&self.session_id, &session)
+                        .await
+                        .map_err(|error| {
+                            CoreExecutorError::apply_failed_runtime_context(error.to_string())
+                        })?
+                    {
                         self.adapter.unregister_session(&self.session_id).await;
                         return Err(CoreExecutorError::apply_failed_runtime_context(format!(
                             "session not found: {}",
@@ -857,13 +864,17 @@ mod tests {
         let req = start_turn_request_from_primitive(&primitive)
             .expect("metadata should be carried, not rejected");
 
-        assert_eq!(req.render_metadata, None);
-        assert_eq!(req.handling_mode, meerkat_core::types::HandlingMode::Queue);
-        assert_eq!(req.skill_references, None);
-        assert_eq!(req.flow_tool_overlay, None);
-        assert_eq!(req.turn_metadata, Some(metadata));
+        assert_eq!(req.runtime.render_metadata, None);
         assert_eq!(
-            req.turn_metadata
+            req.runtime.handling_mode,
+            meerkat_core::types::HandlingMode::Queue
+        );
+        assert_eq!(req.runtime.skill_references, None);
+        assert_eq!(req.runtime.flow_tool_overlay, None);
+        assert_eq!(req.runtime.turn_metadata, Some(metadata));
+        assert_eq!(
+            req.runtime
+                .turn_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.execution_kind),
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending)
@@ -2028,12 +2039,15 @@ mod tests {
         .expect("materialize session");
 
         service
-            .archive(&result.session_id)
+            .archive_with_machine_protocol(
+                &result.session_id,
+                MachineSessionArchiveProtocol::from_machine(adapter.as_ref()),
+            )
             .await
-            .expect("archive session through service");
+            .expect("archive session through machine authority");
         assert!(
             adapter.contains_session(&result.session_id).await,
-            "service-only archive leaves runtime registration for this regression"
+            "machine archive leaves a retired runtime registration for this regression"
         );
 
         let mut executor = PersistentRuntimeExecutor::new(

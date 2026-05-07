@@ -24,8 +24,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
-    PersistenceBundle, PersistentSessionService, PromotingSlot, ScheduleService,
-    ScheduleToolDispatcher, StagedPhase, StagedSessionRegistry, StagedSlot,
+    MachineSessionArchiveProtocol, PersistenceBundle, PersistentSessionService, PromotingSlot,
+    ScheduleService, ScheduleToolDispatcher, StagedPhase, StagedSessionRegistry, StagedSlot,
     encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
@@ -42,7 +42,8 @@ use meerkat_core::service::{
     SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
     SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
-    SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, StartTurnRuntimeSemantics,
+    SessionSummary, SessionView,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -188,9 +189,9 @@ impl ArchiveRuntimeCleanup {
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         service
-            .archive_with_machine_authority(
+            .archive_with_machine_protocol(
                 session_id,
-                self.runtime_adapter.session_control_authority(),
+                MachineSessionArchiveProtocol::from_machine(self.runtime_adapter.as_ref()),
             )
             .await
     }
@@ -519,7 +520,12 @@ async fn await_guarded_session_cleanup(
         let result = match operation {
             GuardedSessionCleanupOperation::Archive => match runtime_cleanup.as_ref() {
                 Some(cleanup) => cleanup.archive_service(&service, &session_id).await,
-                None => service.archive(&session_id).await,
+                None => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(
+                        "runtime-backed archive cleanup requires MachineSessionArchiveProtocol"
+                            .to_string(),
+                    ),
+                )),
             },
             GuardedSessionCleanupOperation::DiscardLive => {
                 service.discard_live_session(&session_id).await
@@ -753,7 +759,7 @@ impl PendingPromotionCleanup {
     async fn restore_after_materialized_failure(
         &mut self,
         service: &PersistentSessionService<FactoryAgentBuilder>,
-        authority: meerkat_runtime::MachineSessionControlAuthority,
+        protocol: MachineSessionArchiveProtocol<'_>,
     ) -> Result<(), SessionError> {
         if let Err(error) = self
             .recover_materialized_staged_capacity_admission(service)
@@ -764,16 +770,29 @@ impl PendingPromotionCleanup {
         }
 
         if let Err(error) = service
-            .archive_with_machine_authority(&self.session_id, authority)
+            .archive_with_machine_protocol(&self.session_id, protocol)
             .await
         {
             let _ = service.discard_live_session(&self.session_id).await;
             self.restore_now().await;
             return Err(error);
         }
-        self.authorize_machine_archived_resume();
-        self.restore_now().await;
+        self.finish_after_machine_archive().await;
         Ok(())
+    }
+
+    async fn finish_after_machine_archive(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _ = self
+            .staged_sessions
+            .take_promoting_system_context_state(&self.session_id)
+            .await;
+        let _ = self.staged_sessions.abandon(&self.session_id).await;
+        self.build_config = None;
+        drop(self.staged_capacity_admission.take());
+        self.armed = false;
     }
 
     fn authorize_machine_archived_resume(&mut self) {
@@ -1054,7 +1073,11 @@ impl RpcMobSessionService {
         let Some(session) = self.service.load_authoritative_session(session_id).await? else {
             return Ok(());
         };
-        if session_metadata_marks_archived(&session) {
+        if self
+            .service
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
             if self.staged_sessions.contains(session_id).await {
                 return Ok(());
             }
@@ -1230,11 +1253,14 @@ impl SessionService for RpcMobSessionService {
     ) -> Result<RunResult, SessionError> {
         let initial_turn = req.initial_turn;
         let session_id = Self::ensure_create_session_id(&mut req);
-        if req
+        if let Some(session) = req
             .build
             .as_ref()
             .and_then(|build| build.resume_session.as_ref())
-            .is_some_and(session_metadata_marks_archived)
+            && self
+                .service
+                .session_archived_by_authority(session.id(), session)
+                .await?
         {
             return Err(SessionError::NotFound { id: session_id });
         }
@@ -1359,7 +1385,10 @@ impl SessionService for RpcMobSessionService {
         let cleanup = self.archive_runtime_cleanup();
         let result = self
             .service
-            .archive_with_machine_authority(id, self.runtime_adapter.session_control_authority())
+            .archive_with_machine_protocol(
+                id,
+                MachineSessionArchiveProtocol::from_machine(self.runtime_adapter.as_ref()),
+            )
             .await;
         let service_not_found = matches!(&result, Err(SessionError::NotFound { .. }));
         let retained_mob_cleanup = if service_not_found {
@@ -1473,8 +1502,24 @@ impl meerkat_mob::MobSessionService for RpcMobSessionService {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        let session = self.service.load_authoritative_session(session_id).await?;
-        Ok(session.filter(|session| !session_metadata_marks_archived(session)))
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(None);
+        };
+        if self
+            .service
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(session))
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        <Self as SessionService>::archive(self, session_id).await
     }
 
     async fn execution_snapshot(
@@ -1655,10 +1700,10 @@ pub(crate) enum InterruptNoopTarget {
 }
 
 fn interrupt_noop_target_for_presence(present: bool) -> InterruptNoopTarget {
-    if !present {
-        InterruptNoopTarget::Missing
-    } else {
+    if present {
         InterruptNoopTarget::Present
+    } else {
+        InterruptNoopTarget::Missing
     }
 }
 
@@ -2243,6 +2288,7 @@ pub struct SessionRuntime {
     approval_service: meerkat_core::ApprovalService,
 }
 
+#[cfg(test)]
 fn session_metadata_marks_archived(session: &Session) -> bool {
     session
         .metadata()
@@ -2460,18 +2506,25 @@ impl SessionRuntime {
         let Some(stored) = self.load_persisted_session(session_id).await? else {
             return Ok(false);
         };
-        Ok(session_metadata_marks_archived(&stored)
-            || stored.messages().len() > live.messages().len())
+        Ok(stored.messages().len() > live.messages().len())
     }
 
     async fn archived_persisted_session_without_live(
         &self,
         session_id: &SessionId,
     ) -> Result<bool, RpcError> {
-        let Some(stored) = self.load_persisted_session(session_id).await? else {
+        let Some(stored) = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+        else {
             return Ok(false);
         };
-        if !session_metadata_marks_archived(&stored) {
+        if !self
+            .session_archived_by_authority(session_id, &stored)
+            .await?
+        {
             return Ok(false);
         }
         if self.staged_sessions.contains(session_id).await {
@@ -3072,13 +3125,9 @@ impl SessionRuntime {
         outcome: &meerkat_runtime::CompletionOutcome,
     ) {
         let archived_now = self
-            .service
-            .load_authoritative_session(session_id)
+            .authoritative_session_archived(session_id)
             .await
-            .ok()
-            .flatten()
-            .as_ref()
-            .is_some_and(session_metadata_marks_archived);
+            .unwrap_or(false);
         if archived_now {
             let _ = self.service.discard_live_session(session_id).await;
             let _ = self.archive_runtime_cleanup().run(session_id).await;
@@ -3355,7 +3404,7 @@ impl SessionRuntime {
                 let restore_result = promotion_cleanup
                     .restore_after_materialized_failure(
                         &service,
-                        runtime_adapter.session_control_authority(),
+                        MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                     )
                     .await;
                 promotion_cleanup.disarm();
@@ -3578,7 +3627,7 @@ impl SessionRuntime {
                 let restore_result = promotion_cleanup
                     .restore_after_materialized_failure(
                         &service,
-                        runtime_adapter.session_control_authority(),
+                        MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
                     )
                     .await;
                 promotion_cleanup.disarm();
@@ -3912,12 +3961,6 @@ impl SessionRuntime {
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.clone(),
             })?;
-        if session_metadata_marks_archived(&session) {
-            return Err(SessionError::NotFound {
-                id: session_id.clone(),
-            });
-        }
-
         let keep_alive = session
             .session_metadata()
             .map(|metadata| metadata.keep_alive)
@@ -4847,10 +4890,6 @@ impl SessionRuntime {
             .load_persisted_session(session_id)
             .await?
             .ok_or_else(|| Self::session_not_found_rpc(session_id))?;
-        if session_metadata_marks_archived(&stored_session) {
-            self.discard_stale_live_session(session_id).await;
-            return Err(Self::session_not_found_rpc(session_id));
-        }
         let keep_alive = stored_session
             .session_metadata()
             .map(|metadata| metadata.keep_alive)
@@ -5071,14 +5110,8 @@ impl SessionRuntime {
         // have no RuntimeLoop — inputs would queue without being processed.
         if !adapter.session_has_executor(session_id).await {
             let persisted_session = self.load_persisted_session(session_id).await?;
-            let persisted_session_is_archived = persisted_session
-                .as_ref()
-                .is_some_and(session_metadata_marks_archived);
-            let persisted_session_exists = persisted_session
-                .as_ref()
-                .is_some_and(|session| !session_metadata_marks_archived(session));
-            let adapter_registration_exists =
-                adapter.contains_session(session_id).await && !persisted_session_is_archived;
+            let persisted_session_exists = persisted_session.is_some();
+            let adapter_registration_exists = adapter.contains_session(session_id).await;
             let session_exists = adapter_registration_exists
                 || self.staged_sessions.contains(session_id).await
                 || self.service.read(session_id).await.is_ok()
@@ -5954,14 +5987,15 @@ impl SessionRuntime {
             let req = StartTurnRequest {
                 prompt: prompt.clone(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx.clone()),
-
-                skill_references: skill_references.clone(),
-                flow_tool_overlay: flow_tool_overlay.clone(),
-                pre_turn_context_appends: pre_turn_context_appends.clone(),
-                turn_metadata: primitive.turn_metadata().cloned(),
+                runtime: StartTurnRuntimeSemantics::new(
+                    None,
+                    meerkat_core::types::HandlingMode::Queue,
+                    skill_references.clone(),
+                    flow_tool_overlay.clone(),
+                    pre_turn_context_appends.clone(),
+                    primitive.turn_metadata().cloned(),
+                ),
             };
 
             let result_rx = self.spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
@@ -6133,14 +6167,15 @@ impl SessionRuntime {
                 StartTurnRequest {
                     prompt: runtime_prompt,
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-
-                    skill_references,
-                    flow_tool_overlay,
-                    pre_turn_context_appends: pre_turn_context_appends.clone(),
-                    turn_metadata: primitive.turn_metadata().cloned(),
+                    runtime: StartTurnRuntimeSemantics::new(
+                        None,
+                        meerkat_core::types::HandlingMode::Queue,
+                        skill_references,
+                        flow_tool_overlay,
+                        pre_turn_context_appends.clone(),
+                        primitive.turn_metadata().cloned(),
+                    ),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -6164,14 +6199,6 @@ impl SessionRuntime {
                 message: format!("session not found: {session_id}"),
                 data: None,
             })?;
-        if session_metadata_marks_archived(&stored_session) {
-            self.discard_stale_live_session(session_id).await;
-            return Err(RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("session not found: {session_id}"),
-                data: None,
-            });
-        }
         let recovery_overrides =
             self.recovery_overrides_from_turn(overrides.as_ref(), keep_alive)?;
         let active_turn = match pre_admission.as_mut() {
@@ -6191,14 +6218,15 @@ impl SessionRuntime {
             StartTurnRequest {
                 prompt,
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-
-                skill_references,
-                flow_tool_overlay,
-                pre_turn_context_appends,
-                turn_metadata: primitive.turn_metadata().cloned(),
+                runtime: StartTurnRuntimeSemantics::new(
+                    None,
+                    meerkat_core::types::HandlingMode::Queue,
+                    skill_references,
+                    flow_tool_overlay,
+                    pre_turn_context_appends,
+                    primitive.turn_metadata().cloned(),
+                ),
             },
             match primitive {
                 RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -6551,13 +6579,15 @@ impl SessionRuntime {
                 StartTurnRequest {
                     prompt: turn_prompt,
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-                    skill_references,
-                    flow_tool_overlay,
-                    pre_turn_context_appends: Vec::new(),
-                    turn_metadata,
+                    runtime: StartTurnRuntimeSemantics::new(
+                        None,
+                        meerkat_core::types::HandlingMode::Queue,
+                        skill_references,
+                        flow_tool_overlay,
+                        Vec::new(),
+                        turn_metadata,
+                    ),
                 },
                 promotion_cleanup,
                 machine_archived_resume_authorized,
@@ -6673,13 +6703,15 @@ impl SessionRuntime {
         let req = StartTurnRequest {
             prompt: turn_prompt.clone(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: Some(event_tx.clone()),
-            skill_references: skill_references.clone(),
-            flow_tool_overlay: flow_tool_overlay.clone(),
-            pre_turn_context_appends: Vec::new(),
-            turn_metadata,
+            runtime: StartTurnRuntimeSemantics::new(
+                None,
+                meerkat_core::types::HandlingMode::Queue,
+                skill_references.clone(),
+                flow_tool_overlay.clone(),
+                Vec::new(),
+                turn_metadata,
+            ),
         };
 
         let result_rx = self.spawn_service_start_turn_with_admission_guard(
@@ -6738,15 +6770,6 @@ impl SessionRuntime {
                 data: None,
             });
         };
-        if session_metadata_marks_archived(&session) {
-            self.discard_stale_live_session(session_id).await;
-            return Err(RpcError {
-                code: error::SESSION_NOT_FOUND,
-                message: format!("Session not found: {session_id}"),
-                data: None,
-            });
-        }
-
         let recovery_overrides = self.recovery_overrides_from_turn(overrides, keep_alive)?;
         let admission = self.reserve_active_turn(session_id).await?;
         if self
@@ -6925,6 +6948,10 @@ impl SessionRuntime {
             };
         }
 
+        if self.authoritative_session_archived(session_id).await? {
+            return Err(Self::archived_session_not_found_rpc(session_id));
+        }
+
         match self
             .runtime_adapter
             .hard_cancel_current_run(session_id, "RPC session runtime interrupt")
@@ -6980,6 +7007,14 @@ impl SessionRuntime {
         }
     }
 
+    fn archived_session_not_found_rpc(session_id: &SessionId) -> RpcError {
+        RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: format!("Session not found: {session_id}"),
+            data: None,
+        }
+    }
+
     pub(crate) async fn interrupt_noop_target(
         &self,
         session_id: &SessionId,
@@ -6989,9 +7024,6 @@ impl SessionRuntime {
         }
 
         if let Some(session) = self.load_persisted_session(session_id).await? {
-            if session_metadata_marks_archived(&session) {
-                return Ok(InterruptNoopTarget::Missing);
-            }
             if session_metadata_marks_mob_member(&session) {
                 #[cfg(feature = "mob")]
                 if let Some(mob_state) = self.mob_state() {
@@ -7048,6 +7080,10 @@ impl SessionRuntime {
         }
         if staged_is_materializing {
             return Err(Self::promoting_session_busy_rpc(session_id));
+        }
+
+        if self.authoritative_session_archived(session_id).await? {
+            return Err(Self::archived_session_not_found_rpc(session_id));
         }
 
         match self.runtime_adapter.cancel_after_boundary(session_id).await {
@@ -7212,10 +7248,48 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, RpcError> {
-        self.service
+        let Some(session) = self
+            .service
             .load_authoritative_session(session_id)
             .await
+            .map_err(session_error_to_rpc)?
+        else {
+            return Ok(None);
+        };
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(session))
+    }
+
+    async fn session_archived_by_authority(
+        &self,
+        session_id: &SessionId,
+        session: &Session,
+    ) -> Result<bool, RpcError> {
+        self.service
+            .session_archived_by_authority(session_id, session)
+            .await
             .map_err(session_error_to_rpc)
+    }
+
+    pub(crate) async fn authoritative_session_archived(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, RpcError> {
+        let Some(session) = self
+            .service
+            .load_authoritative_session(session_id)
+            .await
+            .map_err(session_error_to_rpc)?
+        else {
+            return Ok(false);
+        };
+        self.session_archived_by_authority(session_id, &session)
+            .await
     }
 
     /// Archive (remove) a session.
@@ -9114,13 +9188,8 @@ mod tests {
         StartTurnRequest {
             prompt: ContentInput::Text(prompt.to_string()),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
-            pre_turn_context_appends: Vec::new(),
-            turn_metadata: Some(
+            runtime: StartTurnRuntimeSemantics::runtime_metadata(
                 SessionRuntime::runtime_stamped_prompt_turn_metadata_from_overrides(
                     None, None, None, None, None,
                 ),
@@ -9132,13 +9201,8 @@ mod tests {
         StartTurnRequest {
             prompt: ContentInput::Text(String::new()),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: None,
-            skill_references: None,
-            flow_tool_overlay: None,
-            pre_turn_context_appends: Vec::new(),
-            turn_metadata: Some(
+            runtime: StartTurnRuntimeSemantics::runtime_metadata(
                 meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                     execution_kind: Some(
                         meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
@@ -15211,7 +15275,7 @@ mod tests {
             .await
             .expect("mob/direct deferred create should reserve capacity");
         let mut request = service_start_turn_request("missing runtime stamp");
-        request.turn_metadata = None;
+        request.runtime.turn_metadata = None;
         let result = service
             .apply_runtime_turn(
                 &direct.session_id,
@@ -16508,7 +16572,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_runtime_apply_pre_run_terminal_restores_staged_admission() {
+    async fn pending_runtime_apply_pre_run_terminal_archives_and_releases_staged_admission() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
 
@@ -16540,10 +16604,10 @@ mod tests {
             .load_persisted_session(&session_id)
             .await
             .expect("load machine-archived no-pending snapshot")
-            .expect("no-pending runtime apply should leave a durable terminal snapshot");
+            .is_none();
         assert!(
-            session_metadata_marks_archived(&stored),
-            "no-pending snapshot should be machine-archived while the staged slot is restored"
+            stored,
+            "no-pending runtime apply should hide the machine-archived snapshot behind runtime retirement"
         );
         let (event_tx, _event_rx) = mpsc::channel(100);
         let recovery = runtime
@@ -16566,49 +16630,16 @@ mod tests {
             "restored staged no-pending snapshot must not be recoverable before archive: {recovery:?}"
         );
 
-        let blocked = runtime
-            .create_session(mock_build_config(), None, None)
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.message.contains("Max sessions")),
-            "pre-run no-pending terminal should restore staged admission instead of releasing it: {blocked:?}"
-        );
-
-        runtime
-            .archive_session(&session_id)
-            .await
-            .expect("restored staged session should remain archivable");
-        let (event_tx, _event_rx) = mpsc::channel(100);
-        let recovered = runtime
-            .try_recover_persisted_session(
-                &session_id,
-                "should not recover archived pending no-op".into(),
-                event_tx,
-                false,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await;
-        assert!(
-            recovered
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
-            "archived restored staged session must not leave a recoverable no-pending snapshot: {recovered:?}"
-        );
         runtime
             .create_session(mock_build_config(), None, None)
             .await
-            .expect("archiving the restored staged session should release admission");
+            .expect(
+                "pre-run no-pending terminal should release staged admission after machine archive",
+            );
     }
 
     #[tokio::test]
-    async fn pending_runtime_apply_pre_run_terminal_restored_session_can_still_materialize() {
+    async fn pending_runtime_apply_pre_run_terminal_archived_session_cannot_materialize() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
 
@@ -16638,7 +16669,7 @@ mod tests {
         );
 
         let (event_tx, _event_rx) = mpsc::channel(100);
-        runtime
+        let retry = runtime
             .start_turn(
                 &session_id,
                 "retry after no-pending boundary".into(),
@@ -16649,20 +16680,15 @@ mod tests {
                 None,
             )
             .await
-            .expect("restored staged session should remain materializable");
-        let stored = runtime
-            .load_persisted_session(&session_id)
-            .await
-            .expect("load retried session")
-            .expect("retry should persist the materialized session");
+            .expect_err("machine-archived no-pending session must not materialize");
         assert!(
-            !session_metadata_marks_archived(&stored),
-            "retry should overwrite the machine-archived no-pending snapshot"
+            retry.code == error::SESSION_NOT_FOUND,
+            "machine-archived no-pending session should be gone, got {retry:?}"
         );
         runtime
             .create_session(mock_build_config(), None, None)
             .await
-            .expect("completed retry should release admission");
+            .expect("machine-archived no-pending session should release admission");
     }
 
     async fn drive_pending_start_resume_pending(
@@ -16721,7 +16747,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_start_pre_run_failure_archives_snapshot_and_allows_machine_retry() {
+    async fn pending_start_pre_run_failure_archives_snapshot_and_releases_admission() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
 
@@ -16736,49 +16762,20 @@ mod tests {
             no_pending.message.contains("no pending boundary"),
             "unexpected no-pending start error: {no_pending:?}"
         );
-        let stored = runtime
+        let hidden = runtime
             .load_persisted_session(&session_id)
             .await
             .expect("load machine-archived no-pending start snapshot")
-            .expect("pending start should leave a durable archived snapshot");
+            .is_none();
         assert!(
-            session_metadata_marks_archived(&stored),
-            "start no-pending snapshot should be machine-archived while staged slot is restored"
+            hidden,
+            "pending start no-pending snapshot should be hidden by runtime retirement"
         );
 
-        let blocked = runtime
-            .create_session(mock_build_config(), None, None)
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.message.contains("Max sessions")),
-            "restored staged no-pending start should keep admission reserved: {blocked:?}"
-        );
-
-        let (event_tx, _event_rx) = mpsc::channel(100);
         runtime
-            .start_turn(
-                &session_id,
-                "retry start after no-pending".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
+            .create_session(mock_build_config(), None, None)
             .await
-            .expect("restored staged session should retry after no-pending start");
-        let stored = runtime
-            .load_persisted_session(&session_id)
-            .await
-            .expect("load retried start session")
-            .expect("retry should persist session");
-        assert!(
-            !session_metadata_marks_archived(&stored),
-            "retry should overwrite archived start no-pending snapshot"
-        );
+            .expect("machine-archived no-pending start should release staged admission");
     }
 
     #[tokio::test]
@@ -17032,9 +17029,9 @@ mod tests {
             .expect("reserve recovery admission");
         runtime
             .service
-            .archive_with_machine_authority(
+            .archive_with_machine_protocol(
                 &session_id,
-                runtime.runtime_adapter.session_control_authority(),
+                MachineSessionArchiveProtocol::from_machine(runtime.runtime_adapter.as_ref()),
             )
             .await
             .expect("archive should win before recovered create");
@@ -17265,7 +17262,7 @@ mod tests {
     #[tokio::test]
     async fn staged_archive_unregisters_prepared_runtime_bindings() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -17280,6 +17277,15 @@ mod tests {
             .archive_session(&session_id)
             .await
             .expect("archive staged session");
+        assert_eq!(
+            runtime
+                .service
+                .persisted_runtime_state(&session_id)
+                .await
+                .expect("read persisted staged archive runtime state"),
+            Some(RuntimeState::Retired),
+            "staged archive must retire prepared runtime state before cleanup"
+        );
         assert!(
             !runtime.runtime_adapter.contains_session(&session_id).await,
             "staged archive must unregister prepared runtime bindings"

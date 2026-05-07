@@ -30,7 +30,7 @@ use std::sync::Arc;
 
 use meerkat::{
     AgentEvent, AgentFactory, Config, CreateSessionRequest, EphemeralSessionService,
-    FactoryAgentBuilder, SessionService, StartTurnRequest,
+    FactoryAgentBuilder, SessionService, StartTurnRequest, StartTurnRuntimeSemantics,
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::service::InitialTurnPolicy;
@@ -148,13 +148,8 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          The deployment log shows a new release was pushed 12 minutes ago."
                     .into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: StartTurnRuntimeSemantics::default(),
             },
         )
         .await?;
@@ -186,13 +181,8 @@ Production surfaces (CLI, REST, RPC, MCP) use the runtime-backed path.
                          Summarize the full incident timeline and close it out."
                     .into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: Some(event_tx),
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: StartTurnRuntimeSemantics::default(),
             },
         )
         .await?;

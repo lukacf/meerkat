@@ -485,15 +485,18 @@ Inject skills into a specific turn on an existing session. The skill content is 
     let result = service.start_turn(&session_id, StartTurnRequest {
         prompt: "Now format the output".into(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: Some(vec![SkillKey {
-            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
-            skill_name: SkillName::parse("markdown-formatter")?,
-        }]),
-        flow_tool_overlay: None,
-        additional_instructions: None,
+        runtime: StartTurnRuntimeSemantics::new(
+            None,
+            HandlingMode::Queue,
+            Some(vec![SkillKey {
+                source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")?,
+                skill_name: SkillName::parse("markdown-formatter")?,
+            }]),
+            None,
+            Vec::new(),
+            None,
+        ),
     }).await?;
     ```
   </Tab>

@@ -505,13 +505,15 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                 let req = meerkat_core::service::StartTurnRequest {
                     prompt,
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: meerkat_core::types::HandlingMode::Queue,
                     event_tx: Some(event_tx),
-                    skill_references,
-                    flow_tool_overlay,
-                    pre_turn_context_appends,
-                    turn_metadata,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                        None,
+                        meerkat_core::types::HandlingMode::Queue,
+                        skill_references,
+                        flow_tool_overlay,
+                        pre_turn_context_appends,
+                        turn_metadata,
+                    ),
                 };
                 self.session_service
                     .apply_runtime_turn(

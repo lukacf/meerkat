@@ -50,7 +50,7 @@ use meerkat_core::mcp_config::McpConfig;
 use meerkat_core::PendingSystemContextAppend;
 use meerkat_core::service::{
     CreateSessionRequest, InitialTurnPolicy, SessionBuildOptions, SessionError, SessionService,
-    StartTurnRequest,
+    StartTurnRequest, StartTurnRuntimeSemantics,
 };
 use meerkat_core::types::{ContentInput, HandlingMode, SessionId};
 use meerkat_core::{AgentToolDispatcher as _, Config, Session};
@@ -159,14 +159,6 @@ impl TargetScheduleSessionHost {
     }
 }
 
-fn session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn runtime_delivery_dispatch(
     occurrence: &meerkat::Occurrence,
     outcome: meerkat_runtime::accept::AcceptOutcome,
@@ -239,9 +231,7 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
         match persisted {
-            Some(session) if !session_metadata_marks_archived(&session) => {
-                Ok(meerkat::TargetProbeOutcome::Ready)
-            }
+            Some(_) => Ok(meerkat::TargetProbeOutcome::Ready),
             _ => Ok(meerkat::TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),
@@ -1166,15 +1156,17 @@ fn start_turn_request_from_primitive(
     Ok(StartTurnRequest {
         prompt: primitive.extract_content_input(),
         system_prompt: None,
-        render_metadata: metadata.and_then(|meta| meta.render_metadata.clone()),
-        handling_mode: metadata
-            .and_then(|meta| meta.handling_mode)
-            .unwrap_or(HandlingMode::Queue),
         event_tx: None,
-        skill_references: metadata.and_then(|meta| meta.skill_references.clone()),
-        flow_tool_overlay: metadata.and_then(|meta| meta.flow_tool_overlay.clone()),
-        pre_turn_context_appends,
-        turn_metadata: metadata.cloned(),
+        runtime: StartTurnRuntimeSemantics::new(
+            metadata.and_then(|meta| meta.render_metadata.clone()),
+            metadata
+                .and_then(|meta| meta.handling_mode)
+                .unwrap_or(HandlingMode::Queue),
+            metadata.and_then(|meta| meta.skill_references.clone()),
+            metadata.and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends,
+            metadata.cloned(),
+        ),
     })
 }
 
@@ -2699,20 +2691,15 @@ mod tests {
                 StartTurnRequest {
                     prompt: ContentInput::Text("run shell".to_string()),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    pre_turn_context_appends: Vec::new(),
-                    turn_metadata: Some(
+                    runtime: StartTurnRuntimeSemantics::runtime_metadata(Some(
                         meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
                             execution_kind: Some(
                                 meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                             ),
                             ..Default::default()
                         },
-                    ),
+                    )),
                 },
             )
             .await

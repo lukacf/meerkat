@@ -6020,17 +6020,19 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
         let turn_req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
-            render_metadata: None,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: self.event_tx.clone(),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            pre_turn_context_appends,
-            turn_metadata: primitive.turn_metadata().cloned(),
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                None,
+                meerkat_core::types::HandlingMode::Queue,
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.skill_references.clone()),
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                pre_turn_context_appends,
+                primitive.turn_metadata().cloned(),
+            ),
         };
 
         // Persistent path: use apply_runtime_turn for real receipt + snapshot.
@@ -6342,6 +6344,17 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
             &self.inner,
             session_id,
             authority,
+        )
+        .await
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::archive_with_mob_lifecycle_authority(
+            &self.inner,
+            session_id,
         )
         .await
     }
@@ -8262,14 +8275,6 @@ impl CliScheduleSessionHost {
     }
 }
 
-fn cli_session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
 fn scheduled_skill_keys(
     skill_refs: &[meerkat_core::skills::SkillRef],
 ) -> Result<Option<Vec<meerkat_core::skills::SkillKey>>, meerkat::ScheduleDomainError> {
@@ -8318,14 +8323,19 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             .load_authoritative_session(session_id)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        match persisted {
-            Some(session) if !cli_session_metadata_marks_archived(&session) => {
-                Ok(meerkat::TargetProbeOutcome::Ready)
+        if let Some(session) = persisted {
+            let archived = self
+                .service
+                .session_archived_by_authority(session_id, &session)
+                .await
+                .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
+            if !archived {
+                return Ok(meerkat::TargetProbeOutcome::Ready);
             }
-            _ => Ok(meerkat::TargetProbeOutcome::Missing {
-                detail: Some(format!("session not found: {session_id}")),
-            }),
         }
+        Ok(meerkat::TargetProbeOutcome::Missing {
+            detail: Some(format!("session not found: {session_id}")),
+        })
     }
 
     async fn materialize_session(
@@ -8745,6 +8755,17 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::archive_with_mob_lifecycle_authority(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn session_belongs_to_mob(
         &self,
         session_id: &SessionId,
@@ -9008,7 +9029,12 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                 .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
             } else {
                 service
-                    .archive(&session_id)
+                    .archive_with_machine_protocol(
+                        &session_id,
+                        meerkat::MachineSessionArchiveProtocol::from_machine(
+                            surface.runtime_adapter.as_ref(),
+                        ),
+                    )
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
             }
@@ -9017,7 +9043,12 @@ async fn delete_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
         {
             let _ = config;
             service
-                .archive(&session_id)
+                .archive_with_machine_protocol(
+                    &session_id,
+                    meerkat::MachineSessionArchiveProtocol::from_machine(
+                        surface.runtime_adapter.as_ref(),
+                    ),
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to delete session: {e}"))?;
         }
@@ -12828,7 +12859,8 @@ default_model = "gemma"
             *self
                 .pre_turn_context_appends
                 .lock()
-                .expect("pre-turn context appends lock poisoned") = req.pre_turn_context_appends;
+                .expect("pre-turn context appends lock poisoned") =
+                req.runtime.pre_turn_context_appends;
             if let Some(tx) = req.event_tx {
                 self.saw_event_tx
                     .store(true, std::sync::atomic::Ordering::Release);

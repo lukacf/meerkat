@@ -11,13 +11,13 @@
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::error::ToolError;
-use meerkat_core::service::{MobToolAuthorityContext, SessionError, SessionService};
+use meerkat_core::service::{MobToolAuthorityContext, SessionError};
 use meerkat_core::types::{
     ContentInput, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind,
 };
 use meerkat_mob::{
     AgentIdentity, MobBackendKind, MobDefinition, MobError, MobId, MobRuntimeMode, ProfileName,
-    SpawnMemberSpec, SpawnResult, ids::MeerkatId,
+    SpawnMemberSpec, SpawnResult, ids::MeerkatId, runtime::MobSessionService,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -1905,7 +1905,7 @@ pub async fn archive_session_with_mob_cleanup<S>(
     session_id: &SessionId,
 ) -> Result<(), SessionError>
 where
-    S: SessionService + ?Sized + 'static,
+    S: MobSessionService + ?Sized + 'static,
 {
     let session_id = session_id.clone();
     let result_session_id = session_id.clone();
@@ -1923,7 +1923,10 @@ where
             Ok(false) => {
                 let had_cleanup_anchor =
                     mob_state.has_bridge_session_scoped_mobs(&session_key).await;
-                match service.archive(&session_id).await {
+                match service
+                    .archive_with_mob_lifecycle_authority(&session_id)
+                    .await
+                {
                     Ok(()) => mob_state
                         .destroy_bridge_session_mobs(&session_key)
                         .await
@@ -1970,9 +1973,9 @@ mod tests {
     use meerkat_core::service::{
         AppendSystemContextRequest, AppendSystemContextResult, MobToolAuthorityContext,
         MobToolSnapshotContext, MobToolsFactory, OpaquePrincipalToken, SessionControlError,
-        SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionServiceCommsExt,
-        SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage,
-        SessionView, StartTurnRequest, VisibleToolSnapshotProvider,
+        SessionHistoryPage, SessionHistoryQuery, SessionInfo, SessionQuery, SessionService,
+        SessionServiceCommsExt, SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary,
+        SessionUsage, SessionView, StartTurnRequest, VisibleToolSnapshotProvider,
     };
     use meerkat_core::time_compat::SystemTime;
     use meerkat_core::types::{ContentInput, HandlingMode, RenderMetadata, RunResult, Usage};

@@ -830,12 +830,31 @@ async fn process_queue(
                             reason = conflict.reason,
                             "batch turn-metadata merge conflict"
                         );
-                        let _ = crate::meerkat_machine::fail_runtime_loop_run(
+                        if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                             driver,
                             run_id,
                             CoreApplyFailureCause::primitive_rejected(conflict.to_string()),
                         )
-                        .await;
+                        .await
+                        {
+                            tracing::error!(error = %err, "failed to record primitive rejection terminal event");
+                            let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+                                driver,
+                                completions,
+                                executor,
+                                format!("runtime primitive rejection snapshot failed: {err}"),
+                            )
+                            .await;
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                abandon_completion_waiters(
+                                    &mut completions,
+                                    &input_ids,
+                                    format!("runtime primitive rejection snapshot failed: {err}"),
+                                );
+                            }
+                            return should_stop;
+                        }
                         if let Some(completions) = completions.as_ref() {
                             let mut completions = completions.lock().await;
                             abandon_completion_waiters(
@@ -851,12 +870,31 @@ async fn process_queue(
                     prepare_turn_state_for_primitive(driver, &run_id, &primitive).await
                 {
                     tracing::error!(%run_id, error = %error, "failed to start runtime turn state");
-                    let _ = crate::meerkat_machine::fail_runtime_loop_run(
+                    if let Err(err) = crate::meerkat_machine::fail_runtime_loop_run(
                         driver,
                         run_id,
                         CoreApplyFailureCause::executor_internal(error.to_string()),
                     )
-                    .await;
+                    .await
+                    {
+                        tracing::error!(error = %err, "failed to record turn-state preparation terminal event");
+                        let should_stop = stop_runtime_loop_executor_from_dsl_effect(
+                            driver,
+                            completions,
+                            executor,
+                            format!("runtime turn-state preparation snapshot failed: {err}"),
+                        )
+                        .await;
+                        if let Some(completions) = completions.as_ref() {
+                            let mut completions = completions.lock().await;
+                            abandon_completion_waiters(
+                                &mut completions,
+                                &input_ids,
+                                format!("runtime turn-state preparation snapshot failed: {err}"),
+                            );
+                        }
+                        return should_stop;
+                    }
                     if let Some(completions) = completions.as_ref() {
                         let mut completions = completions.lock().await;
                         abandon_completion_waiters(
@@ -925,13 +963,17 @@ async fn process_queue(
                         let error_msg = e.to_string();
                         let terminal_failure = match &e {
                             CoreExecutorError::TerminalFailure {
+                                outcome,
                                 cause_kind,
                                 message,
                                 ..
-                            } => Some(crate::meerkat_machine_types::MeerkatMachineRunFailure::new(
-                                *cause_kind,
-                                message.clone(),
-                            )),
+                            } => Some(
+                                crate::meerkat_machine_types::MeerkatMachineRunFailure::terminal(
+                                    *outcome,
+                                    *cause_kind,
+                                    message.clone(),
+                                ),
+                            ),
                             _ => None,
                         };
                         let completion_error = match &e {

@@ -328,12 +328,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let result = service.start_turn(&result.session_id, StartTurnRequest {
         prompt: "Now divide that result by 5.".into(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: None,
-        skill_references: None,
-        flow_tool_overlay: None,
-        additional_instructions: None,
+        runtime: StartTurnRuntimeSemantics::default(),
     }).await?;
 
     println!("Follow-up: {}", result.text);

@@ -1132,8 +1132,7 @@ async fn destroy_keeps_committed_dsl_state_when_runtime_destroyed_signal_dispatc
 }
 
 #[tokio::test]
-async fn persistent_retire_keeps_live_dsl_state_but_recovery_does_not_force_projection_after_signal_failure()
- {
+async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_state() {
     let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
     let machine = MeerkatMachine::persistent(
         store.clone() as Arc<dyn crate::store::RuntimeStore>,
@@ -1171,15 +1170,15 @@ async fn persistent_retire_keeps_live_dsl_state_but_recovery_does_not_force_proj
     recovered.register_session(session_id.clone()).await;
     assert_eq!(
         recovered.existing_session_runtime_state(&session_id).await,
-        Some(RuntimeState::Idle),
-        "cold restart must not force semantic lifecycle from the diagnostic runtime-state projection"
+        Some(RuntimeState::Retired),
+        "cold restart must preserve the durable machine-owned terminal state"
     );
     assert_eq!(
         crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
             .await
             .expect("load persisted runtime state after recovery"),
-        Some(RuntimeState::Idle),
-        "recovery rewrites the diagnostic runtime-state projection from machine-owned post-recovery state"
+        Some(RuntimeState::Retired),
+        "recovery must not rewrite the durable terminal projection back to a live lifecycle"
     );
 }
 
@@ -1465,7 +1464,90 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
         other => panic!("expected typed abandoned completion, got {other:?}"),
     }
 
-    let (terminal_cause_kind, runtime_apply_failure_cause, runtime_apply_failure_message) =
+    let (
+        terminal_outcome,
+        terminal_cause_kind,
+        runtime_apply_failure_cause,
+        runtime_apply_failure_message,
+    ) = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let observed = {
+                let sessions = adapter.sessions.read().await;
+                let entry = sessions.get(&session_id).expect("session should exist");
+                let authority = entry
+                    .dsl_authority
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    authority.state.terminal_outcome,
+                    authority.state.terminal_cause_kind,
+                    authority.state.last_runtime_apply_failure_cause,
+                    authority.state.last_runtime_apply_failure_message.clone(),
+                )
+            };
+            if observed.1.is_some() {
+                break observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("runtime loop should terminalize the typed machine failure");
+
+    assert_eq!(terminal_outcome, Some(mm_dsl::TurnTerminalOutcome::Failed));
+    assert_eq!(
+        terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::LlmFailure)
+    );
+    assert_eq!(runtime_apply_failure_cause, None);
+    assert_eq!(runtime_apply_failure_message, None);
+}
+
+#[tokio::test]
+async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop() {
+    struct TypedOutcomeFailureExecutor;
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for TypedOutcomeFailureExecutor {
+        async fn apply(
+            &mut self,
+            _run_id: RunId,
+            _primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            Err(CoreExecutorError::terminal_failure(
+                meerkat_core::TurnTerminalOutcome::StructuredOutputValidationFailed,
+                meerkat_core::TurnTerminalCauseKind::StructuredOutputValidationFailed,
+                "schema validation failed",
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(session_id.clone(), Box::new(TypedOutcomeFailureExecutor))
+        .await;
+
+    adapter
+        .accept_input(&session_id, make_prompt("typed outcome machine failure"))
+        .await
+        .expect("input should be accepted");
+
+    let (terminal_outcome, terminal_cause_kind) =
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
                 let observed = {
@@ -1476,12 +1558,11 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
+                        authority.state.terminal_outcome,
                         authority.state.terminal_cause_kind,
-                        authority.state.last_runtime_apply_failure_cause,
-                        authority.state.last_runtime_apply_failure_message.clone(),
                     )
                 };
-                if observed.0.is_some() {
+                if observed.1.is_some() {
                     break observed;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1491,11 +1572,13 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
         .expect("runtime loop should terminalize the typed machine failure");
 
     assert_eq!(
-        terminal_cause_kind,
-        Some(mm_dsl::TurnTerminalCauseKind::LlmFailure)
+        terminal_outcome,
+        Some(mm_dsl::TurnTerminalOutcome::StructuredOutputValidationFailed)
     );
-    assert_eq!(runtime_apply_failure_cause, None);
-    assert_eq!(runtime_apply_failure_message, None);
+    assert_eq!(
+        terminal_cause_kind,
+        Some(mm_dsl::TurnTerminalCauseKind::StructuredOutputValidationFailed)
+    );
 }
 
 #[tokio::test]

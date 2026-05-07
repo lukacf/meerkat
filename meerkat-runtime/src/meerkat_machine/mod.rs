@@ -1096,9 +1096,14 @@ impl MeerkatMachine {
         &self,
         runtime_id: LogicalRuntimeId,
         dsl_authority: crate::driver::ephemeral::SharedIngressDslAuthority,
+        initial_runtime_state: RuntimeState,
     ) -> DriverEntry {
         let control_projection = Arc::new(StdRwLock::new(
-            crate::driver::ephemeral::RuntimeControlProjection::default(),
+            crate::driver::ephemeral::RuntimeControlProjection {
+                phase: initial_runtime_state,
+                current_run_id: None,
+                pre_run_phase: None,
+            },
         ));
         match (&self.store, &self.blob_store) {
             (Some(store), Some(blob_store)) => {

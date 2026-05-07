@@ -4122,7 +4122,7 @@ async fn wait_for_runtime_turn_quiescence(
                         )),
                         Ok(None) => active_descriptions.push(format!("{input_id}:missing")),
                         Err(error) => {
-                            active_descriptions.push(format!("{input_id}:state_error={error}"))
+                            active_descriptions.push(format!("{input_id}:state_error={error}"));
                         }
                     }
                 }

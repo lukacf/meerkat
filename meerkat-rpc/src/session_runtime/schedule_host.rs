@@ -15,7 +15,7 @@ use meerkat_core::SessionId;
 #[cfg(feature = "mob")]
 use meerkat_mob_mcp::MobMcpScheduleHost;
 
-use super::{SessionRuntime, SessionState, session_metadata_marks_archived};
+use super::{SessionRuntime, SessionState};
 
 fn runtime_delivery_dispatch(
     occurrence: &Occurrence,
@@ -107,9 +107,7 @@ impl SurfaceScheduleSessionHost for RpcScheduleTargetAdapter {
             .await
             .map_err(rpc_to_schedule)?;
         match persisted {
-            Some(session) if !session_metadata_marks_archived(&session) => {
-                Ok(TargetProbeOutcome::Ready)
-            }
+            Some(_) => Ok(TargetProbeOutcome::Ready),
             _ => Ok(TargetProbeOutcome::Missing {
                 detail: Some(format!("session not found: {session_id}")),
             }),

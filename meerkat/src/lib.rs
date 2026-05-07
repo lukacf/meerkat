@@ -242,7 +242,9 @@ pub use meerkat_session::{
     EphemeralSessionService, RuntimeContextAdmissionGuard, SessionAgent, SessionAgentBuilder,
 };
 #[cfg(feature = "session-store")]
-pub use meerkat_session::{MachineServiceTurnCommitProtocol, PersistentSessionService};
+pub use meerkat_session::{
+    MachineServiceTurnCommitProtocol, MachineSessionArchiveProtocol, PersistentSessionService,
+};
 
 #[cfg(feature = "anthropic")]
 pub use meerkat_client::AnthropicClient;

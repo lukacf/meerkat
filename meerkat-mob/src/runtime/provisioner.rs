@@ -438,6 +438,45 @@ impl SessionBackend {
         }
     }
 
+    async fn unregister_runtime_session_binding(&self, session_id: &SessionId) {
+        if let Some(adapter) = &self.runtime_adapter {
+            if adapter.contains_session(session_id).await {
+                adapter.unregister_session(session_id).await;
+            }
+            self.remove_runtime_session_state(session_id).await;
+        }
+    }
+
+    async fn archive_with_authority_then_unregister(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        match self
+            .session_service
+            .archive_with_mob_lifecycle_authority(session_id)
+            .await
+        {
+            Ok(()) => {
+                self.unregister_runtime_session_binding(session_id).await;
+                Ok(())
+            }
+            Err(SessionError::NotFound { id }) => {
+                if let Some(adapter) = &self.runtime_adapter
+                    && adapter.contains_session(session_id).await
+                {
+                    return Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "mob archive authority returned NotFound for registered runtime session {session_id}"
+                        )),
+                    ));
+                }
+                self.unregister_runtime_session_binding(session_id).await;
+                Err(SessionError::NotFound { id })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn execute_runtime_input(
         &self,
         session_id: &SessionId,
@@ -1174,17 +1213,19 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         let req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
-            render_metadata: runtime_render_metadata,
-            handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: queued_context.map(|context| context.event_tx),
-            skill_references: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.skill_references.clone()),
-            flow_tool_overlay: primitive
-                .turn_metadata()
-                .and_then(|meta| meta.flow_tool_overlay.clone()),
-            pre_turn_context_appends,
-            turn_metadata: executor_turn_metadata,
+            runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                runtime_render_metadata,
+                meerkat_core::types::HandlingMode::Queue,
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.skill_references.clone()),
+                primitive
+                    .turn_metadata()
+                    .and_then(|meta| meta.flow_tool_overlay.clone()),
+                pre_turn_context_appends,
+                executor_turn_metadata,
+            ),
         };
 
         self.session_service
@@ -1335,17 +1376,8 @@ impl MobProvisioner for SessionBackend {
         if let Some(admitted_bridge_session_id) = admitted_bridge_session_id.as_ref()
             && admitted_bridge_session_id != &created_bridge_session_id
         {
-            if let Some(adapter) = &self.runtime_adapter {
-                adapter.unregister_session(admitted_bridge_session_id).await;
-                adapter.unregister_session(&created_bridge_session_id).await;
-            }
-            self.remove_runtime_session_state(admitted_bridge_session_id)
-                .await;
-            self.remove_runtime_session_state(&created_bridge_session_id)
-                .await;
             if let Err(error) = self
-                .session_service
-                .archive(&created_bridge_session_id)
+                .archive_with_authority_then_unregister(&created_bridge_session_id)
                 .await
                 && !matches!(error, SessionError::NotFound { .. })
             {
@@ -1353,6 +1385,8 @@ impl MobProvisioner for SessionBackend {
                     "session service returned bridge session '{created_bridge_session_id}' for admitted mob spawn session '{admitted_bridge_session_id}', and cleanup archive failed: {error}"
                 )));
             }
+            self.unregister_runtime_session_binding(admitted_bridge_session_id)
+                .await;
             return Err(MobError::Internal(format!(
                 "session service returned bridge session '{created_bridge_session_id}' for admitted mob spawn session '{admitted_bridge_session_id}'"
             )));
@@ -1408,13 +1442,10 @@ impl MobProvisioner for SessionBackend {
             .operation_status(&bridge_session_id, operation_id)
         {
             Some(OperationStatus::Provisioning) => {
-                if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&bridge_session_id).await {
-                        adapter.unregister_session(&bridge_session_id).await;
-                    }
-                    self.remove_runtime_session_state(&bridge_session_id).await;
-                }
-                match self.session_service.archive(&bridge_session_id).await {
+                match self
+                    .archive_with_authority_then_unregister(&bridge_session_id)
+                    .await
+                {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -1437,26 +1468,20 @@ impl MobProvisioner for SessionBackend {
                 | OperationStatus::Retired
                 | OperationStatus::Terminated,
             ) => {
-                if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&bridge_session_id).await {
-                        adapter.unregister_session(&bridge_session_id).await;
-                    }
-                    self.remove_runtime_session_state(&bridge_session_id).await;
-                }
-                match self.session_service.archive(&bridge_session_id).await {
+                match self
+                    .archive_with_authority_then_unregister(&bridge_session_id)
+                    .await
+                {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
                 Ok(())
             }
             Some(OperationStatus::Absent) | None => {
-                if let Some(adapter) = &self.runtime_adapter {
-                    if adapter.contains_session(&bridge_session_id).await {
-                        adapter.unregister_session(&bridge_session_id).await;
-                    }
-                    self.remove_runtime_session_state(&bridge_session_id).await;
-                }
-                match self.session_service.archive(&bridge_session_id).await {
+                match self
+                    .archive_with_authority_then_unregister(&bridge_session_id)
+                    .await
+                {
                     Ok(()) | Err(SessionError::NotFound { .. }) => {}
                     Err(error) => return Err(error.into()),
                 }
@@ -1474,11 +1499,10 @@ impl MobProvisioner for SessionBackend {
                     .await
                     .map(|_| ())
                     .map_err(|err| MobError::Internal(err.to_string()))?;
-                adapter.unregister_session(&session_id).await;
             }
-            self.remove_runtime_session_state(&session_id).await;
         }
-        self.session_service.archive(&session_id).await?;
+        self.archive_with_authority_then_unregister(&session_id)
+            .await?;
         self.ops_adapter.mark_member_retired(member_ref).await?;
         Ok(())
     }
@@ -1569,11 +1593,11 @@ impl MobProvisioner for SessionBackend {
                 .report_member_progress(member_ref, "turn dispatched")
                 .await?;
             let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(req.handling_mode),
+                handling_mode: Some(req.runtime.handling_mode),
                 keep_alive: None,
-                skill_references: req.skill_references.clone(),
-                flow_tool_overlay: req.flow_tool_overlay.clone(),
-                render_metadata: req.render_metadata.clone(),
+                skill_references: req.runtime.skill_references.clone(),
+                flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
+                render_metadata: req.runtime.render_metadata.clone(),
                 ..Default::default()
             };
             let prompt = req.prompt.clone();
@@ -1624,11 +1648,11 @@ impl MobProvisioner for SessionBackend {
                 0,
                 Some(
                     meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                        handling_mode: Some(req.handling_mode),
+                        handling_mode: Some(req.runtime.handling_mode),
                         keep_alive: None,
-                        skill_references: req.skill_references.clone(),
-                        flow_tool_overlay: req.flow_tool_overlay.clone(),
-                        render_metadata: req.render_metadata.clone(),
+                        skill_references: req.runtime.skill_references.clone(),
+                        flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
+                        render_metadata: req.runtime.render_metadata.clone(),
                         ..Default::default()
                     },
                 ),
@@ -2425,7 +2449,7 @@ impl MobProvisioner for MultiBackendProvisioner {
                         protocol_version: authority.protocol_version,
                         input_id: meerkat_core::time_compat::new_uuid_v7().to_string(),
                         content: req.prompt.clone(),
-                        handling_mode: req.handling_mode,
+                        handling_mode: req.runtime.handling_mode,
                     },
                 );
                 let response: super::bridge_protocol::BridgeDeliveryResponse = self

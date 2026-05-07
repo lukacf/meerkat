@@ -764,16 +764,13 @@ impl std::fmt::Debug for SessionBuildOptions {
     }
 }
 
-/// Request to start a new turn on an existing session.
+/// Runtime/session semantic carrier for starting a turn.
+///
+/// The session service forwards this as one machine/composition-owned bundle.
+/// It must not split handling mode, tool overlays, context appends, or runtime
+/// metadata back into service-level request fields.
 #[derive(Debug)]
-pub struct StartTurnRequest {
-    /// User prompt for this turn (text or multimodal).
-    pub prompt: ContentInput,
-    /// Optional system prompt override for a deferred session's first turn.
-    ///
-    /// This is only supported before the session has any conversation history.
-    /// Materialized sessions with existing messages must reject it.
-    pub system_prompt: Option<String>,
+pub struct StartTurnRuntimeSemantics {
     /// Optional normalized rendering metadata for this turn prompt.
     pub render_metadata: Option<RenderMetadata>,
     /// Handling mode for this turn's ordinary content-bearing work.
@@ -783,8 +780,6 @@ pub struct StartTurnRequest {
     /// to the `SessionAgent` but does not act on it. Non-Queue handling
     /// only works correctly on runtime-backed surfaces.
     pub handling_mode: HandlingMode,
-    /// Channel for streaming events during the turn.
-    pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
     /// Canonical SkillKeys to resolve and inject for this turn.
     pub skill_references: Option<Vec<crate::skills::SkillKey>>,
     /// Optional per-turn flow tool overlay (ephemeral, non-persistent).
@@ -798,6 +793,64 @@ pub struct StartTurnRequest {
     /// the session layer derives per-turn policy from this typed carrier
     /// instead of re-inferring or dropping fields.
     pub turn_metadata: Option<RuntimeTurnMetadata>,
+}
+
+impl Default for StartTurnRuntimeSemantics {
+    fn default() -> Self {
+        Self {
+            render_metadata: None,
+            handling_mode: HandlingMode::Queue,
+            skill_references: None,
+            flow_tool_overlay: None,
+            pre_turn_context_appends: Vec::new(),
+            turn_metadata: None,
+        }
+    }
+}
+
+impl StartTurnRuntimeSemantics {
+    #[must_use]
+    pub fn new(
+        render_metadata: Option<RenderMetadata>,
+        handling_mode: HandlingMode,
+        skill_references: Option<Vec<crate::skills::SkillKey>>,
+        flow_tool_overlay: Option<TurnToolOverlay>,
+        pre_turn_context_appends: Vec<PendingSystemContextAppend>,
+        turn_metadata: Option<RuntimeTurnMetadata>,
+    ) -> Self {
+        Self {
+            render_metadata,
+            handling_mode,
+            skill_references,
+            flow_tool_overlay,
+            pre_turn_context_appends,
+            turn_metadata,
+        }
+    }
+
+    #[must_use]
+    pub fn runtime_metadata(turn_metadata: RuntimeTurnMetadata) -> Self {
+        Self {
+            turn_metadata: Some(turn_metadata),
+            ..Self::default()
+        }
+    }
+}
+
+/// Request to start a new turn on an existing session.
+#[derive(Debug)]
+pub struct StartTurnRequest {
+    /// User prompt for this turn (text or multimodal).
+    pub prompt: ContentInput,
+    /// Optional system prompt override for a deferred session's first turn.
+    ///
+    /// This is only supported before the session has any conversation history.
+    /// Materialized sessions with existing messages must reject it.
+    pub system_prompt: Option<String>,
+    /// Channel for streaming events during the turn.
+    pub event_tx: Option<mpsc::Sender<EventEnvelope<AgentEvent>>>,
+    /// Single runtime/session semantic carrier for this turn.
+    pub runtime: StartTurnRuntimeSemantics,
 }
 
 /// Request to append runtime system context to an existing session.

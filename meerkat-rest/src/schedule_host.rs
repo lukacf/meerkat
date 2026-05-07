@@ -24,10 +24,7 @@ use meerkat_runtime::{
 };
 use tokio::sync::Mutex;
 
-use crate::{
-    AppState, RestRuntimeExecutorContext, RestSessionRuntimeExecutor,
-    session_metadata_marks_archived,
-};
+use crate::{AppState, RestRuntimeExecutorContext, RestSessionRuntimeExecutor};
 
 fn materialized_preload_skills(
     preload_skills: &[meerkat_core::skills::SkillKey],

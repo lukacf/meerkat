@@ -163,12 +163,8 @@ let session_id = result.session_id;
 let result = service.start_turn(&session_id, StartTurnRequest {
     prompt: "What's my name?".into(),
     system_prompt: None,
-    render_metadata: None,
-    handling_mode: HandlingMode::Queue,
     event_tx: None,
-    skill_references: None,
-    flow_tool_overlay: None,
-    additional_instructions: None,
+    runtime: StartTurnRuntimeSemantics::default(),
 }).await?;
 
 // Read session state
@@ -201,12 +197,8 @@ let created = service.create_session(CreateSessionRequest {
 let result = service.start_turn(&created.session_id, StartTurnRequest {
     prompt: "Now run with the first-turn override.".into(),
     system_prompt: Some("You are the deferred first-turn override.".into()),
-    render_metadata: None,
-    handling_mode: HandlingMode::Queue,
     event_tx: None,
-    skill_references: None,
-    flow_tool_overlay: None,
-    additional_instructions: None,
+    runtime: StartTurnRuntimeSemantics::default(),
 }).await?;
 ```
 

@@ -81,6 +81,35 @@ fn spawn_ops_lifecycle_persistence_worker(
 }
 
 impl MeerkatMachine {
+    async fn durable_runtime_state_for_registration(
+        &self,
+        runtime_id: &LogicalRuntimeId,
+    ) -> Result<Option<RuntimeState>, RuntimeDriverError> {
+        let Some(store) = self.store.as_ref() else {
+            return Ok(None);
+        };
+        let mut primary_runtime_state_loaded = false;
+        for (candidate_index, candidate) in runtime_id
+            .storage_alias_candidates()
+            .into_iter()
+            .enumerate()
+        {
+            match store.load_runtime_state(&candidate).await {
+                Ok(state) => {
+                    if candidate_index == 0 {
+                        primary_runtime_state_loaded = true;
+                    }
+                    if state.is_some() {
+                        return Ok(state);
+                    }
+                }
+                Err(_err) if candidate_index > 0 && primary_runtime_state_loaded => continue,
+                Err(err) => return Err(RuntimeDriverError::Internal(err.to_string())),
+            }
+        }
+        Ok(None)
+    }
+
     pub(super) async fn register_session_inner(
         &self,
         session_id: SessionId,
@@ -93,10 +122,14 @@ impl MeerkatMachine {
             }
         }
 
+        let runtime_id = Self::logical_runtime_id(&session_id);
+        let durable_runtime_state = self
+            .durable_runtime_state_for_registration(&runtime_id)
+            .await?;
         let dsl_authority = Arc::new(std::sync::Mutex::new(
             super::dsl::MeerkatMachineAuthority::from_state(super::dsl_authority::project_state(
                 &session_id,
-                RuntimeState::Idle,
+                durable_runtime_state.unwrap_or(RuntimeState::Idle),
                 None,
                 None,
                 None,
@@ -104,8 +137,12 @@ impl MeerkatMachine {
                 None,
             )),
         ));
-        let runtime_id = Self::logical_runtime_id(&session_id);
-        let mut entry = self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
+        let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
+        let mut entry = self.make_driver(
+            runtime_id.clone(),
+            Arc::clone(&dsl_authority),
+            initial_runtime_state,
+        );
         if let Err(err) = entry.as_driver_mut().recover().await {
             tracing::error!(%session_id, error = %err, "failed to recover runtime driver during registration");
             return Err(err);
@@ -323,11 +360,27 @@ impl MeerkatMachine {
                 }
                 (driver, completions, ops_lifecycle)
             } else {
+                let runtime_id = Self::logical_runtime_id(&session_id);
+                let durable_runtime_state = match self
+                    .durable_runtime_state_for_registration(&runtime_id)
+                    .await
+                {
+                    Ok(state) => state,
+                    Err(err) => {
+                        tracing::error!(
+                            %session_id,
+                            error = %err,
+                            "failed to load durable runtime state during executor registration"
+                        );
+                        return;
+                    }
+                };
+                let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
                 let dsl_authority = Arc::new(std::sync::Mutex::new(
                     super::dsl::MeerkatMachineAuthority::from_state(
                         super::dsl_authority::project_state(
                             &session_id,
-                            RuntimeState::Idle,
+                            initial_runtime_state,
                             None,
                             None,
                             None,
@@ -336,9 +389,11 @@ impl MeerkatMachine {
                         ),
                     ),
                 ));
-                let runtime_id = Self::logical_runtime_id(&session_id);
-                let mut recovered_entry =
-                    self.make_driver(runtime_id.clone(), Arc::clone(&dsl_authority));
+                let mut recovered_entry = self.make_driver(
+                    runtime_id.clone(),
+                    Arc::clone(&dsl_authority),
+                    initial_runtime_state,
+                );
                 if let Err(err) = recovered_entry.as_driver_mut().recover().await {
                     tracing::error!(
                         %session_id,

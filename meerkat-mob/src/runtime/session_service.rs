@@ -51,14 +51,6 @@ fn session_control_error_to_session_error(err: SessionControlError) -> SessionEr
     }
 }
 
-fn session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
 #[cfg(feature = "runtime-adapter")]
 fn ephemeral_runtime_adapter_cache()
 -> &'static Mutex<HashMap<usize, Weak<meerkat_runtime::MeerkatMachine>>> {
@@ -91,6 +83,33 @@ fn cached_runtime_adapter(
     let adapter = init();
     cache.insert(key, Arc::downgrade(&adapter));
     adapter
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn retire_runtime_session_for_archive(
+    runtime_adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+) -> Result<(), SessionError> {
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+    match meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id).await {
+        Ok(_) => Ok(()),
+        Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
+            runtime_adapter.register_session(session_id.clone()).await;
+            meerkat_runtime::RuntimeControlPlane::retire(runtime_adapter, &runtime_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "machine archive retire failed after registration: {error}"
+                    )))
+                })
+        }
+        Err(error) => Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "machine archive retire failed: {error}"
+            )),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +221,24 @@ pub trait MobSessionService:
         _session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
         Ok(None)
+    }
+
+    /// Archive a mob-owned session through the strongest lifecycle authority
+    /// this service exposes. Runtime-backed persistent services override this
+    /// to require a concrete `MeerkatMachine` archive protocol before writing
+    /// archive projection state.
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        #[cfg(feature = "runtime-adapter")]
+        if self.runtime_adapter().is_some() {
+            return Err(SessionError::Unsupported(format!(
+                "archive for runtime-backed mob session {session_id} must be implemented by the machine-owned session service"
+            )));
+        }
+
+        <Self as SessionService>::archive(self, session_id).await
     }
 
     async fn apply_runtime_turn(
@@ -335,6 +372,19 @@ where
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         meerkat_core::service::SessionService::cancel_after_boundary(self, session_id).await
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        <Self as SessionService>::read(self, session_id).await?;
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(runtime_adapter) = self.runtime_adapter() {
+            retire_runtime_session_for_archive(runtime_adapter.as_ref(), session_id).await?;
+        }
+
+        <Self as SessionService>::archive(self, session_id).await
     }
 
     async fn execution_snapshot(
@@ -495,8 +545,35 @@ where
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, SessionError> {
-        let session = self.load_authoritative_session(session_id).await?;
-        Ok(session.filter(|session| !session_metadata_marks_archived(session)))
+        let Some(session) = self.load_authoritative_session(session_id).await? else {
+            return Ok(None);
+        };
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(session))
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        #[cfg(feature = "runtime-adapter")]
+        if let Some(runtime_adapter) = self.runtime_adapter() {
+            return meerkat_session::PersistentSessionService::<B>::archive_with_machine_protocol(
+                self,
+                session_id,
+                meerkat_session::MachineSessionArchiveProtocol::from_machine(
+                    runtime_adapter.as_ref(),
+                ),
+            )
+            .await;
+        }
+
+        <Self as SessionService>::archive(self, session_id).await
     }
 
     #[cfg(feature = "runtime-adapter")]

@@ -603,14 +603,6 @@ pub struct MethodRouter {
 }
 
 impl MethodRouter {
-    fn session_metadata_marks_archived(session: &Session) -> bool {
-        session
-            .metadata()
-            .get("session_archived")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false)
-    }
-
     /// Create a new method router.
     ///
     /// Reuses existing mob state from the runtime if available, otherwise
@@ -922,17 +914,17 @@ impl MethodRouter {
         &self,
         session_id: &SessionId,
     ) -> Result<(), RpcResponse> {
-        let persisted = self
+        let archived = self
             .runtime
-            .load_persisted_session(session_id)
+            .authoritative_session_archived(session_id)
             .await
-            .ok()
-            .flatten();
-        if persisted
-            .as_ref()
-            .is_some_and(Self::session_metadata_marks_archived)
-            && !self.runtime.pending_session_exists(session_id).await
-        {
+            .map_err(|error| RpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: None,
+                result: None,
+                error: Some(error),
+            })?;
+        if archived && !self.runtime.pending_session_exists(session_id).await {
             self.runtime_adapter.unregister_session(session_id).await;
             return Err(RpcResponse::error(
                 None,

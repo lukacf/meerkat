@@ -865,17 +865,15 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
                 | crate::meerkat_machine::dsl::TurnPhase::Cancelled
         )
     };
-    if turn_needs_completion {
-        machine_apply_turn_run_completed(driver, &run_id)?;
-    }
     let next_phase =
         crate::runtime_state::run_return_phase_from_pre_run_phase(driver.pre_run_phase());
-    let rollback = match driver {
-        DriverEntry::Persistent(driver) => Some(driver.rollback_snapshot()),
-        DriverEntry::Ephemeral(_) => None,
-    };
+    let terminal_checkpoint = driver.rollback_snapshot();
+    if turn_needs_completion && let Err(err) = machine_apply_turn_run_completed(driver, &run_id) {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(err);
+    }
     let authority = driver.shared_dsl_authority();
-    {
+    let service_turn_commit_result = {
         let mut auth = authority
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -893,16 +891,27 @@ pub(crate) async fn machine_commit_service_turn_terminal_receipt(
                 }
                 .to_string(),
             )
-        })?;
+        })
+    };
+    if let Err(err) = service_turn_commit_result {
+        driver.restore_rollback_snapshot(terminal_checkpoint);
+        return Err(err);
     }
-    if let Some(rollback) = rollback
-        && let DriverEntry::Persistent(driver) = driver
-    {
-        driver
-            .publish_service_turn_terminal_lifecycle(rollback, next_phase)
-            .await?;
-    } else {
-        driver.set_control_projection(next_phase, None, None);
+    match (driver, terminal_checkpoint) {
+        (DriverEntry::Persistent(driver), DriverRollbackSnapshot::Persistent(rollback)) => {
+            driver
+                .publish_service_turn_terminal_lifecycle(rollback, next_phase)
+                .await?;
+        }
+        (DriverEntry::Ephemeral(driver), DriverRollbackSnapshot::Ephemeral(_)) => {
+            driver.set_control_projection(next_phase, None, None);
+        }
+        (driver, checkpoint) => {
+            driver.restore_rollback_snapshot(checkpoint);
+            return Err(RuntimeDriverError::Internal(
+                "service-turn terminal receipt rollback snapshot/driver kind mismatch".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -974,6 +983,7 @@ fn machine_apply_turn_run_failed(
     driver: &mut DriverEntry,
     run_id: &RunId,
     terminal_error: &str,
+    terminal_outcome: meerkat_core::TurnTerminalOutcome,
     terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<&CoreApplyFailureCause>,
 ) -> Result<(), RuntimeDriverError> {
@@ -995,7 +1005,7 @@ fn machine_apply_turn_run_failed(
                 .map(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::from),
             runtime_apply_failure_message: runtime_apply_failure
                 .map(|failure| failure.message().to_owned()),
-            terminal_outcome: crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed,
+            terminal_outcome: terminal_outcome.into(),
             terminal_cause_kind: terminal_cause_kind.into(),
             error: terminal_error.to_owned(),
         },
@@ -2689,6 +2699,7 @@ pub(crate) async fn fail_runtime_loop_run(
         driver,
         run_id,
         failure.message().to_owned(),
+        meerkat_core::TurnTerminalOutcome::Failed,
         meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
         Some(failure),
     )
@@ -2704,6 +2715,7 @@ pub(crate) async fn fail_machine_run(
         driver,
         run_id,
         failure.error,
+        failure.terminal_outcome,
         failure.terminal_cause_kind,
         None,
     )
@@ -2760,6 +2772,7 @@ async fn fail_runtime_loop_run_inner(
     driver: &SharedDriver,
     run_id: RunId,
     terminal_error: String,
+    terminal_outcome: meerkat_core::TurnTerminalOutcome,
     terminal_cause_kind: meerkat_core::TurnTerminalCauseKind,
     runtime_apply_failure: Option<CoreApplyFailureCause>,
 ) -> Result<(), RuntimeLoopRunFailError> {
@@ -2783,6 +2796,7 @@ async fn fail_runtime_loop_run_inner(
         &mut driver,
         &failed_run_id,
         &terminal_error,
+        terminal_outcome,
         terminal_cause_kind,
         runtime_apply_failure.as_ref(),
     ) {
@@ -2856,6 +2870,7 @@ mod run_failed_cause_tests {
             &mut driver,
             &run_id,
             "legacy failure",
+            meerkat_core::TurnTerminalOutcome::Failed,
             meerkat_core::TurnTerminalCauseKind::FatalFailure,
             None,
         )
@@ -2868,6 +2883,10 @@ mod run_failed_cause_tests {
         assert_eq!(
             auth.state.terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
+        );
+        assert_eq!(
+            auth.state.terminal_outcome,
+            Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
         );
         assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
         assert_eq!(auth.state.last_runtime_apply_failure_message, None);
@@ -2882,6 +2901,7 @@ mod run_failed_cause_tests {
             &mut driver,
             &run_id,
             "runtime apply failure: display-only text",
+            meerkat_core::TurnTerminalOutcome::Failed,
             meerkat_core::TurnTerminalCauseKind::FatalFailure,
             None,
         )
@@ -2894,6 +2914,10 @@ mod run_failed_cause_tests {
         assert_eq!(
             auth.state.terminal_cause_kind,
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::FatalFailure)
+        );
+        assert_eq!(
+            auth.state.terminal_outcome,
+            Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
         );
         assert_eq!(auth.state.last_runtime_apply_failure_cause, None);
         assert_eq!(auth.state.last_runtime_apply_failure_message, None);
@@ -2909,6 +2933,7 @@ mod run_failed_cause_tests {
             &mut driver,
             &run_id,
             failure.message(),
+            meerkat_core::TurnTerminalOutcome::Failed,
             meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure,
             Some(&failure),
         )
@@ -2923,12 +2948,54 @@ mod run_failed_cause_tests {
             Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::RuntimeApplyFailure)
         );
         assert_eq!(
+            auth.state.terminal_outcome,
+            Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::Failed)
+        );
+        assert_eq!(
             auth.state.last_runtime_apply_failure_cause,
             Some(crate::meerkat_machine::dsl::RuntimeApplyFailureCause::RuntimeTurn)
         );
         assert_eq!(
             auth.state.last_runtime_apply_failure_message.as_deref(),
             Some("runtime apply failed")
+        );
+    }
+
+    #[test]
+    fn run_completed_preserves_existing_machine_terminal_outcome() {
+        let run_id = RunId::new();
+        let mut driver = running_driver(&run_id);
+
+        {
+            let authority = driver.shared_dsl_authority();
+            let mut auth = authority
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+                &mut *auth,
+                crate::meerkat_machine::dsl::MeerkatMachineInput::BudgetExhausted,
+            )
+            .expect("budget terminal should apply");
+        }
+
+        machine_apply_turn_run_completed(&mut driver, &run_id)
+            .expect("durable commit completion should not overwrite terminal evidence");
+
+        let authority = driver.shared_dsl_authority();
+        let auth = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(
+            auth.state.turn_phase,
+            crate::meerkat_machine::dsl::TurnPhase::Failed
+        );
+        assert_eq!(
+            auth.state.terminal_outcome,
+            Some(crate::meerkat_machine::dsl::TurnTerminalOutcome::BudgetExhausted)
+        );
+        assert_eq!(
+            auth.state.terminal_cause_kind,
+            Some(crate::meerkat_machine::dsl::TurnTerminalCauseKind::BudgetExhausted)
         );
     }
 }

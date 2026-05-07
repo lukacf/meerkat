@@ -728,6 +728,10 @@ impl MockSessionService {
         adapter
     }
 
+    fn set_runtime_adapter(&self, adapter: Arc<meerkat_runtime::MeerkatMachine>) {
+        *self.runtime_adapter.lock().expect("runtime_adapter mutex") = Some(adapter);
+    }
+
     /// Get recorded prompts for inspection in tests.
     async fn recorded_prompts(&self) -> Vec<(SessionId, String)> {
         self.prompts.read().await.clone()
@@ -1231,7 +1235,7 @@ impl SessionService for MockSessionService {
         self.flow_turn_overlays
             .write()
             .await
-            .push((id.clone(), req.flow_tool_overlay.clone()));
+            .push((id.clone(), req.runtime.flow_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
@@ -1463,6 +1467,38 @@ impl SessionService for MockSessionService {
                 .insert(id.clone(), intents);
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "runtime-adapter")]
+async fn retire_test_runtime_archive(
+    adapter: &meerkat_runtime::MeerkatMachine,
+    session_id: &SessionId,
+    session_present: bool,
+) -> Result<(), SessionError> {
+    if !session_present && !adapter.contains_session(session_id).await {
+        return Ok(());
+    }
+
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+    match meerkat_runtime::RuntimeControlPlane::retire(adapter, &runtime_id).await {
+        Ok(_) => Ok(()),
+        Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
+            adapter.register_session(session_id.clone()).await;
+            meerkat_runtime::RuntimeControlPlane::retire(adapter, &runtime_id)
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                        "test machine archive retire failed after registration: {error}"
+                    )))
+                })
+        }
+        Err(error) => Err(SessionError::Agent(
+            meerkat_core::error::AgentError::InternalError(format!(
+                "test machine archive retire failed: {error}"
+            )),
+        )),
     }
 }
 
@@ -1699,6 +1735,18 @@ impl MobSessionService for MockSessionService {
         _authority: meerkat_runtime::MachineSessionControlAuthority,
     ) -> Result<(), SessionError> {
         SessionService::cancel_after_boundary(self, session_id).await
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        if let Some(adapter) = self.runtime_adapter() {
+            let session_present = self.sessions.read().await.contains_key(session_id);
+            retire_test_runtime_archive(adapter.as_ref(), session_id, session_present).await?;
+        }
+
+        SessionService::archive(self, session_id).await
     }
 
     async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
@@ -11317,13 +11365,8 @@ async fn test_flow_step_tool_overlay_is_step_scoped() {
             StartTurnRequest {
                 prompt: "non-flow turn".to_string().into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
             },
         )
         .await
@@ -17809,6 +17852,147 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
     );
 }
 
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_abort_member_provision_retires_runtime_before_absent_cleanup_unregisters() {
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store_for_machine,
+    ));
+    service.set_runtime_adapter(adapter.clone());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+
+    service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "abort absent cleanup".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                comms_name: Some("test-mob/worker/abort-absent-cleanup".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create runtime-backed cleanup session");
+    adapter.register_session(session_id.clone()).await;
+
+    provisioner
+        .abort_member_provision(
+            &MemberRef::from_bridge_session_id(session_id.clone()),
+            &meerkat_core::ops::OperationId::new(),
+            "cleanup absent operation",
+        )
+        .await
+        .expect("absent operation cleanup should archive then unregister");
+
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "successful cleanup should unregister only after archive authority succeeds"
+    );
+    assert_eq!(
+        meerkat_runtime::RuntimeStore::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "runtime lifecycle must be durably retired before registration cleanup"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live service state"),
+        "successful cleanup should archive the session projection"
+    );
+}
+
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_retry() {
+    let service = Arc::new(MockSessionService::new());
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+    let runtime_store_for_machine: Arc<dyn meerkat_runtime::RuntimeStore> = runtime_store.clone();
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+        runtime_store_for_machine,
+    ));
+    service.set_runtime_adapter(adapter.clone());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(&session_id);
+
+    service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "abort archive failure".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                comms_name: Some("test-mob/worker/abort-archive-failure".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create runtime-backed cleanup session");
+    adapter.register_session(session_id.clone()).await;
+    service.set_archive_failure(&session_id).await;
+
+    let err = provisioner
+        .abort_member_provision(
+            &MemberRef::from_bridge_session_id(session_id.clone()),
+            &meerkat_core::ops::OperationId::new(),
+            "cleanup absent operation",
+        )
+        .await
+        .expect_err("archive failure should block runtime unregister cleanup");
+
+    assert!(
+        err.to_string().contains("mock archive failure"),
+        "archive failure should surface to caller, got {err:?}"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "failed archive projection must keep the runtime binding for retry"
+    );
+    assert_eq!(
+        meerkat_runtime::RuntimeStore::load_runtime_state(runtime_store.as_ref(), &runtime_id)
+            .await
+            .expect("load runtime state"),
+        Some(meerkat_runtime::RuntimeState::Retired),
+        "archive authority may retire durably before projection cleanup fails"
+    );
+    assert!(
+        service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live service state"),
+        "failed archive projection should retain the live session for retry"
+    );
+}
+
 #[tokio::test]
 async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_authority() {
     let service = Arc::new(MockSessionService::new());
@@ -23152,6 +23336,15 @@ impl MobSessionService for RealCommsSessionService {
         SessionService::cancel_after_boundary(self, session_id).await
     }
 
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let session_present = self.sessions.read().await.contains_key(session_id);
+        retire_test_runtime_archive(&self.runtime_adapter, session_id, session_present).await?;
+        SessionService::archive(self, session_id).await
+    }
+
     async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
         let names = self.session_comms_names.read().await;
         names
@@ -23515,6 +23708,15 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         SessionService::cancel_after_boundary(self, session_id).await
     }
 
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let session_present = self.sessions.read().await.contains_key(session_id);
+        retire_test_runtime_archive(&self.runtime_adapter, session_id, session_present).await?;
+        SessionService::archive(self, session_id).await
+    }
+
     async fn session_belongs_to_mob(&self, session_id: &SessionId, mob_id: &MobId) -> bool {
         let names = self.session_comms_names.read().await;
         names
@@ -23530,7 +23732,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
-        let pre_turn_context_appends = req.pre_turn_context_appends;
+        let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
         if !pre_turn_context_appends.is_empty() {
             for append in pre_turn_context_appends {
                 self.append_system_context(
@@ -23562,7 +23764,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .push(req.render_metadata.clone());
+            .push(req.runtime.render_metadata.clone());
 
         if let Some(notifier) = self
             .keep_alive_notifiers

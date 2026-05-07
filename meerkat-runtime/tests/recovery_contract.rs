@@ -413,7 +413,7 @@ async fn recovery_persistent_driver_contract_replays_missing_receipts_and_persis
 }
 
 #[tokio::test]
-async fn recovery_contract_does_not_force_lifecycle_from_runtime_state_projection() {
+async fn recovery_contract_preserves_durable_lifecycle_state_projection() {
     for harness in supported_store_harnesses() {
         for recovered_state in [
             RuntimeState::Retired,
@@ -449,14 +449,14 @@ async fn recovery_contract_does_not_force_lifecycle_from_runtime_state_projectio
             machine.register_session(session_id.clone()).await;
             assert_eq!(
                 machine.runtime_state(&session_id).await.unwrap(),
-                RuntimeState::Idle,
-                "{}: recovered {recovered_state} projection must not force live lifecycle truth",
+                recovered_state,
+                "{}: recovered {recovered_state} projection must remain machine lifecycle truth",
                 harness.name
             );
             assert_eq!(
                 harness.store.load_runtime_state(&runtime_id).await.unwrap(),
-                Some(RuntimeState::Idle),
-                "{}: recovered {recovered_state} projection must not remain durable lifecycle truth after machine recovery",
+                Some(recovered_state),
+                "{}: recovered {recovered_state} projection must remain durable lifecycle truth after machine recovery",
                 harness.name
             );
         }

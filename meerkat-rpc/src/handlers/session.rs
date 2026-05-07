@@ -425,12 +425,26 @@ pub async fn handle_create(
             let runtime = Arc::clone(&runtime_for_cleanup);
             let session_id = session_id_for_cleanup.clone();
             async move {
-                let _ = runtime.archive_session(&session_id).await;
+                if let Err(error) = runtime.archive_session(&session_id).await {
+                    tracing::error!(
+                        session_id = %session_id,
+                        error = %error.message,
+                        "RPC unpublished create archive failed; leaving runtime state registered"
+                    );
+                }
             }
         }));
         if install == meerkat::surface::CancelActionInstallOutcome::AlreadyCancelled {
-            let _ = runtime.archive_session(&session_id).await;
-            runtime_adapter.unregister_session(&session_id).await;
+            if let Err(error) = runtime.archive_session(&session_id).await {
+                return RpcResponse::error(
+                    id,
+                    error.code,
+                    format!(
+                        "request cancelled before start but archive cleanup failed: {}",
+                        error.message
+                    ),
+                );
+            }
             return RpcResponse::error(
                 id,
                 error::REQUEST_CANCELLED,

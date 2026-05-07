@@ -105,6 +105,20 @@ fn core_apply_terminal_truth_has_one_authority() -> Result<(), String> {
 }
 
 #[test]
+fn runtime_loop_terminal_snapshot_failures_are_fail_closed() -> Result<(), String> {
+    let root = workspace_root()?;
+    let runtime_loop = fs::read_to_string(root.join("meerkat-runtime/src/runtime_loop.rs"))
+        .map_err(|err| format!("read runtime loop source: {err}"))?;
+
+    assert!(
+        !runtime_loop.contains("let _ = crate::meerkat_machine::fail_runtime_loop_run")
+            && !runtime_loop.contains("let _ = fail_runtime_loop_run"),
+        "runtime loop must not ignore failed terminal snapshot writes"
+    );
+    Ok(())
+}
+
+#[test]
 fn terminal_context_and_run_adapters_use_canonical_primitive_intent() -> Result<(), String> {
     let root = workspace_root()?;
     let runtime_backed = fs::read_to_string(root.join("meerkat/src/surface/runtime_backed.rs"))

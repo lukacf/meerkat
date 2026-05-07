@@ -345,19 +345,40 @@ impl McpRuntimeIngressContext {
             .remove(&session_id.to_string());
     }
 
+    async fn session_archived_by_authority(
+        &self,
+        session_id: &SessionId,
+        session: &Session,
+    ) -> Result<bool, SessionError> {
+        self.service
+            .session_archived_by_authority(session_id, session)
+            .await
+    }
+
+    async fn authoritative_session_archived(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<bool, SessionError> {
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(false);
+        };
+        self.session_archived_by_authority(session_id, &session)
+            .await
+    }
+
     async fn cleanup_runtime_after_completion_outcome(
         &self,
         session_id: &SessionId,
         outcome: &CompletionOutcome,
     ) {
-        let archived_now = self
-            .service
-            .load_authoritative_session(session_id)
-            .await
-            .ok()
-            .flatten()
-            .as_ref()
-            .is_some_and(session_metadata_marks_archived);
+        let archived_now = match self.authoritative_session_archived(session_id).await {
+            Ok(archived_now) => archived_now,
+            Err(_) => {
+                let _ = self.service.discard_live_session(session_id).await;
+                self.clear_session(session_id).await;
+                return;
+            }
+        };
         if archived_now {
             let _ = self.service.discard_live_session(session_id).await;
             self.clear_session(session_id).await;
@@ -507,16 +528,13 @@ impl McpRuntimeIngressContext {
     ) -> Result<(AcceptOutcome, Option<CompletionHandle>), meerkat_runtime::RuntimeDriverError>
     {
         if self
-            .service
-            .load_authoritative_session(session_id)
+            .authoritative_session_archived(session_id)
             .await
             .map_err(|error| meerkat_runtime::RuntimeDriverError::Internal(error.to_string()))?
-            .as_ref()
-            .is_some_and(session_metadata_marks_archived)
         {
             self.clear_session(session_id).await;
             return Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                state: meerkat_runtime::RuntimeState::Destroyed,
+                state: meerkat_runtime::RuntimeState::Retired,
             });
         }
 
@@ -691,7 +709,10 @@ impl McpRuntimeIngressContext {
         admission: Option<meerkat::RuntimeContextAdmissionGuard>,
     ) -> Result<RunResult, SessionError> {
         let session_id = session.id().clone();
-        if session_metadata_marks_archived(&session) {
+        if self
+            .session_archived_by_authority(&session_id, &session)
+            .await?
+        {
             return Err(SessionError::NotFound { id: session_id });
         }
         let runtime_was_registered = self.runtime_adapter.contains_session(&session_id).await;
@@ -770,7 +791,10 @@ impl McpRuntimeIngressContext {
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.clone(),
             })?;
-        if session_metadata_marks_archived(&session) {
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -825,7 +849,10 @@ impl McpRuntimeIngressContext {
             .ok_or_else(|| SessionError::NotFound {
                 id: session_id.clone(),
             })?;
-        if session_metadata_marks_archived(&session) {
+        if self
+            .session_archived_by_authority(session_id, &session)
+            .await?
+        {
             return Err(SessionError::NotFound {
                 id: session_id.clone(),
             });
@@ -1076,14 +1103,6 @@ fn should_apply_context_without_turn(primitive: &RunPrimitive) -> bool {
     primitive.is_context_only_apply_without_turn()
 }
 
-fn session_metadata_marks_archived(session: &Session) -> bool {
-    session
-        .metadata()
-        .get("session_archived")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-}
-
 async fn apply_runtime_turn(
     context: &McpRuntimeIngressContext,
     state: &Arc<McpRuntimeSessionState>,
@@ -1097,13 +1116,7 @@ async fn apply_runtime_turn(
         )));
     }
 
-    if context
-        .service
-        .load_authoritative_session(session_id)
-        .await?
-        .as_ref()
-        .is_some_and(session_metadata_marks_archived)
-    {
+    if context.authoritative_session_archived(session_id).await? {
         context.clear_session(session_id).await;
         return Err(SessionError::NotFound {
             id: session_id.clone(),
@@ -1213,17 +1226,19 @@ async fn apply_runtime_turn(
     let turn_request = StartTurnRequest {
         prompt: prompt.clone(),
         system_prompt: None,
-        render_metadata: None,
-        handling_mode: HandlingMode::Queue,
         event_tx: event_tx.clone(),
-        skill_references: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.skill_references.clone()),
-        flow_tool_overlay: primitive
-            .turn_metadata()
-            .and_then(|meta| meta.flow_tool_overlay.clone()),
-        pre_turn_context_appends: pre_turn_context_appends.clone(),
-        turn_metadata: primitive.turn_metadata().cloned(),
+        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+            None,
+            HandlingMode::Queue,
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.skill_references.clone()),
+            primitive
+                .turn_metadata()
+                .and_then(|meta| meta.flow_tool_overlay.clone()),
+            pre_turn_context_appends.clone(),
+            primitive.turn_metadata().cloned(),
+        ),
     };
 
     let mut pre_admission = context
@@ -1294,17 +1309,19 @@ async fn apply_runtime_turn(
                     StartTurnRequest {
                         prompt,
                         system_prompt: None,
-                        render_metadata: None,
-                        handling_mode: HandlingMode::Queue,
                         event_tx,
-                        skill_references: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.skill_references.clone()),
-                        flow_tool_overlay: primitive
-                            .turn_metadata()
-                            .and_then(|meta| meta.flow_tool_overlay.clone()),
-                        pre_turn_context_appends,
-                        turn_metadata: primitive.turn_metadata().cloned(),
+                        runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                            None,
+                            HandlingMode::Queue,
+                            primitive
+                                .turn_metadata()
+                                .and_then(|meta| meta.skill_references.clone()),
+                            primitive
+                                .turn_metadata()
+                                .and_then(|meta| meta.flow_tool_overlay.clone()),
+                            pre_turn_context_appends,
+                            primitive.turn_metadata().cloned(),
+                        ),
                     },
                     boundary,
                     contributing_input_ids,
@@ -1681,14 +1698,14 @@ mod tests {
             matches!(
                 rejected,
                 Err(meerkat_runtime::RuntimeDriverError::NotReady {
-                    state: meerkat_runtime::RuntimeState::Destroyed
+                    state: meerkat_runtime::RuntimeState::Retired
                 })
             ),
             "archived MCP accept should reject as not ready: {rejected:?}"
         );
         assert!(
             !context.runtime_adapter.contains_session(&session_id).await,
-            "archived MCP accept must clear runtime registration"
+            "archived MCP accept may clear local runtime registration after reporting Retired"
         );
         assert!(
             !context

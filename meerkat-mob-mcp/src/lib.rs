@@ -861,7 +861,7 @@ impl MobMcpState {
             {
                 return self
                     .session_service()
-                    .archive(bridge_session_id)
+                    .archive_with_mob_lifecycle_authority(bridge_session_id)
                     .await
                     .map_err(|error| {
                         MobError::Internal(format!(
@@ -1898,6 +1898,7 @@ struct LocalSessionService {
     /// Per-session broadcast channels for event streaming.
     event_txs:
         RwLock<HashMap<SessionId, tokio::sync::broadcast::Sender<EventEnvelope<AgentEvent>>>>,
+    runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
     counter: std::sync::atomic::AtomicU64,
     archive_delay_ms: std::sync::atomic::AtomicU64,
     archive_failures: Arc<InMemoryArchiveFailureControl>,
@@ -1914,6 +1915,7 @@ impl LocalSessionService {
             archived_views: RwLock::new(HashMap::new()),
             pending_context: RwLock::new(HashMap::new()),
             event_txs: RwLock::new(HashMap::new()),
+            runtime_adapter: Arc::new(meerkat_runtime::MeerkatMachine::ephemeral()),
             counter: std::sync::atomic::AtomicU64::new(0),
             archive_delay_ms: std::sync::atomic::AtomicU64::new(0),
             archive_failures,
@@ -1923,6 +1925,42 @@ impl LocalSessionService {
     fn set_archive_delay_ms(&self, delay_ms: u64) {
         self.archive_delay_ms
             .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    async fn retire_with_machine_archive_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        if !self.sessions.read().await.contains_key(session_id)
+            && !self.runtime_adapter.contains_session(session_id).await
+        {
+            return Ok(());
+        }
+
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        match meerkat_runtime::RuntimeControlPlane::retire(&*self.runtime_adapter, &runtime_id)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
+                self.runtime_adapter
+                    .register_session(session_id.clone())
+                    .await;
+                meerkat_runtime::RuntimeControlPlane::retire(&*self.runtime_adapter, &runtime_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("machine archive retire failed after registration: {error}"),
+                        ))
+                    })
+            }
+            Err(error) => Err(SessionError::Agent(
+                meerkat_core::error::AgentError::InternalError(format!(
+                    "machine archive retire failed: {error}"
+                )),
+            )),
+        }
     }
 }
 
@@ -2265,9 +2303,16 @@ impl MobSessionService for LocalSessionService {
     }
 
     fn runtime_adapter(&self) -> Option<std::sync::Arc<meerkat_runtime::MeerkatMachine>> {
-        Some(std::sync::Arc::new(
-            meerkat_runtime::MeerkatMachine::ephemeral(),
-        ))
+        Some(Arc::clone(&self.runtime_adapter))
+    }
+
+    async fn archive_with_mob_lifecycle_authority(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        self.retire_with_machine_archive_authority(session_id)
+            .await?;
+        SessionService::archive(self, session_id).await
     }
 
     async fn apply_runtime_turn(
@@ -3723,6 +3768,45 @@ mod tests {
             self.sessions.read().await.contains_key(id)
                 || self.persisted_sessions.read().await.contains_key(id)
         }
+
+        async fn retire_with_machine_archive_authority(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            if !self.session_exists(session_id).await
+                && !self.runtime_adapter.contains_session(session_id).await
+            {
+                return Ok(());
+            }
+
+            let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+            match meerkat_runtime::RuntimeControlPlane::retire(&*self.runtime_adapter, &runtime_id)
+                .await
+            {
+                Ok(_) => Ok(()),
+                Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => {
+                    self.runtime_adapter
+                        .register_session(session_id.clone())
+                        .await;
+                    meerkat_runtime::RuntimeControlPlane::retire(
+                        &*self.runtime_adapter,
+                        &runtime_id,
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| {
+                        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+                            format!("machine archive retire failed after registration: {error}"),
+                        ))
+                    })
+                }
+                Err(error) => Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "machine archive retire failed: {error}"
+                    )),
+                )),
+            }
+        }
     }
 
     #[async_trait]
@@ -3958,6 +4042,15 @@ mod tests {
             Some(self.runtime_adapter.clone())
         }
 
+        async fn archive_with_mob_lifecycle_authority(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), SessionError> {
+            self.retire_with_machine_archive_authority(session_id)
+                .await?;
+            SessionService::archive(self, session_id).await
+        }
+
         async fn session_belongs_to_mob(&self, _session_id: &SessionId, _mob_id: &MobId) -> bool {
             true
         }
@@ -4082,13 +4175,15 @@ mod tests {
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    pre_turn_context_appends: Vec::new(),
-                    turn_metadata: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                        None,
+                        HandlingMode::Queue,
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                    ),
                 },
             )
             .await
@@ -4269,13 +4364,15 @@ mod tests {
                 StartTurnRequest {
                     prompt: "hello".to_string().into(),
                     system_prompt: None,
-                    render_metadata: None,
-                    handling_mode: HandlingMode::Queue,
                     event_tx: None,
-                    skill_references: None,
-                    flow_tool_overlay: None,
-                    pre_turn_context_appends: Vec::new(),
-                    turn_metadata: None,
+                    runtime: meerkat_core::service::StartTurnRuntimeSemantics::new(
+                        None,
+                        HandlingMode::Queue,
+                        None,
+                        None,
+                        Vec::new(),
+                        None,
+                    ),
                 },
             )
             .await;
@@ -6285,13 +6382,8 @@ mod tests {
             StartTurnRequest {
                 prompt: "test".into(),
                 system_prompt: None,
-                render_metadata: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
                 event_tx: None,
-                skill_references: None,
-                flow_tool_overlay: None,
-                pre_turn_context_appends: Vec::new(),
-                turn_metadata: None,
+                runtime: meerkat_core::service::StartTurnRuntimeSemantics::default(),
             },
             meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
             vec![],

@@ -145,8 +145,9 @@ fn buildbuddy_machine_authority_lane_runs_tlc_machine_verify() {
         "machine_verify_all_tlc_test must run xtask with workspace runfiles and hermetic rustfmt"
     );
     assert!(
-        wrapper.contains("machine-verify --all") && wrapper.contains("export RUSTFMT"),
-        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run machine-verify --all"
+        wrapper.contains("machine-verify --all --skip-cargo-tests")
+            && wrapper.contains("export RUSTFMT"),
+        "machine_verify_all_tlc_test wrapper must normalize RUSTFMT and run hermetic machine-verify"
     );
     assert!(
         doctor.contains("machine_verify_all_tlc_test")

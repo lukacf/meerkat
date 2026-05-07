@@ -49,6 +49,12 @@ pub struct VerifyArgs {
     /// Validate the canonical registry only and skip TLC execution.
     #[arg(long)]
     skip_tlc: bool,
+    /// Skip Cargo-backed kernel/owner tests after drift and TLC checks.
+    ///
+    /// Bazel remote tests run from runfiles, not from a Git checkout, so the
+    /// Cargo-backed post-checks are covered by Bazel test targets instead.
+    #[arg(long)]
+    skip_cargo_tests: bool,
     /// TLC config profile to run.
     #[arg(long, value_enum, default_value_t = VerifyProfile::Ci)]
     profile: VerifyProfile,
@@ -126,7 +132,14 @@ pub fn machine_verify(args: VerifyArgs) -> Result<()> {
         selection.compositions.len(),
         !args.skip_tlc
     );
-    machine_verify_at_root(&root, &selection, !args.skip_tlc, args.profile, workers)
+    machine_verify_at_root(
+        &root,
+        &selection,
+        !args.skip_tlc,
+        !args.skip_cargo_tests,
+        args.profile,
+        workers,
+    )
 }
 
 pub fn machine_hopcroft(args: HopcroftArgs) -> Result<()> {
@@ -382,6 +395,7 @@ fn machine_verify_at_root(
     root: &Path,
     selection: &Selection,
     run_tlc: bool,
+    run_cargo_tests: bool,
     profile: VerifyProfile,
     workers: usize,
 ) -> Result<()> {
@@ -449,9 +463,13 @@ fn machine_verify_at_root(
         }
     }
 
-    run_generated_kernel_tests(root)?;
-    for machine in &selection.machines {
-        run_machine_owner_tests(root, machine)?;
+    if run_cargo_tests {
+        run_generated_kernel_tests(root)?;
+        for machine in &selection.machines {
+            run_machine_owner_tests(root, machine)?;
+        }
+    } else {
+        println!("skipping Cargo-backed machine kernel/owner tests");
     }
 
     Ok(())

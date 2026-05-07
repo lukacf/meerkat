@@ -1020,6 +1020,11 @@ impl MobMcpState {
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
     ) -> Result<meerkat_mob::MemberDeliveryReceipt, MobError> {
+        if matches!(handling_mode, HandlingMode::Steer) {
+            return Err(MobError::Internal(
+                "handling_mode Steer requires a runtime-backed surface".to_string(),
+            ));
+        }
         self.handle_for(mob_id)
             .await?
             .member(&identity)

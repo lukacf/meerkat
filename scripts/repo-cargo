@@ -17,8 +17,41 @@ hash_path() {
   fi
 }
 
+sanitize_cache_key() {
+  local raw="${1:-}"
+  local key
+  key="$(printf '%s' "${raw}" | LC_ALL=C tr -c 'A-Za-z0-9._@+-' '-')"
+  printf '%s' "${key:-default}"
+}
+
 repo_slug="$(basename "${repo_root}")"
 repo_key="${repo_slug}-$(hash_path "${git_common_dir}")"
+target_cache_schema="v4"
+toolchain_spec=""
+toolchain_key="${MEERKAT_RUST_TOOLCHAIN_ID:-}"
+
+if [[ -n "${RUSTUP_TOOLCHAIN:-}" ]]; then
+  toolchain_spec="${RUSTUP_TOOLCHAIN}"
+  toolchain_key="${toolchain_key:-${toolchain_spec}}"
+elif [[ -f "${repo_root}/rust-toolchain.toml" ]]; then
+  toolchain_spec="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' "${repo_root}/rust-toolchain.toml")"
+  toolchain_key="${toolchain_key:-${toolchain_spec}}"
+elif [[ -f "${repo_root}/rust-toolchain" ]]; then
+  toolchain_spec="$(sed -n 's/#.*//; /^[[:space:]]*$/d; s/^[[:space:]]*//; s/[[:space:]]*$//; p; q' "${repo_root}/rust-toolchain")"
+  toolchain_key="${toolchain_key:-${toolchain_spec}}"
+fi
+
+if [[ -n "${toolchain_spec}" ]] && command -v rustup >/dev/null 2>&1; then
+  rustc_verbose="$(rustup run "${toolchain_spec}" rustc -Vv 2>/dev/null || true)"
+  if [[ -n "${rustc_verbose}" ]]; then
+    rustc_release="$(awk -F ': ' '$1 == "release" { print $2; exit }' <<<"${rustc_verbose}")"
+    rustc_host="$(awk -F ': ' '$1 == "host" { print $2; exit }' <<<"${rustc_verbose}")"
+    rustc_commit="$(awk -F ': ' '$1 == "commit-hash" { print substr($2, 1, 10); exit }' <<<"${rustc_verbose}")"
+    toolchain_key="${rustc_release:-${toolchain_key}}-${rustc_host:-unknown}-${rustc_commit:-unknown}"
+  fi
+fi
+
+toolchain_key="$(sanitize_cache_key "${toolchain_key:-default}")"
 
 if [[ -n "${RUST_LANE_ID:-}" ]]; then
   lane_key="${RUST_LANE_ID}"
@@ -26,10 +59,17 @@ elif [[ -n "${MEERKAT_AGENT_LANE:-}" ]]; then
   lane_key="${MEERKAT_AGENT_LANE}"
 elif [[ -n "${CODEX_AGENT_ID:-}" ]]; then
   lane_key="${CODEX_AGENT_ID}"
+elif [[ -n "${GITHUB_JOB:-}" ]]; then
+  if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
+    lane_key="gha-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB}"
+  else
+    lane_key="gha-${GITHUB_JOB}"
+  fi
 else
   worktree_name="$(basename "${worktree_root}")"
   lane_key="${worktree_name}-$(hash_path "${worktree_root}")"
 fi
+lane_key="$(sanitize_cache_key "${lane_key}")"
 
 if [[ "$(uname -s)" == "Darwin" ]]; then
   cache_root="${HOME}/Library/Caches/rust-workspaces"
@@ -37,16 +77,37 @@ else
   cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/rust-workspaces"
 fi
 
+target_dir_was_set=false
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  target_dir_was_set=true
+fi
 export CARGO_HOME="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${lane_key}}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${target_cache_schema}/${toolchain_key}/${lane_key}}"
 
 mkdir -p "${CARGO_HOME}" "${CARGO_TARGET_DIR}"
+
+if [[ "${GITHUB_ACTIONS:-}" == "true" && "${target_dir_was_set}" == "false" ]]; then
+  if [[ "${CARGO_TARGET_DIR}" == "${repo_root}"* ]]; then
+    echo "error: refusing to clean a Cargo target directory inside the repo tree" >&2
+    exit 1
+  fi
+  target_marker="${CARGO_TARGET_DIR}/.repo-cargo-toolchain"
+  target_marker_value="schema=${target_cache_schema}"$'\n'"toolchain=${toolchain_key}"$'\n'
+  if [[ ! -f "${target_marker}" ]] || [[ "$(cat "${target_marker}")"$'\n' != "${target_marker_value}" ]]; then
+    rm -rf "${CARGO_TARGET_DIR}"
+    mkdir -p "${CARGO_TARGET_DIR}"
+    printf '%s' "${target_marker_value}" >"${target_marker}"
+  fi
+fi
 
 if [[ "${1-}" == "--print-env" ]]; then
   cat <<EOF
 repo_root=${repo_root}
 workspace_root=${workspace_root}
 repo_key=${repo_key}
+target_cache_schema=${target_cache_schema}
+toolchain_spec=${toolchain_spec}
+toolchain_key=${toolchain_key}
 lane_key=${lane_key}
 CARGO_HOME=${CARGO_HOME}
 CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
@@ -66,6 +127,9 @@ doctor=ok
 repo_root=${repo_root}
 workspace_root=${workspace_root}
 repo_key=${repo_key}
+target_cache_schema=${target_cache_schema}
+toolchain_spec=${toolchain_spec}
+toolchain_key=${toolchain_key}
 lane_key=${lane_key}
 CARGO_HOME=${CARGO_HOME}
 CARGO_TARGET_DIR=${CARGO_TARGET_DIR}
@@ -76,11 +140,13 @@ fi
 cd "${workspace_root}"
 
 if [[ -n "${CARGO_BIN:-}" ]]; then
-  cargo_cmd="${CARGO_BIN}"
+  cargo_cmd=("${CARGO_BIN}")
+elif [[ -n "${toolchain_spec}" ]] && command -v rustup >/dev/null 2>&1; then
+  cargo_cmd=(rustup run "${toolchain_spec}" cargo)
 elif command -v cargo >/dev/null 2>&1; then
-  cargo_cmd="$(command -v cargo)"
+  cargo_cmd=("$(command -v cargo)")
 elif [[ -x "${HOME}/.cargo/bin/cargo" ]]; then
-  cargo_cmd="${HOME}/.cargo/bin/cargo"
+  cargo_cmd=("${HOME}/.cargo/bin/cargo")
   export PATH="${HOME}/.cargo/bin:${PATH}"
 else
   cat >&2 <<'EOF'
@@ -92,4 +158,4 @@ EOF
   exit 127
 fi
 
-exec "${cargo_cmd}" "$@"
+exec "${cargo_cmd[@]}" "$@"

@@ -441,6 +441,9 @@ web_search = true
 
 [provider_tools.openai]
 web_search = true
+
+[provider_tools.gemini]
+google_search = true
 ```
 
 See the [configuration guide](https://docs.rkat.ai/concepts/configuration), [realms](https://docs.rkat.ai/concepts/realms), [providers](https://docs.rkat.ai/concepts/providers), and [auth guide](https://docs.rkat.ai/guides/auth) for the full reference.

@@ -248,7 +248,7 @@ This is a breaking release. Wire contracts that previously accepted free-form st
 - `SelfHostedModelConfig.supports_web_search` (default `false`) for self-hosted model opt-in.
 - Non-persisted `AgentConfig.provider_tool_defaults` re-derived on every build (including resume) from current config + profile.
 - Per-turn merge via RFC 7396 merge-patch in `state.rs`; extraction turns strip tool keys.
-- Opt-out: `provider_tools.*.web_search = false` in config, or `provider_params: {"web_search": null}` per-request.
+- Opt-out: `provider_tools.anthropic.web_search = false`, `provider_tools.openai.web_search = false`, or `provider_tools.gemini.google_search = false` in config; `rkat run --no-web-search`; or the provider-native null key in `provider_params` per request.
 
 #### Realm-scoped mob profiles
 - `RealmProfileStore` with `InMemoryRealmProfileStore` and `SqliteRealmProfileStore` for realm-local reusable profile definitions.

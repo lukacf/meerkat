@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -62,6 +62,8 @@ jobs:
 
       - name: Install cargo-machete
         uses: taiki-e/install-action@cargo-machete
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Check for unused dependencies
         run: ./scripts/repo-cargo machete --with-metadata
@@ -74,7 +76,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -144,7 +146,7 @@ jobs:
 
       - name: Install Rust
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
@@ -204,7 +206,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -228,7 +230,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -246,7 +248,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -260,6 +262,9 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+          checksum: false
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Build browser-contract tests
         env:
@@ -309,13 +314,15 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Unit test lane
         run: ./scripts/repo-cargo unit
@@ -328,7 +335,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -342,9 +349,14 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+          checksum: false
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Integration-fast lane
         run: ./scripts/repo-cargo int
@@ -357,7 +369,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -366,6 +378,8 @@ jobs:
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Run e2e-fast lane
         run: ./scripts/repo-cargo e2e-fast
@@ -378,7 +392,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -392,9 +406,14 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack
+          checksum: false
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Run e2e-system lane
         run: ./scripts/repo-cargo e2e-system
@@ -407,7 +426,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -416,6 +435,8 @@ jobs:
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Minimal build checks
         run: |
@@ -434,7 +455,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -443,6 +464,8 @@ jobs:
 
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+        env:
+          HOME: ${{ runner.temp }}/install-action-home-${{ github.job }}
 
       - name: Library crate feature combinations
         run: |
@@ -464,7 +487,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -485,7 +508,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.94.0
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown

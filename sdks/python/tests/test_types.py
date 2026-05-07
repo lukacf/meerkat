@@ -2712,10 +2712,10 @@ async def test_realtime_wrappers_and_channel_scaffold() -> None:
     scoped_capabilities = await session_channel.capabilities()
 
     assert open_info.default_protocol_version == REALTIME_PROTOCOL_VERSION
-    assert status.status["state"] == "opening"
+    assert status.status.state == "opening"
     assert capabilities.capabilities["turning_modes"] == ["provider_managed"]
     assert scoped_open_info.open_token == "token-1"
-    assert scoped_status.status["state"] == "opening"
+    assert scoped_status.status.state == "opening"
     assert scoped_capabilities.capabilities["input_kinds"] == ["text", "audio"]
     assert [method for method, _ in calls] == [
         "realtime/open_info",
@@ -2805,7 +2805,7 @@ async def test_realtime_channel_mob_member_builds_mob_member_wire_target() -> No
     # status() and capabilities() also send the MobMember target with
     # no `mob/member_status` pre-resolve round-trip.
     status_result = await member_channel.status()
-    assert status_result.status["state"] == "opening"
+    assert status_result.status.state == "opening"
     await member_channel.capabilities()
 
     # Call order encodes the new contract: only `realtime/*` calls

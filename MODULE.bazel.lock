@@ -544,7 +544,7 @@
           "FILE:@@//test-fixtures/surface-build-fixtures/Cargo.toml 593af70f4a0efde1688789cb5e7d486825efe4b03156e6b75656cf44ea944ba1",
           "FILE:@@//test-fixtures/machine-dsl-tests/Cargo.toml bc9c8bd79e3d4529e12b6495c1ddf79d02020782b06e265539f7dca351438ccd",
           "FILE:@@//xtask/Cargo.toml e3212c96185cd3e09f10115934760c0f29cfd6a1b61fa28ceb55c10092b2bc65",
-          "FILE:@@//vendor/oai-rt-rs/Cargo.toml 5325298146e1f43afb519170283663b96ddafe2b43c65d64be3ab6b92516bc42"
+          "FILE:@@//vendor/oai-rt-rs/Cargo.toml a20231e72abb794e301ab3488bc7c1aa1ab736fd17f4a438c79f7e99383c7d8e"
         ],
         "generatedRepoSpecs": {
           "crates": {

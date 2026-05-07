@@ -77,6 +77,7 @@ Common options:
 --json                          # alias for --output json
 -s, --stream
 --no-stream
+--no-web-search                 # disable provider-native web search for this run
 --skill <PATH_OR_ID>            # repeatable
 -t, --tools <safe|workspace|full|none>
 --yolo                          # alias for --tools full
@@ -111,6 +112,7 @@ Resume targets: full UUID, short UUID prefix, `realm:<uuid>`, `last`, `~`,
 Defaults:
 
 - `--tools safe`
+- provider-native web search on for supporting models; use `--no-web-search` to disable
 - stream on in a TTY, off in pipes/scripts
 - piped stdin is blob context unless `--stdin lines`
 

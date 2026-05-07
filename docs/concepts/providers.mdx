@@ -144,6 +144,10 @@ meerkat = { version = "0.6.0", features = ["all-providers", "jsonl-store"] }
 
 Provider-specific options can be passed via the `--param` CLI flag or `provider_params` in the SDK:
 
+Provider-native web search is on by default for catalog models that support it.
+Disable it in config with the matching `provider_tools.<provider>` search toggle,
+or for a single CLI run with `rkat run --no-web-search "..."`.
+
 <Tabs>
   <Tab title="Anthropic">
     | Parameter | Description |

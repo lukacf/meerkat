@@ -66,6 +66,14 @@ else
   bad "CODEX_AGENT_ID was not used as the default Cargo lane"
 fi
 
+github_lane_env="$(GITHUB_JOB=fmt-lint GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=2 ./scripts/repo-cargo --print-env)"
+github_lane="$(value_from_env lane_key <<<"${github_lane_env}")"
+if [[ "${github_lane}" == "gha-12345-2-fmt-lint" ]]; then
+  pass "GitHub Actions target lanes are isolated per run attempt"
+else
+  bad "GitHub Actions target lanes do not include the run attempt"
+fi
+
 if [[ "${lane_a_home}" == "${lane_b_home}" ]]; then
   pass "Cargo home stays shared per repository"
 else
@@ -137,6 +145,17 @@ if [[ -n "${raw_cargo_workflow_hits}" ]]; then
   printf '%s\n' "${raw_cargo_workflow_hits}" >&2
 else
   pass "GitHub workflow Rust entrypoints use the repo Cargo wrapper"
+fi
+
+rust_channel="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+if [[ -n "${rust_channel}" ]] &&
+  grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/workflows/cargo.yml &&
+  grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-buildbuddy-ci/action.yml &&
+  ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/workflows/cargo.yml &&
+  ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/actions/setup-buildbuddy-ci/action.yml; then
+  pass "Cargo and BuildBuddy CI install the pinned Rust toolchain"
+else
+  bad "Cargo or BuildBuddy CI Rust toolchain does not match rust-toolchain.toml"
 fi
 
 if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/cargo.yml &&

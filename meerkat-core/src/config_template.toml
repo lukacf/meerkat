@@ -40,7 +40,9 @@ background_max_concurrency = 32
 
 # Provider-native tool defaults. Controls whether provider web search tools
 # are injected by default for models that support them. Set to false to disable.
-# Per-request opt-out: send provider_params: {"web_search": null}.
+# CLI opt-out: rkat run --no-web-search ...
+# Per-request opt-out: send provider_params: {"web_search": null} for
+# Anthropic/OpenAI or {"google_search": null} for Gemini.
 [provider_tools.anthropic]
 web_search = true
 

@@ -106,9 +106,11 @@ Web search is enabled by default for all catalog models with `supports_web_searc
 | Self-hosted | Not wired (v1) | `SelfHostedModelConfig.supports_web_search` | `false` |
 
 **Opt-out:**
-- Config-level: `[provider_tools.anthropic] web_search = false`
-- Per-request: `provider_params: {"web_search": null}` (RFC 7396 null removal)
-- Per-request: `provider_params: {"web_search": false}` (treated as disable)
+- Config-level: set the matching config key from the table above to `false`
+- CLI: `rkat run --no-web-search "..."`.
+- Per-request Anthropic/OpenAI: `provider_params: {"web_search": null}` (RFC 7396 null removal)
+- Per-request Gemini: `provider_params: {"google_search": null}` (RFC 7396 null removal)
+- Per-request boolean: `false` for the provider-native search key is treated as disable
 
 **Resume behavior:** Tool defaults are re-derived on every build (including resume) from current config and model profile. Config changes take effect immediately on resumed sessions. Explicit `provider_params` overrides are persisted in `SessionMetadata`.
 

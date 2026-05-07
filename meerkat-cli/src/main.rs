@@ -92,7 +92,7 @@ const CLI_ABOUT: &str = "Run agent tasks and manage local Meerkat surfaces from 
 const ROOT_AFTER_HELP: &str = "Command groups:\n  Runtime:      run, help, realtime\n  Realm config: init, config, realm\n  Utility:      session, blob, models, capabilities, doctor\n\nAdditional commands appear when their supporting capabilities are compiled in.\n\nExamples:\n  rkat \"summarize this repository\"\n  rkat help \"How do I add an mcp server?\"\n  cat story.txt | rkat \"summarize the story\"\n  git diff | rkat run \"review these changes\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nUse `<binary> <command> -h` for the basic view and `<binary> <command> --help` for all options.";
 const HELP_AFTER_HELP: &str = "Examples:\n  rkat help \"How do I add an mcp server and schedule to remove it in 30 minutes\"\n  rkat help \"Use gemini with my vertex auth, load ~/codex/skills\" --prompt \"Write a match-3 game in Erlang\"";
 
-const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - `--tools safe`\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
+const RUN_AFTER_HELP: &str = "Examples:\n  rkat run \"summarize this repository\"\n  cat story.txt | rkat run \"summarize the story\"\n  git diff | rkat run --json \"review these changes\"\n  rkat run --resume \"keep going\"\n  rkat run --resume ~2 \"pick this thread back up\"\n  tail -f app.log | rkat run --stdin lines \"watch for incidents\"\n  rkat run -t workspace \"fix the failing test\"\n\nDefaults:\n  - `--tools safe`\n  - provider-native web search on for supporting models; use `--no-web-search` to disable\n  - stream on in a TTY, off in pipes/scripts\n  - piped stdin is read as blob context unless `--stdin lines` is set";
 
 const DEFAULT_TRACE_FILTER: &str = "off";
 const VERBOSE_TRACE_FILTER: &str = "info";
@@ -1141,6 +1141,10 @@ enum Commands {
         #[arg(long, help_heading = "Common options")]
         no_stream: bool,
 
+        /// Disable provider-native web search for this run.
+        #[arg(long, help_heading = "Common options")]
+        no_web_search: bool,
+
         /// Provider-specific parameter (KEY=VALUE). Can be repeated.
         #[arg(
             long = "param",
@@ -2116,6 +2120,7 @@ async fn main() -> anyhow::Result<ExitCode> {
             json,
             stream,
             no_stream,
+            no_web_search,
             params,
             provider_params_json,
             output_schema,
@@ -2168,6 +2173,7 @@ async fn main() -> anyhow::Result<ExitCode> {
                 json,
                 stream,
                 no_stream,
+                no_web_search,
                 params,
                 provider_params_json,
                 output_schema,
@@ -2321,6 +2327,7 @@ async fn handle_help_command(
         json,
         stream,
         no_stream,
+        false,
         Vec::new(),
         None,
         None,
@@ -2358,6 +2365,7 @@ async fn handle_run_command(
     json: bool,
     stream: bool,
     no_stream: bool,
+    no_web_search: bool,
     params: Vec<String>,
     provider_params_json: Option<String>,
     output_schema: Option<String>,
@@ -2400,6 +2408,7 @@ async fn handle_run_command(
             output,
             params,
             provider_params_json,
+            no_web_search,
             stream,
             no_stream,
             stdin,
@@ -2459,6 +2468,11 @@ async fn handle_run_command(
     match (duration, provider_params, provider_params_json) {
         (Ok(dur), Ok(parsed_params), Ok(parsed_params_json)) => {
             let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+            let merged_provider_params = apply_no_web_search_provider_param(
+                resolved_provider,
+                merged_provider_params,
+                no_web_search,
+            )?;
             let mut limits = config.budget_limits();
             if let Some(max_duration) = dur {
                 limits.max_duration = Some(max_duration);
@@ -2570,6 +2584,60 @@ fn merge_provider_params(
             "provider params must be JSON objects after parsing"
         )),
     }
+}
+
+fn provider_web_search_param_key(provider: Provider) -> Option<&'static str> {
+    match provider {
+        Provider::Anthropic | Provider::Openai => Some("web_search"),
+        Provider::Gemini => Some("google_search"),
+        Provider::SelfHosted => None,
+    }
+}
+
+fn apply_no_web_search_provider_param(
+    provider: Provider,
+    provider_params: Option<serde_json::Value>,
+    no_web_search: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if !no_web_search {
+        return Ok(provider_params);
+    }
+
+    let Some(key) = provider_web_search_param_key(provider) else {
+        return Ok(provider_params);
+    };
+
+    let mut opt_out = serde_json::Map::new();
+    opt_out.insert(key.to_string(), serde_json::Value::Null);
+    let opt_out = Some(serde_json::Value::Object(opt_out));
+    merge_provider_params(opt_out, provider_params)
+}
+
+fn apply_no_web_search_resume_provider_params(
+    provider: Option<Provider>,
+    model_override_provider: Option<Provider>,
+    stored_provider: meerkat_core::Provider,
+    stored_provider_params: Option<&serde_json::Value>,
+    merged_provider_params: &mut Option<serde_json::Value>,
+    no_web_search: bool,
+) -> anyhow::Result<()> {
+    if !no_web_search {
+        return Ok(());
+    }
+
+    let Some(web_search_provider) = provider
+        .or(model_override_provider)
+        .or_else(|| Provider::from_core(stored_provider))
+    else {
+        return Ok(());
+    };
+
+    let base_params = merged_provider_params
+        .take()
+        .or_else(|| stored_provider_params.cloned());
+    *merged_provider_params =
+        apply_no_web_search_provider_param(web_search_provider, base_params, true)?;
+    Ok(())
 }
 
 fn looks_like_path(raw: &str) -> bool {
@@ -7110,6 +7178,7 @@ async fn resume_session(
     output: String,
     params: Vec<String>,
     provider_params_json: Option<String>,
+    no_web_search: bool,
     stream: bool,
     no_stream: bool,
     stdin: StdinMode,
@@ -7146,6 +7215,7 @@ async fn resume_session(
         output,
         params,
         provider_params_json,
+        no_web_search,
         stream,
         no_stream,
         stdin,
@@ -7183,6 +7253,7 @@ async fn resume_session_with_llm_override(
     output: String,
     params: Vec<String>,
     provider_params_json: Option<String>,
+    no_web_search: bool,
     stream: bool,
     no_stream: bool,
     stdin: StdinMode,
@@ -7218,6 +7289,7 @@ async fn resume_session_with_llm_override(
             output,
             params,
             provider_params_json,
+            no_web_search,
             stream,
             no_stream,
             stdin,
@@ -7256,7 +7328,7 @@ async fn resume_session_with_llm_override(
         let stream = resolve_stream_enabled(stream, no_stream, !json_output)?;
         let parsed_params = parse_provider_params(&params)?;
         let parsed_params_json = parse_provider_params_json(provider_params_json)?;
-        let merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
+        let mut merged_provider_params = merge_provider_params(parsed_params, parsed_params_json)?;
         let parsed_output_schema = output_schema
             .as_ref()
             .map(|s| parse_output_schema(s))
@@ -7305,11 +7377,23 @@ async fn resume_session_with_llm_override(
         } else {
             model
         };
-        if provider.is_none()
-            && let Some(model_override) = model_override.as_deref()
-        {
-            let _ = resolve_cli_provider(&config, model_override, None)?;
-        }
+        let model_override_provider = if provider.is_none() {
+            model_override
+                .as_deref()
+                .map(|model_override| resolve_cli_provider(&config, model_override, None))
+                .transpose()?
+        } else {
+            None
+        };
+
+        apply_no_web_search_resume_provider_params(
+            provider,
+            model_override_provider,
+            stored_metadata.provider,
+            stored_metadata.provider_params.as_ref(),
+            &mut merged_provider_params,
+            no_web_search,
+        )?;
 
         let mut limits = build_state
             .budget_limits
@@ -12808,6 +12892,7 @@ default_model = "gemma"
             false,
             false,
             true,
+            false,
             Vec::new(),
             None,
             None,
@@ -13048,6 +13133,7 @@ default_model = "gemma"
             "temperature=0.2",
             "--params-json",
             r#"{"reasoning":{"effort":"high"}}"#,
+            "--no-web-search",
             "--schema",
             "./schema.json",
             "--json",
@@ -13071,6 +13157,7 @@ default_model = "gemma"
                 skills,
                 params,
                 provider_params_json,
+                no_web_search,
                 output_schema,
                 json,
                 stdin,
@@ -13089,6 +13176,7 @@ default_model = "gemma"
                     provider_params_json.as_deref(),
                     Some(r#"{"reasoning":{"effort":"high"}}"#)
                 );
+                assert!(no_web_search);
                 assert_eq!(output_schema.as_deref(), Some("./schema.json"));
                 assert!(json);
                 assert!(matches!(stdin, StdinMode::Lines));
@@ -15347,6 +15435,102 @@ capabilities = ["definitely_missing_capability"]
         let result = parse_provider_params(&params)?;
         let json = result.ok_or("missing result")?;
         assert_eq!(json["reasoning_effort"], "high");
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_web_search_provider_param_uses_provider_native_key()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let openai = apply_no_web_search_provider_param(
+            Provider::Openai,
+            Some(serde_json::json!({
+                "reasoning_effort": "high",
+                "web_search": {"type": "web_search"}
+            })),
+            true,
+        )?
+        .expect("OpenAI opt-out params");
+        assert_eq!(openai["reasoning_effort"], "high");
+        assert!(
+            openai
+                .get("web_search")
+                .is_some_and(serde_json::Value::is_null)
+        );
+
+        let gemini = apply_no_web_search_provider_param(Provider::Gemini, None, true)?
+            .expect("Gemini opt-out params");
+        assert!(
+            gemini
+                .get("google_search")
+                .is_some_and(serde_json::Value::is_null)
+        );
+        assert!(gemini.get("web_search").is_none());
+
+        let self_hosted = apply_no_web_search_provider_param(Provider::SelfHosted, None, true)?;
+        assert!(self_hosted.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_no_web_search_resume_params_preserve_resume_precedence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let stored = serde_json::json!({
+            "temperature": 0.1,
+            "web_search": {"type": "web_search"}
+        });
+        let mut inherited = None;
+        apply_no_web_search_resume_provider_params(
+            None,
+            None,
+            meerkat_core::Provider::OpenAI,
+            Some(&stored),
+            &mut inherited,
+            true,
+        )?;
+        let inherited = inherited.expect("stored params plus opt-out");
+        assert_eq!(inherited["temperature"], 0.1);
+        assert!(
+            inherited
+                .get("web_search")
+                .is_some_and(serde_json::Value::is_null)
+        );
+
+        let mut explicit = Some(serde_json::json!({"reasoning_effort": "high"}));
+        apply_no_web_search_resume_provider_params(
+            None,
+            None,
+            meerkat_core::Provider::OpenAI,
+            Some(&stored),
+            &mut explicit,
+            true,
+        )?;
+        let explicit = explicit.expect("explicit params plus opt-out");
+        assert_eq!(explicit["reasoning_effort"], "high");
+        assert!(explicit.get("temperature").is_none());
+        assert!(
+            explicit
+                .get("web_search")
+                .is_some_and(serde_json::Value::is_null)
+        );
+
+        let mut model_override = Some(serde_json::json!({"top_p": 0.8}));
+        apply_no_web_search_resume_provider_params(
+            None,
+            Some(Provider::Gemini),
+            meerkat_core::Provider::OpenAI,
+            Some(&stored),
+            &mut model_override,
+            true,
+        )?;
+        let model_override = model_override.expect("model override params plus opt-out");
+        assert_eq!(model_override["top_p"], 0.8);
+        assert!(model_override.get("web_search").is_none());
+        assert!(
+            model_override
+                .get("google_search")
+                .is_some_and(serde_json::Value::is_null)
+        );
+
         Ok(())
     }
 

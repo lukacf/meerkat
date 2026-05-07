@@ -12,7 +12,7 @@ runs:
   steps:
     - name: Install Rust
       if: ${{ inputs.profile == 'doctor' || inputs.profile == 'lint' || inputs.profile == 'sdk' || inputs.profile == 'rust' || inputs.profile == 'wasm' || inputs.profile == 'audit' || inputs.profile == 'full' }}
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@1.94.0
 
     - name: Add wasm32 target
       if: ${{ inputs.profile == 'wasm' || inputs.profile == 'full' }}

@@ -903,13 +903,15 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
             .state
             .take_turn_context_for_inputs(&contributing_input_ids)
             .await;
+        let runtime_render_metadata = primitive
+            .turn_metadata()
+            .and_then(|meta| meta.render_metadata.clone());
         // The runtime has already resolved handling_mode routing (Queue vs
         // Steer) before the executor fires. The session-service start_turn
         // path only supports Queue — Steer semantics are realized by the
-        // runtime ingress, not by the executor. Similarly, render_metadata
-        // is runtime-owned and must not leak into the session-service path.
-        // Strip both from turn_metadata to prevent the session extracting
-        // them from metadata and overriding the flattened Queue value.
+        // runtime ingress, not by the executor. Render metadata is carried on
+        // the flattened request while stripped from turn_metadata so session
+        // implementations cannot re-extract metadata and override the request.
         let executor_turn_metadata = primitive.turn_metadata().map(|meta| {
             let mut m = meta.clone();
             m.handling_mode = Some(meerkat_core::types::HandlingMode::Queue);
@@ -919,7 +921,7 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
         let req = StartTurnRequest {
             prompt: primitive.extract_content_input(),
             system_prompt: None,
-            render_metadata: None,
+            render_metadata: runtime_render_metadata,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             event_tx: queued_context.map(|context| context.event_tx),
             skill_references: primitive

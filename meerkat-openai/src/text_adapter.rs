@@ -188,13 +188,15 @@ fn project_realtime_replay_messages(messages: &[Message]) -> Result<Vec<Message>
             }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_realtime_assistant_blocks(&assistant.blocks);
-                (!blocks.is_empty()).then(|| {
-                    Message::BlockAssistant(BlockAssistantMessage {
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
                         blocks,
                         stop_reason: assistant.stop_reason,
                         created_at: assistant.created_at,
-                    })
-                })
+                    }))
+                }
             }
             Message::ToolResults { .. } => unreachable!("handled above"),
         };

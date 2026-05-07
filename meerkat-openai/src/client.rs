@@ -235,13 +235,15 @@ pub(crate) fn project_openai_replay_messages(
             }
             Message::BlockAssistant(assistant) => {
                 let blocks = project_openai_assistant_blocks(mode, &assistant.blocks);
-                (!blocks.is_empty()).then(|| {
-                    Message::BlockAssistant(BlockAssistantMessage {
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
                         blocks,
                         stop_reason: assistant.stop_reason,
                         created_at: assistant.created_at,
-                    })
-                })
+                    }))
+                }
             }
             Message::ToolResults { .. } => unreachable!("handled above"),
         };

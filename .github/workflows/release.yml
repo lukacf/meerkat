@@ -38,6 +38,7 @@ env:
 jobs:
   release_validate:
     name: Validate release state
+    if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_web_sdk_only != 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -381,7 +382,9 @@ jobs:
     name: Publish crates + SDK packages
     if: >-
       startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_release_packages == 'true')
+      (github.event_name == 'workflow_dispatch' &&
+       github.event.inputs.publish_release_packages == 'true' &&
+       github.event.inputs.publish_web_sdk_only != 'true')
     needs: [release_validate]
     runs-on: ubuntu-latest
     steps:
@@ -494,6 +497,60 @@ jobs:
           else
             npm publish --access public
           fi
+
+      - name: Install wasm-pack
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Publish Web SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        working-directory: sdks/web
+        run: |
+          set -euo pipefail
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
+          PACKAGE_VERSION="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
+          if [[ "$DRY_RUN" != "true" ]] && npm view "$PACKAGE_VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE_VERSION already published, skipping"
+            exit 0
+          fi
+          npm install --ignore-scripts
+          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
+          npm run build
+          if [[ "$DRY_RUN" == "true" ]]; then
+            npm publish --access public --dry-run
+          else
+            npm publish --access public
+          fi
+
+  publish_web_sdk_recovery:
+    name: Publish Web SDK recovery
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.publish_release_packages == 'true' &&
+      github.event.inputs.publish_web_sdk_only == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Python + Node tooling
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
 
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2

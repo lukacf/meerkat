@@ -37,9 +37,10 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
-    SessionError, SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionForkResult,
+    SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
+    SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
+    SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -7289,6 +7290,75 @@ impl SessionRuntime {
             .await
             .ok()
             .map(Into::into)
+    }
+
+    async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {
+        let runtime_running = self
+            .runtime_adapter
+            .runtime_state(session_id)
+            .await
+            .is_ok_and(|state| matches!(state, RuntimeState::Running));
+        let has_active_inputs = self
+            .runtime_adapter
+            .list_active_inputs(session_id)
+            .await
+            .is_ok_and(|inputs| !inputs.is_empty());
+        if runtime_running || has_active_inputs {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is active; transcript fork uses running_behavior=reject"
+                ),
+                data: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// Fork an idle materialized session at a transcript index.
+    pub async fn fork_session_at(
+        &self,
+        session_id: &SessionId,
+        req: SessionForkAtRequest,
+    ) -> Result<SessionForkResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .fork_session_at(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
+    }
+
+    /// Fork an idle materialized session and apply a typed transcript replacement.
+    pub async fn fork_session_replace(
+        &self,
+        session_id: &SessionId,
+        req: SessionForkReplaceRequest,
+    ) -> Result<SessionForkResult, RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return Err(RpcError {
+                code: error::SESSION_BUSY,
+                message: format!(
+                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+                ),
+                data: None,
+            });
+        }
+        self.reject_active_transcript_edit(session_id).await?;
+
+        self.service
+            .fork_session_replace(session_id, req)
+            .await
+            .map_err(session_error_to_rpc)
     }
 
     /// Get the event injector for a session, if available.

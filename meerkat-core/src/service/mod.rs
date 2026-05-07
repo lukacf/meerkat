@@ -27,6 +27,8 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+pub use crate::session::{TranscriptEditError, TranscriptReplacement};
+
 /// Controls whether `create_session()` should execute an initial turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitialTurnPolicy {
@@ -946,6 +948,58 @@ impl SessionHistoryPage {
     }
 }
 
+/// Explicit behavior for transcript fork/edit requests when the source
+/// session has active work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptEditRunningBehavior {
+    /// Reject the request while the source session is active.
+    #[default]
+    Reject,
+}
+
+/// Request to fork a session at a transcript message index.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionForkAtRequest {
+    pub message_index: usize,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Request to fork a session and apply a typed transcript replacement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionForkReplaceRequest {
+    pub message_index: usize,
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    pub replacement: TranscriptReplacement,
+    #[serde(default)]
+    pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Result of creating an edited transcript branch.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SessionForkResult {
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub source_session_id: SessionId,
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
+    pub session_id: SessionId,
+    pub message_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ref: Option<String>,
+}
+
+impl TranscriptEditError {
+    /// Convert a typed edit validation failure into a surface-friendly session
+    /// error without widening the `SessionService` error enum.
+    pub fn into_session_error(self) -> SessionError {
+        SessionError::Agent(crate::error::AgentError::ConfigError(self.to_string()))
+    }
+}
+
 /// Canonical session lifecycle abstraction.
 ///
 /// All surfaces delegate to this trait. Implementations control persistence,
@@ -1181,6 +1235,36 @@ pub trait SessionServiceHistoryExt: SessionService {
         id: &SessionId,
         query: SessionHistoryQuery,
     ) -> Result<SessionHistoryPage, SessionError>;
+}
+
+/// Optional typed transcript fork/edit extension for `SessionService`.
+///
+/// Implementations must create a new session identity for every operation.
+/// Source history is never mutated in place.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait SessionServiceTranscriptEditExt: SessionService {
+    /// Fork a session at a message index.
+    async fn fork_session_at(
+        &self,
+        id: &SessionId,
+        req: SessionForkAtRequest,
+    ) -> Result<SessionForkResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported("fork_session_at".to_string()))
+    }
+
+    /// Fork a session and apply a typed transcript replacement.
+    async fn fork_session_replace(
+        &self,
+        id: &SessionId,
+        req: SessionForkReplaceRequest,
+    ) -> Result<SessionForkResult, SessionError> {
+        let _ = (id, req);
+        Err(SessionError::Unsupported(
+            "fork_session_replace".to_string(),
+        ))
+    }
 }
 
 /// Extension trait for `Arc<dyn SessionService>` to allow calling methods directly.

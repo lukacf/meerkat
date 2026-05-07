@@ -19,8 +19,8 @@ use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
 use crate::tool_scope::ToolFilter;
 use crate::types::{
-    AssistantBlock, BlockAssistantMessage, ContentInput, Message, SessionId, StopReason, ToolDef,
-    ToolProvenance, ToolResult, Usage, UserMessage,
+    AssistantBlock, BlockAssistantMessage, ContentBlock, ContentInput, Message, SessionId,
+    StopReason, ToolDef, ToolProvenance, ToolResult, Usage, UserMessage,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -48,6 +48,66 @@ pub const SESSION_VERSION: u32 = 2;
 ///   `SessionMetadata`-local shape change bumps this without moving
 ///   `SESSION_VERSION`.
 pub const SESSION_METADATA_SCHEMA_VERSION: u32 = 2;
+
+/// Typed transcript replacement used to create an edited fork.
+///
+/// Replacements never mutate the source session in place. The owning service
+/// applies this to a forked prefix, producing a new `SessionId`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TranscriptReplacement {
+    /// Replace the addressed message with a full canonical message.
+    Message { message: Message },
+    /// Replace one user-message content block.
+    UserContentBlock {
+        block_index: usize,
+        block: ContentBlock,
+    },
+    /// Replace one block in a block-assistant message.
+    AssistantBlock {
+        block_index: usize,
+        block: AssistantBlock,
+    },
+    /// Replace one content block inside one tool-result payload.
+    ToolResultContentBlock {
+        result_index: usize,
+        block_index: usize,
+        block: ContentBlock,
+    },
+}
+
+/// Invalid typed transcript edit request.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum TranscriptEditError {
+    #[error("message index {message_index} out of bounds for {message_count} messages")]
+    MessageIndexOutOfBounds {
+        message_index: usize,
+        message_count: usize,
+    },
+    #[error("{block_kind} index {block_index} out of bounds for {block_count} blocks")]
+    BlockIndexOutOfBounds {
+        block_kind: &'static str,
+        block_index: usize,
+        block_count: usize,
+    },
+    #[error("replacement expected {expected} at message index {message_index}, found {actual}")]
+    MessageRoleMismatch {
+        message_index: usize,
+        expected: &'static str,
+        actual: &'static str,
+    },
+}
+
+fn message_role_name(message: &Message) -> &'static str {
+    match message {
+        Message::System(_) => "system",
+        Message::SystemNotice(_) => "system_notice",
+        Message::User(_) => "user",
+        Message::Assistant(_) => "assistant",
+        Message::BlockAssistant(_) => "block_assistant",
+        Message::ToolResults { .. } => "tool_results",
+    }
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1458,6 +1518,108 @@ impl Session {
             metadata: self.metadata.clone(),
             usage: self.usage.clone(),
         }
+    }
+
+    /// Fork the session and replace the message at `message_index`.
+    ///
+    /// The returned session contains the original prefix before
+    /// `message_index`, followed by the typed replacement. Later source
+    /// messages are intentionally omitted so follow-up work continues from the
+    /// edited branch rather than replaying stale descendants.
+    pub fn fork_replacing(
+        &self,
+        message_index: usize,
+        replacement: TranscriptReplacement,
+    ) -> Result<Self, TranscriptEditError> {
+        let Some(original) = self.messages.get(message_index) else {
+            return Err(TranscriptEditError::MessageIndexOutOfBounds {
+                message_index,
+                message_count: self.messages.len(),
+            });
+        };
+
+        let replacement_message = match replacement {
+            TranscriptReplacement::Message { message } => message,
+            TranscriptReplacement::UserContentBlock { block_index, block } => {
+                let Message::User(user) = original else {
+                    return Err(TranscriptEditError::MessageRoleMismatch {
+                        message_index,
+                        expected: "user",
+                        actual: message_role_name(original),
+                    });
+                };
+                if block_index >= user.content.len() {
+                    return Err(TranscriptEditError::BlockIndexOutOfBounds {
+                        block_kind: "user content block",
+                        block_index,
+                        block_count: user.content.len(),
+                    });
+                }
+                let mut edited = user.clone();
+                edited.content[block_index] = block;
+                Message::User(edited)
+            }
+            TranscriptReplacement::AssistantBlock { block_index, block } => {
+                let Message::BlockAssistant(assistant) = original else {
+                    return Err(TranscriptEditError::MessageRoleMismatch {
+                        message_index,
+                        expected: "block_assistant",
+                        actual: message_role_name(original),
+                    });
+                };
+                if block_index >= assistant.blocks.len() {
+                    return Err(TranscriptEditError::BlockIndexOutOfBounds {
+                        block_kind: "assistant block",
+                        block_index,
+                        block_count: assistant.blocks.len(),
+                    });
+                }
+                let mut edited = assistant.clone();
+                edited.blocks[block_index] = block;
+                Message::BlockAssistant(edited)
+            }
+            TranscriptReplacement::ToolResultContentBlock {
+                result_index,
+                block_index,
+                block,
+            } => {
+                let Message::ToolResults {
+                    results,
+                    created_at,
+                } = original
+                else {
+                    return Err(TranscriptEditError::MessageRoleMismatch {
+                        message_index,
+                        expected: "tool_results",
+                        actual: message_role_name(original),
+                    });
+                };
+                let Some(result) = results.get(result_index) else {
+                    return Err(TranscriptEditError::BlockIndexOutOfBounds {
+                        block_kind: "tool result",
+                        block_index: result_index,
+                        block_count: results.len(),
+                    });
+                };
+                if block_index >= result.content.len() {
+                    return Err(TranscriptEditError::BlockIndexOutOfBounds {
+                        block_kind: "tool result content block",
+                        block_index,
+                        block_count: result.content.len(),
+                    });
+                }
+                let mut edited_results = results.clone();
+                edited_results[result_index].content[block_index] = block;
+                Message::ToolResults {
+                    results: edited_results,
+                    created_at: *created_at,
+                }
+            }
+        };
+
+        let mut forked = self.fork_at(message_index);
+        forked.push(replacement_message);
+        Ok(forked)
     }
 
     /// Fork the entire session (full history)

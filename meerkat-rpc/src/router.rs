@@ -16,7 +16,9 @@ use uuid::Uuid;
 use meerkat_core::ConfigStore;
 use meerkat_core::EventEnvelope;
 use meerkat_core::event::AgentEvent;
-use meerkat_core::service::{SessionError, SessionHistoryQuery};
+use meerkat_core::service::{
+    SessionError, SessionForkAtRequest, SessionForkReplaceRequest, SessionHistoryQuery,
+};
 use meerkat_core::session::Session;
 use meerkat_core::types::SessionId;
 #[cfg(feature = "mob")]
@@ -1298,6 +1300,8 @@ impl MethodRouter {
             "session/list" => handlers::session::handle_list(id, params, &self.runtime).await,
             "session/read" => self.handle_session_read(id, params).await,
             "session/history" => self.handle_session_history(id, params).await,
+            "session/fork_at" => self.handle_session_fork_at(id, params).await,
+            "session/fork_replace" => self.handle_session_fork_replace(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
             "blob/get" => self.handle_blob_get(id, params).await,
             #[cfg(not(feature = "mini-surface"))]
@@ -1880,6 +1884,114 @@ impl MethodRouter {
                     format!("Session not found: {session_id}"),
                 )
             }
+        }
+    }
+
+    async fn handle_session_fork_at(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ForkSessionAtParams = match handlers::parse_params(params) {
+            Ok(p) => p,
+            Err(resp) => return resp.with_id(id),
+        };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self
+                .runtime
+                .fork_session_at(
+                    &session_id,
+                    SessionForkAtRequest {
+                        message_index: params.message_index,
+                        running_behavior: params.running_behavior,
+                    },
+                )
+                .await
+            {
+                Ok(mut result) => {
+                    result.session_ref = self.runtime.realm_id().map(|realm| {
+                        meerkat_contracts::format_session_ref(realm, &result.session_id)
+                    });
+                    RpcResponse::success(id, result)
+                }
+                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcripts cannot be edited through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
+        }
+    }
+
+    async fn handle_session_fork_replace(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> RpcResponse {
+        let params: meerkat_contracts::ForkSessionReplaceParams =
+            match handlers::parse_params(params) {
+                Ok(p) => p,
+                Err(resp) => return resp.with_id(id),
+            };
+
+        let session_id = match handlers::parse_session_id_for_runtime(
+            id.clone(),
+            &params.session_id,
+            &self.runtime,
+        ) {
+            Ok(sid) => sid,
+            Err(resp) => return resp,
+        };
+
+        match self.resolve_session_owner(&session_id).await {
+            Some(SessionOwner::Runtime) => match self
+                .runtime
+                .fork_session_replace(
+                    &session_id,
+                    SessionForkReplaceRequest {
+                        message_index: params.message_index,
+                        replacement: params.replacement,
+                        running_behavior: params.running_behavior,
+                    },
+                )
+                .await
+            {
+                Ok(mut result) => {
+                    result.session_ref = self.runtime.realm_id().map(|realm| {
+                        meerkat_contracts::format_session_ref(realm, &result.session_id)
+                    });
+                    RpcResponse::success(id, result)
+                }
+                Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+            },
+            #[cfg(feature = "mob")]
+            Some(SessionOwner::Mob) => RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "mob-owned session transcripts cannot be edited through the generic session surface",
+            ),
+            None => RpcResponse::error(
+                id,
+                error::SESSION_NOT_FOUND,
+                format!("Session not found: {session_id}"),
+            ),
         }
     }
 
@@ -4259,6 +4371,8 @@ args = [{}]
         assert!(method_names.contains(&"help/ask"));
         assert!(method_names.contains(&"session/create"));
         assert!(method_names.contains(&"session/history"));
+        assert!(method_names.contains(&"session/fork_at"));
+        assert!(method_names.contains(&"session/fork_replace"));
         assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
@@ -8082,6 +8196,161 @@ args = [{}]
         assert!(
             archived_history["messages"].as_array().unwrap().len() >= 4,
             "archived history should return the full transcript"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_fork_at_creates_readable_branch_history() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "Follow up",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "second turn should succeed");
+
+        let fork_resp = router
+            .dispatch(make_request(
+                "session/fork_at",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "message_index": 2,
+                    "running_behavior": "reject"
+                }),
+            ))
+            .await
+            .unwrap();
+        let forked = result_value(&fork_resp);
+        let forked_id = forked["session_id"].as_str().unwrap().to_string();
+        assert_ne!(forked_id, session_id);
+        assert_eq!(forked["source_session_id"], session_id);
+        assert_eq!(forked["message_count"], 2);
+
+        let history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &forked_id }),
+            ))
+            .await
+            .unwrap();
+        let history = result_value(&history_resp);
+        assert_eq!(history["message_count"], 2);
+        assert_eq!(history["messages"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_fork_replace_creates_changed_branch_without_mutating_parent() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "Hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let turn_resp = router
+            .dispatch(make_request(
+                "turn/start",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "prompt": "Follow up",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert!(turn_resp.error.is_none(), "second turn should succeed");
+
+        let parent_before_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let parent_before = result_value(&parent_before_resp);
+        let parent_messages = parent_before["messages"].as_array().unwrap();
+        let message_index = parent_messages
+            .iter()
+            .position(|message| message["role"] == "user" && message["content"] == "Follow up")
+            .expect("parent transcript should contain the follow-up user message");
+        let parent_message_count = parent_before["message_count"]
+            .as_u64()
+            .expect("parent message_count should be numeric");
+
+        let fork_resp = router
+            .dispatch(make_request(
+                "session/fork_replace",
+                serde_json::json!({
+                    "session_id": &session_id,
+                    "message_index": message_index,
+                    "replacement": {
+                        "type": "message",
+                        "message": {
+                            "role": "user",
+                            "content": "Edited follow up"
+                        }
+                    },
+                    "running_behavior": "reject"
+                }),
+            ))
+            .await
+            .unwrap();
+        let forked = result_value(&fork_resp);
+        let forked_id = forked["session_id"].as_str().unwrap().to_string();
+        assert_ne!(forked_id, session_id);
+        assert_eq!(forked["message_count"], (message_index + 1) as u64);
+
+        let fork_history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &forked_id }),
+            ))
+            .await
+            .unwrap();
+        let fork_history = result_value(&fork_history_resp);
+        assert_eq!(fork_history["message_count"], (message_index + 1) as u64);
+        assert_eq!(fork_history["messages"][message_index]["role"], "user");
+        assert_eq!(
+            fork_history["messages"][message_index]["content"],
+            "Edited follow up"
+        );
+
+        let parent_history_resp = router
+            .dispatch(make_request(
+                "session/history",
+                serde_json::json!({ "session_id": &session_id }),
+            ))
+            .await
+            .unwrap();
+        let parent_history = result_value(&parent_history_resp);
+        assert_eq!(parent_history["message_count"], parent_message_count);
+        assert_eq!(
+            parent_history["messages"][message_index]["content"],
+            "Follow up"
         );
     }
 

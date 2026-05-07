@@ -245,10 +245,12 @@ pub use schema::{
 pub use service::{
     AppendSystemContextRequest, AppendSystemContextResult, AppendSystemContextStatus,
     CreateSessionRequest, DeferredPromptPolicy, MobToolsBuildArgs, MobToolsFactory,
-    SessionBuildOptions, SessionControlError, SessionError, SessionHistoryPage,
-    SessionHistoryQuery, SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt,
-    SessionServiceControlExt, SessionServiceHistoryExt, SessionSummary, SessionUsage, SessionView,
-    StageToolResultsRequest, StageToolResultsResult, StartTurnRequest, TurnToolOverlay,
+    SessionBuildOptions, SessionControlError, SessionError, SessionForkAtRequest,
+    SessionForkReplaceRequest, SessionForkResult, SessionHistoryPage, SessionHistoryQuery,
+    SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
+    SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
+    SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptReplacement, TurnToolOverlay,
 };
 pub use session::{
     DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,

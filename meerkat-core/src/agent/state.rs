@@ -128,6 +128,27 @@ fn public_terminal_cause_kind(
     cause_kind.filter(|cause_kind| cause_kind.is_specific_failure_cause())
 }
 
+fn assistant_image_events_from_blocks(
+    blocks: &[crate::types::AssistantBlock],
+) -> Vec<crate::event::AssistantImageEvent> {
+    blocks
+        .iter()
+        .filter_map(crate::event::AssistantImageEvent::from_assistant_block)
+        .collect()
+}
+
+fn assistant_image_events_from_effects(
+    effects: &[crate::ops::SessionEffect],
+) -> Vec<crate::event::AssistantImageEvent> {
+    let mut images = Vec::new();
+    for effect in effects {
+        if let crate::ops::SessionEffect::AppendAssistantBlocks { blocks } = effect {
+            images.extend(assistant_image_events_from_blocks(blocks));
+        }
+    }
+    images
+}
+
 fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
     if let Some(reason) = turn_input_failure_reason(input)
         && !reason.cause_kind.is_specific_failure_cause()
@@ -1921,6 +1942,9 @@ where
                         // Add assistant message with ordered blocks
                         self.session
                             .push(Message::BlockAssistant(assistant_msg.clone()));
+                        for image in assistant_image_events_from_blocks(&assistant_msg.blocks) {
+                            emit_event!(AgentEvent::AssistantImageAppended { image });
+                        }
 
                         // Emit tool call requests
                         for (tc, args) in &tool_calls {
@@ -2174,8 +2198,13 @@ where
                         // Add tool results to session
                         self.session.push(Message::tool_results(tool_results));
 
+                        let assistant_image_events =
+                            assistant_image_events_from_effects(&post_tool_effects);
                         if !post_tool_effects.is_empty() {
                             self.apply_session_effects(&post_tool_effects)?;
+                        }
+                        for image in assistant_image_events {
+                            emit_event!(AgentEvent::AssistantImageAppended { image });
                         }
 
                         self.observe_cancel_after_boundary_request(&run_id)?;
@@ -2212,7 +2241,12 @@ where
                         turn_count += 1;
                     } else if self.turn_in_extraction_flow()? {
                         // Extraction turn response — validate against schema
+                        let assistant_image_events =
+                            assistant_image_events_from_blocks(&assistant_msg.blocks);
                         self.session.push(Message::BlockAssistant(assistant_msg));
+                        for image in assistant_image_events {
+                            emit_event!(AgentEvent::AssistantImageAppended { image });
+                        }
 
                         // Drain turn boundary (fires TurnBoundary hooks, drains comms)
                         self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
@@ -2388,7 +2422,12 @@ where
                     } else {
                         // No tool calls - we're done with the agentic loop
                         let final_text = assistant_text.clone();
+                        let assistant_image_events =
+                            assistant_image_events_from_blocks(&assistant_msg.blocks);
                         self.session.push(Message::BlockAssistant(assistant_msg));
+                        for image in assistant_image_events {
+                            emit_event!(AgentEvent::AssistantImageAppended { image });
+                        }
 
                         self.apply_turn_input(TurnExecutionInput::LlmReturnedTerminal {
                             run_id: run_id.clone(),
@@ -5177,6 +5216,45 @@ mod tests {
         }
     }
 
+    struct DirectImageClient;
+
+    #[async_trait]
+    impl AgentLlmClient for DirectImageClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Image {
+                    image_id: crate::AssistantImageId::new(uuid::Uuid::from_u128(501)),
+                    blob_ref: crate::BlobRef {
+                        blob_id: crate::BlobId::new("direct-image-blob"),
+                        media_type: "image/png".to_string(),
+                    },
+                    media_type: crate::MediaType::new("image/png"),
+                    width: 32,
+                    height: 24,
+                    revised_prompt: crate::RevisedPromptDisposition::NotRequested,
+                    meta: crate::ProviderImageMetadata::NotEmitted,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     struct ImageEffectDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
     }
@@ -5373,7 +5451,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_image_session_effects_preserve_tool_result_adjacency() {
+    async fn direct_assistant_image_response_emits_typed_event() {
+        let client = Arc::new(DirectImageClient);
+        let tools = Arc::new(NoTools);
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(1);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .unwrap();
+
+        assert!(agent.session().messages().iter().any(|message| matches!(
+            message,
+            Message::BlockAssistant(blocks)
+                if blocks
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, AssistantBlock::Image { .. }))
+        )));
+
+        let mut image_events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::AssistantImageAppended { image } = event {
+                image_events.push(image);
+            }
+        }
+        assert_eq!(image_events.len(), 1);
+        let image = &image_events[0];
+        assert_eq!(image.blob_ref.blob_id.as_str(), "direct-image-blob");
+        assert_eq!(image.media_type.as_str(), "image/png");
+        assert_eq!((image.width, image.height), (32, 24));
+    }
+
+    #[tokio::test]
+    async fn tool_image_session_effects_preserve_tool_result_adjacency_and_emit_typed_event() {
         let client = Arc::new(ImageEffectClient {
             call_count: Mutex::new(0),
         });
@@ -5383,7 +5498,11 @@ mod tests {
             .await;
         agent.config.max_turns = Some(2);
 
-        let result = agent.run("prompt".to_string().into()).await.unwrap();
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let result = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .unwrap();
         assert_eq!(result.text, "done");
 
         let messages = agent.session().messages();
@@ -5427,6 +5546,43 @@ mod tests {
             image_index > tool_results_index,
             "assistant image blocks should be appended after tool results"
         );
+
+        let image_event_index = {
+            let mut events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+            let tool_result_event_index = events
+                .iter()
+                .position(|event| {
+                    matches!(event, crate::event::AgentEvent::ToolResultReceived { .. })
+                })
+                .expect("tool result event should be emitted");
+            let image_event_index = events
+                .iter()
+                .position(|event| {
+                    matches!(
+                        event,
+                        crate::event::AgentEvent::AssistantImageAppended { .. }
+                    )
+                })
+                .expect("assistant image append event should be emitted");
+            assert!(
+                image_event_index > tool_result_event_index,
+                "assistant image append event should follow tool-result events"
+            );
+            match &events[image_event_index] {
+                crate::event::AgentEvent::AssistantImageAppended { image } => {
+                    assert_eq!(image.blob_ref.blob_id.as_str(), "image-blob");
+                    assert_eq!(image.media_type.as_str(), "image/png");
+                    assert_eq!(image.width, 1);
+                    assert_eq!(image.height, 1);
+                }
+                other => panic!("expected assistant image event, got {other:?}"),
+            }
+            image_event_index
+        };
+        assert!(image_event_index > 0);
     }
 
     #[tokio::test]

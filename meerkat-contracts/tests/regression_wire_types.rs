@@ -18,10 +18,11 @@ use meerkat_contracts::{
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
-    AgentErrorClass, AgentEvent, BudgetType, ContentBlock, ContentInput, HookId, HookPoint,
-    HookReasonCode, RunResult, SessionId, SkillResolutionFailureReason, StopReason,
-    ToolCallArguments, ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload,
-    Usage,
+    AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
+    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType,
+    ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
+    SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
 };
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
@@ -739,6 +740,20 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
                 true,
             )
             .with_applied_at_turn(Some(1)),
+        },
+        AgentEvent::AssistantImageAppended {
+            image: AssistantImageEvent {
+                image_id: AssistantImageId::new(uuid::Uuid::new_v4()),
+                blob_ref: BlobRef {
+                    blob_id: BlobId::new("image-1"),
+                    media_type: "image/png".to_string(),
+                },
+                media_type: MediaType::new("image/png"),
+                width: 1024,
+                height: 1024,
+                revised_prompt: RevisedPromptDisposition::NotRequested,
+                meta: ProviderImageMetadata::NotEmitted,
+            },
         },
         AgentEvent::background_job_completed(
             "j_123",

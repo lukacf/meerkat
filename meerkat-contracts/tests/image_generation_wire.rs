@@ -5,24 +5,26 @@ use std::num::NonZeroU32;
 use meerkat_contracts::wire::{
     WireAssistantBlock, WireGenerateImageExecutionPlan, WireGenerateImageRequest,
     WireImageGenerationToolResult, WireImageOperationPhase, WireModelRoutingApprovalPhase,
-    WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionModelRoutingStatus,
-    WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
+    WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionHistory,
+    WireSessionMessage, WireSessionModelRoutingStatus, WireSwitchTurnControlResult,
+    WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::{
-    ApprovalId, AssistantImageId, AssistantImageRef, BlobId, BlobRef, GenerateImageExecutionPlan,
-    GenerateImageRequest, ImageContinuityTokenSupport, ImageFormatPreference,
-    ImageGenerationBackendKind, ImageGenerationIntent, ImageGenerationTargetCapabilities,
-    ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationApprovalReason,
-    ImageOperationDenialReason, ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass,
-    ImageQualityPreference, ImageSizePreference, MediaType, ModelRoutingApprovalPhase,
-    ModelRoutingApprovalRequest, ModelRoutingApprovalTerminalClass, PromptSource, PromptText,
-    ProviderId, ProviderImageMetadata, ProviderTextDisposition, RevisedPromptDisposition,
-    ScopedModelOverride, ScopedModelOverrideId, ScopedModelOverrideKind,
-    ScopedModelOverrideSummary, SwitchTurnApprovalReason, SwitchTurnControlResult,
-    SwitchTurnDenialReason, SwitchTurnDuration, SwitchTurnIntent, SwitchTurnOrigin,
-    SwitchTurnPhase, SwitchTurnPolicyReason, SwitchTurnReasonText, SwitchTurnReasonTextDisposition,
-    SwitchTurnRequestId, SwitchTurnTerminalClass, TextArtifactRef, ToolCallId, TopologyEpoch,
+    ApprovalId, AssistantImageId, AssistantImageRef, BlobId, BlobRef, BlockAssistantMessage,
+    GenerateImageExecutionPlan, GenerateImageRequest, ImageContinuityTokenSupport,
+    ImageFormatPreference, ImageGenerationBackendKind, ImageGenerationIntent,
+    ImageGenerationTargetCapabilities, ImageGenerationTargetPreference, ImageGenerationToolResult,
+    ImageOperationApprovalReason, ImageOperationDenialReason, ImageOperationId,
+    ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference, ImageSizePreference,
+    MediaType, Message, ModelRoutingApprovalPhase, ModelRoutingApprovalRequest,
+    ModelRoutingApprovalTerminalClass, PromptSource, PromptText, ProviderId, ProviderImageMetadata,
+    ProviderTextDisposition, RevisedPromptDisposition, ScopedModelOverride, ScopedModelOverrideId,
+    ScopedModelOverrideKind, ScopedModelOverrideSummary, SessionHistoryPage, StopReason,
+    SwitchTurnApprovalReason, SwitchTurnControlResult, SwitchTurnDenialReason, SwitchTurnDuration,
+    SwitchTurnIntent, SwitchTurnOrigin, SwitchTurnPhase, SwitchTurnPolicyReason,
+    SwitchTurnReasonText, SwitchTurnReasonTextDisposition, SwitchTurnRequestId,
+    SwitchTurnTerminalClass, TextArtifactRef, ToolCallId, TopologyEpoch,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -63,6 +65,51 @@ fn assistant_image_block_projects_to_wire_image_not_unknown() {
     assert!(encoded.contains("\"block_type\":\"image\""));
     let decoded: WireAssistantBlock = serde_json::from_str(&encoded).unwrap();
     assert!(matches!(decoded, WireAssistantBlock::Image { .. }));
+}
+
+#[test]
+fn assistant_image_block_remains_typed_in_wire_history() {
+    let page = SessionHistoryPage {
+        session_id: meerkat_core::SessionId::new(),
+        offset: 0,
+        limit: Some(50),
+        message_count: 1,
+        has_more: false,
+        messages: vec![Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![meerkat_core::AssistantBlock::Image {
+                image_id: AssistantImageId::new(uuid(2)),
+                blob_ref: BlobRef {
+                    blob_id: BlobId::new("generated-history-image"),
+                    media_type: "image/png".into(),
+                },
+                media_type: MediaType::new("image/png"),
+                width: 1024,
+                height: 1024,
+                revised_prompt: RevisedPromptDisposition::NotRequested,
+                meta: ProviderImageMetadata::NotEmitted,
+            }],
+            StopReason::EndTurn,
+        ))],
+    };
+
+    let wire = WireSessionHistory::from(page);
+    match &wire.messages[0] {
+        WireSessionMessage::BlockAssistant { blocks, .. } => match &blocks[0] {
+            WireAssistantBlock::Image {
+                blob_ref,
+                media_type,
+                width,
+                height,
+                ..
+            } => {
+                assert_eq!(blob_ref.blob_id.as_str(), "generated-history-image");
+                assert_eq!(media_type.as_str(), "image/png");
+                assert_eq!((*width, *height), (1024, 1024));
+            }
+            other => panic!("expected assistant image block, got {other:?}"),
+        },
+        other => panic!("expected block assistant history message, got {other:?}"),
+    }
 }
 
 #[test]

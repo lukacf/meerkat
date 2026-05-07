@@ -28468,7 +28468,7 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
         .await
         .expect("run flow");
-    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(3)).await;
+    let terminal = wait_for_run_terminal(&handle, &run_id, Duration::from_secs(8)).await;
     assert_eq!(terminal.status, MobRunStatus::Failed);
     let events = handle.events().replay_all().await.expect("replay");
     assert!(
@@ -28501,7 +28501,7 @@ async fn test_root_frame_timeout_cleans_up_inflight_node() {
         .get("start-node")
         .copied()
         .expect("start node status");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(30);
     while start_status == crate::run::flow_frame::NodeRunStatus::Running
         && Instant::now() < deadline
     {

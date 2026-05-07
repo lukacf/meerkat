@@ -697,7 +697,6 @@ const packageRunfileLabels = [...localPackages.values()]
   .filter((dir) => dir !== "")
   .sort()
   .map((dir) => `//${dir}:package_runfiles`);
-packageRunfileLabels.push("//vendor/oai-rt-rs:package_runfiles");
 packageRunfileLabels.sort();
 
 function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatrixLabels) {

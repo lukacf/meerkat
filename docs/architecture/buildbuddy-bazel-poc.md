@@ -142,14 +142,11 @@ of less cache warmth between repeated manual runs. Separate Git worktrees
 automatically get different workspace hashes, so they do not share local Bazel
 output bases.
 
-`scripts/buildbuddy-bazel-poc` may need to rebase `MODULE.bazel.lock`
-temporarily when a checked-in lockfile contains a stale absolute path for the
-vendored `oai-rt-rs` path dependency. Local runs rewrite only that path, run
-Bazel with `--lockfile_mode=error` against checked-in metadata, and restore the
-checked-in lockfile plus the vendored generated BUILD file after Bazel exits so
-a successful BuildBuddy build does not dirty the worktree. Persistent BUILD
-regeneration and `MODULE.bazel.lock` updates are explicit maintenance steps, not
-normal local lane behavior.
+`scripts/buildbuddy-bazel-poc` snapshots `MODULE.bazel.lock`, runs Bazel with
+`--lockfile_mode=error` against checked-in metadata, and restores the checked-in
+lockfile after Bazel exits so a successful BuildBuddy build does not dirty the
+worktree. Persistent BUILD regeneration and `MODULE.bazel.lock` updates are
+explicit maintenance steps, not normal local lane behavior.
 
 ## Simulation Harness
 
@@ -243,28 +240,15 @@ Path selectors cache `cargo metadata` under
 small first-populator lock, so simultaneous agents do not serialize on Cargo
 metadata after the cache is warm.
 
-Because the workspace currently vendors `oai-rt-rs` as a Cargo path dependency,
-`MODULE.bazel.lock` can contain an absolute checkout path after lockfile
-generation. `scripts/buildbuddy-bazel-poc` detects when that path belongs to a
-different worktree or CI checkout, rewrites just that vendored path to the
-current checkout, and passes `--lockfile_mode=error` so normal local runs rely
-on checked-in crate_universe metadata rather than silently refreshing it. The
-wrapper snapshots and restores the generated files around the invocation as a
+`oai-rt-rs` resolves from crates.io, so the lockfile no longer carries a
+worktree-local vendored path or a generated vendored BUILD file. The wrapper
+still snapshots and restores `MODULE.bazel.lock` around the invocation as a
 defensive measure, including failed analysis exits.
-
-The vendored `vendor/oai-rt-rs/BUILD.bazel` file is guarded because Bazel
-checks that generated file against the exact content recorded in
-`MODULE.bazel.lock`; even a one-byte whitespace rewrite can fail analysis with a
-content-length mismatch. If that file is already dirty before the run, the
-wrapper fails fast with an actionable error rather than entering a transient
-Bazel analysis failure. If Bazel rewrites it during a local invocation, the trap
-restores the exact checked-in bytes before the wrapper exits.
 
 When Cargo metadata changes require a persistent refresh, run
 `make buildbuddy-generate` for checked-in BUILD files and refresh
 `MODULE.bazel.lock` intentionally with the BuildBuddy CLI. Review the lockfile
-diff, and keep `vendor/oai-rt-rs/BUILD.bazel` byte-for-byte identical unless the
-vendored package's generated BUILD content is intentionally regenerated.
+diff before committing it.
 
 The macOS RBE lanes also pin the Apple SDK selection to the current enterprise
 executor pool default (`BUILDBUDDY_MACOS_SDK_VERSION`, default `26.2`) and a

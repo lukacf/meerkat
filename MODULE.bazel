@@ -107,19 +107,6 @@ register_toolchains(
 )
 
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
-crate.annotation(
-    crate = "oai-rt-rs",
-    version = "0.2.1",
-    additive_build_file_content = """
-# Maintained here so root workspace_runfiles can cross the vendored
-# path-dependency Bazel package boundary.
-filegroup(
-    name = "package_runfiles",
-    srcs = glob(["**/*"], exclude = ["BUILD", "BUILD.bazel"], allow_empty = True),
-    visibility = ["//visibility:public"],
-)
-""",
-)
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",

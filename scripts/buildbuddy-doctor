@@ -408,6 +408,29 @@ else
   bad "BuildBuddy surface feature matrix still routes through cargo-in-shell"
 fi
 
+release_surface_count="$(
+  awk '
+    index($0, "rkat_mini_surface_mini_providers_skills_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:rkat_rpc_mini_surface_mini_bin") {
+      count += 1
+    }
+    END { print count + 0 }
+  ' scripts/buildbuddy-bazel-poc
+)"
+if [[ "${release_surface_count}" -eq 5 ]] &&
+  awk '
+    /release-build-/ { lane = 1 }
+    lane && /default_target=/ && /rkat_mini_bin|rkat_rpc_mini_bin/ { bad = 1 }
+    lane && /;;/ { lane = 0 }
+    END { exit bad ? 1 : 0 }
+  ' scripts/buildbuddy-bazel-poc &&
+  grep -Fq '[rkat-mini]="meerkat-cli/rkat_mini_surface_mini_providers_skills_bin"' .github/workflows/release.yml &&
+  grep -Fq '[rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_surface_mini_bin"' .github/workflows/release.yml &&
+  grep -Fq 'MEERKAT_RELEASE_BUILDBUDDY_JOBS' .github/workflows/release.yml; then
+  pass "BuildBuddy release lanes package feature-scoped mini surface targets"
+else
+  bad "BuildBuddy release lanes are not using feature-scoped mini surface targets"
+fi
+
 if awk '
   /sdk-suites-rbe\)/ { lane = "sdk" }
   /wasm-contract-rbe\)/ { lane = "wasm-contract" }

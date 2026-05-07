@@ -126,10 +126,22 @@ the binary matrix through the generated Bazel release lanes:
 - `release-build-macos-x86`
 - `release-build-windows-x86`
 
+Those release lanes build the same public binary set as the GitHub-hosted path:
+`rkat`, `rkat-mini`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
+The mini binaries must use the generated surface feature-matrix targets
+(`rkat_mini_surface_mini_providers_skills_bin` and
+`rkat_rpc_mini_surface_mini_bin`) so BuildBuddy does not compile the optional
+full mob/RPC surface for mini release artifacts.
+
 Do not commit private BuildBuddy endpoint names or enterprise infrastructure
 details. Supply endpoint overrides through secrets or local environment only;
 the public repository should document the variable shape, not the private
 value.
+
+`MEERKAT_RELEASE_BUILDBUDDY_JOBS` may be set as a repository variable to tune
+release build fanout for owner-only BuildBuddy dispatches. The workflow defaults
+to `64` jobs when the variable is unset; keep this knob public and endpoint
+values private.
 
 Linux arm64 release binaries use extra RBE care because the release graph has a
 few very large generated Rust libraries and AArch64 `ld.gold` can fail during

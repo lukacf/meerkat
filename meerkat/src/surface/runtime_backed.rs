@@ -2104,8 +2104,10 @@ mod tests {
             supports_reasoning: false,
             inline_video: false,
             vision: false,
+            image_input: false,
             image_tool_results: false,
             supports_web_search: false,
+            image_generation: false,
             realtime: true,
             call_timeout_secs: None,
         }

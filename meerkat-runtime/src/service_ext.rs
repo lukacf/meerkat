@@ -65,6 +65,17 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
     ) -> Result<RealtimeAttachmentStatus, RuntimeDriverError>;
 
+    /// Get the runtime-owned resolved LLM capability surface for a session.
+    async fn resolved_session_llm_capabilities(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Option<crate::meerkat_machine_types::SessionLlmCapabilitySurface>, RuntimeDriverError>
+    {
+        Err(RuntimeDriverError::Internal(
+            "resolved session llm capabilities are not implemented by this runtime adapter".into(),
+        ))
+    }
+
     /// Fully-projected public channel status. RPC / MCP `realtime/status`
     /// responders use this so `attempt_count` / `next_retry_at` /
     /// `deadline_at` come from machine-owned reconnect lifecycle state.

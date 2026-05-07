@@ -303,6 +303,7 @@ class SessionDetails(SessionInfo):
     model: str = ""
     provider: str = ""
     last_assistant_text: str | None = None
+    resolved_capabilities: ResolvedModelCapabilities | None = None
 
 
 class ConfigEnvelope(TypedDict, total=False):
@@ -412,12 +413,28 @@ class DeletedMobProfile(TypedDict):
     deleted_revision: int
 
 
+class ResolvedModelCapabilities(TypedDict):
+    vision: bool
+    image_input: bool
+    image_tool_results: bool
+    inline_video: bool
+    realtime: bool
+    web_search: bool
+    image_generation: bool
+
+
 class ModelProfile(TypedDict):
     model_family: str
+    vision: bool
+    image_input: bool
+    image_tool_results: bool
     supports_temperature: bool
     supports_thinking: bool
     supports_reasoning: bool
     inline_video: bool
+    realtime: bool
+    web_search: bool
+    image_generation: bool
     params_schema: dict[str, Any]
 
 

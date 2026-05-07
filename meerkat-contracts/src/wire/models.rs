@@ -29,8 +29,24 @@ pub struct WireModelProfile {
     /// Whether the model supports provider-native web search tools.
     #[serde(default)]
     pub supports_web_search: bool,
+    /// Whether the model can reason over visual content.
+    #[serde(default)]
+    pub vision: bool,
+    /// Whether user messages may include image input blocks.
+    #[serde(default)]
+    pub image_input: bool,
+    /// Whether tool results may include image blocks for this model.
+    #[serde(default)]
+    pub image_tool_results: bool,
     /// Whether the model accepts inline video content in user messages.
+    #[serde(default)]
     pub inline_video: bool,
+    /// Whether the model supports realtime bidirectional transport.
+    #[serde(default)]
+    pub realtime: bool,
+    /// Whether the resolved provider/model can use image generation.
+    #[serde(default)]
+    pub image_generation: bool,
     /// JSON Schema describing accepted provider-specific parameters.
     pub params_schema: serde_json::Value,
     /// Beta headers authorized by the model capability catalog.
@@ -45,6 +61,38 @@ pub struct WireModelBetaHeader {
     pub feature: String,
     pub header_name: String,
     pub header_value: String,
+}
+
+/// Stable resolved model/session/member capability projection.
+///
+/// This is the UI-facing capability shape for already-resolved identities.
+/// Static catalog entries can expose the same bits, but callers should read
+/// this projection from session/member surfaces when identity can change at
+/// runtime.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireResolvedModelCapabilities {
+    /// Whether the model can reason over visual content.
+    #[serde(default)]
+    pub vision: bool,
+    /// Whether user messages may include image input blocks.
+    #[serde(default)]
+    pub image_input: bool,
+    /// Whether tool results may include image blocks for this model.
+    #[serde(default)]
+    pub image_tool_results: bool,
+    /// Whether user messages may include inline video blocks.
+    #[serde(default)]
+    pub inline_video: bool,
+    /// Whether the resolved model can drive realtime transport.
+    #[serde(default)]
+    pub realtime: bool,
+    /// Whether provider-native web search is available for this model.
+    #[serde(default)]
+    pub web_search: bool,
+    /// Whether the resolved provider/session can use image generation.
+    #[serde(default)]
+    pub image_generation: bool,
 }
 
 /// A single model entry in the catalog response.

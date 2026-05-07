@@ -135,6 +135,10 @@ pub struct MobMemberSnapshot {
     /// binding mechanics, not app-facing authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_member: Option<ExternalMemberObservationSnapshot>,
+    /// Runtime-owned resolved LLM capability projection for the member's
+    /// current bridge session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_capabilities: Option<meerkat_contracts::WireResolvedModelCapabilities>,
 }
 
 impl MobMemberSnapshot {
@@ -3489,6 +3493,7 @@ impl MobHandle {
         };
         snapshot.realtime_attachment_status =
             self.project_realtime_attachment_status(&snapshot).await;
+        snapshot.resolved_capabilities = self.project_resolved_capabilities(&snapshot).await;
         snapshot.external_member = self
             .project_external_member_observation(identity, &snapshot)
             .await;
@@ -3521,6 +3526,7 @@ impl MobHandle {
                 peer_connectivity: None,
                 kickoff: entry.kickoff,
                 external_member: None,
+                resolved_capabilities: None,
             }
             .with_current_bridge_session_id(entry.member_ref.bridge_session_id().cloned()),
         )
@@ -3578,6 +3584,29 @@ impl MobHandle {
             let runtime = self.runtime_adapter.as_ref()?.as_ref();
             let status = runtime.realtime_attachment_status(&session_id).await.ok()?;
             Some(map_runtime_realtime_attachment_status(status))
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = snapshot;
+            None
+        }
+    }
+
+    async fn project_resolved_capabilities(
+        &self,
+        snapshot: &MobMemberSnapshot,
+    ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+            let session_id = snapshot.current_bridge_session_id().cloned()?;
+            let runtime = self.runtime_adapter.as_ref()?.as_ref();
+            runtime
+                .resolved_session_llm_capabilities(&session_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|surface| surface.to_wire_resolved())
         }
         #[cfg(not(feature = "runtime-adapter"))]
         {
@@ -4055,6 +4084,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             external_member: None,
+            resolved_capabilities: None,
         }
         .with_current_bridge_session_id(Some(sid.clone()));
         let snapshot_value =
@@ -4087,6 +4117,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             external_member: None,
+            resolved_capabilities: None,
         };
 
         let snapshot_value =
@@ -4118,6 +4149,7 @@ mod tests {
             peer_connectivity: None,
             kickoff: None,
             external_member: None,
+            resolved_capabilities: None,
         };
         assert_eq!(
             snapshot.agent_identity(),

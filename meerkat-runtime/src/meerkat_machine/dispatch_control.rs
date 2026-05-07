@@ -492,6 +492,21 @@ impl MeerkatMachine {
                     status,
                 ))
             }
+            MeerkatMachineCommand::ResolvedSessionLlmCapabilities { session_id } => {
+                let sessions = self.sessions.read().await;
+                let entry = sessions.get(&session_id).ok_or_else(|| {
+                    RuntimeControlPlaneError::NotFound(Self::logical_runtime_id(&session_id))
+                })?;
+                let capabilities = match entry.capability_surface_status {
+                    SessionLlmCapabilitySurfaceStatus::Resolved => {
+                        entry.current_capability_surface.clone()
+                    }
+                    SessionLlmCapabilitySurfaceStatus::Unresolved => None,
+                };
+                Ok(MeerkatMachineCommandResult::ResolvedSessionLlmCapabilities(
+                    capabilities,
+                ))
+            }
             MeerkatMachineCommand::RuntimeRealtimeChannelStatus { session_id } => {
                 let sessions = self.sessions.read().await;
                 let entry = sessions.get(&session_id).ok_or_else(|| {

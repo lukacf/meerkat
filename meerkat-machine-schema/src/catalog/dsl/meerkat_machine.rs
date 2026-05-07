@@ -124,8 +124,10 @@ pub struct SessionLlmCapabilitySurface {
     pub supports_reasoning: bool,
     pub inline_video: bool,
     pub vision: bool,
+    pub image_input: bool,
     pub image_tool_results: bool,
     pub supports_web_search: bool,
+    pub image_generation: bool,
     pub realtime: bool,
     pub call_timeout_secs: Option<u64>,
 }

@@ -1228,6 +1228,15 @@ describe("Session wrappers", () => {
         model: "claude-sonnet-4-6",
         provider: "anthropic",
         last_assistant_text: "hello",
+        resolved_capabilities: {
+          vision: true,
+          image_input: true,
+          image_tool_results: true,
+          inline_video: false,
+          realtime: false,
+          web_search: true,
+          image_generation: true,
+        },
         labels: { team: "infra" },
       };
     };
@@ -1241,6 +1250,15 @@ describe("Session wrappers", () => {
     assert.equal(details.model, "claude-sonnet-4-6");
     assert.equal(details.provider, "anthropic");
     assert.equal(details.lastAssistantText, "hello");
+    assert.deepEqual(details.resolvedCapabilities, {
+      vision: true,
+      imageInput: true,
+      imageToolResults: true,
+      inlineVideo: false,
+      realtime: false,
+      webSearch: true,
+      imageGeneration: true,
+    });
   });
 
   it("session/deferred injectContext call public wrapper", async () => {
@@ -1795,7 +1813,27 @@ describe("Parity wrappers", () => {
             {
               provider: "anthropic",
               default_model_id: "claude-sonnet-4-6",
-              models: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", tier: "recommended" }],
+              models: [
+                {
+                  id: "claude-sonnet-4-6",
+                  display_name: "Claude Sonnet 4.6",
+                  tier: "recommended",
+                  profile: {
+                    model_family: "claude",
+                    supports_temperature: true,
+                    supports_thinking: true,
+                    supports_reasoning: true,
+                    vision: true,
+                    image_input: true,
+                    image_tool_results: true,
+                    inline_video: false,
+                    realtime: false,
+                    supports_web_search: true,
+                    image_generation: true,
+                    params_schema: {},
+                  },
+                },
+              ],
             },
           ],
         };
@@ -1816,6 +1854,8 @@ describe("Parity wrappers", () => {
     assert.equal(help.text, "rkat mcp add ...");
     assert.equal(external.status, "accepted");
     assert.equal(catalog.providers[0].defaultModelId, "claude-sonnet-4-6");
+    assert.equal(catalog.providers[0].models[0].profile?.imageGeneration, true);
+    assert.equal(catalog.providers[0].models[0].profile?.webSearch, true);
     assert.deepEqual(catalog.contractVersion, { major: 0, minor: 5, patch: 1 });
     assert.deepEqual(calls.map((c) => c.method), [
       "help/ask",

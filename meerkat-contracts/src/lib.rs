@@ -362,6 +362,7 @@ pub use wire::{
     WireRenderClass,
     WireRenderMetadata,
     WireRenderSalience,
+    WireResolvedModelCapabilities,
     WireRunResult,
     WireRuntimeBinding,
     WireRuntimeState,

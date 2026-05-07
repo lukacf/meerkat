@@ -235,6 +235,7 @@ MOB_RPC_PROMOTED_SCHEMA_DEFS = frozenset(
         "WireAuthBindingRef",
         "WireMobProfile",
         "WireMobToolConfig",
+        "WireResolvedModelCapabilities",
     ]
 )
 
@@ -897,6 +898,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("WireInputState", wire_schema, "Runtime input state snapshot.")
     append_python_dataclass("ScheduleListResult", wire_schema, "Response payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesResult", wire_schema, "Response payload for schedule/occurrences.")
+    append_python_dataclass(
+        "WireResolvedModelCapabilities",
+        schemas.get("models", {}),
+        "Stable resolved capability projection.",
+    )
     append_python_dataclass("WireSessionInfo", wire_schema, "Detailed session metadata payload.")
     append_python_dataclass("WireSessionSummary", wire_schema, "Session summary payload returned by session/list.")
     append_python_dataclass("ContractVersion", schemas.get("models", {}), "Semantic contract version triple.")
@@ -1279,6 +1285,7 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireInputState", wire_schema)
     append_typescript_interface("ScheduleListResult", wire_schema)
     append_typescript_interface("ScheduleOccurrencesResult", wire_schema)
+    append_typescript_interface("WireResolvedModelCapabilities", schemas.get("models", {}))
     append_typescript_interface("WireSessionInfo", wire_schema)
     append_typescript_interface("WireSessionSummary", wire_schema)
     append_typescript_interface("ContractVersion", schemas.get("models", {}))
@@ -2456,6 +2463,7 @@ def generate_web_mob_types(schemas: dict, output_dir: Path) -> None:
     append_interface("MobMemberSendResult")
     append_interface("MobFlowStatusResult")
     append_interface("MobHelperResult")
+    append_interface("WireResolvedModelCapabilities")
     append_interface("MobMemberStatusResult")
     append_interface("MobAppendSystemContextResult")
 

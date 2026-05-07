@@ -497,6 +497,7 @@ export interface MobMemberStatusResult {
   output_preview?: string;
   peer_connectivity?: unknown;
   realtime_attachment_status?: string;
+  resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
 }
@@ -2053,6 +2054,16 @@ export interface ScheduleOccurrencesResult {
   occurrences: Record<string, unknown>[];
 }
 
+export interface WireResolvedModelCapabilities {
+  image_generation?: boolean;
+  image_input?: boolean;
+  image_tool_results?: boolean;
+  inline_video?: boolean;
+  realtime?: boolean;
+  vision?: boolean;
+  web_search?: boolean;
+}
+
 export interface WireSessionInfo {
   created_at: number;
   is_active: boolean;
@@ -2061,6 +2072,7 @@ export interface WireSessionInfo {
   message_count: number;
   model: string;
   provider: string;
+  resolved_capabilities?: WireResolvedModelCapabilities;
   session_id: string;
   session_ref?: string;
   updated_at: number;
@@ -2103,13 +2115,18 @@ export interface ModelsCatalogResponse {
 
 export interface WireModelProfile {
   beta_headers?: Record<string, unknown>[];
-  inline_video: boolean;
+  image_generation?: boolean;
+  image_input?: boolean;
+  image_tool_results?: boolean;
+  inline_video?: boolean;
   model_family: string;
   params_schema: unknown;
+  realtime?: boolean;
   supports_reasoning: boolean;
   supports_temperature: boolean;
   supports_thinking: boolean;
   supports_web_search?: boolean;
+  vision?: boolean;
 }
 
 export interface WireAssistantImageRef {

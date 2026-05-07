@@ -16,6 +16,7 @@ from .generated.types import (
     WireToolFilter,
 )
 from .streaming import EventSubscription
+from .types import ResolvedModelCapabilities
 
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
 
@@ -115,6 +116,7 @@ MobMemberSnapshot = TypedDict(
                 "reattach_required",
             ]
         ],
+        "resolved_capabilities": NotRequired[ResolvedModelCapabilities],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
         "kickoff": NotRequired[dict[str, Any]],
         # Phase 5G/T5i identity-first realtime routing: session id of

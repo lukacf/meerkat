@@ -11643,6 +11643,47 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "WireResolvedModelCapabilities": {
+        "description": "Stable resolved model/session/member capability projection.\n\nThis is the UI-facing capability shape for already-resolved identities.\nStatic catalog entries can expose the same bits, but callers should read\nthis projection from session/member surfaces when identity can change at\nruntime.",
+        "properties": {
+          "image_generation": {
+            "default": false,
+            "description": "Whether the resolved provider/session can use image generation.",
+            "type": "boolean"
+          },
+          "image_input": {
+            "default": false,
+            "description": "Whether user messages may include image input blocks.",
+            "type": "boolean"
+          },
+          "image_tool_results": {
+            "default": false,
+            "description": "Whether tool results may include image blocks for this model.",
+            "type": "boolean"
+          },
+          "inline_video": {
+            "default": false,
+            "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "realtime": {
+            "default": false,
+            "description": "Whether the resolved model can drive realtime transport.",
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "description": "Whether the model can reason over visual content.",
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "description": "Whether provider-native web search is available for this model.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -11676,6 +11717,16 @@
         "type": [
           "string",
           "null"
+        ]
+      },
+      "resolved_capabilities": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireResolvedModelCapabilities"
+          },
+          {
+            "type": "null"
+          }
         ]
       },
       "status": {
@@ -27882,6 +27933,49 @@
     "type": "object"
   },
   "WireSessionInfo": {
+    "$defs": {
+      "WireResolvedModelCapabilities": {
+        "description": "Stable resolved model/session/member capability projection.\n\nThis is the UI-facing capability shape for already-resolved identities.\nStatic catalog entries can expose the same bits, but callers should read\nthis projection from session/member surfaces when identity can change at\nruntime.",
+        "properties": {
+          "image_generation": {
+            "default": false,
+            "description": "Whether the resolved provider/session can use image generation.",
+            "type": "boolean"
+          },
+          "image_input": {
+            "default": false,
+            "description": "Whether user messages may include image input blocks.",
+            "type": "boolean"
+          },
+          "image_tool_results": {
+            "default": false,
+            "description": "Whether tool results may include image blocks for this model.",
+            "type": "boolean"
+          },
+          "inline_video": {
+            "default": false,
+            "description": "Whether user messages may include inline video blocks.",
+            "type": "boolean"
+          },
+          "realtime": {
+            "default": false,
+            "description": "Whether the resolved model can drive realtime transport.",
+            "type": "boolean"
+          },
+          "vision": {
+            "default": false,
+            "description": "Whether the model can reason over visual content.",
+            "type": "boolean"
+          },
+          "web_search": {
+            "default": false,
+            "description": "Whether provider-native web search is available for this model.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical session info for wire protocol.",
     "properties": {
@@ -27915,6 +28009,16 @@
       },
       "provider": {
         "type": "string"
+      },
+      "resolved_capabilities": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireResolvedModelCapabilities"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "session_id": {
         "type": "string"

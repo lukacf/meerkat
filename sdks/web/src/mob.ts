@@ -20,6 +20,7 @@ import type {
   MemberDeliveryReceipt,
   MobRespawnResult,
   MobMemberSnapshot,
+  ResolvedModelCapabilities,
   MobHelperResult,
   EventEnvelope,
   EventSourceIdentity,
@@ -232,6 +233,27 @@ function optionalRecordField(
     return undefined;
   }
   return requireRecord(raw, message);
+}
+
+function parseResolvedModelCapabilities(
+  raw: unknown,
+): ResolvedModelCapabilities | undefined {
+  if (raw == null) {
+    return undefined;
+  }
+  const record = requireRecord(
+    raw,
+    'Invalid mob member_status response: resolved_capabilities must be object',
+  );
+  return {
+    vision: Boolean(record.vision),
+    image_input: Boolean(record.image_input),
+    image_tool_results: Boolean(record.image_tool_results),
+    inline_video: Boolean(record.inline_video),
+    realtime: Boolean(record.realtime),
+    web_search: Boolean(record.web_search),
+    image_generation: Boolean(record.image_generation),
+  };
 }
 
 function optionalStringArrayField(
@@ -616,6 +638,12 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
   }
   if (realtimeAttachmentStatus !== undefined) {
     result.realtime_attachment_status = realtimeAttachmentStatus;
+  }
+  const resolvedCapabilities = parseResolvedModelCapabilities(
+    snapshot.resolved_capabilities,
+  );
+  if (resolvedCapabilities !== undefined) {
+    result.resolved_capabilities = resolvedCapabilities;
   }
   if (Object.prototype.hasOwnProperty.call(snapshot, 'external_member')) {
     result.external_member = snapshot.external_member;

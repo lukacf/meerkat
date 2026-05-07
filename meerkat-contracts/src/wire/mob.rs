@@ -1719,6 +1719,8 @@ pub struct MobMemberStatusResult {
     pub kickoff: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_member: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_capabilities: Option<crate::wire::WireResolvedModelCapabilities>,
 }
 
 /// Response payload for `mob/snapshot`.
@@ -1728,6 +1730,43 @@ pub struct MobSnapshotResult {
     pub mob_id: String,
     pub status: String,
     pub members: Vec<Value>,
+}
+
+#[cfg(test)]
+mod member_status_capability_tests {
+    use super::*;
+
+    #[test]
+    fn member_status_result_round_trips_resolved_capabilities() {
+        let capabilities = crate::wire::WireResolvedModelCapabilities {
+            vision: true,
+            image_input: true,
+            image_tool_results: false,
+            inline_video: false,
+            realtime: true,
+            web_search: true,
+            image_generation: true,
+        };
+        let result = MobMemberStatusResult {
+            status: WireMobMemberStatus::Active,
+            output_preview: None,
+            error: None,
+            tokens_used: 0,
+            is_final: false,
+            realtime_attachment_status: Some("binding_ready".to_string()),
+            current_session_id: Some("session-1".to_string()),
+            peer_connectivity: None,
+            kickoff: None,
+            external_member: None,
+            resolved_capabilities: Some(capabilities.clone()),
+        };
+
+        let json = serde_json::to_string(&result).expect("serialize member status");
+        assert!(json.contains("\"resolved_capabilities\""));
+        let parsed: MobMemberStatusResult =
+            serde_json::from_str(&json).expect("deserialize member status");
+        assert_eq!(parsed.resolved_capabilities, Some(capabilities));
+    }
 }
 
 /// Response payload for `mob/destroy`.

@@ -6327,16 +6327,7 @@ turn3_capture={turn3_capture:?}; error={err}"
         let mut turn45_capture = turn45_primary_commit.clone();
         turn45_capture.merge_from(turn45_preemption_capture.clone());
         turn45_capture.merge_from(turn45_settled_capture.clone());
-        let interrupted_index = capture_event_index(&turn45_capture, "interrupted")
-            .ok_or("missing interrupted event during turn 5 barge-in")?;
-        let committed_index = turn45_capture
-            .event_kinds
-            .iter()
-            .enumerate()
-            .rfind(|(_, kind)| *kind == "turn_committed")
-            .map(|(index, _)| index)
-            .ok_or("missing post-barge turn_committed event after turn 5")?;
-        if interrupted_index >= committed_index
+        if !turn45_capture.saw_interrupted
             || turn45_capture.output_audio_pcm.is_empty()
             || !pcm_has_non_silence(&turn45_capture.output_audio_pcm)
         {

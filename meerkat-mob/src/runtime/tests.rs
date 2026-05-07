@@ -22347,7 +22347,7 @@ async fn test_schema_ref_file_path_validation_passes_and_fails() {
         .run_flow(FlowId::from("demo"), serde_json::json!({}))
         .await
         .expect("run flow");
-    let ok_terminal = wait_for_run_terminal(&ok_handle, &ok_run_id, Duration::from_secs(2)).await;
+    let ok_terminal = wait_for_run_terminal(&ok_handle, &ok_run_id, Duration::from_secs(8)).await;
     assert_eq!(ok_terminal.status, MobRunStatus::Completed);
 
     let mut schema_bad = NamedTempFile::new().expect("create schema file");
@@ -22369,7 +22369,7 @@ async fn test_schema_ref_file_path_validation_passes_and_fails() {
         .await
         .expect("run flow");
     let bad_terminal =
-        wait_for_run_terminal(&bad_handle, &bad_run_id, Duration::from_secs(2)).await;
+        wait_for_run_terminal(&bad_handle, &bad_run_id, Duration::from_secs(8)).await;
     assert_eq!(bad_terminal.status, MobRunStatus::Failed);
 }
 

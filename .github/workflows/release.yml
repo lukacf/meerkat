@@ -47,13 +47,13 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
 
 # Required GitHub Actions secrets for full release:
 #   CARGO_REGISTRY_TOKEN  - crates.io API token
 #   PYPI_API_TOKEN        - PyPI API token (scoped to meerkat-sdk package)
 #   NPM_TOKEN             - npm access token (scoped to @meerkat org or publish)
 #   BUILDBUDDY_API_KEY    - optional owner-only BuildBuddy binary recovery path
+#   BUILDBUDDY_ENDPOINT   - optional owner-only Windows BB endpoint override
 
 jobs:
   release_validate:
@@ -274,6 +274,7 @@ jobs:
         shell: bash
         env:
           BUILDBUDDY_BAZEL_COMMAND: ${{ matrix.bb_command }}
+          BUILDBUDDY_ENDPOINT: ${{ matrix.bb_command == 'release-build-windows-x86' && secrets.BUILDBUDDY_ENDPOINT || '' }}
           BUILDBUDDY_OUTPUT_LANE: release-build-${{ matrix.target }}
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release

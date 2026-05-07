@@ -466,8 +466,8 @@ if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   ! grep -Fq 'e2e-live:' .github/workflows/cargo.yml &&
   ! grep -Fq 'e2e-smoke:' .github/workflows/cargo.yml &&
   grep -Fq 'Cargo E2E live lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'Cargo E2E smoke lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'needs: [cargo, buildbuddy, dogma-cleanup-gate]' .github/workflows/ci.yml &&
+  grep -Fq 'GCP Bazel E2E smoke lane' .github/workflows/live-e2e.yml &&
+  grep -Fq 'needs: [bazel, dogma-cleanup-gate]' .github/workflows/ci.yml &&
   grep -Fq 'needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/cargo.yml &&
   ! grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging' .github/workflows/cargo.yml; then
   pass "CI gate selects one backend and Cargo gate depends on every standard Cargo CI lane"

@@ -24,26 +24,18 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write
 
 env:
-  MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
   MEERKAT_DOGMA_CLEANUP_GATE: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE || 'false' }}
 
 jobs:
-  cargo:
-    name: Cargo CI
-    if: ${{ !(vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) }}
-    uses: ./.github/workflows/cargo.yml
-    with:
-      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
-      machine_authority_head_sha: ${{ github.sha }}
-
-  buildbuddy:
-    name: BuildBuddy CI
-    if: ${{ (vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+  bazel:
+    name: GCP Bazel CI
     uses: ./.github/workflows/buildbuddy.yml
     with:
-      mode: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh' }}
+      backend: gcp-buildbuddy
+      mode: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-warm' }}
       machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
@@ -109,14 +101,12 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [cargo, buildbuddy, dogma-cleanup-gate]
+    needs: [bazel, dogma-cleanup-gate]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Check selected backend
         run: |
-          bb_enabled="${{ (vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}"
-          cargo_result="${{ needs.cargo.result }}"
-          buildbuddy_result="${{ needs.buildbuddy.result }}"
+          bazel_result="${{ needs.bazel.result }}"
           dogma_result="${{ needs.dogma-cleanup-gate.result }}"
           dogma_enabled="${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}"
 
@@ -125,13 +115,5 @@ jobs:
             exit 1
           fi
 
-          if [[ "$bb_enabled" == "true" ]]; then
-            echo "BuildBuddy selected: $buildbuddy_result"
-            echo "Cargo skipped: $cargo_result"
-            [[ "$buildbuddy_result" == "success" && "$cargo_result" == "skipped" ]]
-            exit $?
-          fi
-
-          echo "Cargo selected: $cargo_result"
-          echo "BuildBuddy skipped: $buildbuddy_result"
-          [[ "$cargo_result" == "success" && "$buildbuddy_result" == "skipped" ]]
+          echo "GCP Bazel CI selected: $bazel_result"
+          [[ "$bazel_result" == "success" ]]

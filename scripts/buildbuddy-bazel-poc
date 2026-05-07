@@ -62,9 +62,12 @@ esac
 
 workspace_root="$(git rev-parse --show-toplevel)"
 source "${workspace_root}/scripts/build-backend-env"
-meerkat_load_local_secrets_env "${workspace_root}"
+meerkat_bazel_backend="${MEERKAT_BAZEL_BACKEND:-buildbuddy-hosted}"
+if [[ "${meerkat_bazel_backend}" != "gcp-local" ]]; then
+  meerkat_load_local_secrets_env "${workspace_root}"
+fi
 
-if [[ -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
+if [[ "${meerkat_bazel_backend}" != "gcp-local" && -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
   key_line="$(grep -m1 -E '^[[:space:]]*(export[[:space:]]+)?BUILDBUDDY_API_KEY=' "${HOME}/.zshrc" || true)"
   if [[ -n "${key_line}" ]]; then
     key_value="${key_line#*=}"
@@ -79,12 +82,12 @@ if [[ -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
     fi
   fi
 fi
-if [[ -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
+if [[ "${meerkat_bazel_backend}" != "gcp-local" && -z "${BUILDBUDDY_API_KEY:-}" && -f "${HOME}/.zshrc" ]]; then
   BUILDBUDDY_API_KEY="$(zsh -lc 'source ~/.zshrc >/dev/null 2>&1 || true; print -r -- ${BUILDBUDDY_API_KEY-}')"
   export BUILDBUDDY_API_KEY
 fi
 
-if [[ -z "${BUILDBUDDY_API_KEY:-}" ]]; then
+if [[ "${meerkat_bazel_backend}" != "gcp-local" && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
   echo "error: BUILDBUDDY_API_KEY is not set" >&2
   exit 1
 fi
@@ -708,6 +711,7 @@ else
 fi
 
 startup_args=()
+startup_args+=(--bazelrc="${workspace_root}/.bazelrc")
 if [[ -z "${BUILDBUDDY_NO_DEFAULT_OUTPUT_BASE:-}" ]]; then
   if [[ -z "${BUILDBUDDY_OUTPUT_BASE:-}" ]]; then
     cache_root="${MEERKAT_BUILDBUDDY_OUTPUT_ROOT:-${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-bazel}"
@@ -789,9 +793,16 @@ if [[ "${#common_args[@]}" -gt 0 ]]; then
 fi
 bb_args+=(
   --config="${config}"
-  --remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
 )
-if [[ -n "${BUILDBUDDY_ENDPOINT:-}" ]]; then
+if [[ "${meerkat_bazel_backend}" == "gcp-local" ]]; then
+  if [[ -n "${MEERKAT_BAZEL_DISK_CACHE:-}" ]]; then
+    mkdir -p "${MEERKAT_BAZEL_DISK_CACHE}"
+    bb_args+=(--disk_cache="${MEERKAT_BAZEL_DISK_CACHE}")
+  fi
+else
+  bb_args+=(--remote_header="x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}")
+fi
+if [[ "${meerkat_bazel_backend}" != "gcp-local" && -n "${BUILDBUDDY_ENDPOINT:-}" ]]; then
   buildbuddy_endpoint="${BUILDBUDDY_ENDPOINT#http://}"
   buildbuddy_endpoint="${buildbuddy_endpoint#https://}"
   buildbuddy_endpoint="${buildbuddy_endpoint#grpc://}"

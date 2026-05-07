@@ -62,3 +62,8 @@ build:buildbuddy-windows-rbe --symlink_prefix=/
 
 test:buildbuddy-macos-rbe-fast --config=buildbuddy-macos-rbe
 test:buildbuddy-macos-rbe-fast --test_tag_filters=fast
+
+build:gcp-linux --platforms=//platforms:linux_x86_64
+build:gcp-linux --extra_execution_platforms=//platforms:linux_x86_64
+build:gcp-linux --nobuild_runfile_links
+build:gcp-linux --symlink_prefix=/

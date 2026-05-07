@@ -8,6 +8,11 @@ on:
         required: false
         default: full-fresh
         type: string
+      backend:
+        description: Bazel backend to use.
+        required: false
+        default: buildbuddy-hosted
+        type: string
       machine_authority_base_sha:
         description: Base revision for machine-authority change detection.
         required: false
@@ -20,7 +25,9 @@ on:
         type: string
     secrets:
       BUILDBUDDY_API_KEY:
-        required: true
+        required: false
+      BUILDBUDDY_ENDPOINT:
+        required: false
       ANTHROPIC_API_KEY:
         required: false
       RKAT_ANTHROPIC_API_KEY:
@@ -82,7 +89,10 @@ permissions:
 env:
   CARGO_HOME: /tmp/meerkat-cargo-home
   MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
+  MEERKAT_BAZEL_BACKEND: ${{ inputs.backend || 'buildbuddy-hosted' }}
+  BUILDBUDDY_BAZEL_CONFIG: ${{ (inputs.backend || '') == 'gcp-local' && 'gcp-linux' || '' }}
   BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+  BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
   RKAT_ANTHROPIC_API_KEY: ${{ secrets.RKAT_ANTHROPIC_API_KEY }}
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}

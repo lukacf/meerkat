@@ -26,10 +26,18 @@ runs:
       env:
         MEERKAT_BUILDBUDDY_CI_MODE: ${{ inputs.mode }}
         MEERKAT_BUILDBUDDY_LOG_ROOT: ${{ runner.temp }}/buildbuddy-logs
-        MEERKAT_BUILDBUDDY_REPOSITORY_CACHE: ${{ runner.temp }}/buildbuddy-repository-cache
+        MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-output-roots' || '' }}
+        MEERKAT_BUILDBUDDY_REPOSITORY_CACHE: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-repository-cache' || format('{0}/buildbuddy-repository-cache', runner.temp) }}
+        MEERKAT_BAZEL_DISK_CACHE: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-disk-cache' || '' }}
       run: |
         mkdir -p "${MEERKAT_BUILDBUDDY_LOG_ROOT}"
         mkdir -p "${MEERKAT_BUILDBUDDY_REPOSITORY_CACHE}"
+        if [[ -n "${MEERKAT_BUILDBUDDY_OUTPUT_ROOT}" ]]; then
+          mkdir -p "${MEERKAT_BUILDBUDDY_OUTPUT_ROOT}"
+        fi
+        if [[ -n "${MEERKAT_BAZEL_DISK_CACHE}" ]]; then
+          mkdir -p "${MEERKAT_BAZEL_DISK_CACHE}"
+        fi
         scripts/buildbuddy-ci-lane "${{ inputs.lane }}"
 
     - name: Upload BuildBuddy logs

@@ -80,6 +80,7 @@ runs:
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
     - name: Require BuildBuddy API key
+      if: ${{ env.MEERKAT_BAZEL_BACKEND != 'gcp-local' }}
       shell: bash
       run: |
         if [[ -z "${BUILDBUDDY_API_KEY}" ]]; then

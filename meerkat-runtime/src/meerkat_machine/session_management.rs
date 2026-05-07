@@ -88,26 +88,10 @@ impl MeerkatMachine {
         let Some(store) = self.store.as_ref() else {
             return Ok(None);
         };
-        let mut primary_runtime_state_loaded = false;
-        for (candidate_index, candidate) in runtime_id
-            .storage_alias_candidates()
-            .into_iter()
-            .enumerate()
-        {
-            match store.load_runtime_state(&candidate).await {
-                Ok(state) => {
-                    if candidate_index == 0 {
-                        primary_runtime_state_loaded = true;
-                    }
-                    if state.is_some() {
-                        return Ok(state);
-                    }
-                }
-                Err(_err) if candidate_index > 0 && primary_runtime_state_loaded => continue,
-                Err(err) => return Err(RuntimeDriverError::Internal(err.to_string())),
-            }
-        }
-        Ok(None)
+        store
+            .load_runtime_state(runtime_id)
+            .await
+            .map_err(|err| RuntimeDriverError::Internal(err.to_string()))
     }
 
     pub(super) async fn register_session_inner(

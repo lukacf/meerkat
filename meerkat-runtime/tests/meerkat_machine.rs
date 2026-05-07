@@ -831,7 +831,7 @@ async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight
 }
 
 #[tokio::test]
-async fn cold_reregister_does_not_force_destroyed_runtime_projection() {
+async fn cold_reregister_preserves_canonical_destroyed_runtime_state() {
     let store = Arc::new(meerkat_runtime::store::InMemoryRuntimeStore::new());
     let sid = SessionId::new();
 
@@ -853,13 +853,13 @@ async fn cold_reregister_does_not_force_destroyed_runtime_projection() {
     restarted.register_session(sid.clone()).await;
     assert_eq!(
         restarted.runtime_state(&sid).await.unwrap(),
-        RuntimeState::Idle,
-        "cold re-registration must not force lifecycle state from the stored runtime projection",
+        RuntimeState::Destroyed,
+        "cold re-registration must preserve canonical durable destroyed runtime truth",
     );
     assert_eq!(
         store.load_runtime_state(&runtime_id).await.unwrap(),
-        Some(RuntimeState::Idle),
-        "cold re-registration must not preserve destroyed projection as durable lifecycle truth",
+        Some(RuntimeState::Destroyed),
+        "cold re-registration must not rewrite canonical durable destroyed runtime truth",
     );
 }
 

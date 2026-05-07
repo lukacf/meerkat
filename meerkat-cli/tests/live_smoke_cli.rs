@@ -427,7 +427,7 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
             .current_dir(&project_dir)
             .args([
                 "run",
-                "Hello. Please create a picture of a cat using generate_image",
+                "You must call the generate_image tool to create a picture of a cat. Do not describe the image in text, you must use the tool.",
                 "--model",
                 "gpt-5.5",
             ])

@@ -10,7 +10,7 @@ use crate::tokio;
 use async_trait::async_trait;
 use futures::FutureExt;
 use meerkat_core::EventEnvelope;
-use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame};
+use meerkat_core::event::{AgentEvent, ScopedAgentEvent, StreamScopeFrame, TurnErrorMetadata};
 use meerkat_core::service::{StartTurnRequest, TurnToolOverlay};
 use meerkat_core::types::ContentInput;
 use std::collections::BTreeMap;
@@ -204,6 +204,14 @@ impl ActorFlowTurnExecutor {
                                 reason: format!(
                                     "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
                                 ),
+                                error_report: None,
+                                error: Some(TurnErrorMetadata::terminal(
+                                    meerkat_core::TurnTerminalCauseKind::StructuredOutputValidationFailed,
+                                    meerkat_core::TurnTerminalOutcome::StructuredOutputValidationFailed,
+                                    format!(
+                                        "structured output extraction failed after {attempts} attempt(s): {reason}; last_output={output:?}"
+                                    ),
+                                )),
                             });
                         }
                         return;
@@ -227,14 +235,36 @@ impl ActorFlowTurnExecutor {
                         if let Some(tx) = completion_tx.take() {
                             let _ = tx.send(FlowTurnOutcome::Failed {
                                 reason: format!("callback pending for tool '{tool_name}': {args}"),
+                                error_report: None,
+                                error: None,
                             });
                         }
                         return;
                     }
-                    AgentEvent::RunFailed { error, .. }
-                    | AgentEvent::InteractionFailed { error, .. } => {
+                    AgentEvent::RunFailed {
+                        error,
+                        error_report,
+                        ..
+                    } => {
                         if let Some(tx) = completion_tx.take() {
-                            let _ = tx.send(FlowTurnOutcome::Failed { reason: error });
+                            let metadata = error_report.as_ref().and_then(|report| {
+                                TurnErrorMetadata::from_agent_error_report(report, error.clone())
+                            });
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: error,
+                                error_report,
+                                error: metadata,
+                            });
+                        }
+                        return;
+                    }
+                    AgentEvent::InteractionFailed { error, .. } => {
+                        if let Some(tx) = completion_tx.take() {
+                            let _ = tx.send(FlowTurnOutcome::Failed {
+                                reason: error,
+                                error_report: None,
+                                error: None,
+                            });
                         }
                         return;
                     }
@@ -245,6 +275,8 @@ impl ActorFlowTurnExecutor {
             if let Some(tx) = completion_tx {
                 let _ = tx.send(FlowTurnOutcome::Failed {
                     reason: "turn event stream closed before terminal outcome".to_string(),
+                    error_report: None,
+                    error: None,
                 });
             }
         })
@@ -469,6 +501,8 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                 }
                 Ok(FlowTurnOutcome::Failed {
                     reason: "turn completion channel closed".to_string(),
+                    error_report: None,
+                    error: None,
                 })
             }
             Err(_) => Err(MobError::FlowTurnTimedOut),
@@ -513,6 +547,7 @@ mod tests {
     use crate::ids::RunId;
     use crate::runtime::FlowTurnOutcome;
     use meerkat_core::AgentEvent;
+    use meerkat_core::event::{AgentErrorClass, AgentErrorReason, AgentErrorReport};
     use meerkat_core::interaction::InteractionId;
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -632,6 +667,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_subscription_bridge_preserves_run_failed_typed_llm_error() {
+        let (events_tx, events_rx) = tokio::sync::mpsc::channel(1);
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let bridge =
+            ActorFlowTurnExecutor::spawn_subscription_bridge(events_rx, completion_tx, None, None);
+
+        let report = AgentErrorReport {
+            class: AgentErrorClass::Terminal,
+            reason: Some(AgentErrorReason::TurnTerminalCause {
+                outcome: meerkat_core::TurnTerminalOutcome::Failed,
+                cause_kind: meerkat_core::TurnTerminalCauseKind::LlmFailure,
+            }),
+            message: "LLM failure terminal turn".to_string(),
+        };
+
+        events_tx
+            .send(AgentEvent::RunFailed {
+                session_id: meerkat_core::SessionId::new(),
+                error_class: AgentErrorClass::Terminal,
+                error: "LLM failure terminal turn".to_string(),
+                terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
+                error_report: Some(report.clone()),
+            })
+            .await
+            .expect("send event");
+
+        match completion_rx.await.expect("completion outcome") {
+            FlowTurnOutcome::Failed {
+                reason,
+                error_report,
+                error,
+            } => {
+                assert_eq!(reason, "LLM failure terminal turn");
+                assert_eq!(error_report, Some(report));
+                let error = error.expect("typed turn error metadata");
+                assert_eq!(error.kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
+                assert!(error.terminal);
+                assert_eq!(
+                    error.outcome,
+                    Some(meerkat_core::TurnTerminalOutcome::Failed)
+                );
+                assert_eq!(error.detail.as_deref(), Some("LLM failure terminal turn"));
+            }
+            other => panic!("expected failed outcome, got {other:?}"),
+        }
+        bridge.await.expect("bridge exits after terminal event");
+    }
+
+    #[tokio::test]
     async fn test_subscription_bridge_waits_for_required_extraction_success() {
         let (events_tx, events_rx) = tokio::sync::mpsc::channel(2);
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -702,7 +786,7 @@ mod tests {
             .expect("send extraction failed event");
 
         match completion_rx.await.expect("completion outcome") {
-            FlowTurnOutcome::Failed { reason } => {
+            FlowTurnOutcome::Failed { reason, .. } => {
                 assert!(
                     reason.contains("structured output extraction failed after 2 attempt(s)"),
                     "reason should preserve extraction attempts: {reason}"

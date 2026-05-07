@@ -115,6 +115,32 @@ fn resolve_completion_waiters(
     }
 }
 
+fn resolve_completion_waiters_with_finalization_failure(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    terminal: Option<CoreApplyTerminal>,
+    error: meerkat_core::TurnErrorMetadata,
+) {
+    match terminal {
+        Some(CoreApplyTerminal::RunResult(result)) => {
+            for input_id in input_ids {
+                registry.resolve_completed_with_finalization_failure(
+                    input_id,
+                    result.as_ref().clone(),
+                    error.clone(),
+                );
+            }
+        }
+        _ => {
+            let reason = error
+                .detail
+                .clone()
+                .unwrap_or_else(|| "runtime finalization failed".to_string());
+            abandon_completion_waiters_with_error(registry, input_ids, reason, error);
+        }
+    }
+}
+
 async fn stop_runtime_loop_executor_from_dsl_effect(
     driver: &crate::meerkat_machine::SharedDriver,
     completions: Option<&crate::meerkat_machine::SharedCompletionRegistry>,
@@ -186,6 +212,18 @@ fn abandon_completion_waiters(
     let reason = reason.into();
     for input_id in input_ids {
         registry.resolve_abandoned(input_id, reason.clone());
+    }
+}
+
+fn abandon_completion_waiters_with_error(
+    registry: &mut crate::completion::CompletionRegistry,
+    input_ids: &[InputId],
+    reason: impl Into<String>,
+    error: meerkat_core::TurnErrorMetadata,
+) {
+    let reason = reason.into();
+    for input_id in input_ids {
+        registry.resolve_abandoned_with_error(input_id, reason.clone(), error.clone());
     }
 }
 
@@ -845,6 +883,19 @@ async fn process_queue(
                         .await
                         {
                             tracing::error!(%run_id, error = %err, "failed to commit runtime loop run");
+                            let completion_error =
+                                meerkat_core::TurnErrorMetadata::runtime_apply_failure(format!(
+                                    "runtime loop commit failed: {err}"
+                                ));
+                            if let Some(completions) = completions.as_ref() {
+                                let mut completions = completions.lock().await;
+                                resolve_completion_waiters_with_finalization_failure(
+                                    &mut completions,
+                                    &input_ids,
+                                    terminal,
+                                    completion_error,
+                                );
+                            }
                             let should_stop = stop_runtime_loop_executor_from_dsl_effect(
                                 driver,
                                 completions,
@@ -852,14 +903,6 @@ async fn process_queue(
                                 format!("runtime loop commit failed for run {run_id}: {err}"),
                             )
                             .await;
-                            if let Some(completions) = completions.as_ref() {
-                                let mut completions = completions.lock().await;
-                                abandon_completion_waiters(
-                                    &mut completions,
-                                    &input_ids,
-                                    format!("runtime loop commit failed: {err}"),
-                                );
-                            }
                             return should_stop;
                         }
 
@@ -880,6 +923,18 @@ async fn process_queue(
                             } => Some(crate::meerkat_machine_types::MeerkatMachineRunFailure::new(
                                 *cause_kind,
                                 message.clone(),
+                            )),
+                            _ => None,
+                        };
+                        let completion_error = match &e {
+                            CoreExecutorError::TerminalFailure {
+                                outcome,
+                                cause_kind,
+                                ..
+                            } => Some(meerkat_core::TurnErrorMetadata::terminal(
+                                *cause_kind,
+                                *outcome,
+                                format!("apply failed: {error_msg}"),
                             )),
                             _ => None,
                         };
@@ -923,11 +978,21 @@ async fn process_queue(
                                     completions.resolve_cancelled(input_id);
                                 }
                             } else {
-                                abandon_completion_waiters(
-                                    &mut completions,
-                                    &input_ids,
-                                    format!("apply failed: {error_msg}"),
-                                );
+                                let reason = format!("apply failed: {error_msg}");
+                                if let Some(error) = completion_error {
+                                    abandon_completion_waiters_with_error(
+                                        &mut completions,
+                                        &input_ids,
+                                        reason,
+                                        error,
+                                    );
+                                } else {
+                                    abandon_completion_waiters(
+                                        &mut completions,
+                                        &input_ids,
+                                        reason,
+                                    );
+                                }
                             }
                         }
                         let mut d = driver.lock().await;

@@ -1420,10 +1420,42 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
         .register_session_with_executor(session_id.clone(), Box::new(TypedMachineFailureExecutor))
         .await;
 
-    adapter
-        .accept_input(&session_id, make_prompt("typed machine failure"))
+    let (accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(&session_id, make_prompt("typed machine failure"))
         .await
         .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve");
+    match completion {
+        CompletionOutcome::AbandonedWithError { reason, error } => {
+            assert!(
+                reason.contains("apply failed: Terminal failure: Failed (LlmFailure)"),
+                "operator reason should remain available: {reason}"
+            );
+            assert_eq!(error.kind, meerkat_core::TurnTerminalCauseKind::LlmFailure);
+            assert!(error.terminal);
+            assert_eq!(
+                error.outcome,
+                Some(meerkat_core::TurnTerminalOutcome::Failed)
+            );
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("provider auth denied")),
+                "typed metadata should preserve original diagnostic detail: {error:?}"
+            );
+        }
+        other => panic!("expected typed abandoned completion, got {other:?}"),
+    }
 
     let (terminal_cause_kind, runtime_apply_failure_cause, runtime_apply_failure_message) =
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -1456,6 +1488,121 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
     );
     assert_eq!(runtime_apply_failure_cause, None);
     assert_eq!(runtime_apply_failure_message, None);
+}
+
+#[tokio::test]
+async fn completion_preserves_structured_output_when_runtime_finalization_fails() {
+    struct StructuredOutputExecutor {
+        session_id: SessionId,
+    }
+
+    #[async_trait::async_trait]
+    impl CoreExecutor for StructuredOutputExecutor {
+        async fn apply(
+            &mut self,
+            run_id: RunId,
+            primitive: RunPrimitive,
+        ) -> Result<CoreApplyOutput, CoreExecutorError> {
+            let receipt = RunBoundaryReceipt {
+                run_id,
+                boundary: RunApplyBoundary::RunStart,
+                contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                conversation_digest: None,
+                message_count: 0,
+                sequence: 0,
+            };
+            Ok(CoreApplyOutput::with_run_result(
+                receipt,
+                Some(b"session snapshot".to_vec()),
+                meerkat_core::RunResult {
+                    text: "{\"gate\":\"green\"}".to_string(),
+                    session_id: self.session_id.clone(),
+                    usage: Default::default(),
+                    turns: 1,
+                    tool_calls: 0,
+                    terminal_cause_kind: None,
+                    structured_output: Some(serde_json::json!({ "gate": "green" })),
+                    extraction_error: None,
+                    schema_warnings: None,
+                    skill_diagnostics: None,
+                },
+            ))
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let inner = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let store: Arc<dyn RuntimeStore> = Arc::new(
+        RuntimeCommitAtomicityStore::fail_atomic_apply_once(Arc::clone(&inner)),
+    );
+    let adapter = Arc::new(MeerkatMachine::persistent(store, memory_blob_store()));
+    let session_id = SessionId::new();
+    adapter
+        .register_session_with_executor(
+            session_id.clone(),
+            Box::new(StructuredOutputExecutor {
+                session_id: session_id.clone(),
+            }),
+        )
+        .await;
+
+    let (accept_outcome, completion_handle) = adapter
+        .accept_input_with_completion(
+            &session_id,
+            make_prompt("structured gate before finalization failure"),
+        )
+        .await
+        .expect("input should be accepted");
+    assert!(matches!(accept_outcome, AcceptOutcome::Accepted { .. }));
+
+    let completion = tokio::time::timeout(
+        Duration::from_secs(1),
+        completion_handle
+            .expect("accepted input should register a completion waiter")
+            .wait(),
+    )
+    .await
+    .expect("completion waiter should resolve after finalization failure");
+
+    match completion {
+        CompletionOutcome::CompletedWithFinalizationFailure { result, error } => {
+            assert_eq!(result.text, "{\"gate\":\"green\"}");
+            assert_eq!(
+                result.structured_output,
+                Some(serde_json::json!({ "gate": "green" }))
+            );
+            assert_eq!(
+                error.kind,
+                meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
+            );
+            assert!(error.terminal);
+            assert_eq!(
+                error.outcome,
+                Some(meerkat_core::TurnTerminalOutcome::Failed)
+            );
+            assert!(
+                error
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("synthetic atomic_apply failure")),
+                "finalization failure detail should remain available: {error:?}"
+            );
+        }
+        other => panic!("expected completed output with finalization failure, got {other:?}"),
+    }
 }
 
 #[tokio::test]

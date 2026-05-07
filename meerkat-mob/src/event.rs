@@ -428,6 +428,10 @@ pub enum MobEventKind {
         step_id: StepId,
         target: AgentRuntimeId,
         reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_report: Option<meerkat_core::event::AgentErrorReport>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<meerkat_core::event::TurnErrorMetadata>,
     },
     /// Aggregate step completion event.
     StepCompleted { run_id: RunId, step_id: StepId },
@@ -778,6 +782,8 @@ mod tests {
             step_id: step_id.clone(),
             target: runtime_id.clone(),
             reason: "fail".to_string(),
+            error_report: None,
+            error: None,
         });
         roundtrip(&MobEventKind::StepCompleted {
             run_id: run_id.clone(),

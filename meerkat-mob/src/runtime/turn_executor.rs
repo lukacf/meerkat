@@ -3,6 +3,7 @@ use crate::ids::{MeerkatId, RunId, StepId};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
+use meerkat_core::event::{AgentErrorReport, TurnErrorMetadata};
 use meerkat_core::service::TurnToolOverlay;
 use meerkat_core::types::ContentInput;
 use serde_json::Value;
@@ -39,6 +40,8 @@ pub enum FlowTurnOutcome {
     },
     Failed {
         reason: String,
+        error_report: Option<AgentErrorReport>,
+        error: Option<TurnErrorMetadata>,
     },
     Canceled,
 }

@@ -516,6 +516,136 @@ impl AgentErrorReport {
     }
 }
 
+/// Stable machine-readable metadata for a turn failure.
+///
+/// Human-readable diagnostics remain in `detail`; consumers should key
+/// behavior off `kind`/`terminal` instead of parsing display strings.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnErrorMetadata {
+    /// Closed failure classifier, serialized as `llm_failure`,
+    /// `runtime_apply_failure`, etc.
+    pub kind: TurnTerminalCauseKind,
+    /// Whether this error terminated the turn/runtime boundary.
+    #[serde(default)]
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<TurnTerminalOutcome>,
+    /// Original operator-facing diagnostic text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+impl TurnErrorMetadata {
+    pub fn terminal(
+        kind: TurnTerminalCauseKind,
+        outcome: TurnTerminalOutcome,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            terminal: true,
+            outcome: Some(outcome),
+            detail: Some(detail.into()),
+            provider: None,
+            model: None,
+            retryable: None,
+        }
+    }
+
+    pub fn runtime_apply_failure(detail: impl Into<String>) -> Self {
+        Self::terminal(
+            TurnTerminalCauseKind::RuntimeApplyFailure,
+            TurnTerminalOutcome::Failed,
+            detail,
+        )
+    }
+
+    pub fn from_agent_error(error: &AgentError) -> Option<Self> {
+        match error {
+            AgentError::Llm {
+                provider,
+                reason,
+                message,
+            } => {
+                let mut metadata = Self::terminal(
+                    TurnTerminalCauseKind::LlmFailure,
+                    TurnTerminalOutcome::Failed,
+                    message.clone(),
+                );
+                metadata.provider = Some((*provider).to_string());
+                metadata.retryable = Some(error.is_recoverable());
+                if let LlmFailureReason::InvalidModel(model) = reason {
+                    metadata.model = Some(model.clone());
+                }
+                Some(metadata)
+            }
+            AgentError::TerminalFailure {
+                outcome,
+                cause_kind,
+                message,
+            } if cause_kind.is_specific_failure_cause() => {
+                Some(Self::terminal(*cause_kind, *outcome, message.clone()))
+            }
+            _ => {
+                let kind = TurnTerminalCauseKind::from_agent_error(error);
+                kind.is_specific_failure_cause()
+                    .then(|| Self::terminal(kind, TurnTerminalOutcome::Failed, error.to_string()))
+            }
+        }
+    }
+
+    pub fn from_agent_error_report(
+        report: &AgentErrorReport,
+        detail: impl Into<String>,
+    ) -> Option<Self> {
+        let detail = detail.into();
+        match &report.reason {
+            Some(AgentErrorReason::TurnTerminalCause {
+                outcome,
+                cause_kind,
+            }) => Some(Self::terminal(*cause_kind, *outcome, detail)),
+            Some(reason) if report.class == AgentErrorClass::Llm => {
+                let mut metadata = Self::terminal(
+                    TurnTerminalCauseKind::LlmFailure,
+                    TurnTerminalOutcome::Failed,
+                    detail,
+                );
+                match reason {
+                    AgentErrorReason::LlmRateLimited { .. }
+                    | AgentErrorReason::LlmNetworkTimeout { .. }
+                    | AgentErrorReason::LlmCallTimeout { .. } => {
+                        metadata.retryable = Some(true);
+                    }
+                    AgentErrorReason::LlmProviderError {
+                        provider_error_retryability,
+                        ..
+                    } => {
+                        metadata.retryable = Some(provider_error_retryability.is_retryable());
+                    }
+                    AgentErrorReason::LlmContextExceeded { .. }
+                    | AgentErrorReason::LlmAuthError => {
+                        metadata.retryable = Some(false);
+                    }
+                    AgentErrorReason::LlmInvalidModel { model } => {
+                        metadata.retryable = Some(false);
+                        metadata.model = Some(model.clone());
+                    }
+                    _ => {}
+                }
+                Some(metadata)
+            }
+            _ => None,
+        }
+    }
+}
+
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "reason_type", rename_all = "snake_case")]

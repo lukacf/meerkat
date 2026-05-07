@@ -2984,10 +2984,17 @@ impl SessionRuntime {
     ) -> bool {
         match outcome {
             meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
             | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
                 reason.contains("runtime boundary commit failed")
                     || reason.contains("runtime loop commit failed")
             }
+            meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure {
+                error, ..
+            } => error.detail.as_deref().is_some_and(|reason| {
+                reason.contains("runtime boundary commit failed")
+                    || reason.contains("runtime loop commit failed")
+            }),
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
             | meerkat_runtime::CompletionOutcome::Cancelled
@@ -2998,9 +3005,11 @@ impl SessionRuntime {
     fn completion_outcome_is_apply_failure(outcome: &meerkat_runtime::CompletionOutcome) -> bool {
         match outcome {
             meerkat_runtime::CompletionOutcome::Abandoned(reason)
+            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
             | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
                 reason.starts_with("apply failed:")
             }
+            meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure { .. } => false,
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
             | meerkat_runtime::CompletionOutcome::Cancelled
@@ -7984,6 +7993,35 @@ fn completion_outcome_to_rpc_result(
             message: format!("turn abandoned: {reason}"),
             data: None,
         }),
+        CompletionOutcome::AbandonedWithError {
+            reason,
+            error: turn_error,
+        } => Err(RpcError {
+            code: error::INTERNAL_ERROR,
+            message: format!("turn abandoned: {reason}"),
+            data: Some(serde_json::json!({
+                "error": turn_error,
+            })),
+        }),
+        CompletionOutcome::CompletedWithFinalizationFailure {
+            result,
+            error: turn_error,
+        } => {
+            let wire_result = meerkat_contracts::WireRunResult::from(*result);
+            let structured_output = wire_result.structured_output.clone();
+            Err(RpcError {
+                code: error::INTERNAL_ERROR,
+                message: turn_error
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "turn finalization failed".to_string()),
+                data: Some(serde_json::json!({
+                    "error": turn_error,
+                    "run_result": wire_result,
+                    "structured_output": structured_output,
+                })),
+            })
+        }
         CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime terminated: {reason}"),
@@ -19093,6 +19131,47 @@ mod tests {
 
         assert_eq!(err.code, error::REQUEST_CANCELLED);
         assert_eq!(err.message, "request cancelled");
+    }
+
+    #[test]
+    fn completion_outcome_to_rpc_result_surfaces_output_and_finalization_error() {
+        let session_id = SessionId::new();
+        let run_result = meerkat_core::RunResult {
+            text: "{\"gate\":\"green\"}".to_string(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: Some(serde_json::json!({ "gate": "green" })),
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+        let err = completion_outcome_to_rpc_result(
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                result: Box::new(run_result),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "runtime loop commit failed: synthetic finalization failure",
+                ),
+            },
+            &session_id,
+        )
+        .expect_err("finalization failure should map to an RPC error");
+
+        assert_eq!(err.code, error::INTERNAL_ERROR);
+        assert!(err.message.contains("synthetic finalization failure"));
+        let data = err.data.expect("finalization failure error data");
+        assert_eq!(data["error"]["kind"], "runtime_apply_failure");
+        assert_eq!(data["error"]["terminal"], true);
+        assert_eq!(
+            data["run_result"]["structured_output"],
+            serde_json::json!({ "gate": "green" })
+        );
+        assert_eq!(
+            data["structured_output"],
+            serde_json::json!({ "gate": "green" })
+        );
     }
 
     #[test]

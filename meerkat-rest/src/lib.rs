@@ -812,10 +812,18 @@ fn completion_outcome_requires_rest_runtime_cleanup(
 ) -> bool {
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
+        | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, .. }
         | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
             reason.contains("runtime boundary commit failed")
                 || reason.contains("runtime loop commit failed")
         }
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+            error,
+            ..
+        } => error.detail.as_deref().is_some_and(|reason| {
+            reason.contains("runtime boundary commit failed")
+                || reason.contains("runtime loop commit failed")
+        }),
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
         | meerkat_runtime::completion::CompletionOutcome::Cancelled
@@ -828,9 +836,13 @@ fn completion_outcome_is_rest_apply_failure(
 ) -> bool {
     match outcome {
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
+        | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, .. }
         | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
             reason.starts_with("apply failed:")
         }
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+            ..
+        } => false,
         meerkat_runtime::completion::CompletionOutcome::Completed(_)
         | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
         | meerkat_runtime::completion::CompletionOutcome::Cancelled
@@ -3518,6 +3530,34 @@ fn completion_outcome_to_api_result(
         }
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(ApiError::Internal(format!("turn abandoned: {reason}")))
+        }
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+            Err(ApiError::InternalWithData {
+                message: format!("turn abandoned: {reason}"),
+                code: "TURN_ABANDONED".to_string(),
+                details: json!({
+                    "error": error,
+                }),
+            })
+        }
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+            result,
+            error,
+        } => {
+            let response = run_result_to_response(*result, realm);
+            let structured_output = response.structured_output.clone();
+            Err(ApiError::InternalWithData {
+                message: error
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "turn finalization failed".to_string()),
+                code: "TURN_FINALIZATION_FAILED".to_string(),
+                details: json!({
+                    "error": error,
+                    "run_result": response,
+                    "structured_output": structured_output,
+                }),
+            })
         }
         meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
             Err(ApiError::Internal(format!("runtime terminated: {reason}")))
@@ -11169,6 +11209,55 @@ mod tests {
         .expect_err("cancelled completion should map to API cancellation");
 
         assert!(matches!(err, ApiError::RequestCancelled { details: None }));
+    }
+
+    #[test]
+    fn completion_outcome_to_api_result_surfaces_output_and_finalization_error() {
+        let session_id = SessionId::new();
+        let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
+        let run_result = meerkat_core::RunResult {
+            text: "{\"gate\":\"green\"}".to_string(),
+            session_id: session_id.clone(),
+            usage: Default::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: None,
+            structured_output: Some(json!({ "gate": "green" })),
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+        let err = completion_outcome_to_api_result(
+            meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                result: Box::new(run_result),
+                error: meerkat_core::TurnErrorMetadata::runtime_apply_failure(
+                    "runtime loop commit failed: synthetic finalization failure",
+                ),
+            },
+            &session_id,
+            &realm,
+            false,
+        )
+        .expect_err("finalization failure should map to an API error");
+
+        let ApiError::InternalWithData {
+            code,
+            details,
+            message,
+        } = err
+        else {
+            panic!("expected typed finalization API error");
+        };
+
+        assert_eq!(code, "TURN_FINALIZATION_FAILED");
+        assert!(message.contains("synthetic finalization failure"));
+        assert_eq!(details["error"]["kind"], "runtime_apply_failure");
+        assert_eq!(details["error"]["terminal"], true);
+        assert_eq!(
+            details["run_result"]["structured_output"],
+            json!({ "gate": "green" })
+        );
+        assert_eq!(details["structured_output"], json!({ "gate": "green" }));
     }
 
     #[test]

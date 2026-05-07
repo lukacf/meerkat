@@ -319,6 +319,29 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
+            Err(anyhow::anyhow!(
+                "turn abandoned: {reason}; error={}",
+                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string())
+            ))
+        }
+        meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+            result,
+            error,
+        } => {
+            let structured_output = result
+                .structured_output
+                .as_ref()
+                .map(serde_json::Value::to_string)
+                .unwrap_or_else(|| "null".to_string());
+            Err(anyhow::anyhow!(
+                "turn finalization failed after output: {}; structured_output={structured_output}",
+                error
+                    .detail
+                    .as_deref()
+                    .unwrap_or("turn finalization failed")
+            ))
+        }
         meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
             Err(anyhow::anyhow!("runtime terminated: {reason}"))
         }

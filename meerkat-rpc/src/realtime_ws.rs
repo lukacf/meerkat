@@ -4177,9 +4177,13 @@ async fn commit_runtime_turn_text(
         if let Some(completion_handle) = completion_handle {
             match completion_handle.wait().await {
                 meerkat_runtime::completion::CompletionOutcome::Completed(_)
+                | meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
+                    ..
+                }
                 | meerkat_runtime::completion::CompletionOutcome::CompletedWithoutResult
                 | meerkat_runtime::completion::CompletionOutcome::Cancelled
                 | meerkat_runtime::completion::CompletionOutcome::Abandoned(_)
+                | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { .. }
                 | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_) => {
                     frames.push(channel_event(RealtimeEvent::TurnCompleted));
                 }

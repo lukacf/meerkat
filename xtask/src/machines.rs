@@ -3110,7 +3110,7 @@ fn verify_profile_name(profile: VerifyProfile) -> &'static str {
 
 fn merged_java_tool_options() -> String {
     let throughput_gc = "-XX:+UseParallelGC";
-    let stack_size = "-Xss16m";
+    let stack_size = "-Xss64m";
     let existing = env::var("JAVA_TOOL_OPTIONS").unwrap_or_default();
     let mut flags = existing
         .split_whitespace()

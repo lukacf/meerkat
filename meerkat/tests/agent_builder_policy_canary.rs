@@ -161,6 +161,17 @@ fn bazel_cargo_check_env() -> Vec<(&'static str, OsString)> {
         env.push(("CARGO_HOME", cargo_home));
     }
 
+    if cfg!(target_os = "linux") {
+        env.push((
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER",
+            OsString::from("cc"),
+        ));
+        env.push((
+            "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS",
+            OsString::from("-Clink-self-contained=no"),
+        ));
+    }
+
     env
 }
 

@@ -306,6 +306,9 @@ jobs:
           for bin in rkat rkat-mini rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
             rel_path="${BIN_PATHS[$bin]}"
             src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
+            if [[ -z "$src" && "$ARCHIVE_EXT" == "zip" ]]; then
+              src="$(find "${BAZEL_BIN}" -path "*/${rel_path}.exe" -type f 2>/dev/null | head -1)"
+            fi
             artifact_name="${bin}-${VERSION}-${TARGET}.${ARCHIVE_EXT}"
 
             if [[ -z "$src" ]]; then

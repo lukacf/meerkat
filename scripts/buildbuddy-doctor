@@ -305,6 +305,7 @@ if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
   grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
   grep -Fq 'mode: ${{ needs.select_backend.outputs.mode }}' .github/workflows/ci.yml &&
+  grep -Fq 'ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}' .github/workflows/ci.yml &&
   grep -Fq 'name: BuildBuddy hosted CI' .github/workflows/ci.yml &&
   grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/ci.yml &&
   grep -Fq 'name: CI gate' .github/workflows/ci.yml &&
@@ -318,6 +319,7 @@ if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   ! grep -Fq 'pull_request:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'push:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'backend:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'ci_started_at_epoch:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcp-buildbuddy' .github/workflows/buildbuddy.yml &&
   grep -Fq 'BuildBuddy CI gate' .github/workflows/buildbuddy.yml; then
@@ -329,6 +331,8 @@ fi
 if grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
   grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
   grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
+  grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Skipping wait for executor pool scale-down' scripts/gcp-buildbuddy-executor-pool &&
   grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/buildbuddy.yml &&

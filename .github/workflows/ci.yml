@@ -52,6 +52,7 @@ jobs:
     outputs:
       backend: ${{ steps.select.outputs.backend }}
       mode: ${{ steps.select.outputs.mode }}
+      started_at_epoch: ${{ steps.select.outputs.started_at_epoch }}
     steps:
       - name: Select backend
         id: select
@@ -66,6 +67,7 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
           REPOSITORY: ${{ github.repository }}
         run: |
+          ci_started_at_epoch="$(date +%s)"
           backend="${INPUT_BACKEND:-auto}"
           if [[ -z "${backend}" || "${backend}" == "auto" ]]; then
             backend="${VAR_BACKEND:-}"
@@ -100,6 +102,7 @@ jobs:
           echo "Selected BuildBuddy mode: ${mode}"
           echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
           echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+          echo "started_at_epoch=${ci_started_at_epoch}" >> "${GITHUB_OUTPUT}"
 
   cargo:
     name: Cargo CI
@@ -118,6 +121,7 @@ jobs:
     with:
       backend: buildbuddy-hosted
       mode: ${{ needs.select_backend.outputs.mode }}
+      ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}
       machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
@@ -130,6 +134,7 @@ jobs:
     with:
       backend: gcp-buildbuddy
       mode: ${{ needs.select_backend.outputs.mode }}
+      ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}
       machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit

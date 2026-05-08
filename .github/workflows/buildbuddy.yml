@@ -13,6 +13,11 @@ on:
         required: false
         default: buildbuddy-hosted
         type: string
+      ci_started_at_epoch:
+        description: Parent CI backend-selection start time, as Unix epoch seconds.
+        required: false
+        default: ""
+        type: string
       machine_authority_base_sha:
         description: Base revision for machine-authority change detection.
         required: false
@@ -114,6 +119,7 @@ env:
   MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE || '12' }}
   MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE || 'c3d-standard-30' }}
   MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB || '1000' }}
+  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
   MEERKAT_HOST_CARGO_HOME: /usr/local/cargo
@@ -137,10 +143,16 @@ jobs:
     name: GCP BuildBuddy control plane
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       grpc_url: ${{ steps.endpoint.outputs.grpc_url }}
       http_url: ${{ steps.endpoint.outputs.http_url }}
+      started_at_epoch: ${{ steps.capture-start.outputs.started_at_epoch }}
     steps:
+      - name: Capture GCP CI start time
+        id: capture-start
+        shell: bash
+        run: echo "started_at_epoch=$(date +%s)" >> "${GITHUB_OUTPUT}"
       - name: Checkout
         uses: actions/checkout@v6
         with:
@@ -196,6 +208,7 @@ jobs:
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
@@ -242,6 +255,7 @@ jobs:
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up, gcp-executors-up]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
@@ -269,6 +283,7 @@ jobs:
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up, gcp-executors-up]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
@@ -328,6 +343,7 @@ jobs:
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && !startsWith(inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh', 'workspace-') && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up, gcp-executors-up]
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
@@ -360,6 +376,7 @@ jobs:
       - gcp-governance-submit
       - gcp-wasm-feature-submit
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -695,10 +712,33 @@ jobs:
       - audit
     if: ${{ always() && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 10
     steps:
       - name: Check results
         run: |
           if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
             echo "BuildBuddy CI failed"
+            exit 1
+          fi
+      - name: Check GCP CI duration SLO
+        if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' }}
+        shell: bash
+        env:
+          CI_STARTED_AT_EPOCH: ${{ inputs.ci_started_at_epoch || needs.gcp-control-plane-up.outputs.started_at_epoch }}
+          MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
+        run: |
+          if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"
+            exit 1
+          fi
+          if ! [[ "${MAX_SECONDS}" =~ ^[0-9]+$ ]] || [[ "${MAX_SECONDS}" == "0" ]]; then
+            echo "::error::Invalid MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: '${MAX_SECONDS}'"
+            exit 1
+          fi
+          now="$(date +%s)"
+          elapsed="$((now - CI_STARTED_AT_EPOCH))"
+          echo "GCP BuildBuddy CI elapsed seconds: ${elapsed}/${MAX_SECONDS}"
+          if (( elapsed > MAX_SECONDS )); then
+            echo "::error::GCP BuildBuddy CI exceeded ${MAX_SECONDS}s SLO (${elapsed}s)."
             exit 1
           fi

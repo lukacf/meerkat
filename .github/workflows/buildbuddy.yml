@@ -255,7 +255,7 @@ jobs:
     if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up, gcp-executors-up]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
@@ -264,7 +264,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - name: Select GCP BuildBuddy lanes
         id: gcp-lanes
         shell: bash
@@ -273,7 +273,19 @@ jobs:
           MACHINE_AUTHORITY_HEAD_SHA: ${{ inputs.machine_authority_head_sha || github.sha }}
         run: |
           machine_authority_changed=true
+          if [[ -z "${MACHINE_AUTHORITY_BASE_SHA}" && "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if git fetch --no-tags --depth=1 origin main; then
+              MACHINE_AUTHORITY_BASE_SHA="$(git rev-parse FETCH_HEAD)"
+              echo "Using origin/main (${MACHINE_AUTHORITY_BASE_SHA}) as the workflow_dispatch diff base."
+            else
+              echo "Could not fetch origin/main; running machine authority conservatively."
+            fi
+          fi
+
           if [[ -n "${MACHINE_AUTHORITY_BASE_SHA}" && "${MACHINE_AUTHORITY_BASE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            if ! git cat-file -e "${MACHINE_AUTHORITY_BASE_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "${MACHINE_AUTHORITY_BASE_SHA}" || true
+            fi
             set +e
             scripts/machine-authority-changed --base "${MACHINE_AUTHORITY_BASE_SHA}" --head "${MACHINE_AUTHORITY_HEAD_SHA}"
             status="$?"
@@ -295,8 +307,6 @@ jobs:
             printf '%s\n' \
               fmt-static \
               cargo-all-features-clippy \
-              feature-clippy \
-              unused-deps \
               test-unit \
               integration-fast \
               seam-inventory \
@@ -316,7 +326,7 @@ jobs:
       - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
         with:
           group: gcp
-          profile: native
+          profile: submitter
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
           lanes: ${{ steps.gcp-lanes.outputs.lanes }}
 

@@ -43,58 +43,7 @@ runs:
           mkdir -p "${MEERKAT_BAZEL_DISK_CACHE}"
         fi
 
-        lanes=()
-        while IFS= read -r lane; do
-          lane="${lane#"${lane%%[![:space:]]*}"}"
-          lane="${lane%"${lane##*[![:space:]]}"}"
-          if [[ -z "${lane}" || "${lane}" == \#* ]]; then
-            continue
-          fi
-          lanes+=("${lane}")
-        done <<< "${LANES}"
-
-        if [[ "${#lanes[@]}" == "0" ]]; then
-          echo "No BuildBuddy lanes selected."
-          exit 0
-        fi
-
-        declare -a pids=()
-        declare -a pid_lanes=()
-        declare -a pid_logs=()
-
-        for lane in "${lanes[@]}"; do
-          lane_log="${MEERKAT_BUILDBUDDY_LOG_ROOT}/batch-${lane}.log"
-          (
-            echo "::group::BuildBuddy lane ${lane}"
-            set +e
-            scripts/buildbuddy-ci-lane "${lane}"
-            lane_status="$?"
-            set -e
-            echo "::endgroup::"
-            exit "${lane_status}"
-          ) >"${lane_log}" 2>&1 &
-          pids+=("$!")
-          pid_lanes+=("${lane}")
-          pid_logs+=("${lane_log}")
-        done
-
-        status=0
-        for i in "${!pids[@]}"; do
-          pid="${pids[$i]}"
-          lane="${pid_lanes[$i]}"
-          lane_log="${pid_logs[$i]}"
-          if wait "${pid}"; then
-            echo "BuildBuddy lane ${lane} passed."
-            grep -E '^(PASS|SKIP) ' "${lane_log}" || tail -40 "${lane_log}" || true
-          else
-            lane_status="$?"
-            echo "BuildBuddy lane ${lane} failed with ${lane_status}" >&2
-            tail -180 "${lane_log}" >&2 || true
-            status="${lane_status}"
-          fi
-        done
-
-        exit "${status}"
+        scripts/buildbuddy-ci-lane-batch
 
     - name: Upload BuildBuddy logs
       if: always()

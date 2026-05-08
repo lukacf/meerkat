@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ((BASH_VERSINFO[0] < 5)); then
+  echo "error: scripts/buildbuddy-ci-lane-batch requires bash 5+ for wait -n diagnostics" >&2
+  exit 2
+fi
+
+log_root="${MEERKAT_BUILDBUDDY_LOG_ROOT:-${RUNNER_TEMP:-/tmp}/buildbuddy-logs}"
+export MEERKAT_BUILDBUDDY_LOG_ROOT="${log_root}"
+mkdir -p "${log_root}"
+
+trim_lane() {
+  local lane="$1"
+  lane="${lane#"${lane%%[![:space:]]*}"}"
+  lane="${lane%"${lane##*[![:space:]]}"}"
+  printf '%s' "${lane}"
+}
+
+lanes=()
+if (($# > 0)); then
+  for lane in "$@"; do
+    lane="$(trim_lane "${lane}")"
+    if [[ -z "${lane}" || "${lane}" == \#* ]]; then
+      continue
+    fi
+    lanes+=("${lane}")
+  done
+else
+  while IFS= read -r lane || [[ -n "${lane}" ]]; do
+    lane="$(trim_lane "${lane}")"
+    if [[ -z "${lane}" || "${lane}" == \#* ]]; then
+      continue
+    fi
+    lanes+=("${lane}")
+  done <<< "${LANES:-}"
+fi
+
+if ((${#lanes[@]} == 0)); then
+  echo "No BuildBuddy lanes selected."
+  exit 0
+fi
+
+max_jobs="${MEERKAT_BUILDBUDDY_BATCH_JOBS:-${#lanes[@]}}"
+if ! [[ "${max_jobs}" =~ ^[0-9]+$ ]] || ((max_jobs < 1)); then
+  echo "Invalid MEERKAT_BUILDBUDDY_BATCH_JOBS='${max_jobs}', using ${#lanes[@]}." >&2
+  max_jobs="${#lanes[@]}"
+fi
+
+declare -a active_pids=()
+declare -A pid_lanes=()
+declare -A pid_logs=()
+
+remove_active_pid() {
+  local done_pid="$1"
+  local remaining=()
+  local pid
+  for pid in "${active_pids[@]}"; do
+    if [[ "${pid}" != "${done_pid}" ]]; then
+      remaining+=("${pid}")
+    fi
+  done
+  active_pids=("${remaining[@]}")
+}
+
+print_active_tails() {
+  local pid lane lane_log
+  for pid in "${active_pids[@]}"; do
+    lane="${pid_lanes[${pid}]:-unknown}"
+    lane_log="${pid_logs[${pid}]:-}"
+    if [[ -n "${lane_log}" && -f "${lane_log}" ]]; then
+      echo "::group::Tail for active BuildBuddy lane ${lane}" >&2
+      tail -120 "${lane_log}" >&2 || true
+      echo "::endgroup::" >&2
+    fi
+  done
+}
+
+kill_active_lanes() {
+  local pid
+  if ((${#active_pids[@]} == 0)); then
+    return
+  fi
+
+  for pid in "${active_pids[@]}"; do
+    kill "${pid}" 2>/dev/null || true
+  done
+  sleep 2
+  for pid in "${active_pids[@]}"; do
+    kill -KILL "${pid}" 2>/dev/null || true
+  done
+  for pid in "${active_pids[@]}"; do
+    wait "${pid}" 2>/dev/null || true
+  done
+}
+
+terminate_batch() {
+  trap - TERM INT
+  echo "::warning::BuildBuddy lane batch received a termination signal; dumping active lane logs." >&2
+  print_active_tails
+  kill_active_lanes
+  exit 143
+}
+
+trap terminate_batch TERM INT
+
+start_lane() {
+  local lane="$1"
+  local lane_log="${log_root}/batch-${lane}.log"
+  local pid
+
+  (
+    echo "::group::BuildBuddy lane ${lane}"
+    echo "BuildBuddy lane ${lane} started at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    set +e
+    scripts/buildbuddy-ci-lane "${lane}"
+    lane_status="$?"
+    set -e
+    echo "BuildBuddy lane ${lane} exited with ${lane_status} at $(date -u +%Y-%m-%dT%H:%M:%SZ)."
+    echo "::endgroup::"
+    exit "${lane_status}"
+  ) >"${lane_log}" 2>&1 &
+
+  pid="$!"
+  active_pids+=("${pid}")
+  pid_lanes["${pid}"]="${lane}"
+  pid_logs["${pid}"]="${lane_log}"
+  echo "Started BuildBuddy lane ${lane} (pid ${pid})."
+}
+
+reap_one_lane() {
+  local done_pid=""
+  local lane_status
+  set +e
+  wait -n -p done_pid "${active_pids[@]}"
+  lane_status="$?"
+  set -e
+
+  if [[ -z "${done_pid}" ]]; then
+    return 0
+  fi
+
+  local lane="${pid_lanes[${done_pid}]:-unknown}"
+  local lane_log="${pid_logs[${done_pid}]:-}"
+  remove_active_pid "${done_pid}"
+
+  if [[ "${lane_status}" == "0" ]]; then
+    echo "BuildBuddy lane ${lane} passed."
+    grep -E '^(PASS|SKIP) ' "${lane_log}" || tail -40 "${lane_log}" || true
+    return 0
+  fi
+
+  echo "::error::BuildBuddy lane ${lane} failed with ${lane_status}." >&2
+  if [[ -n "${lane_log}" && -f "${lane_log}" ]]; then
+    tail -180 "${lane_log}" >&2 || true
+  fi
+  print_active_tails
+  kill_active_lanes
+  exit "${lane_status}"
+}
+
+echo "Running ${#lanes[@]} BuildBuddy lanes with up to ${max_jobs} local submitters."
+
+next_lane=0
+while ((next_lane < ${#lanes[@]} || ${#active_pids[@]} > 0)); do
+  while ((next_lane < ${#lanes[@]} && ${#active_pids[@]} < max_jobs)); do
+    start_lane "${lanes[${next_lane}]}"
+    ((next_lane += 1))
+  done
+
+  if ((${#active_pids[@]} > 0)); then
+    reap_one_lane
+  fi
+done

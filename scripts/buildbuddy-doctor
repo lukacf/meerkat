@@ -384,10 +384,14 @@ if job_has_line .github/workflows/ci.yml select_backend 'runs-on: ubuntu-latest'
   job_has_line .github/workflows/ci.yml gate 'runs-on: ubuntu-latest' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'name: GCP BuildBuddy submitter' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'runs-on: ubuntu-latest' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'timeout-minutes: 20' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'fetch-depth: 1' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'Select GCP BuildBuddy lanes' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'run-buildbuddy-ci-lane-batch' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'group: gcp' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'profile: submitter' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'lanes: ${{ steps.gcp-lanes.outputs.lanes }}' &&
+  grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'if: ${{ false }}' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'if: ${{ false }}' &&
   job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then

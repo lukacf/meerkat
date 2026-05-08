@@ -92,21 +92,14 @@ impl LiveAdapter for ProviderSessionAdapter {
     }
 }
 
-/// Pump task: owns the `RealtimeSession` exclusively. Drains pending
-/// commands between event polls.
+/// Pump task: owns the `RealtimeSession` exclusively. Uses biased select
+/// between commands and event polls.
 ///
-/// **Critical invariant**: `RealtimeSession::next_event` is NOT cancellation-
-/// safe. Dropping it mid-await would leave provider state inconsistent
-/// (events lost, response tracking broken). We never cancel it via
-/// `select!`. Instead, we alternate: poll one event (uninterruptible),
-/// then drain all pending commands non-blockingly.
-///
-/// Latency: command queueing is bounded by `next_event` returning. For
-/// realtime audio, events flow continuously while a turn is active, so
-/// commands get processed promptly. Between turns, `next_event` blocks
-/// until the next provider event — but the provider sends keep-alive
-/// events (response.done, etc.) frequently enough that commands don't
-/// stall.
+/// **Cancellation note**: `RealtimeSession::next_event` future may be
+/// dropped when a command arrives. The OpenAI provider impl
+/// (`RealtimeOpenAiLiveSession`) buffers events in `pending_events` so
+/// dropping a poll mid-await only discards the wake-up, not the event.
+/// The next call to `next_event` picks up buffered events first.
 async fn pump_task(
     mut session: Box<dyn RealtimeSession>,
     mut cmd_rx: mpsc::Receiver<LiveAdapterCommand>,
@@ -117,19 +110,6 @@ async fn pump_task(
         return;
     }
 
-    // Spawn a parallel command-drainer task that owns cmd_rx and signals
-    // commands via a notify. The pump loop then uses biased select:
-    // commands first, then next_event. This works because cmd_rx.recv
-    // is cancel-safe (mpsc::Receiver::recv is documented as cancel-safe)
-    // — when the pump's select wakes up due to next_event returning, the
-    // pending recv future is dropped without losing data.
-    //
-    // session.next_event is NOT cancellation-safe — but we never cancel
-    // it. The select arm waits for cmd OR next_event; whichever fires
-    // first wins. If cmd fires while next_event is still pending, we
-    // would normally drop next_event — but the OpenAI provider impl
-    // buffers events in `pending_events` queue, so dropping a poll only
-    // loses the await wake-up, not the event itself.
     loop {
         tokio::select! {
             biased;

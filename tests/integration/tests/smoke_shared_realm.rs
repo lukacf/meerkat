@@ -3633,10 +3633,12 @@ async fn live_ws_next_text_frame(
             Ok(Some(Ok(WsMessage::Binary(_)))) => continue,
             Ok(Some(Ok(WsMessage::Ping(_)))) => continue,
             Ok(Some(Ok(WsMessage::Pong(_)))) => continue,
-            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => return Ok(None),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => {
+                return Err("ws closed".into());
+            }
             Ok(Some(Ok(WsMessage::Frame(_)))) => continue,
             Ok(Some(Err(err))) => return Err(err.into()),
-            Err(_) => return Err("ws read timeout".into()),
+            Err(_) => return Ok(None),
         }
     }
 }
@@ -3655,12 +3657,7 @@ where
         let remaining = deadline.saturating_duration_since(Instant::now());
         let frame_text = match live_ws_next_text_frame(reader, remaining).await? {
             Some(text) => text,
-            None => {
-                return Err(format!(
-                    "live websocket closed before condition met: capture={capture:?}"
-                )
-                .into());
-            }
+            None => continue, // timeout — outer loop checks deadline
         };
         observe_live_json_frame(&mut capture, &frame_text)?;
         if predicate(&capture) {
@@ -3719,17 +3716,21 @@ async fn collect_live_observations_until_output_settles(
                 }
             }
             Ok(None) => {
-                return if output_started {
-                    Ok(capture)
-                } else {
-                    Err("live websocket closed before assistant output arrived".into())
-                };
+                // timeout — if output already started, treat as settle; otherwise loop
+                if output_started {
+                    return Ok(capture);
+                }
+                continue;
             }
             Err(err) => return Err(err),
         }
     }
 
-    Err(format!("timed out waiting for live output: capture={capture:?}").into())
+    if output_started {
+        Ok(capture)
+    } else {
+        Err(format!("timed out waiting for live output: capture={capture:?}").into())
+    }
 }
 
 fn observation_is_output(text: &str) -> bool {
@@ -3761,10 +3762,11 @@ async fn collect_live_observations_until_ready_or_idle(
                 }
             }
             Ok(None) => {
-                return Err("live websocket closed before the channel became ready".into());
+                // timeout (idle window expired) — return what we have
+                return Ok(capture);
             }
             Err(_) if saw_any_frame => return Ok(capture),
-            Err(_) => {}
+            Err(_) => return Ok(capture),
         }
     }
 
@@ -3913,10 +3915,7 @@ where
         let frame_text = match live_ws_next_text_frame(reader, remaining).await {
             Ok(Some(text)) => text,
             Ok(None) => {
-                return Err("live websocket closed before barge-in completed".into());
-            }
-            Err(_) if started_barge_in && next_barge_in_send_at.is_some() => continue,
-            Err(_) => {
+                // timeout — keep waiting (outer deadline check will exit)
                 if started_barge_in
                     && next_barge_in_chunk == barge_in_chunks.len()
                     && capture.saw_interrupted
@@ -3924,6 +3923,9 @@ where
                     return Ok(capture);
                 }
                 continue;
+            }
+            Err(_) => {
+                return Err("live websocket closed before barge-in completed".into());
             }
         };
         observe_live_json_frame(&mut capture, &frame_text)?;

@@ -254,6 +254,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
+    let live_session_factory: Option<
+        Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+    > = match factory.build_openai_realtime_session_factory(&config).await {
+        Ok(f) => Some(f),
+        Err(err) => {
+            eprintln!(
+                "OpenAI realtime session factory unavailable; live channels will not connect to providers: {err}"
+            );
+            None
+        }
+    };
+
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         realm_paths.root.join("config_state.json"),
@@ -315,6 +327,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|(state, addr, _)| meerkat_rpc::LiveWsConfig {
             state: std::sync::Arc::clone(state),
             base_url: format!("ws://{addr}"),
+            session_factory: live_session_factory.clone(),
         });
 
     let serve_result = if let Some(ref tcp_addr) = cli.tcp {

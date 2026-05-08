@@ -7,6 +7,8 @@
 //! Frame protocol: client sends `LiveInputChunk` JSON, receives
 //! `LiveAdapterObservation` JSON. Token-based channel auth.
 
+pub mod adapter;
 pub mod transport;
 
+pub use adapter::ProviderSessionAdapter;
 pub use transport::{LIVE_WS_PATH, LiveWsState, live_ws_router, serve_live_ws_listener};

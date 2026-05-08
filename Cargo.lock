@@ -2663,10 +2663,13 @@ dependencies = [
 name = "meerkat-live"
 version = "0.6.3"
 dependencies = [
+ "async-trait",
  "axum",
  "base64",
  "futures",
+ "meerkat-contracts",
  "meerkat-core",
+ "meerkat-llm-core",
  "meerkat-runtime",
  "serde",
  "serde_json",

@@ -21249,6 +21249,12 @@
               "id": {
                 "type": "string"
               },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
@@ -26307,6 +26313,12 @@
           "id": {
             "type": "string"
           },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "provider": {
             "const": "open_ai",
             "type": "string"
@@ -27936,6 +27948,12 @@
               "id": {
                 "type": "string"
               },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
@@ -28985,6 +29003,12 @@
               },
               "id": {
                 "type": "string"
+              },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "provider": {
                 "const": "open_ai",

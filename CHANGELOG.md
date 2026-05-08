@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-05-08
+
+Meerkat 0.6.3 is a patch release for blob/file tooling, OpenAI replay continuity, and the final public release binary surface. It adds first-class blob file tools and hardens OpenAI replay state while simplifying release assets to the four supported public runtime binaries.
+
+### Added
+
+- **Blob file tools** (#648) — agents can read, write, inspect, and route blob-backed files through the builtin utility tool surface.
+- **OpenAI replay continuity** (#648) — OpenAI response replay preserves continuity across provider-native tool and content events.
+
+### Changed
+
+- **Release artifacts** — GitHub Releases and Homebrew now publish only `rkat`, `rkat-rpc`, `rkat-rest`, and `rkat-mcp`; all mini binaries are source-build-only custom profiles.
+- **BuildBuddy release lanes** — BuildBuddy release builds now target the same four public runtime binaries as the GitHub-hosted release path.
+- **Release validation** — release readiness now parallelizes independent contract, Rust packaging, Python SDK, and TypeScript SDK checks inside the BuildBuddy validation lane.
+
+### Fixed
+
+- **Rust package verification** — Rust release packaging and publish dry-runs work on Bash 3 and preserve the private `meerkat-core` bridge lookup needed by the facade crate during Cargo package verification.
+- **BuildBuddy release diagnostics** — `buildbuddy-doctor` now enforces the no-mini public release surface and verifies the BuildBuddy release branch selection.
+- **Release recovery cleanup** — removed the obsolete one-off mini asset repair workflow so future repairs cannot accidentally republish mini binaries.
+
 ## [0.6.2] - 2026-05-08
 
 Meerkat 0.6.2 is a patch release for runtime authority, provider/tooling polish, and the recovered BuildBuddy release path. It makes the runtime lifecycle spine machine-owned, improves model/tool visibility and multimodal handling, and removes the unsupported `rkat-mini` binary from published release artifacts while preserving `rkat-rpc-mini`.

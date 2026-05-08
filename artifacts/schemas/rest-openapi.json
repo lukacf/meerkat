@@ -6848,6 +6848,12 @@
               "id": {
                 "type": "string"
               },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "provider": {
                 "const": "open_ai",
                 "type": "string"
@@ -7431,7 +7437,7 @@
   },
   "info": {
     "title": "Meerkat REST API",
-    "version": "0.6.2"
+    "version": "0.6.3"
   },
   "openapi": "3.1.0",
   "paths": {

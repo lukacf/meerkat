@@ -447,7 +447,7 @@ case "${command}" in
   wasm-contract-rbe)
     command="test"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_test"
+    default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_tests"
     extra_args+=(
       --test_output=errors
       --test_summary=terse

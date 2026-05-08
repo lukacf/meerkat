@@ -163,6 +163,7 @@ fn gcp_feature_matrix_lane_fans_out_remote_cargo_actions() {
     let launcher = read(root.join("scripts/buildbuddy-bazel-poc"));
     let build = read(root.join("tools/buildbuddy/BUILD.bazel"));
     let wrapper = read(root.join("tools/buildbuddy/cargo_lane_test.sh"));
+    let full_wrapper = read(root.join("tools/buildbuddy/full_lane_test.sh"));
     let workflow = read(root.join(".github/workflows/buildbuddy.yml"));
     let setup = read(root.join(".github/actions/setup-buildbuddy-ci/action.yml"));
 
@@ -240,6 +241,41 @@ fn gcp_feature_matrix_lane_fans_out_remote_cargo_actions() {
         assert!(
             wrapper.contains(&format!("{arg})")),
             "cargo_lane_test.sh must handle split lane {arg}"
+        );
+    }
+
+    let wasm_lane = find_all_between(&launcher, "wasm-contract-rbe)", ";;")
+        .expect("wasm-contract-rbe lane block");
+    assert!(
+        wasm_lane
+            .contains("default_target=\"//tools/buildbuddy:wasm_contract_cargo_equivalent_tests\""),
+        "wasm-contract-rbe must target the split wasm contract test suite; block:\n{wasm_lane}"
+    );
+    assert!(
+        build.contains("name = \"wasm_contract_cargo_equivalent_tests\""),
+        "tools/buildbuddy BUILD must declare the split wasm contract test suite"
+    );
+    for (target, arg) in [
+        (
+            "wasm_contract_browser_contract_cargo_equivalent_test",
+            "wasm-contract-browser-contract",
+        ),
+        (
+            "wasm_contract_release_targets_cargo_equivalent_test",
+            "wasm-contract-release-targets",
+        ),
+        (
+            "wasm_contract_external_resolver_cargo_equivalent_test",
+            "wasm-contract-external-resolver",
+        ),
+    ] {
+        assert!(
+            build.contains(&format!("\"{target}\": \"{arg}\"")),
+            "split wasm contract target {target} must map to {arg}"
+        );
+        assert!(
+            full_wrapper.contains(&format!("{arg})")),
+            "full_lane_test.sh must handle split wasm contract lane {arg}"
         );
     }
 

@@ -205,3 +205,32 @@ sh_test(
     timeout = "eternal",
     tags = CARGO_EQUIVALENT_TAGS,
 )
+
+WASM_CONTRACT_CARGO_EQUIVALENT_TESTS = {
+    "wasm_contract_browser_contract_cargo_equivalent_test": "wasm-contract-browser-contract",
+    "wasm_contract_release_targets_cargo_equivalent_test": "wasm-contract-release-targets",
+    "wasm_contract_external_resolver_cargo_equivalent_test": "wasm-contract-external-resolver",
+}
+
+[
+    sh_test(
+        name = name,
+        srcs = ["full_lane_test.sh"],
+        args = [lane],
+        data = [
+            "//:workspace_runfiles",
+            "@wasm_pack_darwin_arm64//:wasm-pack",
+            "@wasm_pack_linux_x86_64//:wasm-pack",
+        ] + RUST_TOOLCHAIN_DATA + WASM_RUST_TOOLCHAIN_DATA + SDK_TOOL_DATA,
+        exec_properties = CARGO_EQUIVALENT_EXEC_PROPERTIES,
+        size = "enormous",
+        timeout = "eternal",
+        tags = CARGO_EQUIVALENT_TAGS,
+    )
+    for name, lane in WASM_CONTRACT_CARGO_EQUIVALENT_TESTS.items()
+]
+
+test_suite(
+    name = "wasm_contract_cargo_equivalent_tests",
+    tests = WASM_CONTRACT_CARGO_EQUIVALENT_TESTS.keys(),
+)

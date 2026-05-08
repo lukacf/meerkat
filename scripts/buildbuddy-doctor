@@ -374,11 +374,11 @@ else
 fi
 
 if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'default_target="//tools/buildbuddy:wasm_contract_cargo_equivalent_tests"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:wasm_check_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'default_target="//tools/buildbuddy:security_audit_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'name = "sdk_suites_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
-  grep -Fq 'name = "wasm_contract_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq 'name = "wasm_contract_cargo_equivalent_tests"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'name = "wasm_check_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'name = "security_audit_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel; then
   pass "BuildBuddy SDK, WASM, and audit lanes use real cargo-equivalent Bazel test targets"

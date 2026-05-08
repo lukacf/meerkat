@@ -221,6 +221,24 @@ wait_parallel_jobs() {
 copy_workspace
 cd "${work_root}"
 
+run_wasm_contract_test() {
+  local test_name="$1"
+  local runner="$2"
+  "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test "${test_name}" --no-run
+  case "${runner}" in
+    chrome)
+      "${WASM_PACK}" test --headless --chrome meerkat-web-runtime --test "${test_name}"
+      ;;
+    node)
+      "${WASM_PACK}" test --node meerkat-web-runtime --test "${test_name}"
+      ;;
+    *)
+      echo "unknown wasm contract runner: ${runner}" >&2
+      exit 2
+      ;;
+  esac
+}
+
 case "${lane}" in
   security-audit)
     configure_rust "${host_rust_toolchain}"
@@ -285,12 +303,30 @@ case "${lane}" in
     configure_node
     configure_wasm_pack
     append_rust_cfg 'getrandom_backend="wasm_js"'
-    "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test browser_contract --no-run
-    "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test release_targets --no-run
-    "${CARGO}" test -p meerkat-web-runtime --target wasm32-unknown-unknown --test wasm_external_resolver --no-run
-    "${WASM_PACK}" test --headless --chrome meerkat-web-runtime --test browser_contract
-    "${WASM_PACK}" test --headless --chrome meerkat-web-runtime --test release_targets
-    "${WASM_PACK}" test --node meerkat-web-runtime --test wasm_external_resolver
+    run_wasm_contract_test browser_contract chrome
+    run_wasm_contract_test release_targets chrome
+    run_wasm_contract_test wasm_external_resolver node
+    ;;
+  wasm-contract-browser-contract)
+    configure_rust_with_wasm_target
+    configure_node
+    configure_wasm_pack
+    append_rust_cfg 'getrandom_backend="wasm_js"'
+    run_wasm_contract_test browser_contract chrome
+    ;;
+  wasm-contract-release-targets)
+    configure_rust_with_wasm_target
+    configure_node
+    configure_wasm_pack
+    append_rust_cfg 'getrandom_backend="wasm_js"'
+    run_wasm_contract_test release_targets chrome
+    ;;
+  wasm-contract-external-resolver)
+    configure_rust_with_wasm_target
+    configure_node
+    configure_wasm_pack
+    append_rust_cfg 'getrandom_backend="wasm_js"'
+    run_wasm_contract_test wasm_external_resolver node
     ;;
   *)
     echo "unknown full BuildBuddy lane: ${lane}" >&2

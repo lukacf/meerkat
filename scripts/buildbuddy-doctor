@@ -393,12 +393,20 @@ if job_has_line .github/workflows/ci.yml select_backend 'runs-on: ubuntu-latest'
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'lanes: ${{ steps.gcp-lanes.outputs.lanes }}' &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'if: ${{ false }}' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'if: ${{ false }}' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'runs-on: ubuntu-latest' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'timeout-minutes: 20' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'fetch-depth: 1' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'group: gcp-governance' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'profile: submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'runs-on: ubuntu-latest' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'timeout-minutes: 20' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'fetch-depth: 1' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'group: gcp-wasm-feature' &&
+  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'profile: submitter' &&
   job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
-  pass "GCP BuildBuddy CI uses one GitHub-hosted submitter with Bazel lane fanout"
+  pass "GCP BuildBuddy CI uses a few GitHub-hosted submitters with Bazel lane fanout"
 else
-  bad "GCP BuildBuddy CI still depends on multiple GitHub runner slots"
+  bad "GCP BuildBuddy CI is not using the bounded few-submitter GCP fanout shape"
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&

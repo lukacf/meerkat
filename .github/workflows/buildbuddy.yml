@@ -213,6 +213,7 @@ jobs:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -268,11 +269,47 @@ jobs:
       - name: Select GCP BuildBuddy lanes
         id: gcp-lanes
         shell: bash
+        run: |
+          {
+            echo "lanes<<LANES"
+            printf '%s\n' \
+              fmt-static \
+              cargo-all-features-clippy \
+              test-unit \
+              integration-fast
+            echo "LANES"
+          } >> "${GITHUB_OUTPUT}"
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        with:
+          group: gcp
+          profile: submitter
+          mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
+          lanes: ${{ steps.gcp-lanes.outputs.lanes }}
+
+  gcp-governance-submit:
+    name: GCP BuildBuddy governance submitter
+    if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
+    needs: [gcp-control-plane-up, gcp-executors-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+      - name: Detect machine-authority changes
+        id: machine-changes
+        shell: bash
         env:
           MACHINE_AUTHORITY_BASE_SHA: ${{ inputs.machine_authority_base_sha || '' }}
           MACHINE_AUTHORITY_HEAD_SHA: ${{ inputs.machine_authority_head_sha || github.sha }}
         run: |
-          machine_authority_changed=true
+          changed=true
           if [[ -z "${MACHINE_AUTHORITY_BASE_SHA}" && "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             if git fetch --no-tags --depth=1 origin main; then
               MACHINE_AUTHORITY_BASE_SHA="$(git rev-parse FETCH_HEAD)"
@@ -286,74 +323,6 @@ jobs:
             if ! git cat-file -e "${MACHINE_AUTHORITY_BASE_SHA}^{commit}" 2>/dev/null; then
               git fetch --no-tags --depth=1 origin "${MACHINE_AUTHORITY_BASE_SHA}" || true
             fi
-            set +e
-            scripts/machine-authority-changed --base "${MACHINE_AUTHORITY_BASE_SHA}" --head "${MACHINE_AUTHORITY_HEAD_SHA}"
-            status="$?"
-            set -e
-            case "${status}" in
-              0) machine_authority_changed=true ;;
-              1) machine_authority_changed=false ;;
-              *)
-                echo "Machine-authority diff failed; running conservative check."
-                machine_authority_changed=true
-                ;;
-            esac
-          else
-            echo "No reliable diff base; running machine authority."
-          fi
-
-          {
-            echo "lanes<<LANES"
-            printf '%s\n' \
-              fmt-static \
-              cargo-all-features-clippy \
-              test-unit \
-              integration-fast \
-              seam-inventory \
-              rmat-audit \
-              sdk-suites \
-              wasm-contract-tests \
-              wasm-check \
-              test-minimal \
-              test-feature-matrix-lib \
-              test-feature-matrix-surface-checks \
-              audit
-            if [[ "${machine_authority_changed}" == "true" ]]; then
-              echo "machine-authority"
-            fi
-            echo "LANES"
-          } >> "${GITHUB_OUTPUT}"
-      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
-        with:
-          group: gcp
-          profile: submitter
-          mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
-          lanes: ${{ steps.gcp-lanes.outputs.lanes }}
-
-  gcp-governance-submit:
-    name: GCP BuildBuddy governance submitter
-    if: ${{ false }}
-    needs: [gcp-control-plane-up, gcp-executors-up]
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
-    timeout-minutes: 10
-    env:
-      BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
-      BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
-      BUILDBUDDY_ENDPOINT: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: Detect machine-authority changes
-        id: machine-changes
-        shell: bash
-        env:
-          MACHINE_AUTHORITY_BASE_SHA: ${{ inputs.machine_authority_base_sha || '' }}
-          MACHINE_AUTHORITY_HEAD_SHA: ${{ inputs.machine_authority_head_sha || github.sha }}
-        run: |
-          changed=true
-          if [[ -n "${MACHINE_AUTHORITY_BASE_SHA}" && "${MACHINE_AUTHORITY_BASE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
             set +e
             scripts/machine-authority-changed --base "${MACHINE_AUTHORITY_BASE_SHA}" --head "${MACHINE_AUTHORITY_HEAD_SHA}"
             status="$?"
@@ -392,19 +361,20 @@ jobs:
 
   gcp-wasm-feature-submit:
     name: GCP BuildBuddy wasm and feature submitter
-    if: ${{ false }}
+    if: ${{ (inputs.backend || 'buildbuddy-hosted') == 'gcp-buildbuddy' && (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call' || ((vars.MEERKAT_BUILDBUDDY == 'true' || vars.MEERKAT_BUILDBUDDY == '1') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository))) }}
     needs: [gcp-control-plane-up, gcp-executors-up]
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       BUILDBUDDY_GRPC_URL: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.gcp-control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.gcp-control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 0
+          fetch-depth: 1
       - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
         with:
           group: gcp-wasm-feature

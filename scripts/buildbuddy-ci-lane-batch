@@ -50,6 +50,15 @@ fi
 declare -a active_pids=()
 declare -A pid_lanes=()
 declare -A pid_logs=()
+watchdog_pid=""
+
+cleanup_watchdog() {
+  if [[ -n "${watchdog_pid}" ]]; then
+    kill "${watchdog_pid}" 2>/dev/null || true
+    wait "${watchdog_pid}" 2>/dev/null || true
+    watchdog_pid=""
+  fi
+}
 
 remove_active_pid() {
   local done_pid="$1"
@@ -99,10 +108,52 @@ terminate_batch() {
   echo "::warning::BuildBuddy lane batch received a termination signal; dumping active lane logs." >&2
   print_active_tails
   kill_active_lanes
+  cleanup_watchdog
   exit 143
 }
 
+deadline_batch() {
+  trap - USR1
+  echo "::error::BuildBuddy lane batch reached the GCP CI SLO deadline; dumping active lane logs." >&2
+  print_active_tails
+  kill_active_lanes
+  cleanup_watchdog
+  exit 124
+}
+
 trap terminate_batch TERM INT
+trap deadline_batch USR1
+
+start_slo_watchdog() {
+  if ! [[ "${CI_STARTED_AT_EPOCH:-}" =~ ^[0-9]+$ ]] ||
+    ! [[ "${MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS:-}" =~ ^[0-9]+$ ]] ||
+    [[ "${MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS:-0}" == "0" ]]; then
+    return
+  fi
+
+  local grace="${MEERKAT_BUILDBUDDY_BATCH_SLO_GRACE_SECONDS:-45}"
+  if ! [[ "${grace}" =~ ^[0-9]+$ ]]; then
+    grace=45
+  fi
+
+  local deadline_epoch="$((CI_STARTED_AT_EPOCH + MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS - grace))"
+  local now
+  now="$(date +%s)"
+  local seconds_until_deadline="$((deadline_epoch - now))"
+  if ((seconds_until_deadline <= 0)); then
+    echo "::error::BuildBuddy lane batch started after the GCP CI SLO deadline." >&2
+    exit 124
+  fi
+
+  echo "SLO watchdog will stop this lane batch in ${seconds_until_deadline}s."
+  (
+    sleep "${seconds_until_deadline}"
+    kill -USR1 "$$" 2>/dev/null || true
+  ) &
+  watchdog_pid="$!"
+}
+
+start_slo_watchdog
 
 start_lane() {
   local lane="$1"
@@ -156,6 +207,7 @@ reap_one_lane() {
   fi
   print_active_tails
   kill_active_lanes
+  cleanup_watchdog
   exit "${lane_status}"
 }
 
@@ -172,3 +224,5 @@ while ((next_lane < ${#lanes[@]} || ${#active_pids[@]} > 0)); do
     reap_one_lane
   fi
 done
+
+cleanup_watchdog

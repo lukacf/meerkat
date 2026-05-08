@@ -1439,6 +1439,9 @@ impl MethodRouter {
             "live/close" => {
                 handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
             }
+            "live/send_input" => {
+                handlers::live::handle_live_send_input(id, params, &self.live_adapter_host).await
+            }
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,

@@ -4,7 +4,7 @@
 //! The transport bootstrap is tagged (websocket/webrtc), not a bare ws_url.
 
 use meerkat_core::live_adapter::{
-    LiveAdapterStatus, LiveChannelCapabilities, LiveChannelOpenResponse, LiveContinuityMode,
+    LiveAdapterStatus, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
     LiveTransportBootstrap,
 };
 use meerkat_core::types::SessionId;
@@ -130,6 +130,77 @@ pub async fn handle_live_close(
             id,
             error::INVALID_PARAMS,
             format!("channel {} not found", parsed.channel_id),
+        ),
+        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct LiveSendInputParams {
+    pub channel_id: String,
+    #[serde(flatten)]
+    pub chunk: LiveInputChunkWire,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LiveInputChunkWire {
+    Audio {
+        data: String,
+        sample_rate_hz: u32,
+        channels: u16,
+    },
+    Text {
+        text: String,
+    },
+}
+
+impl LiveInputChunkWire {
+    fn into_chunk(self) -> LiveInputChunk {
+        match self {
+            Self::Audio {
+                data,
+                sample_rate_hz,
+                channels,
+            } => {
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&data)
+                    .unwrap_or_default();
+                LiveInputChunk::Audio {
+                    data: decoded,
+                    sample_rate_hz,
+                    channels,
+                }
+            }
+            Self::Text { text } => LiveInputChunk::Text { text },
+        }
+    }
+}
+
+pub async fn handle_live_send_input(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    host: &LiveAdapterHost,
+) -> RpcResponse {
+    let parsed: LiveSendInputParams = match super::parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let channel_id = LiveChannelId::new(&parsed.channel_id);
+    let chunk = parsed.chunk.into_chunk();
+
+    match host.send_input(&channel_id, chunk).await {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({"sent": true})),
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("channel {} not found", parsed.channel_id),
+        ),
+        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("channel {} has no adapter attached", parsed.channel_id),
         ),
         Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }

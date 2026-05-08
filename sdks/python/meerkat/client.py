@@ -2451,6 +2451,13 @@ class MeerkatClient:
         """Close a live channel. Wraps `live/close`."""
         return await self._request("live/close", {"channel_id": channel_id})
 
+    async def live_send_input(
+        self, channel_id: str, kind: str, **kwargs: Any
+    ) -> dict[str, Any]:
+        """Send an input chunk to a live channel. Wraps `live/send_input`."""
+        params: dict[str, Any] = {"channel_id": channel_id, "kind": kind, **kwargs}
+        return await self._request("live/send_input", params)
+
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]
     ) -> dict[str, Any]:

@@ -451,6 +451,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::basic("live/open", "Open a live audio/text channel for a session"),
             RpcMethodDescriptor::basic("live/status", "Get the status of a live channel"),
             RpcMethodDescriptor::basic("live/close", "Close a live channel"),
+            RpcMethodDescriptor::basic(
+                "live/send_input",
+                "Send an input chunk (audio/text) to a live channel",
+            ),
         ]);
     }
 

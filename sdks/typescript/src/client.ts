@@ -2319,6 +2319,12 @@ export class MeerkatClient {
     return await this.request("live/close", params);
   }
 
+  async liveSendInput(
+    params: { channel_id: string; kind: string; [key: string]: unknown },
+  ): Promise<Record<string, unknown>> {
+    return await this.request("live/send_input", params);
+  }
+
   // -- Auth + realm (Phase 4d) --------------------------------------------
   //
   // These wrappers cover the RPC catalog's auth/* and realm/* methods.

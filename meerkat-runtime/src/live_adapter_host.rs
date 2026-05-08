@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 
-use meerkat_core::live_adapter::{LiveAdapterObservation, LiveAdapterStatus};
+use meerkat_core::live_adapter::{
+    LiveAdapter, LiveAdapterCommand, LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk,
+};
 use meerkat_core::types::SessionId;
 use tokio::sync::Mutex;
 
@@ -33,11 +35,11 @@ impl std::fmt::Display for LiveChannelId {
 }
 
 /// Per-channel state tracked by the host.
-#[derive(Debug)]
 struct ChannelState {
     session_id: SessionId,
     status: LiveAdapterStatus,
     snapshot_version: u64,
+    adapter: Option<Box<dyn LiveAdapter>>,
 }
 
 /// Errors from the live adapter host.
@@ -52,6 +54,8 @@ pub enum LiveAdapterHostError {
     ChannelNotReady(LiveChannelId, LiveAdapterStatus),
     #[error("session {0} already has an active channel")]
     SessionAlreadyBound(SessionId),
+    #[error("no adapter attached to channel {0}")]
+    NoAdapter(LiveChannelId),
     #[error("adapter error: {0}")]
     AdapterError(String),
 }
@@ -59,20 +63,14 @@ pub enum LiveAdapterHostError {
 /// Observation routing decision — what the host does with an adapter observation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ObservationRouting {
-    /// Append to canonical session transcript.
     AppendTranscript,
-    /// Dispatch a tool call through Meerkat's tool dispatcher.
     DispatchToolCall {
         provider_call_id: String,
         tool_name: String,
     },
-    /// Signal an interrupt to the session's current turn.
     SignalInterrupt,
-    /// Update channel status tracking.
     UpdateStatus(LiveAdapterStatus),
-    /// Terminal error — channel should be closed.
     TerminalError,
-    /// No routing action needed (status update only, informational).
     Noop,
 }
 
@@ -80,7 +78,7 @@ pub enum ObservationRouting {
 ///
 /// This is NOT MeerkatMachine state (dogma: adapter must not become a
 /// second machine). It's a runtime orchestrator that:
-/// - Owns the map of active adapter channels
+/// - Owns the map of active adapter channels and their adapters
 /// - Builds projection snapshots from canonical session state
 /// - Routes adapter observations to the right Meerkat API
 /// - Exposes transport bootstrap info for the surface API
@@ -98,11 +96,6 @@ impl LiveAdapterHost {
         }
     }
 
-    /// Open a new live channel for a session.
-    ///
-    /// Returns the channel ID and initial snapshot version. The caller
-    /// must separately build the actual provider adapter session using
-    /// the snapshot.
     pub async fn open_channel(
         &self,
         session_id: SessionId,
@@ -124,25 +117,101 @@ impl LiveAdapterHost {
                 session_id,
                 status: LiveAdapterStatus::Opening,
                 snapshot_version: 0,
+                adapter: None,
             },
         );
 
         Ok(channel_id)
     }
 
-    /// Close a live channel, removing it from the host.
+    /// Attach a live adapter to an open channel.
+    pub async fn attach_adapter(
+        &self,
+        channel_id: &LiveChannelId,
+        adapter: Box<dyn LiveAdapter>,
+    ) -> Result<(), LiveAdapterHostError> {
+        let mut channels = self.channels.lock().await;
+        let channel = channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.adapter = Some(adapter);
+        channel.status = LiveAdapterStatus::Ready;
+        Ok(())
+    }
+
+    /// Send a command to the adapter on a channel.
+    pub async fn send_command(
+        &self,
+        channel_id: &LiveChannelId,
+        command: LiveAdapterCommand,
+    ) -> Result<(), LiveAdapterHostError> {
+        let mut channels = self.channels.lock().await;
+        let channel = channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        let adapter = channel
+            .adapter
+            .as_mut()
+            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
+        adapter
+            .send_command(command)
+            .await
+            .map_err(|e| LiveAdapterHostError::AdapterError(e.to_string()))
+    }
+
+    /// Send an input chunk to the adapter on a channel.
+    pub async fn send_input(
+        &self,
+        channel_id: &LiveChannelId,
+        chunk: LiveInputChunk,
+    ) -> Result<(), LiveAdapterHostError> {
+        self.send_command(channel_id, LiveAdapterCommand::SendInput { chunk })
+            .await
+    }
+
+    /// Poll the next observation from the adapter on a channel.
+    pub async fn next_observation(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
+        let mut channels = self.channels.lock().await;
+        let channel = channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        let adapter = channel
+            .adapter
+            .as_mut()
+            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
+        let obs = adapter
+            .next_observation()
+            .await
+            .map_err(|e| LiveAdapterHostError::AdapterError(e.to_string()))?;
+
+        if let Some(ref obs) = obs {
+            let routing = Self::classify_observation(obs);
+            if let ObservationRouting::UpdateStatus(status) = routing {
+                channel.status = status;
+            }
+        }
+
+        Ok(obs)
+    }
+
     pub async fn close_channel(
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<(), LiveAdapterHostError> {
         let mut channels = self.channels.lock().await;
-        if channels.remove(channel_id).is_none() {
-            return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
+        if let Some(mut channel) = channels.remove(channel_id) {
+            if let Some(mut adapter) = channel.adapter.take() {
+                let _ = adapter.close().await;
+            }
+            Ok(())
+        } else {
+            Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
         }
-        Ok(())
     }
 
-    /// Get the current status of a channel.
     pub async fn channel_status(
         &self,
         channel_id: &LiveChannelId,
@@ -154,7 +223,6 @@ impl LiveAdapterHost {
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
-    /// Get the session ID bound to a channel.
     pub async fn channel_session(
         &self,
         channel_id: &LiveChannelId,
@@ -166,12 +234,6 @@ impl LiveAdapterHost {
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
     }
 
-    /// Classify an adapter observation into a routing decision.
-    ///
-    /// The host does NOT execute the routing — it classifies what
-    /// should happen and returns the decision. The caller (surface
-    /// layer) executes it through the appropriate Meerkat API.
-    /// This keeps the host as a classifier, not an authority.
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
         match observation {
             LiveAdapterObservation::Ready => {
@@ -208,7 +270,6 @@ impl LiveAdapterHost {
         }
     }
 
-    /// Apply a status update from an observation to the channel's tracked state.
     pub async fn apply_status_update(
         &self,
         channel_id: &LiveChannelId,
@@ -222,8 +283,6 @@ impl LiveAdapterHost {
         Ok(())
     }
 
-    /// Increment and return the next snapshot version for a channel.
-    /// Used when rebuilding the provider session after model switch or reconnect.
     pub async fn next_snapshot_version(
         &self,
         channel_id: &LiveChannelId,
@@ -236,7 +295,6 @@ impl LiveAdapterHost {
         Ok(channel.snapshot_version)
     }
 
-    /// List all active channel IDs.
     pub async fn active_channels(&self) -> Vec<LiveChannelId> {
         let channels = self.channels.lock().await;
         channels.keys().cloned().collect()
@@ -253,7 +311,9 @@ impl Default for LiveAdapterHost {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::live_adapter::{LiveAdapterErrorCode, LiveAdapterObservation};
+    use meerkat_core::live_adapter::{
+        LiveAdapterError, LiveAdapterErrorCode, LiveAdapterObservation,
+    };
     use meerkat_core::types::{StopReason, Usage};
 
     fn test_session_id() -> SessionId {
@@ -316,7 +376,7 @@ mod tests {
         assert_eq!(host.channel_session(&ch).await.unwrap(), session_id);
     }
 
-    // -- Observation classification (dogma: host classifies, doesn't execute) --
+    // -- Observation classification --
 
     #[test]
     fn ready_observation_routes_to_status_update() {
@@ -470,5 +530,72 @@ mod tests {
         assert_eq!(active.len(), 2);
         assert!(active.contains(&ch1));
         assert!(active.contains(&ch2));
+    }
+
+    // -- Adapter attachment --
+
+    #[tokio::test]
+    async fn send_input_without_adapter_returns_error() {
+        let host = LiveAdapterHost::new();
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let err = host
+            .send_input(&ch, LiveInputChunk::Text { text: "hi".into() })
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LiveAdapterHostError::NoAdapter(_)));
+    }
+
+    #[tokio::test]
+    async fn attach_adapter_sets_status_to_ready() {
+        let host = LiveAdapterHost::new();
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Opening
+        );
+        host.attach_adapter(&ch, Box::new(StubAdapter::new()))
+            .await
+            .unwrap();
+        assert_eq!(
+            host.channel_status(&ch).await.unwrap(),
+            LiveAdapterStatus::Ready
+        );
+    }
+
+    struct StubAdapter {
+        status: LiveAdapterStatus,
+    }
+
+    impl StubAdapter {
+        fn new() -> Self {
+            Self {
+                status: LiveAdapterStatus::Ready,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LiveAdapter for StubAdapter {
+        async fn send_command(
+            &mut self,
+            _command: LiveAdapterCommand,
+        ) -> Result<(), LiveAdapterError> {
+            Ok(())
+        }
+
+        async fn next_observation(
+            &mut self,
+        ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+            Ok(None)
+        }
+
+        fn status(&self) -> &LiveAdapterStatus {
+            &self.status
+        }
+
+        async fn close(&mut self) -> Result<(), LiveAdapterError> {
+            self.status = LiveAdapterStatus::Closed;
+            Ok(())
+        }
     }
 }

@@ -98,7 +98,7 @@ runs:
 
     - name: Upload BuildBuddy logs
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: buildbuddy-${{ inputs.group }}-${{ github.run_id }}-${{ github.run_attempt }}
         path: ${{ runner.temp }}/buildbuddy-logs

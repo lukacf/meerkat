@@ -698,6 +698,7 @@ impl MethodRouter {
 
     /// Attach a live WebSocket transport state for `live/open` token minting.
     pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
+        self.live_adapter_host = Arc::clone(state.host());
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
         self

@@ -5,6 +5,7 @@
 //! Provider transport mechanics stay inside adapter implementations.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk,
@@ -39,7 +40,7 @@ struct ChannelState {
     session_id: SessionId,
     status: LiveAdapterStatus,
     snapshot_version: u64,
-    adapter: Option<Box<dyn LiveAdapter>>,
+    adapter: Option<Arc<Mutex<Box<dyn LiveAdapter>>>>,
 }
 
 /// Errors from the live adapter host.
@@ -134,7 +135,7 @@ impl LiveAdapterHost {
         let channel = channels
             .get_mut(channel_id)
             .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.adapter = Some(adapter);
+        channel.adapter = Some(Arc::new(Mutex::new(adapter)));
         channel.status = LiveAdapterStatus::Ready;
         Ok(())
     }
@@ -145,14 +146,19 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
         command: LiveAdapterCommand,
     ) -> Result<(), LiveAdapterHostError> {
-        let mut channels = self.channels.lock().await;
-        let channel = channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        let adapter = channel
-            .adapter
-            .as_mut()
-            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
+        let adapter = {
+            let channels = self.channels.lock().await;
+            let channel = channels
+                .get(channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            Arc::clone(
+                channel
+                    .adapter
+                    .as_ref()
+                    .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?,
+            )
+        };
+        let mut adapter = adapter.lock().await;
         adapter
             .send_command(command)
             .await
@@ -174,23 +180,33 @@ impl LiveAdapterHost {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<Option<LiveAdapterObservation>, LiveAdapterHostError> {
-        let mut channels = self.channels.lock().await;
-        let channel = channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        let adapter = channel
-            .adapter
-            .as_mut()
-            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
-        let obs = adapter
-            .next_observation()
-            .await
-            .map_err(|e| LiveAdapterHostError::AdapterError(e.to_string()))?;
+        let adapter = {
+            let channels = self.channels.lock().await;
+            let channel = channels
+                .get(channel_id)
+                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+            Arc::clone(
+                channel
+                    .adapter
+                    .as_ref()
+                    .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?,
+            )
+        };
+        let obs = {
+            let mut adapter = adapter.lock().await;
+            adapter
+                .next_observation()
+                .await
+                .map_err(|e| LiveAdapterHostError::AdapterError(e.to_string()))?
+        };
 
         if let Some(ref obs) = obs {
             let routing = Self::classify_observation(obs);
-            if let ObservationRouting::UpdateStatus(status) = routing {
-                channel.status = status;
+            if let ObservationRouting::UpdateStatus(ref status) = routing {
+                let mut channels = self.channels.lock().await;
+                if let Some(channel) = channels.get_mut(channel_id) {
+                    channel.status = status.clone();
+                }
             }
         }
 
@@ -201,15 +217,19 @@ impl LiveAdapterHost {
         &self,
         channel_id: &LiveChannelId,
     ) -> Result<(), LiveAdapterHostError> {
-        let mut channels = self.channels.lock().await;
-        if let Some(mut channel) = channels.remove(channel_id) {
-            if let Some(mut adapter) = channel.adapter.take() {
-                let _ = adapter.close().await;
+        let adapter = {
+            let mut channels = self.channels.lock().await;
+            if let Some(channel) = channels.remove(channel_id) {
+                channel.adapter
+            } else {
+                return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
             }
-            Ok(())
-        } else {
-            Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+        };
+        if let Some(adapter) = adapter {
+            let mut adapter = adapter.lock().await;
+            let _ = adapter.close().await;
         }
+        Ok(())
     }
 
     pub async fn channel_status(

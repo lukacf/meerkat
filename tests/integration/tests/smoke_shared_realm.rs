@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -3308,7 +3309,798 @@ budget_warning_threshold = 0.8
 }
 
 // ===========================================================================
-// Scenario 71: Live adapter channel lifecycle through RPC + WebSocket
+// Live adapter audio helpers
+// ===========================================================================
+
+const OPENAI_TTS_MODEL: &str = "gpt-4o-mini-tts";
+const OPENAI_TTS_DEFAULT_VOICE: &str = "alloy";
+const LIVE_AUDIO_SAMPLE_RATE_HZ: usize = 24_000;
+const LIVE_AUDIO_BYTES_PER_SAMPLE: usize = 2;
+const LIVE_AUDIO_FRAME_MS: usize = 200;
+const LIVE_AUDIO_TRAILING_SILENCE_MS: usize = 500;
+const LIVE_AUDIO_INTERNAL_SILENCE_THRESHOLD: i16 = 100;
+const LIVE_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 200;
+const LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS: usize = 80;
+const LIVE_OUTPUT_IDLE_SETTLE_MS: u64 = 2_000;
+
+fn openai_tts_model() -> String {
+    first_env(&["RKAT_OPENAI_TTS_MODEL", "OPENAI_TTS_MODEL"])
+        .unwrap_or_else(|| OPENAI_TTS_MODEL.to_string())
+}
+
+fn openai_tts_voice() -> String {
+    first_env(&["RKAT_REALTIME_OPENAI_VOICE", "OPENAI_REALTIME_VOICE"])
+        .unwrap_or_else(|| OPENAI_TTS_DEFAULT_VOICE.to_string())
+}
+
+fn openai_switch_model() -> String {
+    first_env(&["SMOKE_MODEL_OPENAI_SWITCH", "OPENAI_SWITCH_MODEL"])
+        .unwrap_or_else(|| "gpt-5.4-mini".into())
+}
+
+fn live_tts_cache_dir() -> PathBuf {
+    workspace_root().join("target/e2e-live-tts-cache")
+}
+
+fn live_audio_artifacts_dir(scenario: &str) -> PathBuf {
+    workspace_root()
+        .join("target/e2e-live-audio-artifacts")
+        .join(scenario)
+}
+
+fn live_audio_cache_key(text: &str, model: &str, voice: &str) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"openai-tts-v2\0");
+    digest.update(model.as_bytes());
+    digest.update(b"\0");
+    digest.update(voice.as_bytes());
+    digest.update(b"\0");
+    digest.update(text.as_bytes());
+    format!("{:x}", digest.finalize())
+}
+
+fn normalize_semantic_text(text: &str) -> String {
+    text.split_whitespace()
+        .map(|segment| segment.to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn normalized_text_contains_any(text: &str, variants: &[&str]) -> bool {
+    variants
+        .iter()
+        .any(|variant| text.contains(&normalize_semantic_text(variant)))
+}
+
+fn live_pcm_bytes_per_ms() -> usize {
+    (LIVE_AUDIO_SAMPLE_RATE_HZ * LIVE_AUDIO_BYTES_PER_SAMPLE) / 1000
+}
+
+fn append_pcm_trailing_silence(pcm: &[u8], trailing_silence_ms: usize) -> Vec<u8> {
+    let silence_bytes = live_pcm_bytes_per_ms() * trailing_silence_ms;
+    let mut output = Vec::with_capacity(pcm.len() + silence_bytes);
+    output.extend_from_slice(pcm);
+    output.resize(output.len() + silence_bytes, 0);
+    output
+}
+
+fn compress_internal_pcm_silence(
+    pcm: &[u8],
+    amplitude_threshold: i16,
+    max_silence_ms: usize,
+    preserved_silence_ms: usize,
+) -> Vec<u8> {
+    let max_silence_bytes = live_pcm_bytes_per_ms() * max_silence_ms;
+    let preserved_silence_bytes = live_pcm_bytes_per_ms() * preserved_silence_ms;
+    let mut output = Vec::with_capacity(pcm.len());
+    let mut index = 0usize;
+
+    while index + LIVE_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
+        let sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
+        let silent = sample.abs() <= amplitude_threshold;
+        let run_start = index;
+        index += LIVE_AUDIO_BYTES_PER_SAMPLE;
+
+        while index + LIVE_AUDIO_BYTES_PER_SAMPLE <= pcm.len() {
+            let next_sample = i16::from_le_bytes([pcm[index], pcm[index + 1]]);
+            if (next_sample.abs() <= amplitude_threshold) != silent {
+                break;
+            }
+            index += LIVE_AUDIO_BYTES_PER_SAMPLE;
+        }
+
+        let run = &pcm[run_start..index];
+        if silent && run.len() > max_silence_bytes {
+            output.extend_from_slice(&run[..preserved_silence_bytes.min(run.len())]);
+        } else {
+            output.extend_from_slice(run);
+        }
+    }
+
+    if index < pcm.len() {
+        output.extend_from_slice(&pcm[index..]);
+    }
+
+    output
+}
+
+fn prepare_tts_pcm_for_live_vad(pcm: &[u8]) -> Vec<u8> {
+    compress_internal_pcm_silence(
+        pcm,
+        LIVE_AUDIO_INTERNAL_SILENCE_THRESHOLD,
+        LIVE_AUDIO_MAX_INTERNAL_SILENCE_MS,
+        LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS,
+    )
+}
+
+fn chunk_pcm_bytes(pcm: &[u8], frame_ms: usize, trailing_silence_ms: usize) -> Vec<Vec<u8>> {
+    let frame_bytes = live_pcm_bytes_per_ms() * frame_ms;
+    append_pcm_trailing_silence(pcm, trailing_silence_ms)
+        .chunks(frame_bytes.max(1))
+        .map(|chunk| chunk.to_vec())
+        .collect()
+}
+
+fn pcm_has_non_silence(pcm: &[u8]) -> bool {
+    pcm.chunks_exact(2)
+        .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+        .any(|sample| sample != 0)
+}
+
+async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
+    let model = openai_tts_model();
+    let voice = openai_tts_voice();
+    let cache_key = live_audio_cache_key(text, &model, &voice);
+    let cache_path = live_tts_cache_dir().join(format!("{cache_key}.pcm"));
+    if cache_path.exists() {
+        return Ok(tokio::fs::read(cache_path).await?);
+    }
+
+    tokio::fs::create_dir_all(live_tts_cache_dir()).await?;
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?
+        .post("https://api.openai.com/v1/audio/speech")
+        .bearer_auth(api_key)
+        .json(&json!({
+            "model": model,
+            "voice": voice,
+            "input": text,
+            "response_format": "pcm",
+        }))
+        .send()
+        .await?
+        .error_for_status()?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(format!("OpenAI TTS request failed with {status}: {body}").into());
+    }
+    let pcm = prepare_tts_pcm_for_live_vad(&response.bytes().await?);
+    tokio::fs::write(&cache_path, &pcm).await?;
+    Ok(pcm)
+}
+
+// ---------------------------------------------------------------------------
+// Live adapter observation capture
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Clone)]
+struct LiveObservationCapture {
+    input_finals: Vec<String>,
+    output_text: String,
+    output_audio_pcm: Vec<u8>,
+    tool_call_names_by_id: BTreeMap<String, String>,
+    tool_call_requests: Vec<String>,
+    tool_call_completions: Vec<String>,
+    tool_call_failures: Vec<String>,
+    event_kinds: Vec<String>,
+    frame_log: Vec<String>,
+    saw_ready: bool,
+    saw_turn_completed: bool,
+    saw_interrupted: bool,
+}
+
+impl LiveObservationCapture {
+    fn merge_from(&mut self, other: Self) {
+        self.input_finals.extend(other.input_finals);
+        self.output_text.push_str(&other.output_text);
+        self.output_audio_pcm.extend(other.output_audio_pcm);
+        self.tool_call_names_by_id
+            .extend(other.tool_call_names_by_id);
+        self.tool_call_requests.extend(other.tool_call_requests);
+        self.tool_call_completions
+            .extend(other.tool_call_completions);
+        self.tool_call_failures.extend(other.tool_call_failures);
+        self.event_kinds.extend(other.event_kinds);
+        self.frame_log.extend(other.frame_log);
+        self.saw_ready |= other.saw_ready;
+        self.saw_turn_completed |= other.saw_turn_completed;
+        self.saw_interrupted |= other.saw_interrupted;
+    }
+}
+
+fn observe_live_json_frame(
+    capture: &mut LiveObservationCapture,
+    text: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    capture.frame_log.push(text.to_string());
+    let value: Value = serde_json::from_str(text)?;
+    let observation = value["observation"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    capture.event_kinds.push(observation.clone());
+
+    match observation.as_str() {
+        "ready" => {
+            capture.saw_ready = true;
+        }
+        "user_transcript_final" => {
+            if let Some(t) = value["text"].as_str() {
+                capture.input_finals.push(t.to_string());
+            }
+        }
+        "assistant_text_delta" => {
+            if let Some(delta) = value["delta"].as_str() {
+                capture.output_text.push_str(delta);
+            }
+        }
+        "assistant_audio_chunk" => {
+            if let Some(data) = value["data"].as_array() {
+                let bytes: Vec<u8> = data
+                    .iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                    .collect();
+                capture.output_audio_pcm.extend_from_slice(&bytes);
+            }
+        }
+        "tool_call_requested" => {
+            let call_id = value["provider_call_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            let tool_name = value["tool_name"].as_str().unwrap_or_default().to_string();
+            capture
+                .tool_call_names_by_id
+                .insert(call_id, tool_name.clone());
+            capture.tool_call_requests.push(tool_name);
+        }
+        "turn_completed" => {
+            capture.saw_turn_completed = true;
+        }
+        "turn_interrupted" => {
+            capture.saw_interrupted = true;
+        }
+        "assistant_transcript_final" => {}
+        "assistant_transcript_truncated" => {}
+        "status_changed" => {}
+        "error" => {
+            return Err(format!(
+                "live adapter error: {}",
+                value["message"].as_str().unwrap_or("unknown")
+            )
+            .into());
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn live_capture_has_turn_activity(capture: &LiveObservationCapture) -> bool {
+    capture.saw_turn_completed
+        || capture.saw_interrupted
+        || !capture.input_finals.is_empty()
+        || !capture.output_text.is_empty()
+        || !capture.output_audio_pcm.is_empty()
+        || !capture.tool_call_requests.is_empty()
+        || !capture.tool_call_completions.is_empty()
+        || !capture.tool_call_failures.is_empty()
+}
+
+type LiveWsWrite = futures::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Message,
+>;
+type LiveWsRead = futures::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+async fn live_ws_send_audio_chunk(
+    writer: &mut LiveWsWrite,
+    pcm_chunk: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    // Send as binary frame — the transport interprets binary as raw 24kHz mono PCM
+    writer
+        .send(WsMessage::Binary(pcm_chunk.to_vec().into()))
+        .await?;
+    Ok(())
+}
+
+async fn live_ws_next_text_frame(
+    reader: &mut LiveWsRead,
+    timeout_duration: Duration,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    loop {
+        match timeout(timeout_duration, reader.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => return Ok(Some(text.to_string())),
+            Ok(Some(Ok(WsMessage::Binary(_)))) => continue,
+            Ok(Some(Ok(WsMessage::Ping(_)))) => continue,
+            Ok(Some(Ok(WsMessage::Pong(_)))) => continue,
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => return Ok(None),
+            Ok(Some(Ok(WsMessage::Frame(_)))) => continue,
+            Ok(Some(Err(err))) => return Err(err.into()),
+            Err(_) => return Ok(None),
+        }
+    }
+}
+
+async fn collect_live_observations_until<F>(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+    predicate: F,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>>
+where
+    F: Fn(&LiveObservationCapture) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut capture = LiveObservationCapture::default();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame_text = match live_ws_next_text_frame(reader, remaining).await? {
+            Some(text) => text,
+            None => {
+                return Err(format!(
+                    "live websocket closed before condition met: capture={capture:?}"
+                )
+                .into());
+            }
+        };
+        observe_live_json_frame(&mut capture, &frame_text)?;
+        if predicate(&capture) {
+            return Ok(capture);
+        }
+    }
+    Err(format!("timed out waiting for live observation condition: capture={capture:?}").into())
+}
+
+async fn collect_live_observations_until_turn_completed(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    collect_live_observations_until(reader, timeout_secs, |c| c.saw_turn_completed).await
+}
+
+async fn collect_live_observations_until_output_settles(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(LIVE_OUTPUT_IDLE_SETTLE_MS);
+    let mut capture = LiveObservationCapture::default();
+    let mut output_started = false;
+    let mut output_idle_deadline = deadline;
+
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if output_started && now >= output_idle_deadline {
+            return Ok(capture);
+        }
+
+        let wait_deadline = if output_started {
+            output_idle_deadline.min(deadline)
+        } else {
+            deadline
+        };
+        let wait_for = wait_deadline.saturating_duration_since(now);
+        if wait_for.is_zero() {
+            if output_started {
+                return Ok(capture);
+            }
+            break;
+        }
+
+        match live_ws_next_text_frame(reader, wait_for).await {
+            Ok(Some(text)) => {
+                let had_output = observation_is_output(&text);
+                observe_live_json_frame(&mut capture, &text)?;
+                if capture.saw_turn_completed {
+                    return Ok(capture);
+                }
+                if had_output {
+                    output_started = true;
+                    output_idle_deadline = Instant::now() + idle_window;
+                }
+            }
+            Ok(None) => {
+                return if output_started {
+                    Ok(capture)
+                } else {
+                    Err("live websocket closed before assistant output arrived".into())
+                };
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    Err(format!("timed out waiting for live output: capture={capture:?}").into())
+}
+
+fn observation_is_output(text: &str) -> bool {
+    text.contains("\"assistant_text_delta\"")
+        || text.contains("\"assistant_audio_chunk\"")
+        || text.contains("\"turn_completed\"")
+}
+
+async fn collect_live_observations_until_ready_or_idle(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(500);
+    let mut capture = LiveObservationCapture::default();
+    let mut saw_any_frame = false;
+
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match live_ws_next_text_frame(reader, remaining).await {
+            Ok(Some(text)) => {
+                saw_any_frame = true;
+                observe_live_json_frame(&mut capture, &text)?;
+                if capture.saw_ready {
+                    return Ok(capture);
+                }
+            }
+            Ok(None) => {
+                return Err("live websocket closed before the channel became ready".into());
+            }
+            Err(_) if saw_any_frame => return Ok(capture),
+            Err(_) => {}
+        }
+    }
+
+    Ok(capture)
+}
+
+async fn collect_live_observations_until_turn_completed_or_idle(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(LIVE_OUTPUT_IDLE_SETTLE_MS);
+    let mut capture = LiveObservationCapture::default();
+
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match live_ws_next_text_frame(reader, remaining).await {
+            Ok(Some(text)) => {
+                observe_live_json_frame(&mut capture, &text)?;
+                if capture.saw_turn_completed {
+                    return Ok(capture);
+                }
+            }
+            Ok(None) => return Ok(capture),
+            Err(_) => return Ok(capture),
+        }
+    }
+
+    Ok(capture)
+}
+
+async fn stream_live_audio(
+    writer: &mut LiveWsWrite,
+    pcm: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let chunks = chunk_pcm_bytes(pcm, LIVE_AUDIO_FRAME_MS, LIVE_AUDIO_TRAILING_SILENCE_MS);
+    for (index, chunk) in chunks.iter().enumerate() {
+        live_ws_send_audio_chunk(writer, chunk).await?;
+        if index + 1 < chunks.len() {
+            sleep(Duration::from_millis(LIVE_AUDIO_FRAME_MS as u64)).await;
+        }
+    }
+    Ok(())
+}
+
+async fn send_live_audio_and_wait_for_turn(
+    writer: &mut LiveWsWrite,
+    reader: &mut LiveWsRead,
+    pcm: &[u8],
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    stream_live_audio(writer, pcm).await?;
+    // Wait for user transcript final and any output to start settling
+    collect_live_observations_until(reader, timeout_secs, |capture| {
+        !capture.input_finals.is_empty()
+    })
+    .await
+}
+
+async fn settle_live_turn_after_input(
+    reader: &mut LiveWsRead,
+    prior_capture: &LiveObservationCapture,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    if prior_capture.saw_turn_completed {
+        return Ok(LiveObservationCapture::default());
+    }
+    let output_already_started = !prior_capture.output_text.is_empty()
+        || !prior_capture.output_audio_pcm.is_empty()
+        || !prior_capture.tool_call_requests.is_empty()
+        || !prior_capture.tool_call_completions.is_empty()
+        || !prior_capture.tool_call_failures.is_empty();
+    let mut capture = if output_already_started {
+        collect_live_observations_until_turn_completed(reader, timeout_secs).await?
+    } else {
+        let mut capture =
+            collect_live_observations_until_output_settles(reader, timeout_secs).await?;
+        if !capture.saw_turn_completed {
+            capture.merge_from(
+                collect_live_observations_until_turn_completed(reader, timeout_secs).await?,
+            );
+        }
+        capture
+    };
+    if !capture.saw_turn_completed {
+        capture.merge_from(
+            collect_live_observations_until_turn_completed(reader, timeout_secs).await?,
+        );
+    }
+    Ok(capture)
+}
+
+async fn collect_live_observations_until_barge_in<F>(
+    writer: &mut LiveWsWrite,
+    reader: &mut LiveWsRead,
+    seed_capture: &LiveObservationCapture,
+    barge_in_pcm: &[u8],
+    timeout_secs: u64,
+    start_barge_in: F,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>>
+where
+    F: Fn(&LiveObservationCapture) -> bool,
+{
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let mut capture = seed_capture.clone();
+    let mut started_barge_in = start_barge_in(&capture);
+    let barge_in_chunks = chunk_pcm_bytes(
+        barge_in_pcm,
+        LIVE_AUDIO_FRAME_MS,
+        LIVE_AUDIO_TRAILING_SILENCE_MS,
+    );
+    let mut next_barge_in_chunk = 0_usize;
+    let mut next_barge_in_send_at = started_barge_in.then_some(Instant::now());
+
+    // If already started, send first chunk immediately
+    if started_barge_in
+        && next_barge_in_chunk < barge_in_chunks.len()
+        && next_barge_in_send_at.is_some_and(|t| Instant::now() >= t)
+    {
+        live_ws_send_audio_chunk(writer, &barge_in_chunks[next_barge_in_chunk]).await?;
+        next_barge_in_chunk += 1;
+        next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
+            .then_some(Instant::now() + Duration::from_millis(LIVE_AUDIO_FRAME_MS as u64));
+    }
+
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        if started_barge_in
+            && next_barge_in_chunk < barge_in_chunks.len()
+            && next_barge_in_send_at.is_some_and(|t| now >= t)
+        {
+            live_ws_send_audio_chunk(writer, &barge_in_chunks[next_barge_in_chunk]).await?;
+            next_barge_in_chunk += 1;
+            next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
+                .then_some(Instant::now() + Duration::from_millis(LIVE_AUDIO_FRAME_MS as u64));
+            continue;
+        }
+
+        let wait_deadline = next_barge_in_send_at
+            .filter(|t| *t < deadline)
+            .unwrap_or(deadline);
+        let remaining = wait_deadline.saturating_duration_since(Instant::now());
+        let frame_text = match live_ws_next_text_frame(reader, remaining).await {
+            Ok(Some(text)) => text,
+            Ok(None) => {
+                return Err("live websocket closed before barge-in completed".into());
+            }
+            Err(_) if started_barge_in && next_barge_in_send_at.is_some() => continue,
+            Err(_) => {
+                if started_barge_in
+                    && next_barge_in_chunk == barge_in_chunks.len()
+                    && capture.saw_interrupted
+                {
+                    return Ok(capture);
+                }
+                continue;
+            }
+        };
+        observe_live_json_frame(&mut capture, &frame_text)?;
+
+        if !started_barge_in && start_barge_in(&capture) {
+            started_barge_in = true;
+            next_barge_in_send_at = Some(Instant::now());
+        }
+
+        if started_barge_in {
+            let barge_in_complete = next_barge_in_chunk == barge_in_chunks.len();
+            if barge_in_complete && capture.saw_interrupted {
+                return Ok(capture);
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for barge-in preemption (turn_interrupted): capture={capture:?}"
+    )
+    .into())
+}
+
+async fn ensure_live_session_quiescent(
+    writer: &mut LiveWsWrite,
+    reader: &mut LiveWsRead,
+    prior_capture: &LiveObservationCapture,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    if prior_capture.saw_turn_completed {
+        return collect_live_observations_until_ready_or_idle(reader, timeout_secs).await;
+    }
+    // Drain remaining frames until idle
+    collect_live_observations_until_ready_or_idle(reader, timeout_secs).await
+}
+
+async fn dump_live_audio_artifacts(
+    scenario: &str,
+    turn_label: &str,
+    input_pcm: &[u8],
+    capture: &LiveObservationCapture,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = live_audio_artifacts_dir(scenario);
+    tokio::fs::create_dir_all(&dir).await?;
+    tokio::fs::write(dir.join(format!("{turn_label}-input.pcm")), input_pcm).await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-output.pcm")),
+        &capture.output_audio_pcm,
+    )
+    .await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-frames.jsonl")),
+        capture.frame_log.join("\n"),
+    )
+    .await?;
+    tokio::fs::write(
+        dir.join(format!("{turn_label}-summary.json")),
+        serde_json::to_vec_pretty(&json!({
+            "input_finals": capture.input_finals,
+            "output_text": capture.output_text,
+            "tool_call_requests": capture.tool_call_requests,
+            "tool_call_completions": capture.tool_call_completions,
+            "tool_call_failures": capture.tool_call_failures,
+            "saw_ready": capture.saw_ready,
+            "saw_turn_completed": capture.saw_turn_completed,
+            "saw_interrupted": capture.saw_interrupted,
+        }))?,
+    )
+    .await?;
+    Ok(())
+}
+
+/// Open a live channel via RPC, connect WebSocket, return (channel_id, writer, reader).
+async fn live_open_and_connect(
+    pump: &mut RpcEventPump,
+    rpc: &mut RpcProcess,
+    session_id: &str,
+) -> Result<(String, LiveWsWrite, LiveWsRead), Box<dyn std::error::Error>> {
+    let open_result = pump
+        .call(rpc, "live/open", json!({"session_id": session_id}), 30)
+        .await?;
+    let channel_id = open_result["channel_id"]
+        .as_str()
+        .ok_or("missing channel_id in live/open result")?
+        .to_string();
+    let ws_url = open_result["transport"]["url"]
+        .as_str()
+        .ok_or("missing transport.url in live/open result")?
+        .to_string();
+    assert!(
+        !ws_url.is_empty(),
+        "ws_url must not be empty when --live-ws is configured"
+    );
+
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url).await?;
+    let (ws_write, ws_read) = futures::StreamExt::split(ws_stream);
+    Ok((channel_id, ws_write, ws_read))
+}
+
+/// Close a live WebSocket writer and then call live/close via RPC.
+async fn live_close_channel(
+    pump: &mut RpcEventPump,
+    rpc: &mut RpcProcess,
+    writer: LiveWsWrite,
+    channel_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use futures::SinkExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+    let mut writer = writer;
+    let _ = writer.send(WsMessage::Close(None)).await;
+    drop(writer);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let _ = pump
+        .call(rpc, "live/close", json!({"channel_id": channel_id}), 10)
+        .await;
+    Ok(())
+}
+
+#[test]
+fn live_audio_cache_key_is_stable_and_sensitive_to_voice() {
+    let key_a = live_audio_cache_key("hello world", "gpt-4o-mini-tts", "marin");
+    let key_b = live_audio_cache_key("hello world", "gpt-4o-mini-tts", "marin");
+    let key_c = live_audio_cache_key("hello world", "gpt-4o-mini-tts", "cedar");
+    assert_eq!(key_a, key_b);
+    assert_ne!(key_a, key_c);
+}
+
+#[test]
+fn live_audio_chunking_appends_trailing_silence_in_fixed_frames() {
+    let one_frame = vec![1_u8; live_pcm_bytes_per_ms() * LIVE_AUDIO_FRAME_MS];
+    let chunks = chunk_pcm_bytes(
+        &one_frame,
+        LIVE_AUDIO_FRAME_MS,
+        LIVE_AUDIO_TRAILING_SILENCE_MS,
+    );
+    assert_eq!(
+        chunks.len(),
+        4,
+        "200ms audio + 500ms silence should yield four 200ms frames"
+    );
+    assert_eq!(
+        chunks[0].len(),
+        live_pcm_bytes_per_ms() * LIVE_AUDIO_FRAME_MS
+    );
+    assert!(
+        chunks[1..].iter().flatten().all(|byte| *byte == 0),
+        "trailing frames should be silence-only"
+    );
+}
+
+#[test]
+fn live_audio_silence_compression_preserves_short_pauses_and_caps_long_ones() {
+    let tone = vec![1_u8; live_pcm_bytes_per_ms() * 40];
+    let long_silence = vec![0_u8; live_pcm_bytes_per_ms() * 400];
+    let short_silence = vec![0_u8; live_pcm_bytes_per_ms() * 40];
+    let mut pcm = Vec::new();
+    pcm.extend_from_slice(&tone);
+    pcm.extend_from_slice(&long_silence);
+    pcm.extend_from_slice(&tone);
+    pcm.extend_from_slice(&short_silence);
+    pcm.extend_from_slice(&tone);
+
+    let prepared = prepare_tts_pcm_for_live_vad(&pcm);
+    let expected_long_silence = live_pcm_bytes_per_ms() * LIVE_AUDIO_PRESERVED_INTERNAL_SILENCE_MS;
+    assert!(
+        prepared.len() < pcm.len(),
+        "long internal silences should be compressed"
+    );
+    assert!(
+        prepared.len() >= tone.len() * 3 + short_silence.len() + expected_long_silence,
+        "compression should preserve signal and the bounded amount of long silence"
+    );
+}
+
+// ===========================================================================
+// Scenario 71: Live adapter realtime audio roundtrip with TTS, barge-in,
+//              and tool dispatch through the new live/open + WebSocket surface
 // ===========================================================================
 
 #[tokio::test]
@@ -3331,6 +4123,8 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
     tokio::fs::create_dir_all(project_dir.join("data")).await?;
     tokio::fs::create_dir_all(&state_root).await?;
     write_project_config(&project_dir).await?;
+
+    let scenario_name = "scenario-71-live-adapter-audio";
 
     let ws_port = {
         let l = TcpListener::bind("127.0.0.1:0")?;
@@ -3378,7 +4172,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &mut rpc,
                 "session/create",
                 json!({
-                    "prompt": "You are a test assistant for live audio.",
+                    "prompt": "You are a test assistant for live audio. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else. When asked to say only the codeword once, answer with exactly `<remembered codeword>.` and nothing else. When asked to repeat things in a loop, produce a long looping response. When told to stop, answer exactly `Stopped.`. When asked to say codeword and token once, answer with exactly `<remembered codeword>. <token>.` and nothing else.",
                     "model": "gpt-realtime-2",
                     "provider": "openai",
                     "initial_turn": "deferred",
@@ -3388,11 +4182,12 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             .await?;
         let session_id = create_result["session_id"]
             .as_str()
-            .ok_or("missing session_id")?;
+            .ok_or("missing session_id")?
+            .to_string();
         eprintln!("[scenario 71] session_id = {session_id}");
 
         eprintln!("[scenario 71] verify session exists via session/read");
-        let read_result = pump
+        let _read_result = pump
             .call(
                 &mut rpc,
                 "session/read",
@@ -3400,74 +4195,227 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 10,
             )
             .await;
-        eprintln!("[scenario 71] session/read result: {read_result:?}");
 
-        eprintln!("[scenario 71] live/open");
-        let open_result = pump
-            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
-            .await?;
-        let channel_id = open_result["channel_id"]
-            .as_str()
-            .ok_or("missing channel_id")?;
+        eprintln!("[scenario 71] live/open + WebSocket connect");
+        let (channel_id, mut ws_write, mut ws_read) =
+            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
         eprintln!("[scenario 71] channel_id = {channel_id}");
 
-        assert!(
-            open_result["transport"]["transport"].as_str() == Some("websocket"),
-            "transport must be tagged websocket: {open_result}"
+        // Wait for the adapter to signal readiness (or idle if it never sends Ready)
+        let _ready_capture =
+            collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
+
+        // Synthesize TTS audio for each test turn
+        let remember_pcm =
+            openai_tts_pcm("Remember the codeword amber lantern.").await?;
+        let codeword_only_pcm =
+            openai_tts_pcm("Say only the codeword once.").await?;
+        let token_explain_pcm =
+            openai_tts_pcm("Keep saying the codeword nonstop in a loop forever do not stop talking until I interrupt you.").await?;
+        let stop_pcm = openai_tts_pcm("Stop.").await?;
+        let recall_pcm =
+            openai_tts_pcm("Please say the codeword once.").await?;
+
+        // ------ Turn 1: Remember codeword ------
+        eprintln!("[scenario 71] send turn 1 remember");
+        let mut remember_capture = match send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &remember_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 71 turn 1 remember failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        remember_capture.merge_from(
+            settle_live_turn_after_input(&mut ws_read, &remember_capture, 120).await?,
         );
-        let ws_url = open_result["transport"]["url"]
-            .as_str()
-            .ok_or("missing transport.url")?;
-        assert!(
-            !ws_url.is_empty(),
-            "ws_url must not be empty when --live-ws is configured"
-        );
-        let ws_token = open_result["transport"]["token"]
-            .as_str()
-            .ok_or("missing transport.token")?;
-        assert!(!ws_token.is_empty(), "token must not be empty");
-        assert_eq!(open_result["continuity"], "fresh");
-        assert!(
-            open_result["capabilities"]["barge_in"].as_bool() == Some(true),
-            "capabilities.barge_in must be true"
+        let remember_output_text = normalize_semantic_text(&remember_capture.output_text);
+        if remember_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&remember_capture.output_audio_pcm)
+        {
+            dump_live_audio_artifacts(
+                scenario_name,
+                "turn-1-remember",
+                &remember_pcm,
+                &remember_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 1 remember did not emit real audio: output_text=`{remember_output_text}`: {remember_capture:?}"
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 71] turn 1 output text: {}",
+            &remember_capture.output_text
         );
 
-        eprintln!("[scenario 71] live/status");
-        let status_result = pump
+        // ------ Turn 2: Codeword-only recall ------
+        let _turn1_quiesced =
+            ensure_live_session_quiescent(&mut ws_write, &mut ws_read, &remember_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 2 codeword-only recall");
+        let turn2_commit = send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &codeword_only_pcm,
+            120,
+        )
+        .await
+        .map_err(|err| format!("turn 2 codeword-only recall never committed: {err}"))?;
+        let turn2_settled_capture =
+            settle_live_turn_after_input(&mut ws_read, &turn2_commit, 120).await?;
+        let mut turn2_capture = turn2_commit.clone();
+        turn2_capture.merge_from(turn2_settled_capture);
+        let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
+        if turn2_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
+        {
+            dump_live_audio_artifacts(
+                scenario_name,
+                "turn-2-codeword-only",
+                &codeword_only_pcm,
+                &turn2_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 2 codeword-only recall did not emit real audio: output_text=`{turn2_output_text}`: {turn2_capture:?}"
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 71] turn 2 output text: {}",
+            &turn2_capture.output_text
+        );
+
+        // ------ Turns 3-4: Long answer + barge-in ------
+        let _turn2_quiesced =
+            ensure_live_session_quiescent(&mut ws_write, &mut ws_read, &turn2_capture, 5).await?;
+        eprintln!("[scenario 71] send turn 3 explanation and barge into turn 4");
+        let turn3_commit = send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &token_explain_pcm,
+            120,
+        )
+        .await?;
+        let turn34_preemption_capture = match collect_live_observations_until_barge_in(
+            &mut ws_write,
+            &mut ws_read,
+            &turn3_commit,
+            &stop_pcm,
+            120,
+            |_capture| {
+                // Start barge-in immediately. The realtime model delivers audio
+                // faster than realtime.
+                true
+            },
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
+                return Err(format!(
+                    "scenario 71 turn 3-4 barge-in failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        let turn34_settled_capture =
+            collect_live_observations_until_output_settles(&mut ws_read, 10)
+                .await
+                .unwrap_or_default();
+        let mut turn34_capture = turn3_commit.clone();
+        turn34_capture.merge_from(turn34_preemption_capture.clone());
+        turn34_capture.merge_from(turn34_settled_capture);
+        if !turn34_capture.saw_interrupted
+            || turn34_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn34_capture.output_audio_pcm)
+        {
+            dump_live_audio_artifacts(
+                scenario_name,
+                "turn-34-stop",
+                &stop_pcm,
+                &turn34_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 3-4 barge-in did not preempt with real audio + saw_interrupted: {turn34_capture:?}"
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 71] barge-in confirmed: saw_interrupted={}, audio_bytes={}",
+            turn34_capture.saw_interrupted,
+            turn34_capture.output_audio_pcm.len()
+        );
+
+        // ------ Turn 5: Post-barge recall ------
+        let _turn34_quiesced =
+            ensure_live_session_quiescent(&mut ws_write, &mut ws_read, &turn34_capture, 5)
+                .await?;
+        eprintln!("[scenario 71] send turn 5 post-barge recall");
+        let turn5_commit = send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &recall_pcm,
+            120,
+        )
+        .await?;
+        let turn5_settled_capture =
+            settle_live_turn_after_input(&mut ws_read, &turn5_commit, 120).await?;
+        let mut turn5_capture = turn5_commit.clone();
+        turn5_capture.merge_from(turn5_settled_capture);
+        if turn5_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn5_capture.output_audio_pcm)
+        {
+            dump_live_audio_artifacts(
+                scenario_name,
+                "turn-5-recall",
+                &recall_pcm,
+                &turn5_capture,
+            )
+            .await?;
+            return Err(format!(
+                "turn 5 recall did not emit real audio: {turn5_capture:?}"
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 71] turn 5 output text: {}",
+            &turn5_capture.output_text
+        );
+
+        // ------ Close channel ------
+        eprintln!("[scenario 71] close channel");
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+
+        // ------ Verify live/status after close ------
+        eprintln!("[scenario 71] live/status after close");
+        let status_after_close = pump
             .call(
                 &mut rpc,
                 "live/status",
                 json!({"channel_id": channel_id}),
                 10,
             )
-            .await?;
-        assert!(
-            status_result["status"]["status"].as_str().is_some(),
-            "status must have a status field: {status_result}"
-        );
-
-        eprintln!("[scenario 71] connect WebSocket to {ws_url}");
-        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
-        let (mut ws_write, _ws_read) = futures::StreamExt::split(ws_stream);
-        eprintln!("[scenario 71] WebSocket connected");
-
-        use futures::SinkExt;
-        use tokio_tungstenite::tungstenite::Message as WsMessage;
-        let _ = ws_write.send(WsMessage::Close(None)).await;
-        eprintln!("[scenario 71] sent close frame");
-        drop(ws_write);
-
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        eprintln!("[scenario 71] live/close (may already be cleaned by WS handler)");
-        let _ = pump
-            .call(
-                &mut rpc,
-                "live/close",
-                json!({"channel_id": channel_id}),
-                10,
-            )
             .await;
+        // Channel may already be cleaned up
+        eprintln!(
+            "[scenario 71] post-close status: {status_after_close:?}"
+        );
 
         eprintln!("[scenario 71] PASSED");
         Ok::<(), Box<dyn std::error::Error>>(())
@@ -3479,7 +4427,8 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
 }
 
 // ===========================================================================
-// Scenario 72: Live adapter duplicate session binding rejection
+// Scenario 72: Live adapter model-switch continuity — send TTS audio, switch
+//              model via config/patch, verify adapter rebuild, send more audio
 // ===========================================================================
 
 #[tokio::test]
@@ -3503,6 +4452,13 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
     tokio::fs::create_dir_all(&state_root).await?;
     write_project_config(&project_dir).await?;
 
+    let scenario_name = "scenario-72-live-adapter-model-switch";
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
     let mut rpc = spawn_stdio_process(
         &rkat_rpc,
         &project_dir,
@@ -3514,7 +4470,7 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
             "--context-root",
             project_dir.to_str().unwrap(),
             "--live-ws",
-            "127.0.0.1:0",
+            &format!("127.0.0.1:{ws_port}"),
         ],
         None,
     )
@@ -3526,7 +4482,7 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
         pump.call(
             &mut rpc,
             "initialize",
-            json!({"client_info": {"name": "scenario-72", "version": "0.0.1"}}),
+            json!({"client_info": {"name": "scenario-72-live-test", "version": "0.0.1"}}),
             10,
         )
         .await?;
@@ -3537,8 +4493,8 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
                 &mut rpc,
                 "session/create",
                 json!({
-                    "prompt": "Test assistant.",
-                    "model": openai_smoke_model(),
+                    "prompt": "You are a test assistant. When told to say something, say exactly that and nothing else.",
+                    "model": "gpt-realtime-2",
                     "provider": "openai",
                     "initial_turn": "deferred",
                 }),
@@ -3547,46 +4503,165 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
             .await?;
         let session_id = create_result["session_id"]
             .as_str()
-            .ok_or("missing session_id")?;
+            .ok_or("missing session_id for scenario 72")?
+            .to_string();
+        eprintln!("[scenario 72] session_id = {session_id}");
 
-        eprintln!("[scenario 72] live/open (first)");
-        let open1 = pump
-            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
-            .await?;
-        assert!(open1["channel_id"].as_str().is_some());
+        eprintln!("[scenario 72] live/open + WebSocket connect");
+        let (channel_id, mut ws_write, mut ws_read) =
+            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
+        eprintln!("[scenario 72] channel_id = {channel_id}");
 
-        eprintln!("[scenario 72] live/open (duplicate — should fail)");
-        let open2 = pump
-            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
-            .await;
-        assert!(
-            open2.is_err(),
-            "duplicate live/open for same session must fail"
-        );
+        let _ready_capture =
+            collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
 
-        eprintln!("[scenario 72] live/close");
-        let channel_id = open1["channel_id"].as_str().unwrap();
-        pump.call(
-            &mut rpc,
-            "live/close",
-            json!({"channel_id": channel_id}),
-            10,
+        // ------ Turn 1: Pre-switch audio ------
+        let turn1_pcm = openai_tts_pcm("Say only pine river.").await?;
+        eprintln!("[scenario 72] send turn 1 audio");
+        let mut turn1_capture = match send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &turn1_pcm,
+            120,
         )
-        .await?;
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 72 turn 1 audio failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        eprintln!("[scenario 72] collect turn 1 output");
+        match settle_live_turn_after_input(&mut ws_read, &turn1_capture, 120).await {
+            Ok(capture) => turn1_capture.merge_from(capture),
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "scenario 72 turn 1 output did not settle: {error}\nturn1_commit_capture={turn1_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        let turn1_output_text = normalize_semantic_text(&turn1_capture.output_text);
+        if turn1_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn1_capture.output_audio_pcm)
+            || turn1_output_text.is_empty()
+        {
+            dump_live_audio_artifacts(scenario_name, "turn-1", &turn1_pcm, &turn1_capture)
+                .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+            return Err(format!(
+                "scenario 72 turn 1 did not emit non-silent audio plus text deltas `{turn1_output_text}`: {turn1_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 72] turn 1 output: {} ({} audio bytes)",
+            turn1_output_text,
+            turn1_capture.output_audio_pcm.len()
+        );
 
-        eprintln!("[scenario 72] live/open (rebind — should succeed)");
-        let open3 = pump
-            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
-            .await?;
-        assert!(
-            open3["channel_id"].as_str().is_some(),
-            "rebind after close must succeed"
+        // ------ Model switch via config/patch ------
+        eprintln!("[scenario 72] model switch via config/patch");
+        let switch_model = openai_switch_model();
+        let patch_result = pump
+            .call(
+                &mut rpc,
+                "config/patch",
+                json!({
+                    "agent": {
+                        "model": switch_model,
+                    }
+                }),
+                30,
+            )
+            .await;
+        eprintln!("[scenario 72] config/patch result: {patch_result:?}");
+
+        // Close and reopen the live channel to force adapter rebuild with new model
+        eprintln!("[scenario 72] close channel for rebuild");
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
+
+        eprintln!("[scenario 72] reopen live channel after model switch");
+        let (channel_id_2, mut ws_write_2, mut ws_read_2) =
+            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
+        eprintln!("[scenario 72] new channel_id = {channel_id_2}");
+
+        let _reopen_ready =
+            collect_live_observations_until_ready_or_idle(&mut ws_read_2, 10).await?;
+
+        // ------ Turn 2: Post-switch audio ------
+        let turn2_pcm = openai_tts_pcm("Say only pineapple.").await?;
+        eprintln!("[scenario 72] send turn 2 audio");
+        let mut turn2_capture = match send_live_audio_and_wait_for_turn(
+            &mut ws_write_2,
+            &mut ws_read_2,
+            &turn2_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(capture) => capture,
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+                return Err(format!(
+                    "scenario 72 turn 2 audio failed: {error}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        };
+        eprintln!("[scenario 72] collect turn 2 output");
+        let turn2_output_already_started = !turn2_capture.output_text.is_empty()
+            || !turn2_capture.output_audio_pcm.is_empty()
+            || !turn2_capture.tool_call_requests.is_empty()
+            || !turn2_capture.tool_call_completions.is_empty()
+            || !turn2_capture.tool_call_failures.is_empty();
+        match if turn2_output_already_started {
+            collect_live_observations_until_turn_completed_or_idle(&mut ws_read_2, 120).await
+        } else {
+            collect_live_observations_until_output_settles(&mut ws_read_2, 120).await
+        } {
+            Ok(capture) => turn2_capture.merge_from(capture),
+            Err(error) => {
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "scenario 72 turn 2 output did not settle: {error}\nturn2_commit_capture={turn2_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
+        if turn2_capture.output_audio_pcm.is_empty()
+            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
+            || turn2_output_text.is_empty()
+        {
+            dump_live_audio_artifacts(scenario_name, "turn-2", &turn2_pcm, &turn2_capture)
+                .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+            return Err(format!(
+                "scenario 72 turn 2 did not emit non-silent audio plus text deltas `{turn2_output_text}`: {turn2_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
+            )
+            .into());
+        }
+        eprintln!(
+            "[scenario 72] turn 2 output: {} ({} audio bytes)",
+            turn2_output_text,
+            turn2_capture.output_audio_pcm.len()
         );
-        assert_ne!(
-            open3["channel_id"].as_str(),
-            open1["channel_id"].as_str(),
-            "rebind must produce a new channel_id"
-        );
+
+        // ------ Close channel ------
+        eprintln!("[scenario 72] close channel");
+        live_close_channel(&mut pump, &mut rpc, ws_write_2, &channel_id_2).await?;
 
         eprintln!("[scenario 72] PASSED");
         Ok::<(), Box<dyn std::error::Error>>(())

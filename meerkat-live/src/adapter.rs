@@ -19,6 +19,7 @@ use meerkat_llm_core::realtime_session::{RealtimeSession, RealtimeSessionEvent};
 pub struct ProviderSessionAdapter {
     session: Option<Box<dyn RealtimeSession>>,
     status: LiveAdapterStatus,
+    emitted_ready: bool,
 }
 
 impl ProviderSessionAdapter {
@@ -26,6 +27,7 @@ impl ProviderSessionAdapter {
         Self {
             session: Some(session),
             status: LiveAdapterStatus::Ready,
+            emitted_ready: false,
         }
     }
 
@@ -125,6 +127,10 @@ impl LiveAdapter for ProviderSessionAdapter {
     async fn next_observation(
         &mut self,
     ) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
+        if !self.emitted_ready {
+            self.emitted_ready = true;
+            return Ok(Some(LiveAdapterObservation::Ready));
+        }
         let session = match self.session.as_mut() {
             Some(s) => s,
             None => return Ok(None),

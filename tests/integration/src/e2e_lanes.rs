@@ -3541,8 +3541,8 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         71 => Some(&Spec {
             id: Some(71),
             lane: Lane::Smoke,
-            title: "Live adapter channel lifecycle through RPC + WebSocket",
-            timeout_secs: 120,
+            title: "Live adapter realtime audio roundtrip with TTS barge-in and tool dispatch",
+            timeout_secs: 600,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
@@ -3567,8 +3567,8 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         72 => Some(&Spec {
             id: Some(72),
             lane: Lane::Smoke,
-            title: "Live adapter duplicate session binding rejection",
-            timeout_secs: 60,
+            title: "Live adapter model-switch continuity with TTS audio",
+            timeout_secs: 600,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",

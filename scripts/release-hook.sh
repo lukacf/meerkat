@@ -59,6 +59,9 @@ python3 "$ROOT/tools/sdk-codegen/generate.py"
 echo "==> Regenerating BuildBuddy BUILD files..."
 make buildbuddy-generate
 
+echo "==> Refreshing Bazel module lockfile..."
+make buildbuddy-lock-update
+
 # 3. Verify everything is in sync
 echo "==> Verifying version parity..."
 "$ROOT/scripts/verify-version-parity.sh"
@@ -71,6 +74,7 @@ echo "==> Verifying SDK wrapper freshness..."
 
 # 4. Stage SDK and artifact files for the release commit
 git add \
+    "$ROOT/MODULE.bazel.lock" \
     "$ROOT/meerkat-contracts/src/version.rs" \
     "$ROOT/sdks/python/pyproject.toml" \
     "$ROOT/sdks/typescript/package.json" \

@@ -61,13 +61,18 @@ else
   bad "BuildBuddy API key is not configured; set BUILDBUDDY_API_KEY or add it to ~/.zshrc"
 fi
 
+bb_bin=""
 if [[ -n "${BUILDBUDDY_BB:-}" && -x "${BUILDBUDDY_BB}" ]]; then
+  bb_bin="${BUILDBUDDY_BB}"
   pass "BuildBuddy CLI found via BUILDBUDDY_BB"
 elif command -v bb >/dev/null 2>&1; then
+  bb_bin="$(command -v bb)"
   pass "BuildBuddy CLI found on PATH"
 elif [[ -x "${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb" ]]; then
+  bb_bin="${XDG_CACHE_HOME:-${HOME}/.cache}/meerkat/buildbuddy-cli/5.0.350/bin/bb"
   pass "BuildBuddy CLI found in pinned repo cache"
 elif [[ -x /tmp/buildbuddy-poc/bin/bb ]]; then
+  bb_bin="/tmp/buildbuddy-poc/bin/bb"
   pass "BuildBuddy CLI found at /tmp/buildbuddy-poc/bin/bb"
 else
   bad "BuildBuddy CLI not found; run make buildbuddy-install or set BUILDBUDDY_BB"
@@ -103,6 +108,17 @@ else
   cat "${generate_check_log}" >&2
 fi
 rm -f "${generate_check_log}"
+
+module_lock_check_log="${TMPDIR:-/tmp}/meerkat-bazel-module-lock-check.$$"
+if [[ -n "${bb_bin}" ]]; then
+  if "${bb_bin}" mod deps --lockfile_mode=error >"${module_lock_check_log}" 2>&1; then
+    pass "Bazel module lockfile is up to date"
+  else
+    bad "Bazel module lockfile is stale; run make buildbuddy-lock-update"
+    cat "${module_lock_check_log}" >&2
+  fi
+fi
+rm -f "${module_lock_check_log}"
 
 fast_parity_output="$(node scripts/buildbuddy-fast-parity.mjs 2>&1 || true)"
 if [[ "${fast_parity_output}" == "BuildBuddy fast parity ok:"* ]]; then

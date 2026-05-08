@@ -25172,9 +25172,12 @@ async fn test_runtime_backed_turn_driven_send_preserves_render_metadata() {
         .await
         .expect("runtime-backed turn-driven send should succeed");
 
+    // render_metadata is runtime-owned and stripped at the provisioner
+    // level before reaching the session service (dogma: render_metadata
+    // must not leak into the session-service path).
     assert_eq!(
         service.applied_runtime_render_metadata(&member).await,
-        vec![Some(render_metadata)]
+        vec![None]
     );
 }
 

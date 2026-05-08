@@ -601,7 +601,6 @@ publish-dry-run-web:
 	@echo "$(GREEN)Checking Web SDK publish readiness...$(NC)"
 	@(cd sdks/web && \
 		npm install --ignore-scripts && \
-		npm run build:ts && \
 		npm publish --access public --dry-run && \
 		rm -rf dist)
 
@@ -635,22 +634,14 @@ smoke-sdk-typescript-artifact:
 # Full dry-run release path: all validation + dry-run publish checks (no actual uploads)
 release-dry-run: release-preflight
 	@echo "$(GREEN)Running full registry dry-run (no uploads)...$(NC)"
-	@$(MAKE) publish-dry-run
-	@$(MAKE) publish-dry-run-python
-	@$(MAKE) publish-dry-run-typescript
-	@$(MAKE) smoke-sdk-python-artifact
-	@$(MAKE) smoke-sdk-typescript-artifact
-	@$(MAKE) publish-dry-run-web
+	+@$(MAKE) -j4 publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web
+	+@$(MAKE) -j2 smoke-sdk-python-artifact smoke-sdk-typescript-artifact
 
 # Smoke dry-run path for local iteration.
 release-dry-run-smoke: release-preflight-smoke
 	@echo "$(GREEN)Running smoke registry dry-run (no uploads)...$(NC)"
-	@$(MAKE) publish-dry-run
-	@$(MAKE) publish-dry-run-python
-	@$(MAKE) publish-dry-run-typescript
-	@$(MAKE) smoke-sdk-python-artifact
-	@$(MAKE) smoke-sdk-typescript-artifact
-	@$(MAKE) publish-dry-run-web
+	+@$(MAKE) -j4 publish-dry-run publish-dry-run-python publish-dry-run-typescript publish-dry-run-web
+	+@$(MAKE) -j2 smoke-sdk-python-artifact smoke-sdk-typescript-artifact
 
 # Dry-run cargo publish for all publishable crates
 publish-dry-run:

@@ -169,6 +169,32 @@ configure_wasm_pack() {
   export WASM_PACK="${wasm_pack_bin}"
 }
 
+run_parallel_job() {
+  local name="$1"
+  shift
+  local log_file="${TEST_TMPDIR}/${name}.log"
+  (
+    set -euo pipefail
+    "$@"
+  ) >"${log_file}" 2>&1 &
+  echo "$! ${name} ${log_file}" >>"${parallel_jobs_file}"
+}
+
+wait_parallel_jobs() {
+  local failed=0
+  local pid name log_file
+  while read -r pid name log_file; do
+    if wait "${pid}"; then
+      echo "PASS ${name}"
+      continue
+    fi
+    failed=1
+    echo "FAIL ${name}; log follows:" >&2
+    sed -n '1,220p' "${log_file}" >&2 || true
+  done <"${parallel_jobs_file}"
+  return "${failed}"
+}
+
 copy_workspace
 cd "${work_root}"
 
@@ -183,19 +209,32 @@ case "${lane}" in
     configure_node
     configure_python
     "${CARGO}" build -p meerkat-rpc
-    make verify-version-parity CARGO="${CARGO}"
-    make verify-rpc-surface-alignment CARGO="${CARGO}"
-    make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
-    (cd sdks/python &&
-      "${PYTHON}" -m pip install --upgrade pip &&
-      "${PYTHON}" -m pip install -e ".[dev]" &&
-      "${PYTHON}" -m pytest -q tests)
-    (cd sdks/typescript &&
-      npm install --ignore-scripts &&
-      npm run build &&
-      npm test)
-    make verify-schema-freshness CARGO="${CARGO}"
-    make check-rust-release-packaging CARGO="${CARGO}"
+    parallel_jobs_file="${TEST_TMPDIR}/release-validate-jobs.tsv"
+    : >"${parallel_jobs_file}"
+    run_parallel_job release-contracts bash -lc '
+      export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target-release-contracts"
+      make verify-version-parity CARGO="${CARGO}"
+      make verify-rpc-surface-alignment CARGO="${CARGO}"
+      make verify-sdk-wrapper-freshness CARGO="${CARGO}" PYTHON="${PYTHON}"
+      make verify-schema-freshness CARGO="${CARGO}"
+    '
+    run_parallel_job rust-release-packaging bash -lc '
+      export CARGO_TARGET_DIR="${TEST_TMPDIR}/cargo-target-release-packaging"
+      make check-rust-release-packaging CARGO="${CARGO}"
+    '
+    run_parallel_job python-sdk bash -lc '
+      cd sdks/python
+      "${PYTHON}" -m pip install --upgrade pip
+      "${PYTHON}" -m pip install -e ".[dev]"
+      "${PYTHON}" -m pytest -q tests
+    '
+    run_parallel_job typescript-sdk bash -lc '
+      cd sdks/typescript
+      npm install --ignore-scripts
+      npm run build
+      npm test
+    '
+    wait_parallel_jobs
     ;;
   sdk-suites)
     configure_rust "aarch64-apple-darwin__stable_tools"

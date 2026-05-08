@@ -263,14 +263,13 @@ jobs:
           for pkg in "${PACKAGES[@]}"; do
             ./scripts/repo-cargo build -p "$pkg" --release --target "${{ matrix.target }}"
           done
-          ./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini --release --target "${{ matrix.target }}" --no-default-features --features mini-surface
 
       - name: Ad-hoc codesign macOS binaries
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          for bin in rkat rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
             codesign --force --sign - "target/${{ matrix.target }}/release/${bin}"
           done
 
@@ -282,7 +281,7 @@ jobs:
           ARCHIVE_EXT: ${{ matrix.archive_ext }}
         run: |
           set -euo pipefail
-          BINARIES=("rkat" "rkat-rpc" "rkat-rpc-mini" "rkat-rest" "rkat-mcp")
+          BINARIES=("rkat" "rkat-rpc" "rkat-rest" "rkat-mcp")
           mkdir -p dist
           VERSION="${VERSION#v}"
           VERSION="${VERSION//\//-}"
@@ -394,12 +393,11 @@ jobs:
           declare -A BIN_PATHS=(
             [rkat]="meerkat-cli/rkat"
             [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
-            [rkat-rpc-mini]="meerkat-rpc/rkat_rpc_mini_surface_mini_bin"
             [rkat-rest]="meerkat-rest/rkat_rest_bin"
             [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
           )
 
-          for bin in rkat rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+          for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
             rel_path="${BIN_PATHS[$bin]}"
             src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
             if [[ -z "$src" && "$ARCHIVE_EXT" == "zip" ]]; then
@@ -597,7 +595,7 @@ jobs:
             echo "    url \"${BASE}/rkat-${VERSION}-${target}.tar.gz\""
             echo "    sha256 \"$(get_sha "rkat-${VERSION}-${target}.tar.gz")\""
             echo ""
-            for r in rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp; do
+            for r in rkat-rpc rkat-rest rkat-mcp; do
               gen_resource "$r" "$target"
               echo ""
             done
@@ -633,7 +631,7 @@ jobs:
             echo '  def install'
             echo '    bin.install "rkat"'
             echo ''
-            echo '    %w[rkat-rpc rkat-rpc-mini rkat-rest rkat-mcp].each do |name|'
+            echo '    %w[rkat-rpc rkat-rest rkat-mcp].each do |name|'
             echo '      resource(name).stage do'
             echo '        bin.install name'
             echo '      end'
@@ -720,6 +718,9 @@ jobs:
           for c in "${crates[@]}"; do
             tmp_cfg="$(mktemp)"
             scripts/generate-patch-config.sh "$GITHUB_WORKSPACE" "$c" > "$tmp_cfg"
+            export CARGO_TARGET_DIR="${RUNNER_TEMP:-/tmp}/meerkat-publish-target/${c}"
+            mkdir -p "${CARGO_TARGET_DIR}/package"
+            ln -sfn "${GITHUB_WORKSPACE}/meerkat-core" "${CARGO_TARGET_DIR}/package/meerkat-core"
             if [[ "$DRY_RUN" == "true" ]]; then
               cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
             else

@@ -7,8 +7,7 @@ icon: "truck-fast"
 # CD and Distribution Rulebook
 
 This document captures the publication model for Meerkat binaries and SDKs
-(`rkat`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, `rkat-mcp`, Python SDK, and
-TypeScript SDK).
+(`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`, Python SDK, and TypeScript SDK).
 
 ## Goals
 
@@ -46,7 +45,6 @@ Release artifacts are built for each surface binary:
 
 - `rkat` (CLI)
 - `rkat-rpc`
-- `rkat-rpc-mini`
 - `rkat-rest`
 - `rkat-mcp`
 
@@ -69,10 +67,10 @@ Include a checksum manifest with all artifacts:
 - `checksums.sha256`
 - `index.json`
 
-`rkat-mini` is intentionally source-build-only. It remains available as a
-reduced CLI profile for custom packaging, but it is not a GitHub release asset
-or Homebrew resource. See [Mini surfaces](/guides/mini-surfaces) for the build
-command.
+Mini binaries such as `rkat-mini` and `rkat-rpc-mini` are intentionally
+source-build-only. They remain available as reduced profiles for custom
+packaging, but they are not GitHub release assets or Homebrew resources. See
+[Mini surfaces](/guides/mini-surfaces) for build commands.
 
 ### 2) Python SDK distribution
 
@@ -158,10 +156,9 @@ release lanes:
 - `release-build-windows-x86`
 
 Those release lanes build the same public binary set as the GitHub-hosted path:
-`rkat`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
-The RPC mini binary must use the generated surface feature-matrix target
-(`rkat_rpc_mini_surface_mini_bin`) so BuildBuddy does not compile the optional
-full RPC surface for the mini release artifact.
+`rkat`, `rkat-rpc`, `rkat-rest`, and `rkat-mcp`. Mini binaries are deliberately
+excluded from both public release paths; build them from source when a custom
+distribution needs a reduced surface.
 
 Do not commit private BuildBuddy endpoint names or enterprise infrastructure
 details. Supply endpoint overrides through secrets or local environment only;

@@ -41,7 +41,7 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **State model** | Realm-scoped sessions, config, credentials, blobs, schedules, and mobs | Tool-local or app-local state |
 | **Providers** | Anthropic, OpenAI, Gemini, and self-hosted OpenAI-compatible models | Usually one provider family |
 | **Auth** | Env API keys, realm bindings, OAuth/device flows, TokenStore, cloud IAM, and per-session/member overrides | Usually provider key per process |
-| **Surfaces** | CLI, mini CLI, REST, JSON-RPC, mini RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
+| **Surfaces** | CLI, REST, JSON-RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
 | **Agent infra** | Hooks, skills, semanitc memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
 | **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
@@ -66,7 +66,7 @@ npm install @rkat/sdk
 npm install @rkat/web
 ```
 
-Release artifacts include `rkat`, `rkat-rpc`, `rkat-rpc-mini`, `rkat-rest`, and `rkat-mcp`.
+Release artifacts include `rkat`, `rkat-rpc`, `rkat-rest`, and `rkat-mcp`.
 
 **Run a one-off prompt** with any provider:
 
@@ -232,7 +232,7 @@ make release-preflight
 
 **Packaging and targets.** Mobpack ships the current CLI surface: `rkat mob pack`, `rkat mob inspect`, `rkat mob validate`, `rkat mob deploy`, and `rkat mob web build`.
 
-**Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included; `rkat-rpc-mini` is the slim JSON-RPC release surface.
+**Modularity.** Rust library consumers choose feature flags such as `anthropic`, `openai`, `gemini`, `session-store`, `mcp`, `comms`, `skills`, and `schedule`. Shipped CLI/RPC/REST/MCP binaries are product builds with the expected batteries included.
 
 ## Surfaces
 
@@ -247,7 +247,6 @@ All surfaces share the same session lifecycle and runtime-backed contracts.
 | **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
 | **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
 | **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional realtime WebSocket bootstrap | [RPC guide](https://docs.rkat.ai/api/rpc) |
-| **Mini RPC (`rkat-rpc-mini`)** | Small JSON-RPC runtime for core session/config/catalog/capabilities methods | [Mini surfaces](https://docs.rkat.ai/guides/mini-surfaces) |
 | **MCP Server (`rkat-mcp`)** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
 
 ## Architecture
@@ -456,7 +455,7 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
 | [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, realms, auth and bindings, tools, providers, scheduling, mobs, comms, realtime |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, realtime, image generation, mini surfaces, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, realtime, image generation, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript, Web |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, builtin tools, session contracts |

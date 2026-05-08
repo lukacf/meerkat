@@ -4,7 +4,7 @@ description: "Current Meerkat architecture: execution path, canonical machines, 
 icon: "layer-group"
 ---
 
-Meerkat is a library-first agent runtime. The same execution substrate powers the CLI, source-built mini CLI profile, REST, JSON-RPC, mini RPC, MCP, Rust embedding, Python/TypeScript SDKs layered on top of `rkat-rpc`, and the browser/WASM runtime.
+Meerkat is a library-first agent runtime. The same execution substrate powers the CLI, REST, JSON-RPC, MCP, Rust embedding, Python/TypeScript SDKs layered on top of `rkat-rpc`, and the browser/WASM runtime. Reduced CLI/RPC profiles remain available as source builds for custom distributions.
 
 <Note>
 The architecture working dump under `docs/architecture/two-kernel-research/` was retired during the April 2026 docs cleanup. The canonical sources of truth are the machine catalog, generated specs, and the doctrine/ADR documents linked from this page.
@@ -43,7 +43,7 @@ and optional mob tooling.
 | `rkat` CLI | Runtime-backed | Developer and automation workflows over the shared session service |
 | `rkat-mini` | Runtime-backed source-build reduced profile | Smaller CLI command set for custom embeddable/product distributions |
 | `rkat-rpc` | Runtime-backed | JSON-RPC 2.0 over stdio/TCP, SDK backend, optional realtime WebSocket bootstrap |
-| `rkat-rpc-mini` | Runtime-backed reduced build | Core session/config/catalog/capability RPC subset |
+| `rkat-rpc-mini` | Runtime-backed source-build reduced profile | Core session/config/catalog/capability RPC subset for custom distributions |
 | `rkat-rest` | Runtime-backed | HTTP/SSE adapter over the same session, schedule, auth, config, comms, and limited mob helper surfaces |
 | `rkat-mcp` | Runtime-backed | Public `meerkat_*` MCP tools backed by `SessionService` plus typed public mob tools when compiled |
 | Rust SDK | Runtime-backed or standalone | Direct `SessionService` embedding; `StandaloneEphemeral` is explicit for tests and local-only embeddings |

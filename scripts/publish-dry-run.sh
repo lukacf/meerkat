@@ -19,15 +19,35 @@ trap 'rm -f "$tmp_cfg"; rm -rf "$tmp_dir"' EXIT
 
 LOG_DIR="$tmp_dir/logs"
 mkdir -p "$LOG_DIR"
+ISOLATED_TARGETS="${MEERKAT_PUBLISH_DRY_RUN_ISOLATED_TARGETS:-1}"
 
-mapfile -t PACKAGES < <("$(dirname "$0")/release-rust-crates.sh")
+if [[ "$ISOLATED_TARGETS" != 1 && "$ISOLATED_TARGETS" != true ]]; then
+  mkdir -p "$tmp_dir/target/package"
+  rm -f "$tmp_dir/target/package/meerkat-core"
+  ln -s "$ROOT/meerkat-core" "$tmp_dir/target/package/meerkat-core"
+fi
+
+PACKAGES=()
+while IFS= read -r pkg; do
+  PACKAGES+=("$pkg")
+done < <("$(dirname "$0")/release-rust-crates.sh")
 
 run_publish() {
   pkg="$1"
   cfg="$2"
   log_file="$LOG_DIR/$pkg.log"
   result_file="$LOG_DIR/$pkg.result"
-  if "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --config "$cfg" > "$log_file" 2>&1; then
+  if [[ "$ISOLATED_TARGETS" == 1 || "$ISOLATED_TARGETS" == true ]]; then
+    target_dir="$tmp_dir/target/$pkg"
+  else
+    target_dir="$tmp_dir/target"
+  fi
+  if [[ "$ISOLATED_TARGETS" == 1 || "$ISOLATED_TARGETS" == true ]]; then
+    mkdir -p "$target_dir/package"
+    rm -f "$target_dir/package/meerkat-core"
+    ln -s "$ROOT/meerkat-core" "$target_dir/package/meerkat-core"
+  fi
+  if CARGO_TARGET_DIR="$target_dir" "$CARGO" publish -p "$pkg" --dry-run --allow-dirty --config "$cfg" > "$log_file" 2>&1; then
     printf "%s:ok\n" "$pkg" > "$result_file"
   else
     printf "%s:fail\n" "$pkg" > "$result_file"
@@ -37,6 +57,9 @@ run_publish() {
 export -f run_publish
 export LOG_DIR
 export CARGO
+export ROOT
+export tmp_dir
+export ISOLATED_TARGETS
 
 # shellcheck disable=SC2068
 printf '%s\n' "${PACKAGES[@]}" \

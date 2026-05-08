@@ -192,9 +192,9 @@ jobs:
       - name: Verify schema freshness
         run: make verify-schema-freshness
 
-      - name: Verify Rust release packaging
+      - name: Verify Rust release config
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
-        run: make check-rust-release-packaging
+        run: make check-rust-release-config
 
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -237,9 +237,9 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Verify Rust release packaging
+      - name: Verify Rust release config
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_release_assets_only != 'true' }}
-        run: make check-rust-release-packaging
+        run: make check-rust-release-config
 
       - name: Verify tag matches version
         if: startsWith(github.ref, 'refs/tags/v')

@@ -541,7 +541,7 @@ else
 fi
 
 if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
-  grep -Fq 'Verify Rust release packaging' .github/workflows/release.yml &&
+  grep -Fq 'Verify Rust release config' .github/workflows/release.yml &&
   grep -Fq 'e2e-system' .github/workflows/cargo.yml &&
   ! grep -Fq 'e2e-live:' .github/workflows/cargo.yml &&
   ! grep -Fq 'e2e-smoke:' .github/workflows/cargo.yml &&

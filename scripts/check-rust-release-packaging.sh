@@ -14,7 +14,7 @@ while IFS= read -r crate; do
     RELEASE_CRATES+=("$crate")
 done < <("$ROOT/scripts/release-rust-crates.sh")
 
-"$PYTHON" "$ROOT/scripts/check_rust_release_packaging.py" "$ROOT" "${RELEASE_CRATES[@]}"
+"$ROOT/scripts/check-rust-release-config.sh"
 
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -45,6 +45,7 @@ run_package() {
         ln -s "$ROOT/meerkat-core" "$target_dir/package/meerkat-core"
     fi
 
+    printf '  %-34sPACKAGING\n' "$crate"
     if "$ROOT/scripts/generate-patch-config.sh" "$ROOT" "$crate" > "$cfg" &&
         CARGO_TARGET_DIR="$target_dir" "$CARGO" package -p "$crate" --locked --allow-dirty --config "$cfg" > "$log_file" 2>&1; then
         printf '%s:ok\n' "$crate" > "$result_file"
@@ -61,7 +62,7 @@ export ISOLATED_TARGETS
 export -f run_package
 
 printf '%s\n' "${RELEASE_CRATES[@]}" |
-    xargs -n1 -I{} -P "$JOBS" bash -lc 'run_package "$1"' _ "{}"
+    xargs -I{} -P "$JOBS" bash -lc 'run_package "$1"' _ "{}"
 
 fail=0
 for crate in "${RELEASE_CRATES[@]}"; do
@@ -91,6 +92,7 @@ if [[ "$fail" -ne 0 ]]; then
     exit 1
 fi
 
+echo "Running published-style facade link smoke..."
 if [[ "$ISOLATED_TARGETS" == 1 || "$ISOLATED_TARGETS" == true ]]; then
     "$ROOT/scripts/check-published-facade-link.sh"
 else

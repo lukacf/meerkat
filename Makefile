@@ -13,7 +13,7 @@ YELLOW := \033[0;33m
 RED := \033[0;31m
 NC := \033[0m
 
-.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory dogma-cleanup-gate dogma-cleanup-gate-fixtures dogma-cleanup-ci-gate verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-packaging check-published-facade-link check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
+.PHONY: all install-build-deps build test test-unit test-int e2e-fast e2e-build e2e-system e2e-live e2e-smoke e2e-auth test-int-real test-e2e test-all test-minimal test-feature-matrix-lib test-feature-matrix-surface test-feature-matrix test-surface-modularity test-sdk-python test-sdk-typescript test-sdk-suites lint lint-feature-matrix fmt fmt-check audit rust-lane-doctor agent-gate cargo-agent-gate buildbuddy-install buildbuddy-generate buildbuddy-generate-check buildbuddy-doctor buildbuddy-build buildbuddy-check buildbuddy-clippy buildbuddy-lint buildbuddy-test buildbuddy-test-all buildbuddy-test-unit buildbuddy-test-int buildbuddy-e2e-fast buildbuddy-e2e-system buildbuddy-e2e-live buildbuddy-e2e-smoke buildbuddy-e2e-auth buildbuddy-agent-gate buildbuddy-ci-dispatch buildbuddy-fast buildbuddy-benchmark buildbuddy-ci buildbuddy-ci-warm buildbuddy-ci-full buildbuddy-ci-full-warm ci ci-smoke release-preflight release-preflight-smoke release-workflow release-assets release-packages release-web-sdk publish-dry-run publish-dry-run-python publish-dry-run-typescript release-dry-run release-dry-run-smoke clean doc release install-hooks coverage check help legacy-surface-gate legacy-surface-inventory session-control-gate deprecated-backend-gate deprecated-backend-inventory dogma-cleanup-gate dogma-cleanup-gate-fixtures dogma-cleanup-ci-gate verify-version-parity verify-schema-freshness verify-rpc-surface-alignment verify-sdk-wrapper-freshness check-rust-release-config check-rust-release-packaging check-published-facade-link check-mini-skill-size bump-sdk-versions smoke-sdk-python-artifact smoke-sdk-typescript-artifact xtask-build machine-codegen machine-verify machine-check-drift seam-inventory rmat-audit audit-generated-headers
 
 # Default target
 all: ci
@@ -508,7 +508,11 @@ verify-sdk-wrapper-freshness:
 	@scripts/verify-sdk-wrapper-freshness.sh
 
 # Verify the publishable Rust workspace surface matches the release list and
-# every released crate packages cleanly before we ever talk to crates.io.
+# release binary metadata matches the workspace version.
+check-rust-release-config:
+	@scripts/check-rust-release-config.sh
+
+# Verify every released crate packages cleanly before we ever talk to crates.io.
 check-rust-release-packaging:
 	@scripts/check-rust-release-packaging.sh
 
@@ -740,6 +744,7 @@ help:
 	@echo "  $(GREEN)verify-schema-freshness$(NC)- Check committed schemas match Rust source"
 	@echo "  $(GREEN)verify-rpc-surface-alignment$(NC)- Check router/catalog/docs method parity"
 	@echo "  $(GREEN)verify-sdk-wrapper-freshness$(NC)- Check SDK wrapper coverage for catalog methods"
+	@echo "  $(GREEN)check-rust-release-config$(NC)- Verify release Rust crate list and binary metadata"
 	@echo "  $(GREEN)check-rust-release-packaging$(NC)- Verify release Rust crates package cleanly"
 	@echo "  $(GREEN)bump-sdk-versions$(NC)     - Bump Python + TS versions to match Cargo"
 	@echo "  $(GREEN)regen-schemas$(NC)         - Re-emit schemas + run SDK codegen"

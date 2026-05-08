@@ -3306,3 +3306,297 @@ budget_warning_threshold = 0.8
     shutdown_child(rest_child).await?;
     Ok(())
 }
+
+// ===========================================================================
+// Scenario 71: Live adapter channel lifecycle through RPC + WebSocket
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-71-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 71] initialize");
+        let init_result = pump
+            .call(
+                &mut rpc,
+                "initialize",
+                json!({
+                    "client_info": {"name": "scenario-71-live-test", "version": "0.0.1"},
+                }),
+                10,
+            )
+            .await?;
+        assert!(
+            init_result.get("server_info").is_some(),
+            "initialize must return server_info"
+        );
+
+        eprintln!("[scenario 71] create session");
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "You are a test assistant. Reply with short answers.",
+                    "model": openai_smoke_model(),
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?;
+        eprintln!("[scenario 71] session_id = {session_id}");
+
+        eprintln!("[scenario 71] live/open");
+        let open_result = pump
+            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
+            .await?;
+        let channel_id = open_result["channel_id"]
+            .as_str()
+            .ok_or("missing channel_id")?;
+        eprintln!("[scenario 71] channel_id = {channel_id}");
+
+        assert!(
+            open_result["transport"]["transport"].as_str() == Some("websocket"),
+            "transport must be tagged websocket: {open_result}"
+        );
+        let ws_url = open_result["transport"]["url"]
+            .as_str()
+            .ok_or("missing transport.url")?;
+        assert!(
+            !ws_url.is_empty(),
+            "ws_url must not be empty when --live-ws is configured"
+        );
+        let ws_token = open_result["transport"]["token"]
+            .as_str()
+            .ok_or("missing transport.token")?;
+        assert!(!ws_token.is_empty(), "token must not be empty");
+        assert_eq!(open_result["continuity"], "fresh");
+        assert!(
+            open_result["capabilities"]["barge_in"].as_bool() == Some(true),
+            "capabilities.barge_in must be true"
+        );
+
+        eprintln!("[scenario 71] live/status");
+        let status_result = pump
+            .call(
+                &mut rpc,
+                "live/status",
+                json!({"channel_id": channel_id}),
+                10,
+            )
+            .await?;
+        assert!(
+            status_result["status"]["status"].as_str().is_some(),
+            "status must have a status field: {status_result}"
+        );
+
+        eprintln!("[scenario 71] connect WebSocket to {ws_url}");
+        let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url).await?;
+        let (mut ws_write, _ws_read) = futures::StreamExt::split(ws_stream);
+        eprintln!("[scenario 71] WebSocket connected");
+
+        use futures::SinkExt;
+        use tokio_tungstenite::tungstenite::Message as WsMessage;
+        let text_input = json!({"kind": "text", "text": "Hello from scenario 71"});
+        ws_write
+            .send(WsMessage::Text(text_input.to_string().into()))
+            .await?;
+        eprintln!("[scenario 71] sent text frame");
+
+        ws_write.send(WsMessage::Close(None)).await?;
+        eprintln!("[scenario 71] sent close frame");
+
+        eprintln!("[scenario 71] live/close");
+        let close_result = pump
+            .call(
+                &mut rpc,
+                "live/close",
+                json!({"channel_id": channel_id}),
+                10,
+            )
+            .await?;
+        assert_eq!(close_result.get("closed"), Some(&json!(true)));
+
+        eprintln!("[scenario 71] verify channel removed");
+        let status_after = pump
+            .call(
+                &mut rpc,
+                "live/status",
+                json!({"channel_id": channel_id}),
+                10,
+            )
+            .await;
+        assert!(status_after.is_err(), "live/status should fail after close");
+
+        eprintln!("[scenario 71] PASSED");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+// ===========================================================================
+// Scenario 72: Live adapter duplicate session binding rejection
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "scenario-72-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            "127.0.0.1:0",
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[scenario 72] initialize");
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "scenario-72", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+
+        eprintln!("[scenario 72] create session");
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "Test assistant.",
+                    "model": openai_smoke_model(),
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?;
+
+        eprintln!("[scenario 72] live/open (first)");
+        let open1 = pump
+            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
+            .await?;
+        assert!(open1["channel_id"].as_str().is_some());
+
+        eprintln!("[scenario 72] live/open (duplicate — should fail)");
+        let open2 = pump
+            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
+            .await;
+        assert!(
+            open2.is_err(),
+            "duplicate live/open for same session must fail"
+        );
+
+        eprintln!("[scenario 72] live/close");
+        let channel_id = open1["channel_id"].as_str().unwrap();
+        pump.call(
+            &mut rpc,
+            "live/close",
+            json!({"channel_id": channel_id}),
+            10,
+        )
+        .await?;
+
+        eprintln!("[scenario 72] live/open (rebind — should succeed)");
+        let open3 = pump
+            .call(&mut rpc, "live/open", json!({"session_id": session_id}), 10)
+            .await?;
+        assert!(
+            open3["channel_id"].as_str().is_some(),
+            "rebind after close must succeed"
+        );
+        assert_ne!(
+            open3["channel_id"].as_str(),
+            open1["channel_id"].as_str(),
+            "rebind must produce a new channel_id"
+        );
+
+        eprintln!("[scenario 72] PASSED");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}

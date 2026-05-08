@@ -251,18 +251,6 @@ const fn default_limit() -> usize {
 
 /// W3-H: resolve a `RealtimeChannelTarget` to the concrete session id the
 /// RPC query should operate on. `SessionTarget` is valid only for standalone
-/// sessions; mob-owned bridge sessions must be addressed as `MobMember` so
-/// the current binding comes from the MobMachine's canonical map.
-async fn resolve_target_session_id(
-    state: &Arc<MobMcpState>,
-    target: &RealtimeChannelTarget,
-) -> Result<meerkat_core::types::SessionId, McpToolError> {
-    state
-        .resolve_realtime_target_session(target)
-        .await
-        .map_err(|err| McpToolError::invalid_params(err.to_string()))
-}
-
 async fn realtime_status_payload(
     _state: &Arc<MobMcpState>,
     _params: RealtimeStatusParams,

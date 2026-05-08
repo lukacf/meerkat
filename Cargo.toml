@@ -32,6 +32,7 @@ members = [
     "meerkat-web-runtime",
     "meerkat-mob-mcp",
     "meerkat-runtime",
+    "meerkat-live",
     "test-fixtures/mcp-test-server",
     "tests/integration",
     "meerkat-machine-schema",

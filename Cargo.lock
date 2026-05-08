@@ -2659,6 +2659,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "meerkat-live"
+version = "0.6.3"
+dependencies = [
+ "axum",
+ "base64",
+ "futures",
+ "meerkat-core",
+ "meerkat-runtime",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "meerkat-llm-core"
 version = "0.6.4"
 dependencies = [
@@ -2994,6 +3011,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-models",

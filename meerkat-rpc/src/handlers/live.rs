@@ -8,6 +8,7 @@ use meerkat_core::live_adapter::{
     LiveTransportBootstrap,
 };
 use meerkat_core::types::SessionId;
+use meerkat_live::LiveWsState;
 use meerkat_runtime::live_adapter_host::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId};
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,8 @@ pub async fn handle_live_open(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    live_ws: Option<&LiveWsState>,
+    live_ws_base_url: Option<&str>,
 ) -> RpcResponse {
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -72,12 +75,25 @@ pub async fn handle_live_open(
         }
     };
 
-    let result = LiveOpenResult {
-        channel_id: channel_id.to_string(),
-        transport: LiveTransportBootstrap::Websocket {
+    let transport = if let (Some(ws_state), Some(base_url)) = (live_ws, live_ws_base_url) {
+        let token = ws_state.mint_token(channel_id.clone()).await;
+        LiveTransportBootstrap::Websocket {
+            url: format!(
+                "{base_url}{path}?token={token}",
+                path = meerkat_live::LIVE_WS_PATH
+            ),
+            token,
+        }
+    } else {
+        LiveTransportBootstrap::Websocket {
             url: String::new(),
             token: String::new(),
-        },
+        }
+    };
+
+    let result = LiveOpenResult {
+        channel_id: channel_id.to_string(),
+        transport,
         capabilities: LiveChannelCapabilities::default(),
         continuity: LiveContinuityMode::Fresh,
     };
@@ -222,8 +238,14 @@ mod tests {
         let params = raw(serde_json::json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef"
         }));
-        let response =
-            handle_live_open(Some(crate::protocol::RpcId::Num(1)), Some(&params), &host).await;
+        let response = handle_live_open(
+            Some(crate::protocol::RpcId::Num(1)),
+            Some(&params),
+            &host,
+            None,
+            None,
+        )
+        .await;
         assert!(response.error.is_none(), "expected success: {response:?}");
         let result: serde_json::Value =
             serde_json::from_str(response.result.unwrap().get()).unwrap();
@@ -239,9 +261,22 @@ mod tests {
         let params = raw(serde_json::json!({
             "session_id": "01234567-89ab-cdef-0123-456789abcdef"
         }));
-        let _ = handle_live_open(Some(crate::protocol::RpcId::Num(1)), Some(&params), &host).await;
-        let response =
-            handle_live_open(Some(crate::protocol::RpcId::Num(2)), Some(&params), &host).await;
+        let _ = handle_live_open(
+            Some(crate::protocol::RpcId::Num(1)),
+            Some(&params),
+            &host,
+            None,
+            None,
+        )
+        .await;
+        let response = handle_live_open(
+            Some(crate::protocol::RpcId::Num(2)),
+            Some(&params),
+            &host,
+            None,
+            None,
+        )
+        .await;
         assert!(response.error.is_some());
     }
 
@@ -255,6 +290,8 @@ mod tests {
             Some(crate::protocol::RpcId::Num(1)),
             Some(&open_params),
             &host,
+            None,
+            None,
         )
         .await;
         let open_result: serde_json::Value =
@@ -284,6 +321,8 @@ mod tests {
             Some(crate::protocol::RpcId::Num(1)),
             Some(&open_params),
             &host,
+            None,
+            None,
         )
         .await;
         let open_result: serde_json::Value =

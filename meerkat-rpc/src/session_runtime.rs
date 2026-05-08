@@ -4026,6 +4026,47 @@ impl SessionRuntime {
         .with_runtime_system_context(realtime_projection_runtime_system_context(&session)))
     }
 
+    /// Build a live open config for a session that may be deferred (no turns yet).
+    /// Falls back to reading the session from the store if the live path fails.
+    pub async fn live_open_config_for_session(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+        match self
+            .realtime_session_open_config(session_id, turning_mode)
+            .await
+        {
+            Ok(config) => Ok(config),
+            Err(live_err) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %live_err,
+                    "live open config from runtime failed; falling back to service read"
+                );
+                let session_info = self.read_session_rich(session_id).await.ok_or_else(|| {
+                    SessionError::NotFound {
+                        id: session_id.clone(),
+                    }
+                })?;
+                let provider = meerkat_core::Provider::from_name(&session_info.provider);
+                let identity = meerkat_core::SessionLlmIdentity {
+                    model: session_info.model,
+                    provider,
+                    self_hosted_server_id: None,
+                    provider_params: None,
+                    auth_binding: None,
+                };
+                Ok(RealtimeSessionOpenConfig::new(
+                    turning_mode,
+                    identity,
+                    vec![],
+                    vec![],
+                ))
+            }
+        }
+    }
+
     fn recovery_overrides_from_turn(
         &self,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,

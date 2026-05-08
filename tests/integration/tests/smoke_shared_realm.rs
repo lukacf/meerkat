@@ -3378,8 +3378,8 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &mut rpc,
                 "session/create",
                 json!({
-                    "prompt": "You are a test assistant. Reply with short answers.",
-                    "model": openai_smoke_model(),
+                    "prompt": "You are a test assistant for live audio.",
+                    "model": "gpt-realtime-2",
                     "provider": "openai",
                     "initial_turn": "deferred",
                 }),
@@ -3390,6 +3390,17 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             .as_str()
             .ok_or("missing session_id")?;
         eprintln!("[scenario 71] session_id = {session_id}");
+
+        eprintln!("[scenario 71] verify session exists via session/read");
+        let read_result = pump
+            .call(
+                &mut rpc,
+                "session/read",
+                json!({"session_id": session_id}),
+                10,
+            )
+            .await;
+        eprintln!("[scenario 71] session/read result: {read_result:?}");
 
         eprintln!("[scenario 71] live/open");
         let open_result = pump

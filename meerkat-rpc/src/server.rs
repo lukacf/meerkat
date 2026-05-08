@@ -128,6 +128,16 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         }
     }
 
+    pub fn with_live_session_factory_opt(
+        mut self,
+        factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
+    ) -> Self {
+        if let Some(factory) = factory {
+            self.router = self.router.with_live_session_factory(factory);
+        }
+        self
+    }
+
     /// Attach a live WebSocket transport for `live/open` token minting.
     pub fn with_live_ws(
         mut self,
@@ -511,7 +521,9 @@ pub async fn serve_stdio_with_options(
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);
     if let Some(live_ws) = live_ws {
-        server = server.with_live_ws(live_ws.state, live_ws.base_url);
+        server = server
+            .with_live_ws(live_ws.state, live_ws.base_url)
+            .with_live_session_factory_opt(live_ws.session_factory);
     }
     server.run().await
 }
@@ -521,6 +533,7 @@ pub async fn serve_stdio_with_options(
 pub struct LiveWsConfig {
     pub state: Arc<meerkat_live::LiveWsState>,
     pub base_url: String,
+    pub session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
 /// Accept a single RPC client over an already-connected TCP stream.
@@ -549,7 +562,9 @@ pub async fn serve_tcp_connection_with_options(
     let mut server =
         RpcServer::new_with_skill_runtime(reader, write_half, runtime, config_store, skill_runtime);
     if let Some(live_ws) = live_ws {
-        server = server.with_live_ws(live_ws.state, live_ws.base_url);
+        server = server
+            .with_live_ws(live_ws.state, live_ws.base_url)
+            .with_live_session_factory_opt(live_ws.session_factory);
     }
     server.skip_shutdown_on_eof = true;
     server.run().await

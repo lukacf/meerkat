@@ -585,6 +585,7 @@ pub struct MethodRouter {
     live_adapter_host: Arc<meerkat_runtime::live_adapter_host::LiveAdapterHost>,
     live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
     live_ws_base_url: Option<String>,
+    live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
 impl MethodRouter {
@@ -691,6 +692,7 @@ impl MethodRouter {
             live_adapter_host: Arc::new(meerkat_runtime::live_adapter_host::LiveAdapterHost::new()),
             live_ws_state: None,
             live_ws_base_url: None,
+            live_session_factory: None,
         }
     }
 
@@ -698,6 +700,15 @@ impl MethodRouter {
     pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
+        self
+    }
+
+    /// Attach a live session factory for creating provider adapters on `live/open`.
+    pub fn with_live_session_factory(
+        mut self,
+        factory: Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+    ) -> Self {
+        self.live_session_factory = Some(factory);
         self
     }
 
@@ -975,6 +986,7 @@ impl MethodRouter {
             live_adapter_host: Arc::new(meerkat_runtime::live_adapter_host::LiveAdapterHost::new()),
             live_ws_state: None,
             live_ws_base_url: None,
+            live_session_factory: None,
         }
     }
 
@@ -1450,6 +1462,8 @@ impl MethodRouter {
                     &self.live_adapter_host,
                     self.live_ws_state.as_deref(),
                     self.live_ws_base_url.as_deref(),
+                    &self.runtime,
+                    self.live_session_factory.as_ref().map(Arc::as_ref),
                 )
                 .await
             }

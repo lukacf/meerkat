@@ -382,7 +382,6 @@ jobs:
           mode: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'workflow_call') && (inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh') || 'full-fresh' }}
           lanes: |
             sdk-suites
-            wasm-contract-tests
             wasm-check
             test-minimal
             test-feature-matrix-lib

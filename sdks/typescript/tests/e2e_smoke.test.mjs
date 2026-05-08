@@ -206,11 +206,10 @@ async function assertFetchableImageBlob(client, block) {
 
 describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
   let MeerkatClient;
-  let RealtimeChannel;
   const clients = [];
 
   before(async () => {
-    ({ MeerkatClient, RealtimeChannel } = await import("../dist/index.js"));
+    ({ MeerkatClient } = await import("../dist/index.js"));
   });
 
   afterEach(async () => {
@@ -591,114 +590,6 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         assert.match(String(error), /definitely-invalid-live-smoke-model/);
       }
       });
-      },
-    );
-  }
-
-  if (includeScenario(59)) {
-    it(
-      "Scenario 59: realtime channel session exchange through the packaged SDK",
-      { skip: !hasOpenAIKey() },
-      async () => {
-      const scenario = "Scenario 59";
-      const client = await withStepTimeout(
-        scenario,
-        "connect client",
-        connectClient({ realmId: `ts-realtime-59-${Date.now()}-${process.pid}` }),
-      );
-
-      const session = await withStepTimeout(
-        scenario,
-        "create session",
-        client.createSession(
-        "When asked through realtime, reply with TS-REALTIME-59 and mention cedar.",
-        {
-          model: "gpt-realtime-1.5",
-          provider: "openai",
-        },
-        ),
-      );
-      assert.ok(session.id);
-
-      const channel = RealtimeChannel.session(client, session.id);
-      const openInfo = await withStepTimeout(
-        scenario,
-        "request realtime open info",
-        channel.openInfo(),
-      );
-      assert.match(openInfo.ws_url, /^ws:\/\//);
-      assert.ok(openInfo.default_protocol_version);
-
-      const connection = await withStepTimeout(
-        scenario,
-        "connect realtime websocket",
-        channel.connect(),
-      );
-      await withStepTimeout(
-        scenario,
-        "send realtime text chunk",
-        connection.sendInput({
-          kind: "text_chunk",
-          text: "Reply with TS-REALTIME-59 and the word cedar.",
-        }),
-      );
-
-      const frames = [];
-      await withStepTimeout(scenario, "receive realtime turn commit", (async () => {
-        while (true) {
-          const frame = await connection.nextFrame();
-          assert.notEqual(frame, null, "realtime websocket closed before turn commit");
-          if (frame.type === "channel.error") {
-            throw new Error(`realtime channel error: ${JSON.stringify(frame)}`);
-          }
-          frames.push(frame);
-          if (frame.type === "channel.event" && frame.event?.type === "turn_committed") {
-            break;
-          }
-        }
-      })());
-
-      const eventTypes = frames
-        .filter((frame) => frame.type === "channel.event" && frame.event?.type)
-        .map((frame) => frame.event.type);
-      assert.deepEqual(eventTypes.slice(0, 4), [
-        "turn_started",
-        "input_transcript_partial",
-        "input_transcript_final",
-        "turn_committed",
-      ]);
-
-      const sessionState = await waitFor(
-        async () => withStepTimeout(scenario, "poll session after realtime turn", client.readSession(session.id)),
-        (state) => (state.lastAssistantText || "").toLowerCase().includes("ts-realtime-59"),
-        { timeoutMs: 120000, intervalMs: 500 },
-      );
-      const lastText = (sessionState.lastAssistantText || "").toLowerCase();
-      assert.ok(lastText.includes("ts-realtime-59"));
-      assert.ok(lastText.includes("cedar"));
-
-      const history = await withStepTimeout(
-        scenario,
-        "read session history",
-        client.readSessionHistory(session.id),
-      );
-      assert.ok(history.messages.some(
-        (message) =>
-          message.role === "user"
-          && typeof message.content === "string"
-          && message.content.includes("Reply with TS-REALTIME-59 and the word cedar."),
-      ));
-
-      await withStepTimeout(scenario, "close realtime channel", connection.close());
-      const closed = await withStepTimeout(scenario, "wait for realtime close", (async () => {
-        while (true) {
-          const frame = await connection.nextFrame();
-          if (frame?.type === "channel.closed") {
-            return frame;
-          }
-        }
-      })());
-      assert.equal(closed.type, "channel.closed");
       },
     );
   }

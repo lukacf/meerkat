@@ -43,13 +43,8 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
-  type RealtimeCapabilitiesResult,
-  type RealtimeOpenInfo,
-  type RealtimeOpenRequest,
-  type RealtimeStatusResult,
   type MobTurnStartParams,
   type MobRotateSupervisorResult,
-  type RuntimeRealtimeAttachmentStatusResult,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -1390,9 +1385,8 @@ export class MeerkatClient {
     };
     resolvedCapabilities?: ResolvedModelCapabilities;
     /**
-     * Diagnostic bridge-session id for status/continuity only. Realtime
-     * callers open `RealtimeChannel.mobMember(...)`; the server resolves the
-     * current binding behind the stable mob-member target.
+     * Diagnostic bridge-session id for status/continuity only. Live targeting
+     * resolves the current member binding at the server boundary.
      */
     currentSessionId?: string;
   }> {
@@ -2253,21 +2247,6 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeRealtimeAttachmentStatus(
-    sessionId: string,
-  ): Promise<RuntimeRealtimeAttachmentStatusResult> {
-    const result = await this.request("session/realtime_attachment_status", {
-      session_id: sessionId,
-    });
-    if (typeof result.status !== "string" || result.status.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/realtime_attachment_status response: missing status",
-      );
-    }
-    return result as unknown as RuntimeRealtimeAttachmentStatusResult;
-  }
-
   /** Idempotent spawn: spawns or returns the existing member entry. */
   async mobEnsureMember(
     mobId: string,
@@ -2299,45 +2278,6 @@ export class MeerkatClient {
       mob_id: mobId,
       filter,
     });
-  }
-
-  async realtimeOpenInfo(
-    request: RealtimeOpenRequest,
-  ): Promise<RealtimeOpenInfo> {
-    const result = await this.request("realtime/open_info", request);
-    if (typeof result.ws_url !== "string" || result.ws_url.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid realtime/open_info response: missing ws_url",
-      );
-    }
-    return result as unknown as RealtimeOpenInfo;
-  }
-
-  async realtimeStatus(
-    params: { target: Record<string, unknown> },
-  ): Promise<RealtimeStatusResult> {
-    const result = await this.request("realtime/status", params);
-    if (typeof result.status !== "object" || result.status === null) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid realtime/status response: missing status",
-      );
-    }
-    return result as unknown as RealtimeStatusResult;
-  }
-
-  async realtimeCapabilities(
-    params: { target: Record<string, unknown> },
-  ): Promise<RealtimeCapabilitiesResult> {
-    const result = await this.request("realtime/capabilities", params);
-    if (typeof result.capabilities !== "object" || result.capabilities === null) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid realtime/capabilities response: missing capabilities",
-      );
-    }
-    return result as unknown as RealtimeCapabilitiesResult;
   }
 
   // -- Auth + realm (Phase 4d) --------------------------------------------

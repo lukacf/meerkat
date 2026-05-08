@@ -1199,9 +1199,9 @@ impl MobMcpState {
             .map_err(|err| SessionError::Unsupported(err.to_string()))
     }
 
-    /// Wave-c C-9c R4: fully-projected public channel status for MCP
-    /// `meerkat_realtime_status`. Reads DSL state (attachment +
-    /// reconnect-progress) through the runtime adapter.
+    /// Fully-projected channel status for internal realtime diagnostics.
+    /// Reads DSL state (attachment + reconnect-progress) through the runtime
+    /// adapter.
     pub async fn realtime_session_realtime_channel_status(
         &self,
         session_id: &SessionId,

@@ -122,25 +122,21 @@ pub use models::{
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
     AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioChunk, RealtimeAudioFormat,
-    RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelConfig,
-    RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,
-    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelRole,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeChannelTarget,
-    RealtimeClientFrame, RealtimeErrorCode, RealtimeErrorDetails, RealtimeEvent,
-    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
+    RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeChannelClosedFrame,
+    RealtimeChannelConfig, RealtimeChannelErrorFrame, RealtimeChannelEventFrame,
+    RealtimeChannelInputFrame, RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame,
+    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame,
+    RealtimeChannelTarget, RealtimeClientFrame, RealtimeErrorCode, RealtimeErrorDetails,
+    RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
     RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk,
-    RealtimeTextDelta, RealtimeToolTimeoutPolicy, RealtimeTurningMode, RealtimeVideoChunk,
-    ToolCallTimeoutContext,
+    RealtimeServerFrame, RealtimeTextChunk, RealtimeTextDelta, RealtimeToolTimeoutPolicy,
+    RealtimeTurningMode, RealtimeVideoChunk, ToolCallTimeoutContext,
 };
 pub use result::WireRunResult;
 pub use runtime::{
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,
     RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult,
     RuntimeStateResult,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,

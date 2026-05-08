@@ -460,35 +460,6 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
         )]);
     }
 
-    if options.runtime_available {
-        methods.extend([
-            RpcMethodDescriptor::typed(
-                "realtime/open_info",
-                "Get bootstrap metadata for opening a realtime channel",
-                "RealtimeOpenRequest",
-                "RealtimeOpenInfo",
-            ),
-            RpcMethodDescriptor::typed(
-                "realtime/status",
-                "Get product-layer realtime channel status for a target",
-                "RealtimeStatusParams",
-                "RealtimeStatusResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "realtime/capabilities",
-                "Get product-layer realtime capabilities for a target",
-                "RealtimeCapabilitiesParams",
-                "RealtimeCapabilitiesResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/realtime_attachment_status",
-                "Get a session's realtime attachment status",
-                "RuntimeRealtimeAttachmentStatusParams",
-                "RuntimeRealtimeAttachmentStatusResult",
-            ),
-        ]);
-    }
-
     if options.mob_enabled {
         methods.extend([
             RpcMethodDescriptor::typed(
@@ -976,11 +947,21 @@ mod tests {
             "session/external_event",
             "session/peer_response_terminal",
             "session/inject_context",
-            "session/realtime_attachment_status",
         ] {
             assert!(
                 methods.iter().any(|m| m == supported),
                 "canonical runtime-backed session control noun must remain advertised: {supported}"
+            );
+        }
+        for retired in [
+            "realtime/open_info",
+            "realtime/status",
+            "realtime/capabilities",
+            "session/realtime_attachment_status",
+        ] {
+            assert!(
+                !methods.iter().any(|m| m == retired),
+                "retired realtime compatibility method must not be advertised: {retired}"
             );
         }
         for retired in [

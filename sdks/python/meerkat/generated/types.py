@@ -1300,34 +1300,6 @@ class SessionStreamCloseResult:
 
 
 @dataclass
-class RuntimeRealtimeAttachmentStatusParams:
-    """Request payload for `session/realtime_attachment_status`."""
-    session_id: str
-
-
-@dataclass
-class RealtimeOpenRequest:
-    """Request payload for `realtime/open_info`."""
-    role: RealtimeChannelRole
-    target: RealtimeChannelTarget
-    turning_mode: RealtimeTurningMode
-    channel_config: Optional[RealtimeChannelConfig] = None
-    reconnect_policy: Optional[RealtimeReconnectPolicy] = None
-
-
-@dataclass
-class RealtimeStatusParams:
-    """Request payload for `realtime/status`."""
-    target: RealtimeChannelTarget
-
-
-@dataclass
-class RealtimeCapabilitiesParams:
-    """Request payload for `realtime/capabilities`."""
-    target: RealtimeChannelTarget
-
-
-@dataclass
 class ScheduleIdParams:
     """Request payload for schedule id lookups."""
     schedule_id: str
@@ -1398,12 +1370,6 @@ class RuntimeStateResult:
 
 
 @dataclass
-class RuntimeRealtimeAttachmentStatusResult:
-    """Response payload for `session/realtime_attachment_status`."""
-    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
-
-
-@dataclass
 class RealtimeReconnectPolicy:
     """Public reconnect policy for a realtime channel."""
     initial_backoff_ms: int
@@ -1429,9 +1395,8 @@ RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeo
 class RealtimeChannelConfig:
     """Per-channel runtime knobs negotiated at open time.
 
-Additive fields only — clients that do not carry this struct inherit the
-server-default behavior via `#[serde(default)]` on the parent
-[`RealtimeOpenRequest`]."""
+Additive fields only; callers that do not carry this struct inherit the
+server-default behavior through the surrounding open command."""
     tool_timeout: Optional[RealtimeToolTimeoutPolicy] = None
 
 
@@ -1465,30 +1430,6 @@ class RealtimeChannelStatus:
     deadline_at: Optional[str] = None
     next_retry_at: Optional[str] = None
     reason: Optional[str] = None
-
-
-@dataclass
-class RealtimeOpenInfo:
-    """Response payload for `realtime/open_info`."""
-    capabilities: RealtimeCapabilities
-    default_protocol_version: RealtimeProtocolVersion
-    expires_at: str
-    open_token: str
-    target: RealtimeChannelTarget
-    ws_url: str
-    supported_protocol_versions: Optional[list[RealtimeProtocolVersion]] = None
-
-
-@dataclass
-class RealtimeStatusResult:
-    """Response payload for `realtime/status`."""
-    status: RealtimeChannelStatus
-
-
-@dataclass
-class RealtimeCapabilitiesResult:
-    """Response payload for `realtime/capabilities`."""
-    capabilities: RealtimeCapabilities
 
 
 @dataclass
@@ -2317,7 +2258,7 @@ WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
 
 # Public live attachment status projection used by runtime and mob surfaces.
-WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
+WireRealtimeAttachmentStatus = Any
 
 # Target for a public realtime channel.
 #

@@ -119,9 +119,8 @@ MobMemberSnapshot = TypedDict(
         "resolved_capabilities": NotRequired[ResolvedModelCapabilities],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
         "kickoff": NotRequired[dict[str, Any]],
-        # Diagnostic bridge-session id for status/continuity only. Realtime
-        # callers open `RealtimeChannel.mob_member(...)`; the server resolves
-        # the current binding behind the stable mob-member target.
+        # Diagnostic bridge-session id for status/continuity only. Live
+        # targeting resolves the current member binding at the server boundary.
         "current_session_id": NotRequired[str],
     },
 )

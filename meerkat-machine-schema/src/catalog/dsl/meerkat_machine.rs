@@ -2454,8 +2454,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             RealtimeIntentProjected { present: bool },
             RealtimeBindingRotated { authority_epoch: u64 },
             // Reconnect-progress state changed. Shell consumers (e.g.
-            // observability pipelines) can subscribe; production RPC/MCP
-            // `realtime/status` responders read the state fields directly.
+            // observability pipelines) can subscribe; provider transport
+            // status is no longer a public Meerkat semantic status.
             RealtimeReconnectProgressProjected {
                 attempt_count: u64,
                 next_retry_at_ms: Option<u64>,

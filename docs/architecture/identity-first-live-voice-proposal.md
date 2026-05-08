@@ -1,38 +1,33 @@
 # Realtime Product Layer
 
-**Status**: Accepted design record
+**Status**: Superseded by LUC-507 live adapter MVP
 **Date**: 2026-04-19
 
 ## Summary
 
-This document records the settled public contract for realtime in Meerkat.
-Earlier drafts used "voice" terminology and sketched explicit attach/detach
-commands; the shipped product contract is now capability-driven and
-session-owned.
+This document records the previous realtime product-layer contract. LUC-507
+retires that public contract because it made provider transport lifecycle look
+like Meerkat semantic truth.
 
-## Final contract
+The replacement direction is:
 
-- Public API surfaces use **`realtime`** terminology, not `voice`.
-- A session or mob member becomes realtime-capable by choosing a model whose
-  `ModelCapabilities.realtime` flag is `true`.
-- There is **no caller-facing attach/detach RPC**. The runtime attaches and
-  detaches the transport automatically as part of session creation and
-  `reconfigure_live_topology`.
-- `session/realtime_attachment_status` is the canonical observation API for
-  attachment state.
-- `realtime/open_info`, `realtime/status`, and `realtime/capabilities` are the
-  product-layer bootstrap and inspection APIs.
-- Mobs do not own a separate realtime subsystem. Each member is a session, so
-  per-member realtime is just per-session realtime with stable `AgentIdentity`
-  and rotating `AgentRuntimeId` bindings.
-- Provider callbacks are fenced by `RealtimeAttachmentSignalAuthority` so stale
-  transports cannot mutate canonical session state after a replacement.
+- Provider-hosted live sessions are runtime-owned adapter projections, not
+  MeerkatMachine state.
+- Public realtime RPC/REST/MCP/CLI/SDK compatibility surfaces are retired until
+  a new `live/*` or MobKit-specific API is introduced.
+- Meerkat still owns ingress, cancellation/steering, tool dispatch, canonical
+  transcript/history, mob identity, auth, and realm checks.
+- Adapter observations are fenced by projection watermark and adapter
+  generation before they can affect canonical APIs.
+- Mob targeting follows `AgentIdentity` and resolves the current session at the
+  authority boundary instead of pinning a stale session id.
 
 ## Historical note
 
-Some internal method names still use `live_` prefixes (for example
-`reconfigure_live_topology`). Those are implementation details and do not
-change the public product contract above.
+The old contract used `realtime/*` bootstrap/status methods and
+model-capability auto-attachment. Those names can still appear in historical
+audit documents or legacy transport internals, but they are not the public
+product contract.
 
 ## See also
 

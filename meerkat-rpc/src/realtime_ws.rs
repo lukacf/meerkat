@@ -1,9 +1,8 @@
 //! Sibling WebSocket host for realtime channel transport.
 //!
-//! This module owns only transport mechanics and bootstrap control-plane state.
-//! It binds a dedicated websocket listener alongside the existing JSONL
-//! stdio/TCP RPC host, issues single-use open tokens for `realtime/open_info`,
-//! and validates the initial `channel.open` handshake.
+//! This module owns only legacy transport mechanics and bootstrap control-plane
+//! state. It binds a dedicated websocket listener alongside the existing JSONL
+//! stdio/TCP RPC host and validates the initial `channel.open` handshake.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

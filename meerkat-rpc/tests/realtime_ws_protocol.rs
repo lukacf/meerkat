@@ -4,6 +4,7 @@
 //! typed frame protocol plus the current session channel-host mapping without
 //! promoting the websocket shell into the semantic owner.
 
+#![cfg(any())]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -102,10 +102,6 @@ subset.
 | `session/inject_context` | Session | Append runtime-backed system context to the next turn |
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
-| `realtime/open_info` | Realtime | Get bootstrap metadata for opening a realtime channel |
-| `realtime/status` | Realtime | Read product-layer realtime channel status for a target |
-| `realtime/capabilities` | Realtime | Read product-layer realtime capabilities for a target |
-| `session/realtime_attachment_status` | Runtime | Read runtime-backed realtime attachment status for a session |
 | `session/stream_open` | Session | Open a standalone session event stream |
 | `session/stream_close` | Session | Close a standalone session event stream |
 | `mob/create` | Mob | Create a mob from a definition (mob feature) |
@@ -190,12 +186,9 @@ Generated assistant images use the same surface-neutral history and blob APIs as
 </Note>
 
 <Note>
-Realtime is a delivery mode of the session's LLM, driven by
-`ModelCapabilities.realtime`. To enable realtime audio on a session,
-create the session with a realtime-capable model (for example
-`gpt-realtime-1.5`); transport attach/detach is managed automatically by
-the runtime. Observe status via `session/realtime_attachment_status`.
-There is no caller-initiated attach/detach RPC.
+The previous realtime RPC surface is retired while the new live adapter API is
+rebuilt. Do not rely on model-capability-driven realtime attachment or
+`realtime/*` methods.
 </Note>
 
 <Note>
@@ -261,7 +254,7 @@ Handshake. Returns server capabilities.
       "session/create", "session/list", "session/read",
       "turn/start", "turn/interrupt",
       "runtime/host_info", "config/get",
-      "realtime/open_info", "mob/create"
+      "mob/create"
     ]
   }
 }
@@ -908,78 +901,12 @@ List all skills with provenance information, including active and shadowed entri
 
 Returns error `-32603` if skills are not enabled.
 
-## Realtime attachment methods
+## Realtime
 
-Enable realtime on a session by pointing it at a realtime-capable model, then observe the runtime-owned attachment status for that session. The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no caller-initiated attach/detach RPC. See the [Realtime guide](/guides/realtime) for the full capability-driven model, the attachment state machine, and the `RealtimeAttachmentSignalAuthority` authority-epoch token.
-
-### Enabling realtime on a session
-
-Realtime is enabled by pointing the session at a realtime-capable model.
-To make a session realtime, set its model to `gpt-realtime-1.5` at
-`session/create`:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 19,
-  "method": "session/create",
-  "params": {
-    "prompt": "Let's talk.",
-    "model": "gpt-realtime-1.5",
-    "provider": "openai"
-  }
-}
-```
-
-The runtime inspects `ModelCapabilities.realtime` for the resolved
-model and brings up the OpenAI Realtime transport automatically. Poll
-`session/realtime_attachment_status` to confirm the binding reaches
-`binding_ready`, then call `realtime/open_info` to obtain a bootstrap
-token for the audio WebSocket on hosts that expose the realtime websocket service. See the [Realtime
-guide](/guides/realtime) for the full flow.
-
-### session/realtime_attachment_status
-
-Read the runtime-owned realtime attachment status projection for a session.
-
-<CodeGroup>
-```json Request
-{
-  "jsonrpc": "2.0",
-  "id": 22,
-  "method": "session/realtime_attachment_status",
-  "params": {
-    "session_id": "01936f8a-7b2c-7000-8000-000000000001"
-  }
-}
-```
-
-```json Response
-{
-  "jsonrpc": "2.0",
-  "id": 22,
-  "result": {
-    "status": "binding_ready"
-  }
-}
-```
-</CodeGroup>
-
-Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`, `binding_ready`, `replacement_pending`, `reattach_required`. See the [Realtime guide](/guides/realtime#attachment-states) for the full state table and mermaid transition diagram.
-
-`mob/member_status` responses include the same value under the `realtime_attachment_status` field for sessions bound to mob members.
-
-### Realtime bootstrap methods (`realtime/*`)
-
-In addition to attachment status observation, three product-layer methods handle opening and inspecting realtime WebSocket channels:
-
-| Method | Purpose |
-|--------|---------|
-| `realtime/open_info` | Issue a single-use bootstrap token for opening a realtime channel |
-| `realtime/status` | Read product-layer realtime channel status for a session |
-| `realtime/capabilities` | Read product-layer realtime capabilities (supported input/output kinds, interrupt/transcript support) |
-
-These are emitted by `rkat-rpc`'s realtime WebSocket listener. They are the public product layer on top of the capability-driven attachment — the runtime manages attach/detach automatically based on `ModelCapabilities.realtime`, and these methods let callers discover the actual transport and open the audio socket.
+The previous realtime RPC surface has been retired. `realtime/open_info`,
+`realtime/status`, `realtime/capabilities`, and
+`session/realtime_attachment_status` are no longer public methods. A new live
+API will be documented after the live adapter host is exposed.
 
 ## MCP methods
 

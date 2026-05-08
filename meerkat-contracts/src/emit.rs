@@ -112,20 +112,17 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
         "PeerResponseTerminalStatusWire": schema_for!(crate::wire::PeerResponseTerminalStatusWire),
         "SessionExternalEventEnvelope": schema_for!(crate::wire::SessionExternalEventEnvelope),
-        "WireRealtimeAttachmentStatus": schema_for!(crate::wire::WireRealtimeAttachmentStatus),
-        "RuntimeRealtimeAttachmentStatusResult": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusResult),
         "RealtimeChannelTarget": schema_for!(crate::wire::RealtimeChannelTarget),
         "RealtimeChannelRole": schema_for!(crate::wire::RealtimeChannelRole),
         "RealtimeTurningMode": schema_for!(crate::wire::RealtimeTurningMode),
         "RealtimeInputKind": schema_for!(crate::wire::RealtimeInputKind),
         "RealtimeOutputKind": schema_for!(crate::wire::RealtimeOutputKind),
         "RealtimeReconnectPolicy": schema_for!(crate::wire::RealtimeReconnectPolicy),
+        "RealtimeToolTimeoutPolicy": schema_for!(crate::wire::RealtimeToolTimeoutPolicy),
+        "RealtimeChannelConfig": schema_for!(crate::wire::RealtimeChannelConfig),
         "RealtimeCapabilities": schema_for!(crate::wire::RealtimeCapabilities),
         "RealtimeChannelState": schema_for!(crate::wire::RealtimeChannelState),
         "RealtimeChannelStatus": schema_for!(crate::wire::RealtimeChannelStatus),
-        "RealtimeOpenInfo": schema_for!(crate::wire::RealtimeOpenInfo),
-        "RealtimeStatusResult": schema_for!(crate::wire::RealtimeStatusResult),
-        "RealtimeCapabilitiesResult": schema_for!(crate::wire::RealtimeCapabilitiesResult),
         "RealtimeTextChunk": schema_for!(crate::wire::RealtimeTextChunk),
         "RealtimeTextDelta": schema_for!(crate::wire::RealtimeTextDelta),
         "RealtimeAudioChunk": schema_for!(crate::wire::RealtimeAudioChunk),
@@ -299,11 +296,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "DeviceStartParams": schema_for!(crate::wire::DeviceStartParams),
         "DeviceCompleteParams": schema_for!(crate::wire::DeviceCompleteParams),
         "ProvisionApiKeyParams": schema_for!(crate::wire::ProvisionApiKeyParams),
-        "RealtimeOpenRequest": schema_for!(crate::wire::RealtimeOpenRequest),
-        "RealtimeStatusParams": schema_for!(crate::wire::RealtimeStatusParams),
-        "RealtimeCapabilitiesParams": schema_for!(crate::wire::RealtimeCapabilitiesParams),
         "SessionPeerResponseTerminalParams": schema_for!(crate::wire::SessionPeerResponseTerminalParams),
-        "RuntimeRealtimeAttachmentStatusParams": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusParams),
         "SessionStreamOpenParams": schema_for!(crate::wire::SessionStreamOpenParams),
         "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
         "ForkSessionAtParams": schema_for!(crate::wire::ForkSessionAtParams),
@@ -1056,9 +1049,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 RestOperationContract::event_stream("SseEventStream")
             }
             ("/sessions/{id}/status", "get") => RestOperationContract::json("RuntimeStateResult"),
-            ("/sessions/{id}/realtime-attachment-status", "get") => {
-                RestOperationContract::json("RuntimeRealtimeAttachmentStatusResult")
-            }
             ("/schedule/call", "post") => {
                 RestOperationContract::with_json_request("RestScheduleToolCallRequest", "JsonValue")
             }
@@ -1095,17 +1085,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             }
             ("/runtime/health", "get") => RestOperationContract::json("RuntimeHostHealth"),
             ("/models/catalog", "get") => RestOperationContract::json("ModelsCatalogResponse"),
-            ("/realtime/open_info", "post") => {
-                RestOperationContract::with_json_request("RealtimeOpenRequest", "RealtimeOpenInfo")
-            }
-            ("/realtime/status", "post") => RestOperationContract::with_json_request(
-                "RealtimeStatusParams",
-                "RealtimeStatusResult",
-            ),
-            ("/realtime/capabilities", "post") => RestOperationContract::with_json_request(
-                "RealtimeCapabilitiesParams",
-                "RealtimeCapabilitiesResult",
-            ),
             ("/mob/{id}/spawn-helper", "post") => {
                 RestOperationContract::with_json_request("RestMobHelperRequest", "JsonValue")
             }

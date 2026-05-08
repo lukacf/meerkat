@@ -337,30 +337,6 @@
       "name": "skills/list"
     },
     {
-      "description": "Get bootstrap metadata for opening a realtime channel",
-      "name": "realtime/open_info",
-      "params_type": "RealtimeOpenRequest",
-      "result_type": "RealtimeOpenInfo"
-    },
-    {
-      "description": "Get product-layer realtime channel status for a target",
-      "name": "realtime/status",
-      "params_type": "RealtimeStatusParams",
-      "result_type": "RealtimeStatusResult"
-    },
-    {
-      "description": "Get product-layer realtime capabilities for a target",
-      "name": "realtime/capabilities",
-      "params_type": "RealtimeCapabilitiesParams",
-      "result_type": "RealtimeCapabilitiesResult"
-    },
-    {
-      "description": "Get a session's realtime attachment status",
-      "name": "session/realtime_attachment_status",
-      "params_type": "RuntimeRealtimeAttachmentStatusParams",
-      "result_type": "RuntimeRealtimeAttachmentStatusResult"
-    },
-    {
       "description": "Create a mob from a definition",
       "name": "mob/create",
       "params_type": "MobCreateParams",

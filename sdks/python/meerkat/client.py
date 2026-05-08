@@ -46,12 +46,6 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobRotateSupervisorResult,
     MobTurnStartParams,
-    RealtimeCapabilitiesResult,
-    RealtimeChannelStatus,
-    RealtimeOpenInfo,
-    RealtimeOpenRequest,
-    RealtimeStatusResult,
-    RuntimeRealtimeAttachmentStatusResult,
     WireBudgetSplitPolicy,
     WireAuthBindingRef,
     WireContentInput,
@@ -2439,15 +2433,6 @@ class MeerkatClient:
         self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
-    async def runtime_realtime_attachment_status(
-        self, session_id: str
-    ) -> RuntimeRealtimeAttachmentStatusResult:
-        raw = await self._request(
-            "session/realtime_attachment_status",
-            {"session_id": session_id},
-        )
-        return RuntimeRealtimeAttachmentStatusResult(**raw)
-
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2483,25 +2468,6 @@ class MeerkatClient:
             "mob/list_members_matching",
             {"mob_id": mob_id, "filter": filter},
         )
-
-    async def realtime_open_info(
-        self, request: RealtimeOpenRequest | dict[str, Any]
-    ) -> RealtimeOpenInfo:
-        raw = await self._request("realtime/open_info", _wire_params(request))
-        return RealtimeOpenInfo(**raw)
-
-    async def realtime_status(self, params: dict[str, Any]) -> RealtimeStatusResult:
-        raw = await self._request("realtime/status", _wire_params(params))
-        status_raw = raw.get("status", {})
-        if isinstance(status_raw, dict):
-            raw["status"] = RealtimeChannelStatus(**status_raw)
-        return RealtimeStatusResult(**raw)
-
-    async def realtime_capabilities(
-        self, params: dict[str, Any]
-    ) -> RealtimeCapabilitiesResult:
-        raw = await self._request("realtime/capabilities", _wire_params(params))
-        return RealtimeCapabilitiesResult(**raw)
 
     # -- Transport ---------------------------------------------------------
 

@@ -76,17 +76,15 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         ))
     }
 
-    /// Fully-projected public channel status. RPC / MCP `realtime/status`
-    /// responders use this so `attempt_count` / `next_retry_at` /
-    /// `deadline_at` come from machine-owned reconnect lifecycle state.
+    /// Fully-projected internal channel status for diagnostics. Attempt and
+    /// deadline fields come from machine-owned reconnect lifecycle state.
     async fn realtime_channel_status(
         &self,
         session_id: &SessionId,
     ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError>;
 
-    /// Machine-owned realtime bootstrap eligibility. `realtime/open_info`,
-    /// `realtime/capabilities`, and websocket `channel.open` use this instead
-    /// of inferring eligibility from attachment-status availability.
+    /// Machine-owned realtime bootstrap eligibility. Transport code uses this
+    /// instead of inferring eligibility from attachment-status availability.
     async fn realtime_bootstrap_eligibility(
         &self,
         _session_id: &SessionId,

@@ -14,6 +14,9 @@ use meerkat_core::{
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
+use meerkat_llm_core::realtime_adapter::{
+    RealtimeAdapter, RealtimeAdapterCommand, RealtimeAdapterObservation, RealtimeAdapterStatus,
+};
 use meerkat_llm_core::realtime_session::{
     RealtimeExternalSessionTarget, RealtimeSession, RealtimeSessionEvent, RealtimeSessionFactory,
     RealtimeSessionOpenConfig,
@@ -2246,6 +2249,164 @@ impl OpenAiRealtimeSessionFactory {
     }
 }
 
+/// OpenAI implementation of the internal realtime adapter seam.
+///
+/// This wrapper owns provider-session mechanics only. It opens, rebuilds, and
+/// drives an [`OpenAiRealtimeSession`], then emits typed adapter observations
+/// for the runtime-owned host to gate into canonical Meerkat APIs.
+pub struct OpenAiRealtimeAdapter {
+    raw_factory: Arc<dyn OpenAiLiveSessionFactory>,
+    session: Option<OpenAiRealtimeSession>,
+    capabilities: RealtimeCapabilities,
+    status: RealtimeAdapterStatus,
+}
+
+impl OpenAiRealtimeAdapter {
+    /// Create an OpenAI realtime adapter from a raw sideband factory.
+    #[must_use]
+    pub fn new(raw_factory: Arc<dyn OpenAiLiveSessionFactory>) -> Self {
+        Self {
+            raw_factory,
+            session: None,
+            capabilities: openai_realtime_capabilities(),
+            status: RealtimeAdapterStatus::NotOpened,
+        }
+    }
+
+    async fn open_from_snapshot(
+        &mut self,
+        snapshot: meerkat_llm_core::realtime_adapter::RealtimeProjectionSnapshot,
+    ) -> Result<(), LlmError> {
+        self.status = RealtimeAdapterStatus::Opening;
+        let open_config = snapshot.to_open_config();
+        let raw = match self.raw_factory.open_session(&open_config).await {
+            Ok(raw) => raw,
+            Err(error) => {
+                self.session = None;
+                self.status = RealtimeAdapterStatus::Terminal {
+                    reason: error.to_string(),
+                };
+                return Err(error);
+            }
+        };
+        let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
+        session.set_response_nudge_config(
+            open_config.response_nudge_timeout_ms,
+            open_config.response_nudge_max_attempts,
+        );
+        if let Err(error) = session
+            .seed_history_projection(
+                &open_config.seed_messages,
+                &open_config.runtime_system_context,
+            )
+            .await
+        {
+            self.session = None;
+            self.status = RealtimeAdapterStatus::Terminal {
+                reason: error.to_string(),
+            };
+            return Err(error);
+        }
+        self.session = Some(session);
+        self.status = RealtimeAdapterStatus::Ready;
+        Ok(())
+    }
+
+    fn session_mut(&mut self) -> Result<&mut OpenAiRealtimeSession, LlmError> {
+        self.session
+            .as_mut()
+            .ok_or_else(|| LlmError::InvalidRequest {
+                message: "openai realtime adapter session is not open".to_string(),
+            })
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl RealtimeAdapter for OpenAiRealtimeAdapter {
+    fn capabilities(&self) -> &RealtimeCapabilities {
+        &self.capabilities
+    }
+
+    fn status(&self) -> RealtimeAdapterStatus {
+        self.status.clone()
+    }
+
+    async fn handle_command(&mut self, command: RealtimeAdapterCommand) -> Result<(), LlmError> {
+        match command {
+            RealtimeAdapterCommand::OpenSession { snapshot } => {
+                self.open_from_snapshot(snapshot).await
+            }
+            RealtimeAdapterCommand::RebuildSession { snapshot, .. } => {
+                if let Some(session) = self.session.as_mut() {
+                    let _ = session.close().await;
+                }
+                self.session = None;
+                self.open_from_snapshot(snapshot).await
+            }
+            RealtimeAdapterCommand::SendAdmittedInput { chunk } => {
+                self.session_mut()?.send_input(chunk).await
+            }
+            RealtimeAdapterCommand::CommitInput => self.session_mut()?.commit_turn().await,
+            RealtimeAdapterCommand::Interrupt { .. } => self.session_mut()?.interrupt().await,
+            RealtimeAdapterCommand::Steer { instruction: _ } => Err(LlmError::InvalidRequest {
+                message: "openai realtime adapter does not support direct steer commands yet"
+                    .to_string(),
+            }),
+            RealtimeAdapterCommand::TruncateAssistantOutput {
+                item,
+                content_index,
+                audio_played_ms,
+            } => {
+                self.session_mut()?
+                    .truncate_assistant_output(item.into_inner(), content_index, audio_played_ms)
+                    .await
+            }
+            RealtimeAdapterCommand::SubmitToolResult { result } => {
+                self.session_mut()?.submit_tool_result(result).await
+            }
+            RealtimeAdapterCommand::SubmitToolError { call, error } => {
+                self.session_mut()?
+                    .submit_tool_error(call.into_inner(), error)
+                    .await
+            }
+            RealtimeAdapterCommand::CloseSession { .. } => {
+                self.status = RealtimeAdapterStatus::Closing;
+                if let Some(session) = self.session.as_mut() {
+                    session.close().await?;
+                }
+                self.session = None;
+                self.status = RealtimeAdapterStatus::Closed;
+                Ok(())
+            }
+        }
+    }
+
+    async fn next_observation(&mut self) -> Result<Option<RealtimeAdapterObservation>, LlmError> {
+        let Some(session) = self.session.as_mut() else {
+            return Ok(None);
+        };
+        match session.next_event().await {
+            Ok(Some(event)) => Ok(Some(RealtimeAdapterObservation::from(event))),
+            Ok(None) => {
+                self.session = None;
+                self.status = RealtimeAdapterStatus::Closed;
+                Ok(Some(RealtimeAdapterObservation::ProviderStatus {
+                    status: self.status.clone(),
+                }))
+            }
+            Err(error) => {
+                self.status = RealtimeAdapterStatus::Terminal {
+                    reason: error.to_string(),
+                };
+                Ok(Some(RealtimeAdapterObservation::ProviderStatus {
+                    status: self.status.clone(),
+                }))
+            }
+        }
+    }
+}
+
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
@@ -2426,6 +2587,11 @@ mod tests {
     };
     use meerkat_core::{
         Message, PendingSystemContextAppend, Provider, SessionLlmIdentity, ToolDef, ToolResult,
+    };
+    use meerkat_llm_core::realtime_adapter::{
+        RealtimeAdapter, RealtimeAdapterCommand, RealtimeAdapterContinuity,
+        RealtimeAdapterObservation, RealtimeAdapterStatus, RealtimeProjectionSnapshot,
+        RealtimeProjectionWatermark, RealtimeProviderToolCallRef,
     };
     use meerkat_llm_core::realtime_session::{
         RealtimeExternalSessionTarget, RealtimeSessionEvent, RealtimeSessionFactory,
@@ -2620,6 +2786,25 @@ mod tests {
         }])
     }
 
+    fn sample_projection_snapshot(turning_mode: RealtimeTurningMode) -> RealtimeProjectionSnapshot {
+        let open_config = sample_open_config(turning_mode);
+        RealtimeProjectionSnapshot {
+            identity: open_config.llm_identity,
+            turning_mode: open_config.turning_mode,
+            visible_tools: open_config.visible_tools,
+            seed_messages: Vec::new(),
+            runtime_system_context: Vec::new(),
+            watermark: RealtimeProjectionWatermark {
+                version: 1,
+                frontier: 11,
+                digest: "snapshot-digest".to_string(),
+            },
+            continuity: RealtimeAdapterContinuity::TranscriptOnly,
+            response_nudge_timeout_ms: Some(125),
+            response_nudge_max_attempts: Some(1),
+        }
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl OpenAiLiveSessionFactory for FakeOpenAiLiveFactory {
@@ -2739,6 +2924,135 @@ mod tests {
         assert_eq!(
             resolve_realtime_output_language_instruction(Some("  None  ")),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_realtime_adapter_opens_from_projection_snapshot() {
+        let snapshot = sample_projection_snapshot(RealtimeTurningMode::ProviderManaged);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let next_events = sample_open_handshake_events(&snapshot.to_open_config());
+        let open_configs = Arc::new(Mutex::new(Vec::new()));
+        let raw_factory = Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::from([Ok(Box::new(FakeOpenAiLiveSession {
+                seen: seen.clone(),
+                next_events,
+            })
+                as Box<dyn OpenAiLiveSession>)])),
+            attached_sessions: Mutex::new(VecDeque::new()),
+            open_configs: open_configs.clone(),
+        });
+        let mut adapter = OpenAiRealtimeAdapter::new(raw_factory);
+
+        RealtimeAdapter::handle_command(
+            &mut adapter,
+            RealtimeAdapterCommand::OpenSession {
+                snapshot: snapshot.clone(),
+            },
+        )
+        .await
+        .expect("open should succeed through adapter seam");
+
+        assert_eq!(
+            RealtimeAdapter::status(&adapter),
+            RealtimeAdapterStatus::Ready
+        );
+        let configs = open_configs.lock().await;
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].llm_identity.model, snapshot.identity.model);
+        assert_eq!(configs[0].response_nudge_timeout_ms, Some(125));
+        assert_eq!(configs[0].response_nudge_max_attempts, Some(1));
+        assert!(
+            seen.lock()
+                .await
+                .iter()
+                .any(|event| matches!(event, ClientEvent::SessionUpdate { .. })),
+            "opening should configure the provider session"
+        );
+    }
+
+    #[tokio::test]
+    async fn openai_realtime_adapter_delegates_commands_and_maps_observations() {
+        let snapshot = sample_projection_snapshot(RealtimeTurningMode::ExplicitCommit);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let next_events = sample_open_handshake_events(&snapshot.to_open_config());
+        let open_configs = Arc::new(Mutex::new(Vec::new()));
+        let raw_factory = Arc::new(FakeOpenAiLiveFactory {
+            opened_sessions: Mutex::new(VecDeque::from([Ok(Box::new(FakeOpenAiLiveSession {
+                seen: seen.clone(),
+                next_events: next_events.clone(),
+            })
+                as Box<dyn OpenAiLiveSession>)])),
+            attached_sessions: Mutex::new(VecDeque::new()),
+            open_configs,
+        });
+        let mut adapter = OpenAiRealtimeAdapter::new(raw_factory);
+
+        RealtimeAdapter::handle_command(
+            &mut adapter,
+            RealtimeAdapterCommand::OpenSession { snapshot },
+        )
+        .await
+        .expect("open should succeed");
+        RealtimeAdapter::handle_command(
+            &mut adapter,
+            RealtimeAdapterCommand::SendAdmittedInput {
+                chunk: RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
+                    mime_type: "audio/pcm".to_string(),
+                    sample_rate_hz: 24_000,
+                    channels: 1,
+                    data: "AAEC".to_string(),
+                }),
+            },
+        )
+        .await
+        .expect("audio input should delegate to OpenAI session");
+        RealtimeAdapter::handle_command(&mut adapter, RealtimeAdapterCommand::CommitInput)
+            .await
+            .expect("commit should delegate to OpenAI session");
+
+        {
+            let sent = seen.lock().await;
+            assert!(sent.iter().any(|event| {
+                matches!(
+                    event,
+                    ClientEvent::InputAudioBufferAppend { audio, .. } if audio == "AAEC"
+                )
+            }));
+            assert!(
+                sent.iter()
+                    .any(|event| matches!(event, ClientEvent::InputAudioBufferCommit { .. }))
+            );
+            assert!(
+                sent.iter()
+                    .any(|event| matches!(event, ClientEvent::ResponseCreate { .. }))
+            );
+        }
+
+        next_events.lock().await.push_back(Ok(Some(
+            ServerEvent::ResponseFunctionCallArgumentsDone {
+                event_id: "evt_tool".to_string(),
+                response_id: "resp_1".to_string(),
+                item_id: "item_1".to_string(),
+                output_index: 0,
+                call_id: "call_1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{\"q\":\"meerkat\"}".to_string(),
+            },
+        )));
+
+        let observation = RealtimeAdapter::next_observation(&mut adapter)
+            .await
+            .expect("observation should map")
+            .expect("tool call should emit an observation");
+
+        assert_eq!(
+            observation,
+            RealtimeAdapterObservation::ProviderToolCallRequested {
+                call: RealtimeProviderToolCallRef::new("call_1"),
+                name: "lookup".to_string(),
+                arguments: serde_json::json!({ "q": "meerkat" }),
+            }
         );
     }
 

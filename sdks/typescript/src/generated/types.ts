@@ -938,26 +938,6 @@ export interface SessionStreamCloseResult {
   stream_id: string;
 }
 
-export interface RuntimeRealtimeAttachmentStatusParams {
-  session_id: string;
-}
-
-export interface RealtimeOpenRequest {
-  channel_config?: RealtimeChannelConfig;
-  reconnect_policy?: RealtimeReconnectPolicy;
-  role: RealtimeChannelRole;
-  target: RealtimeChannelTarget;
-  turning_mode: RealtimeTurningMode;
-}
-
-export interface RealtimeStatusParams {
-  target: RealtimeChannelTarget;
-}
-
-export interface RealtimeCapabilitiesParams {
-  target: RealtimeChannelTarget;
-}
-
 export interface ScheduleIdParams {
   schedule_id: string;
 }
@@ -1233,7 +1213,7 @@ export type WireRenderSalience = "background" | "normal" | "important" | "urgent
 
 export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
-export type WireRealtimeAttachmentStatus = "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
+export type WireRealtimeAttachmentStatus = unknown;
 
 export interface RealtimeChannelTargetSessionTarget {
   session_id: string;
@@ -1867,10 +1847,6 @@ export interface RuntimeStateResult {
   state: WireRuntimeState;
 }
 
-export interface RuntimeRealtimeAttachmentStatusResult {
-  status: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
-}
-
 export interface RealtimeReconnectPolicy {
   initial_backoff_ms: number;
   max_attempts: number;
@@ -1921,24 +1897,6 @@ export interface RealtimeChannelStatus {
   next_retry_at?: string;
   reason?: string;
   state: RealtimeChannelState;
-}
-
-export interface RealtimeOpenInfo {
-  capabilities: RealtimeCapabilities;
-  default_protocol_version: RealtimeProtocolVersion;
-  expires_at: string;
-  open_token: string;
-  supported_protocol_versions?: RealtimeProtocolVersion[];
-  target: RealtimeChannelTarget;
-  ws_url: string;
-}
-
-export interface RealtimeStatusResult {
-  status: RealtimeChannelStatus;
-}
-
-export interface RealtimeCapabilitiesResult {
-  capabilities: RealtimeCapabilities;
 }
 
 export interface RealtimeTextChunk {

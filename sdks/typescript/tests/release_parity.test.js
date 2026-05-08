@@ -6,7 +6,6 @@ import {
   Session,
   DeferredSession,
   Mob,
-  RealtimeChannel,
 } from "../dist/index.js";
 
 describe("Phase 1 release parity targets", () => {
@@ -42,9 +41,6 @@ describe("Phase 1 release parity targets", () => {
       "callScheduleTool",
       "readMobEvents",
       "spawnMobMembers",
-      "realtimeOpenInfo",
-      "realtimeStatus",
-      "realtimeCapabilities",
       "createMobProfile",
       "getMobProfile",
       "listMobProfiles",
@@ -75,9 +71,4 @@ describe("Phase 1 release parity targets", () => {
     }
   });
 
-  it("exports the RealtimeChannel scaffold", () => {
-    assert.equal(typeof RealtimeChannel, "function");
-    assert.equal(typeof RealtimeChannel.session, "function");
-    assert.equal(typeof RealtimeChannel.mobMember, "function");
-  });
 });

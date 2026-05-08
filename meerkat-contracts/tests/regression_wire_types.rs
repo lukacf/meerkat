@@ -8,13 +8,12 @@
 //! These catch silent renames and accidental field removals.
 
 use meerkat_contracts::{
-    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeCapabilities,
-    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
-    RealtimeClientFrame, RealtimeEvent, RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo,
-    RealtimeOpenRequest, RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion,
-    RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTurningMode, WireError, WireEvent,
-    WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage, WireSessionSummary,
-    WireUsage,
+    ContractVersion, CoreCreateParams, ErrorCode, KNOWN_AGENT_EVENT_TYPES, RealtimeChannelRole,
+    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget, RealtimeClientFrame,
+    RealtimeEvent, RealtimeInputChunk, RealtimeOpenRequest, RealtimeOutputChunk,
+    RealtimeProtocolVersion, RealtimeReconnectPolicy, RealtimeServerFrame, RealtimeTurningMode,
+    WireError, WireEvent, WireRunResult, WireSessionHistory, WireSessionInfo, WireSessionMessage,
+    WireSessionSummary, WireUsage,
 };
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
@@ -856,63 +855,7 @@ fn wire_usage_from_usage_conversion() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. RealtimeOpenInfo required fields
-// ---------------------------------------------------------------------------
-
-#[test]
-fn realtime_open_info_required_fields() {
-    let info = RealtimeOpenInfo {
-        ws_url: "ws://localhost:9999/realtime/ws".to_string(),
-        open_token: "token-1".to_string(),
-        expires_at: "2026-04-15T12:00:00Z".to_string(),
-        target: RealtimeChannelTarget::SessionTarget {
-            session_id: "session-1".to_string(),
-        },
-        supported_protocol_versions: vec![RealtimeProtocolVersion::CURRENT],
-        default_protocol_version: RealtimeProtocolVersion::CURRENT,
-        capabilities: RealtimeCapabilities {
-            input_kinds: vec![
-                RealtimeInputKind::Text,
-                RealtimeInputKind::Audio,
-                RealtimeInputKind::Video,
-            ],
-            output_kinds: vec![RealtimeOutputKind::Text, RealtimeOutputKind::Audio],
-            turning_modes: vec![
-                RealtimeTurningMode::ProviderManaged,
-                RealtimeTurningMode::ExplicitCommit,
-            ],
-            interrupt_supported: true,
-            transcript_supported: true,
-            tool_lifecycle_events_supported: true,
-            video_supported: true,
-            audio_input_format: None,
-            audio_output_format: None,
-        },
-    };
-    let value = serde_json::to_value(&info).unwrap();
-
-    assert!(value.get("ws_url").is_some(), "missing ws_url");
-    assert!(value.get("open_token").is_some(), "missing open_token");
-    assert!(value.get("expires_at").is_some(), "missing expires_at");
-    assert!(value.get("target").is_some(), "missing target");
-    assert!(
-        value.get("supported_protocol_versions").is_some(),
-        "missing supported_protocol_versions"
-    );
-    assert!(
-        value.get("default_protocol_version").is_some(),
-        "missing default_protocol_version"
-    );
-    assert_eq!(
-        value["supported_protocol_versions"],
-        serde_json::json!(["2"])
-    );
-    assert_eq!(value["default_protocol_version"], serde_json::json!("2"));
-    assert!(value.get("capabilities").is_some(), "missing capabilities");
-}
-
-// ---------------------------------------------------------------------------
-// 14. RealtimeOpenRequest roundtrip
+// 13. RealtimeOpenRequest roundtrip
 // ---------------------------------------------------------------------------
 
 #[test]

@@ -507,11 +507,9 @@ pub(crate) enum MeerkatMachineCommand {
     ResolvedSessionLlmCapabilities {
         session_id: SessionId,
     },
-    /// Fully-projected public channel status. Returns attachment state plus
+    /// Fully-projected internal channel status. Returns attachment state plus
     /// machine-owned reconnect lifecycle/progress collapsed into a
-    /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
-    /// `realtime/status` RPC handler and the MCP `meerkat_realtime_status`
-    /// tool so they do not hand-compose partial projections.
+    /// ready-to-serialize [`RealtimeChannelStatus`] for diagnostics.
     RuntimeRealtimeChannelStatus {
         session_id: SessionId,
     },

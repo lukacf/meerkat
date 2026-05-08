@@ -353,11 +353,10 @@ pub use meerkat_contracts::{
     self as contracts, CapabilitiesResponse, CapabilityHint, CapabilityId, CapabilityRegistration,
     CapabilityScope, CapabilityStatus, CommsParams, ContractVersion, CoreCreateParams,
     ErrorCategory, ErrorCode, HelpExecutionMode, HelpRequest, HelpResponse, HookParams, Protocol,
-    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
-    RealtimeOpenInfo, RealtimeOpenRequest, RealtimeReconnectPolicy, RealtimeStatusParams,
-    RealtimeStatusResult, RealtimeTurningMode, SkillEntry, SkillInspectResponse, SkillListResponse,
-    SkillsParams, StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
+    RealtimeCapabilities, RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus,
+    RealtimeChannelTarget, RealtimeOpenInfo, RealtimeOpenRequest, RealtimeReconnectPolicy,
+    RealtimeTurningMode, SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams,
+    StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
     WireSessionSummary, WireUsage, build_capabilities,
 };
 

@@ -20,6 +20,8 @@ pub mod error;
 pub mod factory;
 pub mod http;
 pub mod provider_runtime;
+#[doc(hidden)]
+pub mod realtime_adapter;
 pub mod realtime_session;
 pub mod streaming;
 pub mod test_client;

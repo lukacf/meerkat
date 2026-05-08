@@ -13506,140 +13506,6 @@
     "title": "RealtimeCapabilities",
     "type": "object"
   },
-  "RealtimeCapabilitiesResult": {
-    "$defs": {
-      "RealtimeAudioFormat": {
-        "description": "Descriptor for an expected or actual realtime audio format.",
-        "properties": {
-          "channels": {
-            "description": "Channel count; `1` for mono.",
-            "format": "uint8",
-            "maximum": 255,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "mime_type": {
-            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
-            "type": "string"
-          },
-          "sample_rate_hz": {
-            "description": "Sample rate in hertz, e.g. `24000`.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "mime_type",
-          "sample_rate_hz",
-          "channels"
-        ],
-        "type": "object"
-      },
-      "RealtimeCapabilities": {
-        "description": "Product-facing realtime capability set for one target/provider combination.",
-        "properties": {
-          "audio_input_format": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RealtimeAudioFormat"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
-          },
-          "audio_output_format": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RealtimeAudioFormat"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Audio format the provider session emits for output audio chunks."
-          },
-          "input_kinds": {
-            "items": {
-              "$ref": "#/$defs/RealtimeInputKind"
-            },
-            "type": "array"
-          },
-          "interrupt_supported": {
-            "type": "boolean"
-          },
-          "output_kinds": {
-            "items": {
-              "$ref": "#/$defs/RealtimeOutputKind"
-            },
-            "type": "array"
-          },
-          "tool_lifecycle_events_supported": {
-            "type": "boolean"
-          },
-          "transcript_supported": {
-            "type": "boolean"
-          },
-          "turning_modes": {
-            "items": {
-              "$ref": "#/$defs/RealtimeTurningMode"
-            },
-            "type": "array"
-          },
-          "video_supported": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "interrupt_supported",
-          "transcript_supported",
-          "tool_lifecycle_events_supported",
-          "video_supported"
-        ],
-        "type": "object"
-      },
-      "RealtimeInputKind": {
-        "description": "Input modality kind supported by a realtime channel.",
-        "enum": [
-          "text",
-          "audio",
-          "video"
-        ],
-        "type": "string"
-      },
-      "RealtimeOutputKind": {
-        "description": "Output modality kind supported by a realtime channel.",
-        "enum": [
-          "text",
-          "audio",
-          "video"
-        ],
-        "type": "string"
-      },
-      "RealtimeTurningMode": {
-        "description": "Turning mode for a realtime channel.",
-        "enum": [
-          "provider_managed",
-          "explicit_commit"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `realtime/capabilities`.",
-    "properties": {
-      "capabilities": {
-        "$ref": "#/$defs/RealtimeCapabilities"
-      }
-    },
-    "required": [
-      "capabilities"
-    ],
-    "title": "RealtimeCapabilitiesResult",
-    "type": "object"
-  },
   "RealtimeChannelClosedFrame": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Payload for `channel.closed`.",
@@ -13652,6 +13518,70 @@
       }
     },
     "title": "RealtimeChannelClosedFrame",
+    "type": "object"
+  },
+  "RealtimeChannelConfig": {
+    "$defs": {
+      "RealtimeToolTimeoutPolicy": {
+        "description": "Typed per-channel tool timeout policy.",
+        "oneOf": [
+          {
+            "description": "Use the server's default realtime tool timeout.",
+            "properties": {
+              "type": {
+                "const": "default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Do not apply a realtime-specific timeout. The runtime/tool dispatcher\nmay still enforce its own normal execution policy.",
+            "properties": {
+              "type": {
+                "const": "disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Apply this finite realtime-specific timeout.",
+            "properties": {
+              "timeout_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "finite",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "timeout_ms"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Per-channel runtime knobs negotiated at open time.\n\nAdditive fields only; callers that do not carry this struct inherit the\nserver-default behavior through the surrounding open command.",
+    "properties": {
+      "tool_timeout": {
+        "$ref": "#/$defs/RealtimeToolTimeoutPolicy",
+        "description": "Realtime-specific timeout policy for product-session tool dispatch."
+      }
+    },
+    "title": "RealtimeChannelConfig",
     "type": "object"
   },
   "RealtimeChannelErrorFrame": {
@@ -15705,217 +15635,6 @@
     "title": "RealtimeInputKind",
     "type": "string"
   },
-  "RealtimeOpenInfo": {
-    "$defs": {
-      "RealtimeAudioFormat": {
-        "description": "Descriptor for an expected or actual realtime audio format.",
-        "properties": {
-          "channels": {
-            "description": "Channel count; `1` for mono.",
-            "format": "uint8",
-            "maximum": 255,
-            "minimum": 0,
-            "type": "integer"
-          },
-          "mime_type": {
-            "description": "IANA-style MIME type, e.g. `audio/pcm`.",
-            "type": "string"
-          },
-          "sample_rate_hz": {
-            "description": "Sample rate in hertz, e.g. `24000`.",
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          }
-        },
-        "required": [
-          "mime_type",
-          "sample_rate_hz",
-          "channels"
-        ],
-        "type": "object"
-      },
-      "RealtimeCapabilities": {
-        "description": "Product-facing realtime capability set for one target/provider combination.",
-        "properties": {
-          "audio_input_format": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RealtimeAudioFormat"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Audio format the provider session accepts for client audio input.\nClients MUST stamp incoming [`RealtimeAudioChunk`]s with the same\n`sample_rate_hz` and `channels`; mismatches are rejected server-side."
-          },
-          "audio_output_format": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/RealtimeAudioFormat"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Audio format the provider session emits for output audio chunks."
-          },
-          "input_kinds": {
-            "items": {
-              "$ref": "#/$defs/RealtimeInputKind"
-            },
-            "type": "array"
-          },
-          "interrupt_supported": {
-            "type": "boolean"
-          },
-          "output_kinds": {
-            "items": {
-              "$ref": "#/$defs/RealtimeOutputKind"
-            },
-            "type": "array"
-          },
-          "tool_lifecycle_events_supported": {
-            "type": "boolean"
-          },
-          "transcript_supported": {
-            "type": "boolean"
-          },
-          "turning_modes": {
-            "items": {
-              "$ref": "#/$defs/RealtimeTurningMode"
-            },
-            "type": "array"
-          },
-          "video_supported": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "interrupt_supported",
-          "transcript_supported",
-          "tool_lifecycle_events_supported",
-          "video_supported"
-        ],
-        "type": "object"
-      },
-      "RealtimeChannelTarget": {
-        "description": "Target for a public realtime channel.\n\nTwo variants, one for each addressing mode:\n\n- `SessionTarget` — standalone sessions (no mob-member continuity). The\n  session id is pinned for the channel's lifetime; when that session\n  ends, the channel ends.\n\n- `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the\n  canonical anchor, and the server resolves the current bridge session\n  on every tick from the MobMachine's `member_session_bindings` map.\n  Respawn atomically rotates the bridge session via the\n  `MemberSessionBindingChanged { old: Some, new: Some }` effect; the\n  channel survives without any SDK round-trip. A terminal\n  `MemberSessionBindingChanged { old: Some, new: None }` closes the\n  channel with `RealtimeErrorCode::BindingReleased`.",
-        "oneOf": [
-          {
-            "properties": {
-              "session_id": {
-                "type": "string"
-              },
-              "type": {
-                "const": "session_target",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "properties": {
-              "agent_identity": {
-                "type": "string"
-              },
-              "mob_id": {
-                "type": "string"
-              },
-              "type": {
-                "const": "mob_member",
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "mob_id",
-              "agent_identity"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "RealtimeInputKind": {
-        "description": "Input modality kind supported by a realtime channel.",
-        "enum": [
-          "text",
-          "audio",
-          "video"
-        ],
-        "type": "string"
-      },
-      "RealtimeOutputKind": {
-        "description": "Output modality kind supported by a realtime channel.",
-        "enum": [
-          "text",
-          "audio",
-          "video"
-        ],
-        "type": "string"
-      },
-      "RealtimeProtocolVersion": {
-        "description": "Canonical wire protocol version for realtime channels.\n\nThe version is bumped every time the on-the-wire shape of\n[`RealtimeAudioChunk`], frame enums, or other load-bearing realtime\ncontracts changes in an incompatible way. Clients and servers handshake on\nthe string form; this enum is the single typed owner of the set.",
-        "oneOf": [
-          {
-            "const": "2",
-            "description": "v2: adds `sample_rate_hz` + `channels` to [`RealtimeAudioChunk`] and\ntyped [`RealtimeErrorCode`] on channel errors.",
-            "type": "string"
-          }
-        ]
-      },
-      "RealtimeTurningMode": {
-        "description": "Turning mode for a realtime channel.",
-        "enum": [
-          "provider_managed",
-          "explicit_commit"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `realtime/open_info`.",
-    "properties": {
-      "capabilities": {
-        "$ref": "#/$defs/RealtimeCapabilities"
-      },
-      "default_protocol_version": {
-        "$ref": "#/$defs/RealtimeProtocolVersion"
-      },
-      "expires_at": {
-        "type": "string"
-      },
-      "open_token": {
-        "type": "string"
-      },
-      "supported_protocol_versions": {
-        "items": {
-          "$ref": "#/$defs/RealtimeProtocolVersion"
-        },
-        "type": "array"
-      },
-      "target": {
-        "$ref": "#/$defs/RealtimeChannelTarget"
-      },
-      "ws_url": {
-        "type": "string"
-      }
-    },
-    "required": [
-      "ws_url",
-      "open_token",
-      "expires_at",
-      "target",
-      "default_protocol_version",
-      "capabilities"
-    ],
-    "title": "RealtimeOpenInfo",
-    "type": "object"
-  },
   "RealtimeOutputChunk": {
     "$defs": {
       "RealtimeAudioChunk": {
@@ -16995,71 +16714,6 @@
     ],
     "title": "RealtimeServerFrame"
   },
-  "RealtimeStatusResult": {
-    "$defs": {
-      "RealtimeChannelState": {
-        "description": "Lifecycle state for a realtime channel.",
-        "enum": [
-          "opening",
-          "ready",
-          "interrupted",
-          "reconnecting",
-          "closed",
-          "error"
-        ],
-        "type": "string"
-      },
-      "RealtimeChannelStatus": {
-        "description": "Public realtime channel status projection.",
-        "properties": {
-          "attempt_count": {
-            "default": 0,
-            "format": "uint32",
-            "minimum": 0,
-            "type": "integer"
-          },
-          "deadline_at": {
-            "description": "Wall-clock deadline after which the reconnect cycle will be abandoned\nand the channel will close with `ReconnectExhausted`. Derived from the\nreconnect policy's `max_total_ms` on top of the cycle's start time. RFC\n3339 encoded, matches `next_retry_at`. Present only while the channel\nis actively reconnecting.",
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "next_retry_at": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "reason": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "state": {
-            "$ref": "#/$defs/RealtimeChannelState"
-          }
-        },
-        "required": [
-          "state"
-        ],
-        "type": "object"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `realtime/status`.",
-    "properties": {
-      "status": {
-        "$ref": "#/$defs/RealtimeChannelStatus"
-      }
-    },
-    "required": [
-      "status"
-    ],
-    "title": "RealtimeStatusResult",
-    "type": "object"
-  },
   "RealtimeTextChunk": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "A text chunk for realtime ingress/egress.",
@@ -17087,6 +16741,58 @@
     ],
     "title": "RealtimeTextDelta",
     "type": "object"
+  },
+  "RealtimeToolTimeoutPolicy": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Typed per-channel tool timeout policy.",
+    "oneOf": [
+      {
+        "description": "Use the server's default realtime tool timeout.",
+        "properties": {
+          "type": {
+            "const": "default",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Do not apply a realtime-specific timeout. The runtime/tool dispatcher\nmay still enforce its own normal execution policy.",
+        "properties": {
+          "type": {
+            "const": "disabled",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Apply this finite realtime-specific timeout.",
+        "properties": {
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": {
+            "const": "finite",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "timeout_ms"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "RealtimeToolTimeoutPolicy"
   },
   "RealtimeTurningMode": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -17467,34 +17173,6 @@
       "outcome_type"
     ],
     "title": "RuntimeAcceptResult",
-    "type": "object"
-  },
-  "RuntimeRealtimeAttachmentStatusResult": {
-    "$defs": {
-      "WireRealtimeAttachmentStatus": {
-        "description": "Public live attachment status projection used by runtime and mob surfaces.",
-        "enum": [
-          "unattached",
-          "intent_present_unbound",
-          "binding_not_ready",
-          "binding_ready",
-          "replacement_pending",
-          "reattach_required"
-        ],
-        "type": "string"
-      }
-    },
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `session/realtime_attachment_status`.",
-    "properties": {
-      "status": {
-        "$ref": "#/$defs/WireRealtimeAttachmentStatus"
-      }
-    },
-    "required": [
-      "status"
-    ],
-    "title": "RuntimeRealtimeAttachmentStatusResult",
     "type": "object"
   },
   "RuntimeStateResult": {
@@ -26656,20 +26334,6 @@
     ],
     "title": "WireRealmSummary",
     "type": "object"
-  },
-  "WireRealtimeAttachmentStatus": {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Public live attachment status projection used by runtime and mob surfaces.",
-    "enum": [
-      "unattached",
-      "intent_present_unbound",
-      "binding_not_ready",
-      "binding_ready",
-      "replacement_pending",
-      "reattach_required"
-    ],
-    "title": "WireRealtimeAttachmentStatus",
-    "type": "string"
   },
   "WireRenderClass": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

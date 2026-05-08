@@ -242,38 +242,10 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/realtime/open_info",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get bootstrap metadata for opening a realtime channel",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/realtime/status",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get product-layer realtime channel status for a target",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/realtime/capabilities",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get product-layer realtime capabilities for a target",
-            )],
-        ),
-        RestPathDescriptor::new(
             "/sessions/{id}/status",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get a session's current runtime state",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/realtime-attachment-status",
-            vec![RestOperationDescriptor::new(
-                "get",
-                "Get a session's realtime attachment status",
             )],
         ),
         RestPathDescriptor::new(

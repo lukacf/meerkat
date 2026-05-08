@@ -20,7 +20,7 @@ use meerkat::{
     MachineSessionArchiveProtocol, OutputSchema, PersistenceBundle, PersistentSessionService,
     ScheduleService, ScheduleToolDispatcher, ToolError, ToolResult,
 };
-use meerkat_contracts::{RealtimeOpenRequest, SkillsParams};
+use meerkat_contracts::SkillsParams;
 use meerkat_core::error::invalid_session_id_message;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -1482,11 +1482,6 @@ fn base_tools_list() -> Vec<Value> {
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamOpenInput>()
         }),
         json!({
-            "name": "meerkat_realtime_open_info",
-            "description": "Issue realtime websocket bootstrap information through the configured RPC realtime host.",
-            "inputSchema": meerkat_tools::schema_for::<RealtimeOpenRequest>()
-        }),
-        json!({
             "name": "meerkat_event_stream_read",
             "description": "Read the next item from an open session-level event stream.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSessionEventStreamReadInput>()
@@ -1705,13 +1700,6 @@ pub async fn handle_tools_call_with_notifier(
                     ToolCallError::invalid_params(format!("Invalid arguments: {e}"))
                 })?;
             handle_meerkat_event_stream_open(state, input)
-                .await
-                .map_err(ToolCallError::internal)
-        }
-        "meerkat_realtime_open_info" => {
-            let input: RealtimeOpenRequest = serde_json::from_value(arguments.clone())
-                .map_err(|e| ToolCallError::invalid_params(format!("Invalid arguments: {e}")))?;
-            handle_meerkat_realtime_open_info(state, input)
                 .await
                 .map_err(ToolCallError::internal)
         }
@@ -2441,25 +2429,6 @@ fn mcp_live_response_value(
         applied_at_turn: None,
     })
     .map_err(|error| format!("failed to serialize MCP live response: {error}"))
-}
-
-async fn handle_meerkat_realtime_open_info(
-    state: &MeerkatMcpState,
-    input: RealtimeOpenRequest,
-) -> Result<Value, String> {
-    #[cfg(not(feature = "mob"))]
-    {
-        let _ = (state, input);
-        Err("realtime/open_info delegation requires the mob-enabled MCP server build".to_string())
-    }
-    #[cfg(feature = "mob")]
-    {
-        let addr = state.mob_state.realtime_rpc_tcp_addr().ok_or_else(|| {
-            "realtime/open_info delegation requires --realtime-rpc-tcp".to_string()
-        })?;
-        let result = rpc_tcp_call(&addr, "realtime/open_info", json!(input)).await?;
-        Ok(wrap_tool_payload(result))
-    }
 }
 
 async fn rpc_tcp_call(addr: &str, method: &str, params: Value) -> Result<Value, String> {
@@ -4673,10 +4642,9 @@ mod tests {
         assert_eq!(mcp_reload_tool["name"], "meerkat_mcp_reload");
         let event_stream_open_tool = find_tool("meerkat_event_stream_open");
         assert_eq!(event_stream_open_tool["name"], "meerkat_event_stream_open");
-        let realtime_open_info_tool = find_tool("meerkat_realtime_open_info");
-        assert_eq!(
-            realtime_open_info_tool["name"],
-            "meerkat_realtime_open_info"
+        assert!(
+            !tool_names.contains(&"meerkat_realtime_open_info"),
+            "old realtime bootstrap proxy must stay retired"
         );
         let event_stream_read_tool = find_tool("meerkat_event_stream_read");
         assert_eq!(event_stream_read_tool["name"], "meerkat_event_stream_read");

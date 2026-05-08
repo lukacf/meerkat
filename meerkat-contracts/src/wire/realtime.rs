@@ -350,9 +350,8 @@ impl RealtimeToolTimeoutPolicy {
 
 /// Per-channel runtime knobs negotiated at open time.
 ///
-/// Additive fields only — clients that do not carry this struct inherit the
-/// server-default behavior via `#[serde(default)]` on the parent
-/// [`RealtimeOpenRequest`].
+/// Additive fields only; callers that do not carry this struct inherit the
+/// server-default behavior through the surrounding open command.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeChannelConfig {
@@ -424,7 +423,7 @@ pub struct RealtimeChannelStatus {
     pub reason: Option<String>,
 }
 
-/// Request payload for `realtime/open_info`.
+/// Internal request payload for legacy websocket bootstrap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeOpenRequest {
@@ -439,7 +438,7 @@ pub struct RealtimeOpenRequest {
     pub channel_config: Option<RealtimeChannelConfig>,
 }
 
-/// Response payload for `realtime/open_info`.
+/// Internal response payload for legacy websocket bootstrap.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct RealtimeOpenInfo {
@@ -450,34 +449,6 @@ pub struct RealtimeOpenInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supported_protocol_versions: Vec<RealtimeProtocolVersion>,
     pub default_protocol_version: RealtimeProtocolVersion,
-    pub capabilities: RealtimeCapabilities,
-}
-
-/// Request payload for `realtime/status`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RealtimeStatusParams {
-    pub target: RealtimeChannelTarget,
-}
-
-/// Response payload for `realtime/status`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RealtimeStatusResult {
-    pub status: RealtimeChannelStatus,
-}
-
-/// Request payload for `realtime/capabilities`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RealtimeCapabilitiesParams {
-    pub target: RealtimeChannelTarget,
-}
-
-/// Response payload for `realtime/capabilities`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub struct RealtimeCapabilitiesResult {
     pub capabilities: RealtimeCapabilities,
 }
 

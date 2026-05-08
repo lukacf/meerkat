@@ -835,14 +835,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
-    append_python_dataclass(
-        "RuntimeRealtimeAttachmentStatusParams",
-        params_schema,
-        "Request payload for session/realtime_attachment_status.",
-    )
-    append_python_dataclass("RealtimeOpenRequest", params_schema, "Request payload for realtime/open_info.")
-    append_python_dataclass("RealtimeStatusParams", params_schema, "Request payload for realtime/status.")
-    append_python_dataclass("RealtimeCapabilitiesParams", params_schema, "Request payload for realtime/capabilities.")
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
@@ -857,24 +849,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         runtime_state_result_root,
         "Response payload for runtime-backed session status projections.",
     )
-    append_python_dataclass(
-        "RuntimeRealtimeAttachmentStatusResult",
-        wire_schema,
-        "Response payload for session/realtime_attachment_status.",
-    )
     append_python_dataclass("RealtimeReconnectPolicy", wire_schema, "Reconnect policy for realtime channels.")
     append_python_alias(
         "RealtimeToolTimeoutPolicy",
-        params_schema,
+        wire_schema,
         "Tool timeout policy for realtime channels.",
     )
-    append_python_dataclass("RealtimeChannelConfig", params_schema, "Runtime knobs for a realtime channel.")
+    append_python_dataclass("RealtimeChannelConfig", wire_schema, "Runtime knobs for a realtime channel.")
     append_python_dataclass("RealtimeAudioFormat", wire_schema, "Realtime audio format descriptor.")
     append_python_dataclass("RealtimeCapabilities", wire_schema, "Capability set for a realtime channel.")
     append_python_dataclass("RealtimeChannelStatus", wire_schema, "Public realtime channel status projection.")
-    append_python_dataclass("RealtimeOpenInfo", wire_schema, "Response payload for realtime/open_info.")
-    append_python_dataclass("RealtimeStatusResult", wire_schema, "Response payload for realtime/status.")
-    append_python_dataclass("RealtimeCapabilitiesResult", wire_schema, "Response payload for realtime/capabilities.")
     append_python_dataclass("RealtimeTextChunk", wire_schema, "Text chunk for realtime ingress.")
     append_python_dataclass("RealtimeTextDelta", wire_schema, "Text delta for realtime output.")
     append_python_dataclass("RealtimeAudioChunk", wire_schema, "Opaque realtime audio chunk.")
@@ -1204,10 +1188,6 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
-    append_typescript_interface("RuntimeRealtimeAttachmentStatusParams", params_schema)
-    append_typescript_interface("RealtimeOpenRequest", params_schema)
-    append_typescript_interface("RealtimeStatusParams", params_schema)
-    append_typescript_interface("RealtimeCapabilitiesParams", params_schema)
     append_typescript_interface("ScheduleIdParams", params_schema)
     append_typescript_interface("ListSchedulesParams", params_schema)
     append_typescript_interface("ScheduleOccurrencesParams", params_schema)
@@ -1256,16 +1236,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("MobWireResult", wire_schema)
     append_typescript_interface("MobUnwireResult", wire_schema)
     append_typescript_interface("RuntimeStateResult", runtime_state_result_root)
-    append_typescript_interface("RuntimeRealtimeAttachmentStatusResult", wire_schema)
     append_typescript_interface("RealtimeReconnectPolicy", wire_schema)
-    append_typescript_alias("RealtimeToolTimeoutPolicy", params_schema)
-    append_typescript_interface("RealtimeChannelConfig", params_schema)
+    append_typescript_alias("RealtimeToolTimeoutPolicy", wire_schema)
+    append_typescript_interface("RealtimeChannelConfig", wire_schema)
     append_typescript_interface("RealtimeAudioFormat", wire_schema)
     append_typescript_interface("RealtimeCapabilities", wire_schema)
     append_typescript_interface("RealtimeChannelStatus", wire_schema)
-    append_typescript_interface("RealtimeOpenInfo", wire_schema)
-    append_typescript_interface("RealtimeStatusResult", wire_schema)
-    append_typescript_interface("RealtimeCapabilitiesResult", wire_schema)
     append_typescript_interface("RealtimeTextChunk", wire_schema)
     append_typescript_interface("RealtimeTextDelta", wire_schema)
     append_typescript_interface("RealtimeAudioChunk", wire_schema)

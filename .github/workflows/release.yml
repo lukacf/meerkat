@@ -857,38 +857,10 @@ jobs:
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_web_sdk_only != 'true' }}
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          MEERKAT_REGISTRY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}
         run: |
-          set -euo pipefail
-          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
-          if [[ "$DRY_RUN" == "true" ]]; then
-            echo "Running cargo publish in dry-run mode"
-          else
-            echo "Publishing crates to crates.io"
-          fi
-          mapfile -t crates < <(scripts/release-rust-crates.sh)
-          for c in "${crates[@]}"; do
-            tmp_cfg="$(mktemp)"
-            scripts/generate-patch-config.sh "$GITHUB_WORKSPACE" "$c" > "$tmp_cfg"
-            export CARGO_TARGET_DIR="${RUNNER_TEMP:-/tmp}/meerkat-publish-target/${c}"
-            mkdir -p "${CARGO_TARGET_DIR}/package"
-            ln -sfn "${GITHUB_WORKSPACE}/meerkat-core" "${CARGO_TARGET_DIR}/package/meerkat-core"
-            if [[ "$DRY_RUN" == "true" ]]; then
-              cargo publish -p "$c" --locked --dry-run --config "$tmp_cfg"
-            else
-              output=$(cargo publish -p "$c" --locked --config "$tmp_cfg" 2>&1) && true
-              rc=$?
-              if [[ $rc -eq 0 ]]; then
-                echo "  $c: published"
-              elif echo "$output" | grep -q "already exists\|already uploaded"; then
-                echo "  $c: already published, skipping"
-              else
-                echo "$output" >&2
-                echo "  $c: FAILED" >&2
-                exit $rc
-              fi
-            fi
-            rm -f "$tmp_cfg"
-          done
+          MEERKAT_REGISTRY_DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}" \
+            scripts/release-publish-rust-crates.sh
 
       - name: Publish Python SDK
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.publish_web_sdk_only != 'true' }}

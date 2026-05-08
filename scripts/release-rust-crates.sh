@@ -3,37 +3,37 @@
 set -euo pipefail
 
 printf '%s\n' \
-  meerkat-models \
   meerkat-machine-derive \
   meerkat-machine-dsl-core \
-  meerkat-machine-dsl \
-  meerkat-machine-schema \
-  meerkat-machine-kernels \
   meerkat-agent-build-authority \
   meerkat-core \
-  meerkat-llm-core \
-  meerkat-auth-core \
-  meerkat-anthropic \
-  meerkat-openai \
-  meerkat-gemini \
+  meerkat-machine-dsl \
+  meerkat-models \
+  meerkat-machine-schema \
+  meerkat-machine-kernels \
   meerkat-schedule \
   meerkat-contracts \
-  meerkat-client \
-  meerkat-providers \
   meerkat-store \
-  meerkat-tools \
-  meerkat-runtime \
-  meerkat-session \
+  meerkat-llm-core \
+  meerkat-skills \
+  meerkat-auth-core \
   meerkat-memory \
   meerkat-mcp \
-  meerkat-mcp-server \
   meerkat-hooks \
-  meerkat-skills \
   meerkat-comms \
-  meerkat-rpc \
-  meerkat-rest \
+  meerkat-anthropic \
+  meerkat-gemini \
+  meerkat-providers \
+  meerkat-runtime \
+  meerkat-openai \
+  meerkat-tools \
+  meerkat-session \
+  meerkat-client \
   meerkat \
   meerkat-mob \
   meerkat-mob-mcp \
   meerkat-mob-pack \
+  meerkat-mcp-server \
+  meerkat-rpc \
+  meerkat-rest \
   rkat

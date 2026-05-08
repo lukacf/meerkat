@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release package publishing** — Rust crate publishing now follows a
+  dependency-ordered crate list, streams per-crate `cargo publish` logs, applies
+  a bounded timeout, and skips Cargo's duplicate verifier during real uploads
+  because release validation already packages and links the published surface.
+
 ## [0.6.3] - 2026-05-08
 
 Meerkat 0.6.3 is a patch release for published Rust crate consumers. It fixes

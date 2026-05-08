@@ -284,10 +284,14 @@ fn gcp_feature_matrix_lane_fans_out_remote_cargo_actions() {
         "setup-buildbuddy-ci must document the lightweight submitter profile"
     );
     assert!(
+        setup.contains("inputs.profile == 'submitter' || inputs.profile == 'doctor'"),
+        "submitter profile must install Rust because Bazel target selection still reads cargo metadata locally"
+    );
+    assert!(
         workflow.contains("group: gcp\n          profile: submitter")
             && workflow.contains("group: gcp-governance\n          profile: submitter")
             && workflow.contains("group: gcp-wasm-feature\n          profile: submitter"),
-        "GCP submit-only jobs should skip local Rust/Node setup and let remote Bazel executors do the work"
+        "GCP submit-only jobs should use the lightweight submitter profile and let remote Bazel executors do compilation"
     );
 }
 

@@ -391,6 +391,7 @@ if job_has_line .github/workflows/ci.yml select_backend 'runs-on: ubuntu-latest'
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'group: gcp' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'profile: submitter' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'lanes: ${{ steps.gcp-lanes.outputs.lanes }}' &&
+  grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'if: ${{ false }}' &&
   job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'if: ${{ false }}' &&

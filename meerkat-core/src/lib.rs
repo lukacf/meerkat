@@ -42,6 +42,7 @@ pub mod image_content;
 pub mod image_generation;
 pub mod interaction;
 pub mod lifecycle;
+pub mod live_adapter;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
@@ -175,9 +176,8 @@ pub use handles::{
     PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
     PeerResponseTerminalFact, PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
     PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
-    PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, RealtimeProductTurnHandle,
-    RealtimeProductTurnPhase, SessionAdmissionHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
-    TurnStateHandle, TurnStateSnapshot,
+    PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, SessionAdmissionHandle,
+    SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle, TurnStateSnapshot,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,

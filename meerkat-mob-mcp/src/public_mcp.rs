@@ -264,15 +264,20 @@ async fn resolve_target_session_id(
 }
 
 async fn realtime_status_payload(
-    state: &Arc<MobMcpState>,
-    params: RealtimeStatusParams,
+    _state: &Arc<MobMcpState>,
+    _params: RealtimeStatusParams,
 ) -> Result<RealtimeStatusResult, McpToolError> {
-    let session_id = resolve_target_session_id(state, &params.target).await?;
-    let status = state
-        .realtime_session_realtime_channel_status(&session_id)
-        .await
-        .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-    Ok(RealtimeStatusResult { status })
+    // Realtime status is no longer DSL-owned (live-adapter MVP).
+    // Return a default closed status.
+    Ok(RealtimeStatusResult {
+        status: meerkat_contracts::RealtimeChannelStatus {
+            state: meerkat_contracts::RealtimeChannelState::Closed,
+            attempt_count: 0,
+            next_retry_at: None,
+            deadline_at: None,
+            reason: Some("realtime status is not available in this version".to_string()),
+        },
+    })
 }
 
 pub fn public_tool_names() -> &'static [&'static str] {

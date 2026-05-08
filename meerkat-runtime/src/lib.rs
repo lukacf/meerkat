@@ -60,6 +60,7 @@ pub mod input;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
+pub mod live_adapter_host;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
@@ -114,8 +115,8 @@ pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,
     RuntimeMcpServerLifecycleHandle, RuntimeModelRoutingHandle, RuntimePeerCommsHandle,
-    RuntimePeerInteractionHandle, RuntimeRealtimeProductTurnHandle, RuntimeSessionAdmissionHandle,
-    RuntimeSessionContextHandle, RuntimeTurnStateHandle,
+    RuntimePeerInteractionHandle, RuntimeSessionAdmissionHandle, RuntimeSessionContextHandle,
+    RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,
@@ -141,8 +142,7 @@ pub use meerkat_machine::{
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,
-    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, RealtimeAttachmentSignalAuthority,
-    RealtimeAttachmentStatus, RealtimeBootstrapEligibility, ResolvedSessionLlmReconfigure,
+    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, ResolvedSessionLlmReconfigure,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };

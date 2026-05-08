@@ -63,7 +63,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, HashSet, btree_map::Entry};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -207,7 +207,6 @@ fn persisted_mob_binding(session: &meerkat_core::Session) -> Option<meerkat_mob:
 pub struct MobMcpState {
     session_service: Arc<dyn MobSessionService>,
     runtime_adapter: Option<Arc<meerkat_runtime::MeerkatMachine>>,
-    realtime_rpc_tcp_addr: StdMutex<Option<String>>,
     default_llm_client: Option<Arc<dyn LlmClient>>,
     default_llm_client_provider: Option<DefaultLlmClientProvider>,
     external_tools_provider: Option<meerkat_mob::ExternalToolsProvider>,
@@ -239,7 +238,6 @@ impl MobMcpState {
         Self {
             session_service,
             runtime_adapter,
-            realtime_rpc_tcp_addr: StdMutex::new(None),
             default_llm_client: None,
             default_llm_client_provider: None,
             external_tools_provider: None,
@@ -290,28 +288,6 @@ impl MobMcpState {
             mob_root
         });
         self
-    }
-
-    pub fn with_realtime_rpc_tcp_addr(self, addr: Option<String>) -> Self {
-        *self
-            .realtime_rpc_tcp_addr
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
-        self
-    }
-
-    pub fn set_realtime_rpc_tcp_addr(&self, addr: Option<String>) {
-        *self
-            .realtime_rpc_tcp_addr
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = addr;
-    }
-
-    pub fn realtime_rpc_tcp_addr(&self) -> Option<String> {
-        self.realtime_rpc_tcp_addr
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
     }
 
     pub fn with_default_llm_client(mut self, client: Option<Arc<dyn LlmClient>>) -> Self {
@@ -1196,41 +1172,6 @@ impl MobMcpState {
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
         self.session_service.read(session_id).await.map(|_| ())
-    }
-
-    pub async fn realtime_session_realtime_attachment_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<meerkat_runtime::RealtimeAttachmentStatus, SessionError> {
-        self.realtime_validate_session_target(session_id).await?;
-        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
-            SessionError::Unsupported(
-                "runtime adapter unavailable for realtime target inspection".to_string(),
-            )
-        })?;
-        adapter
-            .realtime_attachment_status(session_id)
-            .await
-            .map_err(|err| SessionError::Unsupported(err.to_string()))
-    }
-
-    /// Wave-c C-9c R4: fully-projected public channel status for MCP
-    /// `meerkat_realtime_status`. Reads DSL state (attachment +
-    /// reconnect-progress) through the runtime adapter.
-    pub async fn realtime_session_realtime_channel_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<meerkat_contracts::RealtimeChannelStatus, SessionError> {
-        self.realtime_validate_session_target(session_id).await?;
-        let adapter = self.runtime_adapter.as_ref().ok_or_else(|| {
-            SessionError::Unsupported(
-                "runtime adapter unavailable for realtime channel status inspection".to_string(),
-            )
-        })?;
-        adapter
-            .realtime_channel_status(session_id)
-            .await
-            .map_err(|err| SessionError::Unsupported(err.to_string()))
     }
 
     pub async fn mob_wait_kickoff(

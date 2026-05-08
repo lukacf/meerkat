@@ -45,16 +45,11 @@ struct Cli {
     /// Example: --tcp 127.0.0.1:4800
     #[arg(long)]
     tcp: Option<String>,
-    /// Permit --tcp/--realtime-ws to bind non-loopback addresses.
+    /// Permit --tcp to bind non-loopback addresses.
     ///
     /// This is an explicit transport exposure opt-in, not an auth mechanism.
     #[arg(long)]
     allow_remote: bool,
-    /// Listen on a sibling WebSocket address for realtime channels.
-    ///
-    /// Example: --realtime-ws 127.0.0.1:4900
-    #[arg(long)]
-    realtime_ws: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -150,14 +145,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|err| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
             })?;
-    }
-    if let Some(ref realtime_ws_addr) = cli.realtime_ws {
-        meerkat_rpc::secure_rpc::validate_tcp_bind_policy(
-            "realtime_ws",
-            realtime_ws_addr,
-            tcp_bind_policy,
-        )
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
     }
     let selection = RealmConfig::selection_from_inputs(
         cli.realm.clone(),
@@ -261,18 +248,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
-    let realtime_openai_factory = match factory.build_openai_realtime_session_factory(&config).await
-    {
-        Ok(factory) => Some(factory),
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "OpenAI realtime sideband factory unavailable; realtime websocket host will expose text-only runtime attachment unless credentials are configured"
-            );
-            None
-        }
-    };
-
     let config_runtime = Arc::new(ConfigRuntime::new(
         Arc::clone(&config_store),
         realm_paths.root.join("config_state.json"),
@@ -314,61 +289,12 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
-    let realtime_ws = if let Some(ref realtime_ws_addr) = cli.realtime_ws {
-        let listener = tokio::net::TcpListener::bind(realtime_ws_addr).await?;
-        let actual_realtime_ws_addr = listener.local_addr()?;
-        let actual_ws_url = format!(
-            "ws://{actual_realtime_ws_addr}{}",
-            meerkat_rpc::REALTIME_WS_PATH
-        );
-        let mut host = meerkat_rpc::RealtimeWsHost::new(actual_ws_url.clone());
-        if let Some(session_factory) = realtime_openai_factory.clone() {
-            host = host.with_session_factory(session_factory);
-        }
-        let host = Arc::new(host);
-        eprintln!("rkat-rpc listening on {actual_ws_url}");
-        let rt = Arc::clone(&runtime);
-        let cs = Arc::clone(&config_store);
-        let ws_host = Arc::clone(&host);
-        Some((
-            host,
-            tokio::spawn(async move {
-                meerkat_rpc::serve_realtime_ws_listener(listener, ws_host, rt, cs).await
-            }),
-        ))
-    } else {
-        None
-    };
-
     let serve_result = if let Some(ref tcp_addr) = cli.tcp {
         eprintln!("rkat-rpc listening on tcp://{tcp_addr}");
-        if let Some((realtime_ws_host, _)) = &realtime_ws {
-            meerkat_rpc::serve_tcp_with_realtime_ws_host(
-                tcp_addr,
-                runtime,
-                config_store,
-                skill_runtime,
-                Some(Arc::clone(realtime_ws_host)),
-            )
-            .await
-        } else {
-            meerkat_rpc::serve_tcp(tcp_addr, runtime, config_store, skill_runtime).await
-        }
-    } else if let Some((realtime_ws_host, _)) = &realtime_ws {
-        meerkat_rpc::serve_stdio_with_skill_runtime_and_realtime_ws_host(
-            runtime,
-            config_store,
-            skill_runtime,
-            Some(Arc::clone(realtime_ws_host)),
-        )
-        .await
+        meerkat_rpc::serve_tcp(tcp_addr, runtime, config_store, skill_runtime).await
     } else {
         meerkat_rpc::serve_stdio_with_skill_runtime(runtime, config_store, skill_runtime).await
     };
-    if let Some((_, realtime_ws_handle)) = realtime_ws {
-        realtime_ws_handle.abort();
-        let _ = realtime_ws_handle.await;
-    }
     lease.shutdown().await;
     serve_result?;
 

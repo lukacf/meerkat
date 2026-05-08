@@ -2960,7 +2960,6 @@ dependencies = [
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-providers",
- "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",

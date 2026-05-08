@@ -93,7 +93,6 @@ async fn integration_real_live_continue_hangs() {
             sessions_jsonl_dir: String::new(),
         },
         expose_paths: false,
-        realtime_rpc_tcp_addr: None,
         config_runtime,
         realm_lease: Arc::new(tokio::sync::Mutex::new(None)),
         skill_runtime: None,

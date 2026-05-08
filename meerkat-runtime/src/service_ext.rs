@@ -12,9 +12,8 @@ use crate::completion::CompletionHandle;
 use crate::input::Input;
 use crate::input_state::StoredInputState;
 use crate::meerkat_machine_types::{
-    ImageOperationRoutingRequest, ImageOperationRoutingResult, RealtimeAttachmentStatus,
-    RealtimeBootstrapEligibility, SessionLlmReconfigureReport, SessionLlmReconfigureRequest,
-    SwitchTurnRequest,
+    ImageOperationRoutingRequest, ImageOperationRoutingResult, SessionLlmReconfigureReport,
+    SessionLlmReconfigureRequest, SwitchTurnRequest,
 };
 use crate::runtime_state::RuntimeState;
 use crate::traits::{ResetReport, RetireReport, RuntimeDriverError};
@@ -59,12 +58,6 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
         session_id: &SessionId,
     ) -> Result<RuntimeState, RuntimeDriverError>;
 
-    /// Get the live attachment status for a session.
-    async fn realtime_attachment_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<RealtimeAttachmentStatus, RuntimeDriverError>;
-
     /// Get the runtime-owned resolved LLM capability surface for a session.
     async fn resolved_session_llm_capabilities(
         &self,
@@ -73,26 +66,6 @@ pub trait SessionServiceRuntimeExt: Send + Sync {
     {
         Err(RuntimeDriverError::Internal(
             "resolved session llm capabilities are not implemented by this runtime adapter".into(),
-        ))
-    }
-
-    /// Fully-projected public channel status. RPC / MCP `realtime/status`
-    /// responders use this so `attempt_count` / `next_retry_at` /
-    /// `deadline_at` come from machine-owned reconnect lifecycle state.
-    async fn realtime_channel_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError>;
-
-    /// Machine-owned realtime bootstrap eligibility. `realtime/open_info`,
-    /// `realtime/capabilities`, and websocket `channel.open` use this instead
-    /// of inferring eligibility from attachment-status availability.
-    async fn realtime_bootstrap_eligibility(
-        &self,
-        _session_id: &SessionId,
-    ) -> Result<RealtimeBootstrapEligibility, RuntimeDriverError> {
-        Err(RuntimeDriverError::Internal(
-            "realtime bootstrap eligibility is not implemented by this runtime adapter".into(),
         ))
     }
 

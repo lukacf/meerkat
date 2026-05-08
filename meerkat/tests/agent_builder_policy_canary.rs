@@ -501,7 +501,6 @@ async fn public_facade_rejects_forged_session_runtime_binding_authority() {
         Arc::clone(prepared.session_context()),
         Arc::clone(prepared.session_claim_handle()),
         Arc::clone(prepared.interaction_stream()),
-        Arc::clone(prepared.realtime_product_turn()),
         Arc::new(()),
     );
 

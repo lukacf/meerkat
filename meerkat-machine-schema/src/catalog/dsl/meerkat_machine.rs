@@ -258,185 +258,6 @@ impl ToolVisibilityWitness {
     }
 }
 
-/// Per-session realtime binding-state lifecycle.
-///
-/// Unit variants only — carried inside `MeerkatMachine` state as a closed
-/// set of phases. The default (`Unbound`) is paired with
-/// `realtime_binding_authority_epoch == None` by the
-/// `realtime_binding_epoch_consistency` invariant.
-///
-/// Default serde tagging reuses the variant names as string values
-/// (`"Unbound"`, `"BindingNotReady"`, `"BindingReady"`, `"ReplacementPending"`)
-/// to preserve wire-format compatibility with earlier stringly-typed clients.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeBindingState {
-    #[default]
-    Unbound,
-    BindingNotReady,
-    BindingReady,
-    ReplacementPending,
-}
-
-/// Per-session realtime reconnect retry lifecycle.
-///
-/// The realtime websocket shell supplies time observations and jittered retry
-/// deadlines, but the canonical cycle phase, attempt count, exhaustion, and
-/// public status projection live in the MeerkatMachine state. This replaces
-/// the previous websocket-local retry progress projection path.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeReconnectCycleState {
-    #[default]
-    Idle,
-    Reconnecting,
-    Exhausted,
-}
-
-/// Product-turn lifecycle phase for a provider-managed realtime session
-/// (U9 / dogma #4).
-///
-/// The realtime-WS shell previously tracked turn lifecycle as three shell
-/// locals (`product_turn_in_flight`, `product_turn_committed`,
-/// `product_output_started`). This enum collapses the product of those
-/// three orthogonal milestones into a closed set of phases the DSL owns:
-///
-/// - `Idle`: between turns — no input accepted yet.
-/// - `AwaitingProgress`: input accepted; no commit, no output observed.
-/// - `Committed`: `TurnCommitted` arrived but no output delta yet.
-/// - `OutputStarted`: output delta / tool call arrived but no commit yet.
-/// - `Preemptible`: both `TurnCommitted` and output have landed — the
-///   only state in which an input chunk should preempt the current
-///   provider-managed turn (the "committed turn has visible assistant-side
-///   progress" rule documented on `should_preempt_on_input`).
-///
-/// Transitions are idempotent via guard rejection: the runtime handle
-/// reports guard-rejected transitions as `Ok(false)` so the shell can
-/// fire unconditionally on every lifecycle event without tracking its
-/// own phase.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProductTurnPhase {
-    #[default]
-    Idle,
-    AwaitingProgress,
-    Committed,
-    OutputStarted,
-    Preemptible,
-}
-
-/// Projection-freshness discriminant for the realtime provider session
-/// (dogma round 2, U-C / dogma #1, #3, #13, #20).
-///
-/// Replaces the shell-local `ProjectionFreshness` enum previously owned by
-/// `meerkat-rpc::realtime_ws`. Freshness truth is now canonical DSL state
-/// owned by the session's MeerkatMachine; the realtime-WS shell reads it via
-/// the [`RealtimeProductTurnHandle`] and fires typed inputs for each
-/// observer tick, turn terminal, and refresh-drain.
-///
-/// The `baseline_ms` companion field
-/// ([`MeerkatMachineState::realtime_projection_frontier_ms`]) pairs with this
-/// discriminant: it holds the `baseline_ms` while `Clean`, and the
-/// `new_at_ms` of the pending advance while `StaleDeferred` / `StaleImmediate`.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProjectionFreshness {
-    /// Provider projection matches canonical session state as of
-    /// `realtime_projection_frontier_ms`. No refresh owed.
-    #[default]
-    Clean,
-    /// Canonical state advanced while the provider turn was live; refresh
-    /// blocked until the turn terminates so barge-in continuity isn't broken.
-    StaleDeferred,
-    /// Refresh owed at the next drain site (idle input-chunk arrival or
-    /// turn-end).
-    StaleImmediate,
-}
-
-/// Typed classification of a clean provider-session close for the realtime
-/// socket (dogma round 2, U-C / dogma #1, #3, #18, #20).
-///
-/// Replaces the shell-local boolean pair (`client_has_submitted_input`,
-/// `last_turn_terminally_completed`) previously owned by the realtime-WS
-/// dispatch loop. The DSL owns the classification; the shell reads
-/// [`RealtimeProductTurnHandle::reconnect_policy_on_clean_close`] at the
-/// clean-close branch point and dispatches on the typed value.
-///
-/// Semantics: a `CleanExit` means the session has no in-flight client work
-/// that would need to be recovered via reattach (either the client never
-/// submitted anything, or the last turn reached a terminal completion).
-/// `ReattachAndRecover` means the client issued work that has not yet
-/// reached a terminal completion, so a clean close is treated as a
-/// mid-work disconnect and the channel proactively re-opens.
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Default,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeReconnectPolicy {
-    /// A clean close has nothing to recover — either the client never
-    /// submitted input on this session, or the last observed turn reached
-    /// a terminal completion.
-    #[default]
-    CleanExit,
-    /// The client issued work that has not yet reached a terminal turn
-    /// completion; a clean close is a mid-work disconnect and the channel
-    /// should proactively reattach.
-    ReattachAndRecover,
-}
-
 /// Bridging type for an MCP server identifier, matching the catalog type.
 /// Used as the key in `mcp_server_states` and carried on MCP lifecycle
 /// inputs and effects.
@@ -721,18 +542,6 @@ pub enum SurfacePhase {
     #[default]
     Operating,
     Shutdown,
-}
-
-/// Typed live-topology reconfigure phase. Closed set of literals previously
-/// assigned to `live_topology_phase`. The catalog DSL holds a parallel copy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum LiveTopologyPhase {
-    #[default]
-    Idle,
-    Reconfiguring,
-    Detached,
-    HostIdentityApplied,
-    HostVisibilityApplied,
 }
 
 /// Typed input-lifecycle phase, mirroring the closed set of literals the DSL
@@ -1499,27 +1308,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             surface_phase: SurfacePhase,
             removal_timeout_ms: u64,
 
-            // --- Realtime-attachment authority (per-session) ---
-            realtime_intent_present: bool,
-            realtime_binding_state: Enum<RealtimeBindingState>,
-            realtime_binding_authority_epoch: Option<u64>,
-            realtime_reattach_required: bool,
-            realtime_next_authority_epoch: u64,
-
-            // --- Realtime reconnect lifecycle ---
-            //
-            // The websocket shell supplies time observations and jittered
-            // deadlines, but the DSL owns the reconnect cycle phase, attempt
-            // count, retry deadline, exhaustion marker, and public status
-            // projection.
-            realtime_reconnect_cycle_state: Enum<RealtimeReconnectCycleState>,
-            realtime_reconnect_attempt_count: u64,
-            realtime_reconnect_next_retry_at_ms: Option<u64>,
-            realtime_reconnect_deadline_at_ms: Option<u64>,
-
-            // --- Live-topology reconfigure phase ---
-            live_topology_phase: LiveTopologyPhase,
-
             // --- MCP server lifecycle ---
             //
             // Per-server connection state keyed by configured `McpServerId`.
@@ -1580,61 +1368,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             // map without depending on map value comparison in DSL guards.
             reserved_interaction_streams: Set<PeerCorrelationId>,
             attached_interaction_streams: Set<PeerCorrelationId>,
-
-            // --- Realtime product-turn lifecycle (U9 / dogma #4) ---
-            //
-            // Collapses the old shell locals (`product_turn_in_flight`,
-            // `product_turn_committed`, `product_output_started`) into a
-            // canonical five-phase closed set owned by the DSL. The
-            // realtime-WS shell fires one input per lifecycle event and
-            // reads `should_preempt_on_input` off the typed handle; no
-            // shell-side bool tracking, no helper-local event matching.
-            realtime_product_turn_phase: Enum<RealtimeProductTurnPhase>,
-
-            // --- Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20) ---
-            //
-            // Canonical freshness truth for the realtime provider session's
-            // projection relative to the canonical session state. Replaces
-            // the shell-local `ProjectionFreshness` enum + observer queue
-            // previously owned by `meerkat-rpc::realtime_ws`.
-            //
-            // `realtime_projection_freshness` carries the discriminant;
-            // `realtime_projection_frontier_ms` holds the monotonic
-            // watermark — the `baseline_ms` while `Clean`, or the pending
-            // advance's `new_at_ms` while `StaleDeferred` / `StaleImmediate`.
-            // Transitions are driven by five inputs:
-            //   * `RealtimeProjectionAdvanceObserved { advanced_at_ms }` —
-            //     fired on every `SessionContextAdvanced` observer tick;
-            //     routes to `StaleDeferred` if the product turn is live,
-            //     `StaleImmediate` otherwise.
-            //   * `RealtimeProjectionRefreshed { observed_ms }` — fired
-            //     after a successful provider-session refresh drain; this is
-            //     the only non-reset path allowed to clear stale.
-            //   * `RealtimeProjectionBaselineObserved { observed_ms }` —
-            //     fired after provider-owned transcript/progress mutations
-            //     that the current provider session already knows about. It
-            //     advances a clean frontier but must not clear a pending
-            //     external stale advance.
-            //   * `RealtimeProjectionReset { baseline_ms }` — fired on
-            //     product-session close / error / reconnect to re-seed the
-            //     `Clean` baseline.
-            //   * `ProductTurnTerminal` also folds in a
-            //     `StaleDeferred → StaleImmediate` promotion so the DSL
-            //     owns the turn-end-drain promotion directly.
-            realtime_projection_freshness: Enum<RealtimeProjectionFreshness>,
-            realtime_projection_frontier_ms: u64,
-
-            // --- Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20) ---
-            //
-            // Classifies what a clean provider-session close means for the
-            // realtime channel's reconnect behavior. Replaces the shell-
-            // local boolean pair (`client_has_submitted_input`,
-            // `last_turn_terminally_completed`) that used to co-decide
-            // `needs_reattach`. The shell reads this field directly at the
-            // clean-close branch via
-            // `RealtimeProductTurnHandle::reconnect_policy_on_clean_close`
-            // and dispatches on the typed value.
-            realtime_reconnect_policy: Enum<RealtimeReconnectPolicy>,
 
             // --- Peer-ingress transport capability ownership (W2-G / issue #264) ---
             //
@@ -1816,26 +1549,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             surface_removal_applied_at_turn = EmptyMap,
             surface_phase = SurfacePhase::Operating,
             removal_timeout_ms = 30000,
-            realtime_intent_present = false,
-            realtime_binding_state = RealtimeBindingState::Unbound,
-            realtime_binding_authority_epoch = None,
-            realtime_reattach_required = false,
-            realtime_next_authority_epoch = 1,
-            realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle,
-            realtime_reconnect_attempt_count = 0,
-            realtime_reconnect_next_retry_at_ms = None,
-            realtime_reconnect_deadline_at_ms = None,
-            live_topology_phase = LiveTopologyPhase::Idle,
             mcp_server_states = EmptyMap,
             pending_peer_requests = EmptyMap,
             inbound_peer_requests = EmptyMap,
             last_session_context_updated_at_ms = 0,
             reserved_interaction_streams = EmptySet,
             attached_interaction_streams = EmptySet,
-            realtime_product_turn_phase = RealtimeProductTurnPhase::Idle,
-            realtime_projection_freshness = RealtimeProjectionFreshness::Clean,
-            realtime_projection_frontier_ms = 0,
-            realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit,
             peer_ingress_owner_kind = PeerIngressOwnerKind::Unattached,
             peer_ingress_comms_runtime_id = None,
             peer_ingress_mob_id = None,
@@ -1918,7 +1637,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             Ingest { runtime_id: AgentRuntimeId, work_id: WorkId, origin: Enum<WorkOrigin> },
             PublishEvent { kind: String },
             RuntimeState { runtime_id: String },
-            RuntimeRealtimeAttachmentStatus { session_id: SessionId },
             ModelRoutingStatus { session_id: SessionId },
             SetModelRoutingBaseline { baseline_model: String, realtime_capable: bool },
             RequestFiniteSwitchTurn {
@@ -2123,33 +1841,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             SurfaceFinalizeRemovalForced { surface_id: String },
             SurfaceSnapshotAligned { epoch: u64 },
             SurfaceShutdown,
-            // Realtime-attachment inputs.
-            ProjectRealtimeIntent { present: bool },
-            BeginRealtimeBinding,
-            ReplaceRealtimeBinding,
-            DetachRealtimeBinding,
-            RequireRealtimeReattach,
-            RequireRealtimeReattachForAuthority { authority_epoch: u64 },
-            PublishRealtimeSignal { authority_epoch: u64, next_binding_state: Enum<RealtimeBindingState> },
-            // Reconnect retry lifecycle. The websocket shell supplies
-            // millis-since-epoch retry deadlines from its clock/jitter source;
-            // the DSL owns cycle lifetime, attempt increments, exhaustion, and
-            // public status projection.
-            BeginRealtimeReconnectCycle {
-                next_retry_at_ms: Option<u64>,
-                deadline_at_ms: Option<u64>,
-            },
-            ScheduleRealtimeReconnectRetry { next_retry_at_ms: Option<u64> },
-            ExhaustRealtimeReconnectCycle,
-            ClearRealtimeReconnectProgress,
-            // Live-topology reconfigure inputs.
-            BeginLiveTopologyReconfigure { authority_epoch: u64 },
-            MarkLiveTopologyDetached,
-            ApplyLiveTopologyIdentity,
-            ApplyLiveTopologyVisibility,
-            CompleteLiveTopology,
-            AbortLiveTopologyBeforeDetach,
-            FailLiveTopologyAfterDetach,
             // MCP server lifecycle inputs. Shell fires these when transport
             // state changes; each rewrites the server's slot in
             // `mcp_server_states` and emits `McpServerStateChanged`.
@@ -2186,44 +1877,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             InteractionStreamCompleted { corr_id: PeerCorrelationId },
             InteractionStreamExpired { corr_id: PeerCorrelationId },
             InteractionStreamClosedEarly { corr_id: PeerCorrelationId },
-            // Realtime product-turn lifecycle inputs (U9 / dogma #4). The
-            // realtime-WS shell fires one of these per observed provider-
-            // session event (input accepted, TurnCommitted, output delta /
-            // tool call, interrupted, logical turn completed); idempotent
-            // transitions are guard-rejected and surfaced as `Ok(false)`
-            // by the handle.
-            ProductTurnInFlight,
-            ProductTurnCommitted,
-            ProductOutputStarted,
-            ProductTurnInterrupted,
-            ProductTurnTerminal,
-            // Realtime projection freshness inputs (dogma round 2, U-C /
-            // dogma #1, #3, #13, #20). The realtime-WS shell fires
-            // `RealtimeProjectionAdvanceObserved` on every
-            // `SessionContextAdvanced` observer tick, `RealtimeProjectionRefreshed`
-            // after a successful provider-session rebuild,
-            // `RealtimeProjectionBaselineObserved` after provider-owned events
-            // that the currently-open provider session already knows about, and
-            // `RealtimeProjectionReset` on product-session close / error /
-            // reconnect. The DSL decides whether each advance lands as
-            // `StaleDeferred` (turn live) or `StaleImmediate` (turn idle), and
-            // only refresh/reset paths may clear stale.
-            RealtimeProjectionAdvanceObserved { advanced_at_ms: u64 },
-            RealtimeProjectionRefreshed { observed_ms: u64 },
-            RealtimeProjectionBaselineObserved { observed_ms: u64 },
-            RealtimeProjectionReset { baseline_ms: u64 },
-            // Realtime reconnect-policy inputs (dogma round 2, U-C / dogma
-            // #1, #3, #18, #20). `ClassifyRealtimeClientInputSubmitted` fires
-            // when the client's input chunk is accepted by the provider
-            // session, flipping the policy to `ReattachAndRecover`.
-            // `ClassifyRealtimeMidTurnActivity` fires on a provider-issued
-            // tool call inside a live turn (mid-work signal), also routing to
-            // `ReattachAndRecover`. `ClassifyRealtimeTurnTerminated` fires
-            // on a logical turn terminal, routing to `CleanExit` (the
-            // session delivered what the client asked for).
-            ClassifyRealtimeClientInputSubmitted,
-            ClassifyRealtimeMidTurnActivity,
-            ClassifyRealtimeTurnTerminated,
             // Peer-ingress transport capability ownership (W2-G).
             //
             // `AttachSessionIngress` only succeeds from `Unattached`:
@@ -2324,7 +1977,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             InputState,
             ListActiveInputs,
             RuntimeState,
-            RuntimeRealtimeAttachmentStatus,
             ModelRoutingStatus,
             LoadBoundaryReceipt
         ]
@@ -2450,19 +2102,6 @@ macro_rules! meerkat_catalog_machine_dsl {
                 epoch: u64,
             },
             RevokeSupervisorTrustEdge { peer_id: String, epoch: u64 },
-            // Realtime-attachment effects.
-            RealtimeIntentProjected { present: bool },
-            RealtimeBindingRotated { authority_epoch: u64 },
-            // Reconnect-progress state changed. Shell consumers (e.g.
-            // observability pipelines) can subscribe; production RPC/MCP
-            // `realtime/status` responders read the state fields directly.
-            RealtimeReconnectProgressProjected {
-                attempt_count: u64,
-                next_retry_at_ms: Option<u64>,
-                deadline_at_ms: Option<u64>,
-            },
-            // Live-topology reconfigure effects.
-            LiveTopologyPhaseChanged,
             // MCP server lifecycle effects.
             McpServerStateChanged { server_id: McpServerId, new_state: McpServerState },
             McpServerReloadRequested { server_id: McpServerId },
@@ -2488,23 +2127,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             // shell-side channel projection.
             InteractionStreamStateChanged { corr_id: PeerCorrelationId, new_state: InteractionStreamState },
             InteractionStreamCleanup { corr_id: PeerCorrelationId },
-            // Realtime product-turn lifecycle effect (U9 / dogma #4). Emitted
-            // on every phase-advancing transition so the realtime-WS shell
-            // can log / observe phase changes without polling the handle.
-            // The realtime-WS dispatch loop reads the typed handle directly
-            // for preempt decisions; this effect is currently informational.
-            RealtimeProductTurnPhaseChanged { new_phase: Enum<RealtimeProductTurnPhase> },
-            // Realtime projection freshness + reconnect policy change
-            // effects (dogma round 2, U-C / dogma #1, #3, #13, #18, #20).
-            // Emitted on every DSL-owned projection-state / policy advance
-            // so the shell can trace transitions. The realtime-WS dispatcher
-            // reads the typed handle directly for drain + close-branch
-            // decisions; these effects are informational.
-            RealtimeProjectionFreshnessChanged {
-                new_freshness: Enum<RealtimeProjectionFreshness>,
-                frontier_ms: u64,
-            },
-            RealtimeReconnectPolicyChanged { new_policy: Enum<RealtimeReconnectPolicy> },
             // Track-B (R5) peer-projection effects.
             LocalEndpointChanged { endpoint: Option<PeerEndpoint> },
             PeerProjectionChanged { peer_projection_epoch: u64 },
@@ -2573,10 +2195,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition RejectSurfaceCall => external,
         disposition PublishSupervisorTrustEdge => external handoff supervisor_trust_publish,
         disposition RevokeSupervisorTrustEdge => external handoff supervisor_trust_revoke,
-        disposition RealtimeIntentProjected => external,
-        disposition RealtimeBindingRotated => external,
-        disposition RealtimeReconnectProgressProjected => external,
-        disposition LiveTopologyPhaseChanged => external,
         disposition McpServerStateChanged => external,
         disposition McpServerReloadRequested => external,
         disposition PeerInteractionStateChanged => external,
@@ -2585,9 +2203,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition SessionContextAdvanced => external,
         disposition InteractionStreamStateChanged => external,
         disposition InteractionStreamCleanup => external,
-        disposition RealtimeProductTurnPhaseChanged => external,
-        disposition RealtimeProjectionFreshnessChanged => external,
-        disposition RealtimeReconnectPolicyChanged => external,
         disposition LocalEndpointChanged => external,
         disposition PeerProjectionChanged => external,
         disposition CommsTrustReconcileRequested => external,
@@ -2635,16 +2250,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         invariant staged_reload_surfaces_are_active {
             for_all(surface_id in self.reload_staged_surfaces,
                 self.active_surfaces.contains(surface_id))
-        }
-
-        // Realtime binding state and authority epoch must stay in lockstep.
-        // Unbound iff no epoch; any active binding state must carry Some(epoch).
-        // Prevents Unbound+Some(epoch) and BindingReady+None from being
-        // representable as a TLC-enforceable fact (DSL-native substitute for
-        // a typed sum).
-        invariant realtime_binding_epoch_consistency {
-            (self.realtime_binding_state == RealtimeBindingState::Unbound)
-            == (self.realtime_binding_authority_epoch == None)
         }
 
         // Peer-ingress owner companion fields must stay in lockstep with the
@@ -2861,24 +2466,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ModelRoutingApprovalTerminalized { approval_id: request_id, phase: RoutingApprovalPhase::Denied }
         }
 
-        transition RequestFiniteSwitchTurnRealtimeConflict {
-            per_phase [Idle, Attached, Running]
-            on input RequestFiniteSwitchTurn {
-                request_id, target_model, turns, target_realtime_capable,
-                requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
-            }
-            guard "realtime_conflict" {
-                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
-            }
-            update {
-                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
-                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::RealtimeTransportConflict);
-            }
-            to Idle
-            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::RealtimeTransportConflict }
-        }
-
         transition RequestFiniteSwitchTurnScopedConflict {
             per_phase [Idle, Attached, Running]
             on input RequestFiniteSwitchTurn {
@@ -2909,9 +2496,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "positive_turns" { turns > 0 }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
-            guard "no_realtime_conflict" {
-                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
-            }
             guard "no_scoped_conflict" {
                 self.model_routing_turn_override_id == None
                 && self.model_routing_operation_override_id == None
@@ -2940,9 +2524,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
-            guard "no_realtime_conflict" {
-                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
-            }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(request_id, RoutingApprovalPhase::Approved);
@@ -2956,24 +2537,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
             to Idle
             emit SwitchTurnPersistentReconfigureRequested { request_id: request_id, target_model: target_model }
-        }
-
-        transition RequestUntilChangedSwitchTurnRealtimeConflict {
-            per_phase [Idle, Attached, Running]
-            on input RequestUntilChangedSwitchTurn {
-                request_id, target_model, target_realtime_capable,
-                requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed
-            }
-            guard "realtime_conflict" {
-                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
-            }
-            update {
-                self.model_routing_switch_terminal.insert(request_id, RoutingSwitchTurnTerminal::Denied);
-                self.model_routing_switch_denials.insert(request_id, RoutingDenialReason::RealtimeTransportConflict);
-            }
-            to Idle
-            emit SwitchTurnDenied { request_id: request_id, reason: RoutingDenialReason::RealtimeTransportConflict }
         }
 
         transition RequestUntilChangedSwitchTurnApprovalUnavailable {
@@ -3111,25 +2674,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::ScopedOverrideConflict }
         }
 
-        transition BeginImageOperationRealtimeConflict {
-            per_phase [Idle, Attached, Running]
-            on input BeginImageOperation {
-                operation_id, target_model, target_realtime_capable,
-                requires_approval, approval_available, approval_denied,
-                realtime_detach_allowed, requires_scoped_override
-            }
-            guard "realtime_conflict" {
-                self.realtime_intent_present && !target_realtime_capable && !realtime_detach_allowed
-            }
-            update {
-                self.model_routing_image_operation_phases.insert(operation_id, RoutingImageOperationPhase::Terminal);
-                self.model_routing_image_terminals.insert(operation_id, RoutingImageTerminal::Denied);
-                self.model_routing_image_denials.insert(operation_id, RoutingDenialReason::RealtimeTransportConflict);
-            }
-            to Idle
-            emit ImageOperationDenied { operation_id: operation_id, reason: RoutingDenialReason::RealtimeTransportConflict }
-        }
-
         transition BeginImageOperationApprovalUnavailable {
             per_phase [Idle, Attached, Running]
             on input BeginImageOperation {
@@ -3177,9 +2721,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "baseline_known" { self.model_routing_baseline_model != None }
             guard "no_operation_in_operation" { self.model_routing_operation_override_id == None }
             guard "approval_satisfied" { !requires_approval || (approval_available && !approval_denied) }
-            guard "no_realtime_conflict" {
-                !self.realtime_intent_present || target_realtime_capable || realtime_detach_allowed
-            }
             update {
                 if requires_approval {
                     self.model_routing_approval_phases.insert(operation_id, RoutingApprovalPhase::Approved);
@@ -8165,330 +7706,6 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         // =====================================================================
-        // Realtime-attachment transitions
-        // =====================================================================
-
-        transition ProjectRealtimeIntent {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ProjectRealtimeIntent { present }
-            guard "session_registered" { self.session_id != None }
-            update {
-                self.realtime_intent_present = present;
-            }
-            to Idle
-            emit RealtimeIntentProjected { present: present }
-        }
-
-        transition BeginRealtimeBinding {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BeginRealtimeBinding
-            guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
-            update {
-                self.realtime_binding_state = RealtimeBindingState::BindingNotReady;
-                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
-                self.realtime_reattach_required = false;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
-        }
-
-        transition ReplaceRealtimeBinding {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ReplaceRealtimeBinding
-            guard "session_registered" { self.session_id != None }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
-            update {
-                self.realtime_binding_state = RealtimeBindingState::ReplacementPending;
-                self.realtime_binding_authority_epoch = Some(self.realtime_next_authority_epoch);
-                self.realtime_reattach_required = false;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-            emit RealtimeBindingRotated { authority_epoch: self.realtime_binding_authority_epoch.get("value") }
-        }
-
-        transition DetachRealtimeBinding {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input DetachRealtimeBinding
-            guard "session_registered" { self.session_id != None }
-            update {
-                self.realtime_binding_state = RealtimeBindingState::Unbound;
-                self.realtime_binding_authority_epoch = None;
-                self.realtime_reattach_required = false;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-        }
-
-        transition RequireRealtimeReattach {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequireRealtimeReattach
-            guard "session_registered" { self.session_id != None }
-            update {
-                self.realtime_binding_state = RealtimeBindingState::Unbound;
-                self.realtime_binding_authority_epoch = None;
-                self.realtime_reattach_required = true;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-        }
-
-        transition RequireRealtimeReattachForAuthority {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input RequireRealtimeReattachForAuthority { authority_epoch }
-            guard "session_registered" { self.session_id != None }
-            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            update {
-                self.realtime_binding_state = RealtimeBindingState::Unbound;
-                self.realtime_binding_authority_epoch = None;
-                self.realtime_reattach_required = true;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-        }
-
-        transition PublishRealtimeSignal {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input PublishRealtimeSignal { authority_epoch, next_binding_state }
-            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "no_topology_reconfigure_in_progress" { self.live_topology_phase == LiveTopologyPhase::Idle }
-            guard "valid_next_state" {
-                next_binding_state == RealtimeBindingState::BindingNotReady
-                || next_binding_state == RealtimeBindingState::BindingReady
-                || next_binding_state == RealtimeBindingState::ReplacementPending
-            }
-            update {
-                self.realtime_binding_state = next_binding_state;
-                self.realtime_reattach_required = false;
-                if next_binding_state == RealtimeBindingState::BindingReady {
-                    self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                    self.realtime_reconnect_attempt_count = 0;
-                    self.realtime_reconnect_next_retry_at_ms = None;
-                    self.realtime_reconnect_deadline_at_ms = None;
-                }
-            }
-            to Idle
-        }
-
-        transition BeginRealtimeReconnectCycle {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BeginRealtimeReconnectCycle { next_retry_at_ms, deadline_at_ms }
-            guard "session_registered" { self.session_id != None }
-            guard "reattach_required" { self.realtime_reattach_required }
-            guard "cycle_idle" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Idle }
-            update {
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Reconnecting;
-                self.realtime_reconnect_attempt_count = 1;
-                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
-                self.realtime_reconnect_deadline_at_ms = deadline_at_ms;
-            }
-            to Idle
-            emit RealtimeReconnectProgressProjected {
-                attempt_count: 1,
-                next_retry_at_ms: next_retry_at_ms,
-                deadline_at_ms: deadline_at_ms,
-            }
-        }
-
-        transition ScheduleRealtimeReconnectRetry {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ScheduleRealtimeReconnectRetry { next_retry_at_ms }
-            guard "session_registered" { self.session_id != None }
-            guard "cycle_reconnecting" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Reconnecting }
-            update {
-                self.realtime_reconnect_attempt_count = self.realtime_reconnect_attempt_count + 1;
-                self.realtime_reconnect_next_retry_at_ms = next_retry_at_ms;
-            }
-            to Idle
-            emit RealtimeReconnectProgressProjected {
-                attempt_count: self.realtime_reconnect_attempt_count,
-                next_retry_at_ms: next_retry_at_ms,
-                deadline_at_ms: self.realtime_reconnect_deadline_at_ms,
-            }
-        }
-
-        transition ExhaustRealtimeReconnectCycle {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ExhaustRealtimeReconnectCycle
-            guard "session_registered" { self.session_id != None }
-            guard "cycle_reconnecting" { self.realtime_reconnect_cycle_state == RealtimeReconnectCycleState::Reconnecting }
-            update {
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Exhausted;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-            emit RealtimeReconnectProgressProjected {
-                attempt_count: 0,
-                next_retry_at_ms: None,
-                deadline_at_ms: None,
-            }
-        }
-
-        transition ClearRealtimeReconnectProgress {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ClearRealtimeReconnectProgress
-            guard "session_registered" { self.session_id != None }
-            update {
-                self.realtime_reconnect_cycle_state = RealtimeReconnectCycleState::Idle;
-                self.realtime_reconnect_attempt_count = 0;
-                self.realtime_reconnect_next_retry_at_ms = None;
-                self.realtime_reconnect_deadline_at_ms = None;
-            }
-            to Idle
-            emit RealtimeReconnectProgressProjected {
-                attempt_count: 0,
-                next_retry_at_ms: None,
-                deadline_at_ms: None,
-            }
-        }
-
-        // =====================================================================
-        // Live-topology reconfigure transitions
-        // =====================================================================
-
-        transition BeginLiveTopologyReconfigure {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input BeginLiveTopologyReconfigure { authority_epoch }
-            guard "session_registered" { self.session_id != None }
-            guard "authority_matches_current" { self.realtime_binding_authority_epoch == Some(authority_epoch) }
-            guard "topology_idle" { self.live_topology_phase == LiveTopologyPhase::Idle }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::Reconfiguring;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        // MarkLiveTopologyDetached is the "safe to detach" gate. It rejects
-        // while the runtime is mid-primitive (turn_phase != Ready && !=
-        // DrainingBoundary). A shell retry loop applies this input until the
-        // DSL accepts, encoding the "wait for next natural boundary" invariant
-        // at the DSL layer rather than in shell polling of current_run_id.
-        //
-        // **Catalog/runtime divergence (intentional):** the catalog DSL
-        // (`meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs`) does
-        // not model `turn_phase` and conservatively guards on
-        // `current_run_id == None` instead. That is a strict over-
-        // approximation of this guard: every catalog trace is admissible
-        // here, so invariants proven by TLC against the catalog hold in
-        // production. The runtime can additionally detach at
-        // `DrainingBoundary` mid-run, which TLC does not exercise.
-        transition MarkLiveTopologyDetached {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input MarkLiveTopologyDetached
-            guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
-            guard "turn_at_safe_boundary" {
-                self.turn_phase == TurnPhase::Ready
-                || self.turn_phase == TurnPhase::DrainingBoundary
-                || self.turn_phase == TurnPhase::Completed
-                || self.turn_phase == TurnPhase::Failed
-                || self.turn_phase == TurnPhase::Cancelled
-            }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::Detached;
-                self.realtime_binding_state = RealtimeBindingState::Unbound;
-                self.realtime_binding_authority_epoch = None;
-                self.realtime_reattach_required = false;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        transition ApplyLiveTopologyIdentity {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ApplyLiveTopologyIdentity
-            guard "session_registered" { self.session_id != None }
-            guard "topology_detached" { self.live_topology_phase == LiveTopologyPhase::Detached }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::HostIdentityApplied;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        transition ApplyLiveTopologyVisibility {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input ApplyLiveTopologyVisibility
-            guard "session_registered" { self.session_id != None }
-            guard "host_identity_applied" { self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::HostVisibilityApplied;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        transition CompleteLiveTopology {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input CompleteLiveTopology
-            guard "session_registered" { self.session_id != None }
-            guard "host_visibility_applied" { self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::Idle;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        transition AbortLiveTopologyBeforeDetach {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input AbortLiveTopologyBeforeDetach
-            guard "session_registered" { self.session_id != None }
-            guard "topology_reconfiguring" { self.live_topology_phase == LiveTopologyPhase::Reconfiguring }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::Idle;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        transition FailLiveTopologyAfterDetach {
-            per_phase [Idle, Attached, Running, Retired, Stopped]
-            on input FailLiveTopologyAfterDetach
-            guard "session_registered" { self.session_id != None }
-            guard "topology_past_detach" {
-                self.live_topology_phase == LiveTopologyPhase::Detached
-                || self.live_topology_phase == LiveTopologyPhase::HostIdentityApplied
-                || self.live_topology_phase == LiveTopologyPhase::HostVisibilityApplied
-            }
-            update {
-                self.live_topology_phase = LiveTopologyPhase::Idle;
-                self.realtime_binding_state = RealtimeBindingState::Unbound;
-                self.realtime_binding_authority_epoch = None;
-                self.realtime_reattach_required = true;
-                self.realtime_next_authority_epoch = self.realtime_next_authority_epoch + 1;
-            }
-            to Idle
-            emit LiveTopologyPhaseChanged
-        }
-
-        // =====================================================================
         // MCP server lifecycle transitions
         // =====================================================================
         //
@@ -8751,351 +7968,6 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
             emit InteractionStreamStateChanged { corr_id: corr_id, new_state: InteractionStreamState::ClosedEarly }
             emit InteractionStreamCleanup { corr_id: corr_id }
-        }
-
-        // =====================================================================
-        // Realtime product-turn lifecycle (U9 / dogma #4)
-        // =====================================================================
-        //
-        // Five-phase lifecycle: Idle → AwaitingProgress → {Committed,
-        // OutputStarted} → Preemptible → Idle. Each transition is guarded
-        // on the source phase(s) for which it advances; idempotent fires
-        // (e.g., `ProductTurnCommitted` when already `Committed` or
-        // `Preemptible`) are guard-rejected and surfaced as `Ok(false)` by
-        // the runtime handle, so the realtime-WS shell can fire
-        // unconditionally on every observed provider-session event without
-        // tracking its own phase.
-
-        // Input accepted — only meaningful from Idle. In-flight inputs on
-        // live turns do not rewind the phase.
-        transition ProductTurnInFlight {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnInFlight
-            guard "only_from_idle" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
-        }
-
-        // `TurnCommitted` arrived from the provider. Valid from
-        // AwaitingProgress (→ Committed) and OutputStarted (→ Preemptible).
-        transition ProductTurnCommittedFromAwaiting {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnCommitted
-            guard "from_awaiting" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
-        }
-
-        transition ProductTurnCommittedFromOutput {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnCommitted
-            guard "from_output_started" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
-        }
-
-        // Output delta / tool call arrived. Valid from AwaitingProgress
-        // (→ OutputStarted) and Committed (→ Preemptible).
-        transition ProductOutputStartedFromAwaiting {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductOutputStarted
-            guard "from_awaiting" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::AwaitingProgress
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::OutputStarted;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::OutputStarted }
-        }
-
-        transition ProductOutputStartedFromCommitted {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductOutputStarted
-            guard "from_committed" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Committed
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Preemptible;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Preemptible }
-        }
-
-        // Interrupt clears the "output-started" milestone without tearing
-        // down the turn. Preemptible → Committed; OutputStarted →
-        // AwaitingProgress. Idempotent from Idle / AwaitingProgress /
-        // Committed is handled by the monotonic pair below.
-        transition ProductTurnInterruptedFromPreemptible {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnInterrupted
-            guard "from_preemptible" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Preemptible
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Committed;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Committed }
-        }
-
-        transition ProductTurnInterruptedFromOutput {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnInterrupted
-            guard "from_output_started" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::OutputStarted
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::AwaitingProgress;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::AwaitingProgress }
-        }
-
-        // Logical-turn terminal. Rewinds any active phase back to Idle.
-        // Idempotent from Idle is rejected by the guard.
-        transition ProductTurnTerminal {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ProductTurnTerminal
-            guard "not_already_idle" {
-                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
-            }
-            update {
-                self.realtime_product_turn_phase = RealtimeProductTurnPhase::Idle;
-            }
-            to Idle
-            emit RealtimeProductTurnPhaseChanged { new_phase: RealtimeProductTurnPhase::Idle }
-        }
-
-        // =====================================================================
-        // Realtime projection freshness (dogma round 2, U-C / dogma #1, #3, #13, #20)
-        // =====================================================================
-        //
-        // Canonical freshness state for the realtime provider session's
-        // projection relative to canonical session truth. Three transitions
-        // split on product-turn phase + current freshness to decide the next
-        // state; a fourth handles turn-end promotion.
-
-        // Observer tick arrived while the product turn is live — record the
-        // pending advance as `StaleDeferred` so barge-in continuity is
-        // preserved. Monotonic: rejects advances that don't surpass the
-        // current frontier.
-        transition RealtimeProjectionAdvanceDuringTurn {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
-            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
-            guard "turn_in_flight" {
-                self.realtime_product_turn_phase != RealtimeProductTurnPhase::Idle
-            }
-            update {
-                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleDeferred;
-                self.realtime_projection_frontier_ms = advanced_at_ms;
-            }
-            to Idle
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: RealtimeProjectionFreshness::StaleDeferred,
-                frontier_ms: advanced_at_ms
-            }
-        }
-
-        // Observer tick arrived while the product turn is idle — record the
-        // pending advance as `StaleImmediate` so the next drain site picks
-        // it up.
-        transition RealtimeProjectionAdvanceWhileIdle {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input RealtimeProjectionAdvanceObserved { advanced_at_ms }
-            guard "monotonic" { advanced_at_ms > self.realtime_projection_frontier_ms }
-            guard "turn_idle" {
-                self.realtime_product_turn_phase == RealtimeProductTurnPhase::Idle
-            }
-            update {
-                self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
-                self.realtime_projection_frontier_ms = advanced_at_ms;
-            }
-            to Idle
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: RealtimeProjectionFreshness::StaleImmediate,
-                frontier_ms: advanced_at_ms
-            }
-        }
-
-        // After a successful provider-session refresh drain. Returns to
-        // `Clean` ONLY when `observed_ms` matches or exceeds the current
-        // frontier. If a concurrent external advance (e.g. a
-        // peer_response_terminal landing while our own turn was committing)
-        // already pushed the frontier above `observed_ms` via a
-        // `RealtimeProjectionAdvanceObserved` tick, the refresh is
-        // guard-rejected so the stale state at the higher frontier is
-        // preserved — the external advance still owes a refresh, and
-        // clobbering it here would drop the tick the next drain site depends
-        // on. This is the DSL-owned successor of the shell-side "preserve
-        // newer concurrent external advance" dance #299 introduced on the
-        // pre-U-C W2-E freshness state.
-        transition RealtimeProjectionRefreshed {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input RealtimeProjectionRefreshed { observed_ms }
-            guard "not_behind_frontier" {
-                observed_ms >= self.realtime_projection_frontier_ms
-            }
-            guard "actually_changing" {
-                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
-                || observed_ms > self.realtime_projection_frontier_ms
-            }
-            update {
-                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
-                if observed_ms > self.realtime_projection_frontier_ms {
-                    self.realtime_projection_frontier_ms = observed_ms;
-                }
-            }
-            to Idle
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: RealtimeProjectionFreshness::Clean,
-                frontier_ms: self.realtime_projection_frontier_ms
-            }
-        }
-
-        // Provider-owned realtime events can advance canonical session
-        // context for data the currently-open provider session already knows
-        // about (e.g. its own transcript/progress). That may raise the global
-        // session-context watermark past a pending external runtime-context
-        // advance. This input advances the clean baseline when there is no
-        // pending stale work, but it deliberately refuses to clear
-        // `StaleDeferred` / `StaleImmediate`; only an actual provider-session
-        // refresh drain may do that.
-        transition RealtimeProjectionBaselineObservedClean {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input RealtimeProjectionBaselineObserved { observed_ms }
-            guard "clean" {
-                self.realtime_projection_freshness == RealtimeProjectionFreshness::Clean
-            }
-            guard "monotonic" { observed_ms > self.realtime_projection_frontier_ms }
-            update {
-                self.realtime_projection_frontier_ms = observed_ms;
-            }
-            to Idle
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: RealtimeProjectionFreshness::Clean,
-                frontier_ms: self.realtime_projection_frontier_ms
-            }
-        }
-
-        // Re-seed `Clean` baseline on product-session close / error /
-        // reconnect. Monotonic in the same sense as `RealtimeProjectionRefreshed`:
-        // `baseline_ms` must not regress the frontier. If a newer observer
-        // tick transitioned the freshness to `StaleImmediate` / `StaleDeferred`
-        // at a higher frontier between the caller's read and this fire, the
-        // reset collapses to `Clean` at that higher frontier — the drain is
-        // about to re-enter via the product-session rebuild anyway, and
-        // regressing the frontier would drop a real advance.
-        transition RealtimeProjectionReset {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input RealtimeProjectionReset { baseline_ms }
-            guard "actually_changing" {
-                self.realtime_projection_freshness != RealtimeProjectionFreshness::Clean
-                || baseline_ms > self.realtime_projection_frontier_ms
-            }
-            update {
-                self.realtime_projection_freshness = RealtimeProjectionFreshness::Clean;
-                if baseline_ms > self.realtime_projection_frontier_ms {
-                    self.realtime_projection_frontier_ms = baseline_ms;
-                }
-            }
-            to Idle
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: RealtimeProjectionFreshness::Clean,
-                frontier_ms: self.realtime_projection_frontier_ms
-            }
-        }
-
-        // =====================================================================
-        // Realtime reconnect policy (dogma round 2, U-C / dogma #1, #3, #18, #20)
-        // =====================================================================
-        //
-        // The DSL classifies what a clean provider-session close means for
-        // the realtime channel's reconnect behavior. Replaces the shell-local
-        // boolean pair (`client_has_submitted_input`,
-        // `last_turn_terminally_completed`).
-
-        // Client submitted work to the provider session — any subsequent
-        // clean close while this policy stands is a mid-work disconnect.
-        // Also promotes `StaleDeferred → StaleImmediate` at turn end is
-        // handled by `ClassifyRealtimeTurnTerminated`.
-        transition ClassifyRealtimeClientInputSubmitted {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRealtimeClientInputSubmitted
-            guard "not_already_reattach" {
-                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
-            }
-            update {
-                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
-            }
-            to Idle
-            emit RealtimeReconnectPolicyChanged {
-                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
-            }
-        }
-
-        // Mid-turn activity on the provider session (e.g. a provider-issued
-        // tool call before a terminal turn completion) is not terminal, so
-        // flag the reconnect policy back to `ReattachAndRecover` if a prior
-        // terminal had already flipped us to `CleanExit`. Idempotent when
-        // already `ReattachAndRecover`.
-        transition ClassifyRealtimeMidTurnActivity {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRealtimeMidTurnActivity
-            guard "not_already_reattach" {
-                self.realtime_reconnect_policy != RealtimeReconnectPolicy::ReattachAndRecover
-            }
-            update {
-                self.realtime_reconnect_policy = RealtimeReconnectPolicy::ReattachAndRecover;
-            }
-            to Idle
-            emit RealtimeReconnectPolicyChanged {
-                new_policy: RealtimeReconnectPolicy::ReattachAndRecover
-            }
-        }
-
-        // Logical turn reached a terminal stop reason — the session delivered
-        // the client's requested work. A subsequent clean close is a session
-        // finishing, not a mid-work drop. Also folds in the `StaleDeferred →
-        // StaleImmediate` promotion so the turn-end drain site picks up any
-        // pending async mutation.
-        transition ClassifyRealtimeTurnTerminated {
-            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
-            on input ClassifyRealtimeTurnTerminated
-            guard "actually_changing" {
-                self.realtime_reconnect_policy != RealtimeReconnectPolicy::CleanExit
-                || self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred
-            }
-            update {
-                self.realtime_reconnect_policy = RealtimeReconnectPolicy::CleanExit;
-                if self.realtime_projection_freshness == RealtimeProjectionFreshness::StaleDeferred {
-                    self.realtime_projection_freshness = RealtimeProjectionFreshness::StaleImmediate;
-                }
-            }
-            to Idle
-            emit RealtimeReconnectPolicyChanged {
-                new_policy: RealtimeReconnectPolicy::CleanExit
-            }
-            emit RealtimeProjectionFreshnessChanged {
-                new_freshness: self.realtime_projection_freshness,
-                frontier_ms: self.realtime_projection_frontier_ms
-            }
         }
 
         // =====================================================================

@@ -1308,9 +1308,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::Recover { .. }
                 | MeerkatMachineCommand::Destroy { .. }
                 | MeerkatMachineCommand::RuntimeState { .. }
-                | MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { .. }
                 | MeerkatMachineCommand::ResolvedSessionLlmCapabilities { .. }
-                | MeerkatMachineCommand::RuntimeRealtimeChannelStatus { .. }
                 | MeerkatMachineCommand::ConfigureModelRoutingBaseline { .. }
                 | MeerkatMachineCommand::SessionModelRoutingStatus { .. }
                 | MeerkatMachineCommand::RequestSwitchTurn { .. }

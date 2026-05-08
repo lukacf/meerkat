@@ -2177,7 +2177,6 @@ mod tests {
             ("DrainPhase", "Running", "Paused"),
             ("DrainMode", "Timed", "Manual"),
             ("McpServerState", "Connected", "HalfOpen"),
-            ("RealtimeReconnectCycleState", "Idle", "CoolingDown"),
             (
                 "OperationTerminalOutcomeKind",
                 "Completed",

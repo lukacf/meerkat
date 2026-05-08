@@ -461,32 +461,8 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.runtime_available {
-        methods.extend([
-            RpcMethodDescriptor::typed(
-                "realtime/open_info",
-                "Get bootstrap metadata for opening a realtime channel",
-                "RealtimeOpenRequest",
-                "RealtimeOpenInfo",
-            ),
-            RpcMethodDescriptor::typed(
-                "realtime/status",
-                "Get product-layer realtime channel status for a target",
-                "RealtimeStatusParams",
-                "RealtimeStatusResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "realtime/capabilities",
-                "Get product-layer realtime capabilities for a target",
-                "RealtimeCapabilitiesParams",
-                "RealtimeCapabilitiesResult",
-            ),
-            RpcMethodDescriptor::typed(
-                "session/realtime_attachment_status",
-                "Get a session's realtime attachment status",
-                "RuntimeRealtimeAttachmentStatusParams",
-                "RuntimeRealtimeAttachmentStatusResult",
-            ),
-        ]);
+        // Realtime surface methods removed in live-adapter MVP.
+        let _ = &options;
     }
 
     if options.mob_enabled {
@@ -976,7 +952,6 @@ mod tests {
             "session/external_event",
             "session/peer_response_terminal",
             "session/inject_context",
-            "session/realtime_attachment_status",
         ] {
             assert!(
                 methods.iter().any(|m| m == supported),

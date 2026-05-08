@@ -34,13 +34,6 @@ export type {
 } from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
-export { RealtimeChannel, RealtimeConnection } from "./realtime.js";
-export type {
-  RealtimeChannelOptions,
-  RealtimeChannelTarget,
-  RealtimeSessionTarget,
-} from "./realtime.js";
-
 export type {
   AgentEventEnvelope,
   AttributedEvent,

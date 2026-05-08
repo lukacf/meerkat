@@ -8,9 +8,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::meerkat_machine::{CommsDrainMode, CommsDrainPhase, DrainExitReason, dsl};
-use chrono::{DateTime, Utc};
 use indexmap::IndexSet;
-use meerkat_contracts::{RealtimeChannelState, RealtimeChannelStatus};
 use meerkat_core::RuntimeEpochId;
 use meerkat_core::agent::CommsRuntime;
 use meerkat_core::image_generation::{
@@ -45,128 +43,6 @@ use crate::traits::{
     DestroyReport, RecoveryReport, RecycleReport, ResetReport, RetireReport,
     RuntimeControlPlaneError, RuntimeDriverError,
 };
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RealtimeAttachmentStatus {
-    Unattached,
-    IntentPresentUnbound,
-    BindingNotReady,
-    BindingReady,
-    ReplacementPending,
-    ReattachRequired,
-}
-
-/// Typed reconnect-progress carrier read from machine-owned reconnect state.
-/// `attempt_count` and `next_retry_at` used to be hard-coded or projected from
-/// websocket-local retry state; the canonical `RealtimeChannelStatus`
-/// projection now reads them from the MeerkatMachine lifecycle fields.
-///
-/// `deadline_at` is the wall-clock cutoff after which the reconnect cycle
-/// will be abandoned (`reconnect_policy.max_total_ms` on top of the
-/// cycle's start time). `None` outside an active reconnect cycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReconnectProgress {
-    pub attempt_count: u32,
-    pub next_retry_at: Option<DateTime<Utc>>,
-    pub deadline_at: Option<DateTime<Utc>>,
-}
-
-impl ReconnectProgress {
-    pub fn new(
-        attempt_count: u32,
-        next_retry_at: Option<DateTime<Utc>>,
-        deadline_at: Option<DateTime<Utc>>,
-    ) -> Self {
-        Self {
-            attempt_count,
-            next_retry_at,
-            deadline_at,
-        }
-    }
-}
-
-impl RealtimeAttachmentStatus {
-    /// Canonical mapping to the public wire reason. `None` means the
-    /// `reason` field is unset on the projected `RealtimeChannelStatus`
-    /// (used for `BindingReady`, where there is no explanatory text).
-    fn default_reason(self) -> Option<&'static str> {
-        match self {
-            Self::Unattached => Some("no realtime channel is open for this target"),
-            Self::IntentPresentUnbound | Self::BindingNotReady => {
-                Some("realtime attachment is pending")
-            }
-            Self::BindingReady => None,
-            Self::ReplacementPending => Some("realtime attachment replacement is pending"),
-            Self::ReattachRequired => Some("realtime attachment requires reattach"),
-        }
-    }
-
-    fn channel_state(self) -> RealtimeChannelState {
-        match self {
-            Self::Unattached => RealtimeChannelState::Closed,
-            Self::IntentPresentUnbound | Self::BindingNotReady => RealtimeChannelState::Opening,
-            Self::BindingReady => RealtimeChannelState::Ready,
-            Self::ReplacementPending | Self::ReattachRequired => RealtimeChannelState::Reconnecting,
-        }
-    }
-
-    /// Canonical projection, reconnect-progress-aware variant. Active
-    /// reconnect progress is read from machine state and passed as
-    /// `Some(progress)`; reconnecting statuses without an active machine-owned
-    /// cycle report zero attempts and no retry deadline.
-    pub fn to_channel_status(self, reconnect: Option<&ReconnectProgress>) -> RealtimeChannelStatus {
-        let state = self.channel_state();
-        let reason = self.default_reason().map(str::to_string);
-        let (attempt_count, next_retry_at, deadline_at) = match (state, reconnect) {
-            (RealtimeChannelState::Reconnecting, Some(progress)) => (
-                progress.attempt_count,
-                progress.next_retry_at.map(|dt| dt.to_rfc3339()),
-                progress.deadline_at.map(|dt| dt.to_rfc3339()),
-            ),
-            (RealtimeChannelState::Reconnecting, None) => (0, None, None),
-            _ => (0, None, None),
-        };
-        RealtimeChannelStatus {
-            state,
-            attempt_count,
-            next_retry_at,
-            deadline_at,
-            reason,
-        }
-    }
-}
-
-impl From<RealtimeAttachmentStatus> for RealtimeChannelStatus {
-    fn from(status: RealtimeAttachmentStatus) -> Self {
-        status.to_channel_status(None)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct RealtimeAttachmentSignalAuthority {
-    pub session_id: SessionId,
-    pub authority_epoch: u64,
-}
-
-/// Machine-owned proof that a session is currently eligible for realtime
-/// bootstrap. Surfaces can inspect the projected channel status, but only the
-/// runtime can construct this value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RealtimeBootstrapEligibility {
-    status: RealtimeChannelStatus,
-}
-
-impl RealtimeBootstrapEligibility {
-    pub(crate) fn eligible(status: RealtimeChannelStatus) -> Self {
-        Self { status }
-    }
-
-    #[must_use]
-    pub fn status(&self) -> &RealtimeChannelStatus {
-        &self.status
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -501,18 +377,7 @@ pub(crate) enum MeerkatMachineCommand {
     RuntimeState {
         runtime_id: LogicalRuntimeId,
     },
-    RuntimeRealtimeAttachmentStatus {
-        session_id: SessionId,
-    },
     ResolvedSessionLlmCapabilities {
-        session_id: SessionId,
-    },
-    /// Fully-projected public channel status. Returns attachment state plus
-    /// machine-owned reconnect lifecycle/progress collapsed into a
-    /// ready-to-serialize [`RealtimeChannelStatus`]. Consumed by the
-    /// `realtime/status` RPC handler and the MCP `meerkat_realtime_status`
-    /// tool so they do not hand-compose partial projections.
-    RuntimeRealtimeChannelStatus {
         session_id: SessionId,
     },
     ConfigureModelRoutingBaseline {
@@ -642,9 +507,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     RecoveryReport(RecoveryReport),
     DestroyReport(DestroyReport),
     RuntimeState(RuntimeState),
-    RealtimeAttachmentStatus(RealtimeAttachmentStatus),
     ResolvedSessionLlmCapabilities(Option<SessionLlmCapabilitySurface>),
-    RealtimeChannelStatus(RealtimeChannelStatus),
     SessionModelRoutingStatus(SessionModelRoutingStatus),
     SwitchTurnControlResult(SwitchTurnControlResult),
     ImageOperationRoutingResult(ImageOperationRoutingResult),
@@ -816,10 +679,6 @@ meerkat_machine_runtime_internal_inputs!(
         LlmReturnedTerminal,
         LlmReturnedToolCalls,
         PrimitiveApplied,
-        ProductOutputStarted,
-        ProductTurnCommitted,
-        ProductTurnInFlight,
-        ProductTurnTerminal,
         RecordBoundarySeq,
         RollbackRun,
         RunCompleted,
@@ -834,44 +693,18 @@ meerkat_machine_runtime_internal_inputs!(
         CancelRun,
         CancellationObserved,
         ForceCancelNoRun,
-        ProductTurnInterrupted,
         RequestCancelAfterBoundary,
         RunCancelled,
     ],
     LiveTopologyReconfiguration => [
-        AbortLiveTopologyBeforeDetach,
-        ApplyLiveTopologyIdentity,
-        ApplyLiveTopologyVisibility,
-        BeginLiveTopologyReconfigure,
-        CompleteLiveTopology,
         CompleteUntilChangedSwitchTurnReconfigure,
-        FailLiveTopologyAfterDetach,
-        MarkLiveTopologyDetached,
     ],
     RealtimeBindingLifecycle => [
-        BeginRealtimeBinding,
-        BeginRealtimeReconnectCycle,
-        ClassifyRealtimeClientInputSubmitted,
-        ClassifyRealtimeMidTurnActivity,
-        ClassifyRealtimeTurnTerminated,
-        ClearRealtimeReconnectProgress,
-        DetachRealtimeBinding,
-        ExhaustRealtimeReconnectCycle,
         InteractionStreamAttached,
         InteractionStreamClosedEarly,
         InteractionStreamCompleted,
         InteractionStreamExpired,
         InteractionStreamReserved,
-        ProjectRealtimeIntent,
-        PublishRealtimeSignal,
-        RealtimeProjectionAdvanceObserved,
-        RealtimeProjectionBaselineObserved,
-        RealtimeProjectionRefreshed,
-        RealtimeProjectionReset,
-        ReplaceRealtimeBinding,
-        RequireRealtimeReattach,
-        RequireRealtimeReattachForAuthority,
-        ScheduleRealtimeReconnectRetry,
     ],
     CommsIngressLifecycle => [
         AddDirectPeerEndpoint,
@@ -1056,26 +889,6 @@ meerkat_machine_fieldless_runtime_internal_inputs!(
         DrainExitedClean,
         DrainExitedRespawnable,
         SurfaceShutdown,
-        BeginRealtimeBinding,
-        ReplaceRealtimeBinding,
-        DetachRealtimeBinding,
-        RequireRealtimeReattach,
-        ExhaustRealtimeReconnectCycle,
-        ClearRealtimeReconnectProgress,
-        MarkLiveTopologyDetached,
-        ApplyLiveTopologyIdentity,
-        ApplyLiveTopologyVisibility,
-        CompleteLiveTopology,
-        AbortLiveTopologyBeforeDetach,
-        FailLiveTopologyAfterDetach,
-        ProductTurnInFlight,
-        ProductTurnCommitted,
-        ProductOutputStarted,
-        ProductTurnInterrupted,
-        ProductTurnTerminal,
-        ClassifyRealtimeClientInputSubmitted,
-        ClassifyRealtimeMidTurnActivity,
-        ClassifyRealtimeTurnTerminated,
         DetachIngress,
         ClearLocalEndpoint,
     ],
@@ -1156,7 +969,6 @@ pub enum MeerkatMachineCatalogInput {
     Recover,
     Destroy,
     RuntimeState,
-    RuntimeRealtimeAttachmentStatus,
     ModelRoutingStatus,
     SetModelRoutingBaseline,
     RequestFiniteSwitchTurn,
@@ -1207,7 +1019,6 @@ impl MeerkatMachineCatalogInput {
         Self::Recover,
         Self::Destroy,
         Self::RuntimeState,
-        Self::RuntimeRealtimeAttachmentStatus,
         Self::ModelRoutingStatus,
         Self::SetModelRoutingBaseline,
         Self::RequestFiniteSwitchTurn,
@@ -1265,9 +1076,6 @@ impl MeerkatMachineCatalogInput {
             Self::Recover => MeerkatMachineInputVariant::Recover,
             Self::Destroy => MeerkatMachineInputVariant::Destroy,
             Self::RuntimeState => MeerkatMachineInputVariant::RuntimeState,
-            Self::RuntimeRealtimeAttachmentStatus => {
-                MeerkatMachineInputVariant::RuntimeRealtimeAttachmentStatus
-            }
             Self::ModelRoutingStatus => MeerkatMachineInputVariant::ModelRoutingStatus,
             Self::SetModelRoutingBaseline => MeerkatMachineInputVariant::SetModelRoutingBaseline,
             Self::RequestFiniteSwitchTurn => MeerkatMachineInputVariant::RequestFiniteSwitchTurn,
@@ -1328,7 +1136,6 @@ impl MeerkatMachineCatalogInput {
             Self::Recover => "Recover",
             Self::Destroy => "Destroy",
             Self::RuntimeState => "RuntimeState",
-            Self::RuntimeRealtimeAttachmentStatus => "RuntimeRealtimeAttachmentStatus",
             Self::ModelRoutingStatus => "ModelRoutingStatus",
             Self::SetModelRoutingBaseline => "SetModelRoutingBaseline",
             Self::RequestFiniteSwitchTurn => "RequestFiniteSwitchTurn",
@@ -1355,7 +1162,6 @@ impl MeerkatMachineCommandVariant {
             Self::ConfigureModelRoutingBaseline
             | Self::RequestSwitchTurn
             | Self::ResolvedSessionLlmCapabilities
-            | Self::RuntimeRealtimeChannelStatus
             | Self::SessionModelRoutingStatus
             | Self::PrepareLocalSessionBindings => None,
             Self::RegisterSession => Some(MeerkatMachineCatalogInput::RegisterSession),
@@ -1397,9 +1203,6 @@ impl MeerkatMachineCommandVariant {
             Self::Recover => Some(MeerkatMachineCatalogInput::Recover),
             Self::Destroy => Some(MeerkatMachineCatalogInput::Destroy),
             Self::RuntimeState => Some(MeerkatMachineCatalogInput::RuntimeState),
-            Self::RuntimeRealtimeAttachmentStatus => {
-                Some(MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus)
-            }
             Self::AdmitModelRoutingAssistantTurn => {
                 Some(MeerkatMachineCatalogInput::AdmitModelRoutingAssistantTurn)
             }
@@ -1466,11 +1269,6 @@ const fn meerkat_machine_command_classification(
                 MeerkatMachineCatalogInput::RequestFiniteSwitchTurn,
                 MeerkatMachineCatalogInput::RequestUntilChangedSwitchTurn,
             ])
-        }
-        MeerkatMachineCommandVariant::RuntimeRealtimeChannelStatus => {
-            MeerkatMachineCommandClassification::CatalogInput(
-                MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus,
-            )
         }
         MeerkatMachineCommandVariant::ResolvedSessionLlmCapabilities => {
             MeerkatMachineCommandClassification::ShellMechanic(
@@ -1622,11 +1420,6 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::RuntimeState => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::RuntimeState,
-            )
-        }
-        MeerkatMachineCommandVariant::RuntimeRealtimeAttachmentStatus => {
-            MeerkatMachineCommandClassification::CatalogInput(
-                MeerkatMachineCatalogInput::RuntimeRealtimeAttachmentStatus,
             )
         }
         MeerkatMachineCommandVariant::AdmitModelRoutingAssistantTurn => {

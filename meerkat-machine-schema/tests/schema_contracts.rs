@@ -911,7 +911,6 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
         "InputState",
         "ListActiveInputs",
         "RuntimeState",
-        "RuntimeRealtimeAttachmentStatus",
         "LoadBoundaryReceipt",
     ] {
         assert!(

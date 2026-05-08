@@ -398,7 +398,8 @@ if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test
   grep -Fq 'name = "sdk_suites_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'name = "wasm_contract_cargo_equivalent_tests"' tools/buildbuddy/BUILD.bazel &&
   grep -Fq 'name = "wasm_check_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
-  grep -Fq 'name = "security_audit_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel; then
+  grep -Fq 'name = "security_audit_cargo_equivalent_test"' tools/buildbuddy/BUILD.bazel &&
+  grep -Fq 'workspace copy observed changing runfile' tools/buildbuddy/full_lane_test.sh; then
   pass "BuildBuddy SDK, WASM, and audit lanes use real cargo-equivalent Bazel test targets"
 else
   bad "BuildBuddy SDK, WASM, or audit lane is still static, host-only, or unmapped"

@@ -42,12 +42,34 @@ case "$(uname -s)-$(uname -m)" in
 esac
 
 copy_workspace() {
-  rm -rf "${work_root}"
-  mkdir -p "${work_root}"
-  (
-    cd "${runfiles_root}"
-    tar -chf - --exclude='.git' --exclude='bazel-*' --exclude='target' --exclude='target-*' .
-  ) | tar -xf - -C "${work_root}"
+  local attempt log status statuses
+  for attempt in 1 2 3; do
+    rm -rf "${work_root}"
+    mkdir -p "${work_root}"
+    log="${TEST_TMPDIR}/workspace-copy-${attempt}.log"
+    set +e
+    (
+      cd "${runfiles_root}"
+      tar -chf - --exclude='.git' --exclude='bazel-*' --exclude='target' --exclude='target-*' .
+    ) 2>"${log}" | tar -xf - -C "${work_root}" 2>>"${log}"
+    statuses=("${PIPESTATUS[@]}")
+    set -e
+    if [[ "${statuses[0]}" == "0" && "${statuses[1]}" == "0" ]]; then
+      return
+    fi
+    if grep -Fq 'file changed as we read it' "${log}" && [[ "${attempt}" -lt 3 ]]; then
+      cat "${log}" >&2
+      echo "workspace copy observed changing runfile; retrying (${attempt}/3)" >&2
+      sleep "${attempt}"
+      continue
+    fi
+    cat "${log}" >&2
+    status="${statuses[0]}"
+    if [[ "${status}" == "0" ]]; then
+      status="${statuses[1]}"
+    fi
+    exit "${status}"
+  done
 }
 
 prepend_path() {

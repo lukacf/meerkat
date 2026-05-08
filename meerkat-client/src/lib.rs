@@ -93,11 +93,6 @@ pub mod openai_compatible {
 pub mod openai_live {
     pub use meerkat_openai::live::*;
 }
-#[cfg(all(
-    feature = "openai",
-    feature = "openai-realtime",
-    not(target_arch = "wasm32")
-))]
 #[cfg(feature = "gemini")]
 pub mod gemini {
     pub use meerkat_gemini::*;

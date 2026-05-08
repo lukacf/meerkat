@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-05-08
+
+Meerkat 0.6.2 is a patch release for runtime authority, provider/tooling polish, and the recovered BuildBuddy release path. It makes the runtime lifecycle spine machine-owned, improves model/tool visibility and multimodal handling, and removes the unsupported `rkat-mini` binary from published release artifacts while preserving `rkat-rpc-mini`.
+
+### Added
+
+- **Machine-owned runtime lifecycle spine** (#636) — runtime lifecycle authority now flows through the machine-owned spine, keeping lifecycle decisions under the generated machine contract.
+- **Provider replay projection contract** (#639) — provider replay facts now have a typed projection contract for downstream replay/debug consumers.
+- **Typed transcript fork/edit API** (#642) — transcript fork and edit flows are exposed through typed runtime APIs instead of ad hoc mutation paths.
+- **Universal agent LLM client decorator** (#643) — agent LLM clients can be wrapped consistently across providers and runtime surfaces.
+- **Resolved model capability visibility** (#645) — resolved model capabilities are surfaced explicitly so clients can inspect provider/model feature availability.
+- **Canonical assistant image event** — assistant image generation now has a canonical event shape for runtime and SDK consumers.
+
+### Changed
+
+- **Provider web search defaults** (#646) — provider-native web search is enabled by default when the selected model supports it.
+- **Release artifacts** — `rkat-mini` is no longer shipped in GitHub Releases or Homebrew resources; it remains a source-build option. The release still publishes `rkat-rpc-mini`.
+- **OpenAI realtime dependency** — Meerkat now uses the published `oai-rt-rs` crate instead of an unpublished/local realtime dependency.
+
+### Fixed
+
+- **BuildBuddy release backend** — full and asset-recovery release workflows can now select the BuildBuddy-backed release binary path while leaving the public GitHub-hosted path as the default.
+- **Cross-platform release assets** — BuildBuddy release packaging was repaired for Linux arm64, macOS arm64/x86_64, and Windows asset collection/output layout.
+- **Private BuildBuddy endpoint handling** — enterprise BuildBuddy endpoint selection stays secret-scoped and owner-only; public contributors continue through the standard GitHub-hosted release path.
+- **Release recovery flows** — asset-only and Web SDK recovery lanes now rebuild from the release tag and skip unrelated registry/validation work.
+- **Mob executor and SDK realtime edge cases** — fixed a mob executor `handling_mode` leak and Python SDK realtime deserialization issue.
+- **LLM error reporting** — provider/runtime LLM errors now surface with clearer structured context.
+
 ## [0.6.1] - 2026-05-06
 
 Meerkat 0.6.1 is a focused patch release for provider-native tool visibility. It restores provider web search plumbing across request injection and response capture, and adds a typed profile visibility seam for image generation in mob/session tooling.

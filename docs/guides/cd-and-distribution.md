@@ -143,9 +143,9 @@ For manual dispatches, use the `release_backend` input.
 The Make dispatch wrappers use the same local flip as CI:
 
 ```bash
-make release-workflow VERSION=v0.6.1
-MEERKAT_BUILDBUDDY=1 make release-workflow VERSION=v0.6.1
-MEERKAT_BUILDBUDDY=1 make release-assets VERSION=v0.6.1
+make release-workflow VERSION=vX.Y.Z
+MEERKAT_BUILDBUDDY=1 make release-workflow VERSION=vX.Y.Z
+MEERKAT_BUILDBUDDY=1 make release-assets VERSION=vX.Y.Z
 ```
 
 The BuildBuddy branch routes the release matrix through the generated Bazel
@@ -278,5 +278,5 @@ with minimal surface-area, no behavior changes to runtime APIs.
 - Local equivalent:
   - `make release-dry-run`
 - Example:
-  - `make release-workflow VERSION=v0.6.1 REGISTRY_DRY_RUN=true`
-  - `MEERKAT_BUILDBUDDY=1 make release-workflow VERSION=v0.6.1 REGISTRY_DRY_RUN=true`
+  - `make release-workflow VERSION=vX.Y.Z REGISTRY_DRY_RUN=true`
+  - `MEERKAT_BUILDBUDDY=1 make release-workflow VERSION=vX.Y.Z REGISTRY_DRY_RUN=true`

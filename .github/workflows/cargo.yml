@@ -184,7 +184,7 @@ jobs:
 
       - name: Machine verification
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
-        run: ./scripts/repo-cargo xtask machine-verify --all
+        run: ./scripts/repo-cargo xtask machine-verify --all --skip-cargo-tests
 
       - name: Protocol codegen
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}

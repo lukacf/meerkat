@@ -469,7 +469,38 @@ jobs:
           BUILDBUDDY_OUTPUT_BASE: ${{ runner.temp }}/bb-release-${{ matrix.target }}
           MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ runner.temp }}/bb-release
           BUILDBUDDY_RELEASE_JOBS: ${{ vars.MEERKAT_RELEASE_BUILDBUDDY_JOBS || '64' }}
-        run: scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}"
+          TARGET: ${{ matrix.target }}
+          ARCHIVE_EXT: ${{ matrix.archive_ext }}
+        run: |
+          set +e
+          scripts/buildbuddy-bazel-poc --jobs="${BUILDBUDDY_RELEASE_JOBS}"
+          status="$?"
+          set -e
+
+          if [[ "${status}" -eq 38 ]]; then
+            echo "::warning::BuildBuddy build completed but BES upload failed; validating downloaded outputs before continuing"
+            BAZEL_BIN="${BUILDBUDDY_OUTPUT_BASE}/execroot/_main/bazel-out"
+            declare -A BIN_PATHS=(
+              [rkat]="meerkat-cli/rkat"
+              [rkat-rpc]="meerkat-rpc/rkat_rpc_bin"
+              [rkat-rest]="meerkat-rest/rkat_rest_bin"
+              [rkat-mcp]="meerkat-mcp-server/rkat_mcp_bin"
+            )
+            for bin in rkat rkat-rpc rkat-rest rkat-mcp; do
+              rel_path="${BIN_PATHS[$bin]}"
+              src="$(find "${BAZEL_BIN}" -path "*/${rel_path}" -type f 2>/dev/null | head -1)"
+              if [[ -z "${src}" && "${ARCHIVE_EXT}" == "zip" ]]; then
+                src="$(find "${BAZEL_BIN}" -path "*/${rel_path}.exe" -type f 2>/dev/null | head -1)"
+              fi
+              if [[ -z "${src}" ]]; then
+                echo "BuildBuddy exited 38 and ${bin} output is missing for ${TARGET}" >&2
+                exit "${status}"
+              fi
+            done
+            exit 0
+          fi
+
+          exit "${status}"
 
       - name: Package artifacts
         shell: bash
@@ -519,7 +550,16 @@ jobs:
             archive_path="${PWD}/dist/${artifact_name}"
 
             if [[ "$ARCHIVE_EXT" == "zip" ]]; then
-              (cd "${stage_dir}" && 7z a -tzip "${archive_path}" "${payload_name}")
+              if command -v 7z >/dev/null 2>&1; then
+                (cd "${stage_dir}" && 7z a -tzip "${archive_path}" "${payload_name}")
+              elif command -v zip >/dev/null 2>&1; then
+                (cd "${stage_dir}" && zip -q "${archive_path}" "${payload_name}")
+              elif command -v python3 >/dev/null 2>&1; then
+                (cd "${stage_dir}" && python3 -c 'import sys, zipfile; archive_path, payload_name = sys.argv[1], sys.argv[2]; archive = zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED); archive.write(payload_name); archive.close()' "${archive_path}" "${payload_name}")
+              else
+                echo "Need 7z, zip, or python3 to create ${archive_path}" >&2
+                exit 1
+              fi
             else
               tar -czf "${archive_path}" -C "${stage_dir}" "${payload_name}"
             fi

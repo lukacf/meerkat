@@ -6,6 +6,18 @@ export { EventSubscription } from './events.js';
 export { isKnownEvent, KNOWN_AGENT_EVENT_TYPES } from './types.js';
 export type * from './types.js';
 export {
+  LIVE_PCM_WORKLET_PROCESSOR_NAME,
+  liveAudioMediaConstraints,
+  openBrowserLiveAudioCapture,
+} from './live_audio.js';
+export type {
+  BrowserLiveAudioCapture,
+  BrowserLiveAudioConstraints,
+  BrowserLiveAudioContext,
+  BrowserLiveAudioOptions,
+  BrowserLiveAudioSocket,
+} from './live_audio.js';
+export {
   Auth,
   WASM_EXTERNAL_AUTH_RESOLVER_HANDLE,
   registerExternalAuthResolver,

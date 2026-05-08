@@ -6,10 +6,12 @@ import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
+const CURRENT_WASM_VERSION = '0.6.3';
+
 function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
-    runtime_version: () => '0.6.0',
+    runtime_version: () => CURRENT_WASM_VERSION,
     init_runtime_from_config: () => JSON.stringify({ status: 'initialized' }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
@@ -89,7 +91,7 @@ async function runtimeWithMobList(payload) {
     {
       async default() {},
       runtime_version() {
-        return '0.6.0';
+        return CURRENT_WASM_VERSION;
       },
       init_runtime_from_config() {
         return JSON.stringify({ status: 'initialized' });

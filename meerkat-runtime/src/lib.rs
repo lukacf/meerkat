@@ -60,6 +60,7 @@ pub mod input;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
+pub mod live_adapter_host;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;
@@ -133,6 +134,10 @@ pub use input_scope::InputScope;
 pub use input_state::{
     InputAbandonReason, InputLifecycleState, InputState, InputStateEvent, InputStateHistoryEntry,
     InputTerminalOutcome, MAX_STAGE_ATTEMPTS, PolicySnapshot, ReconstructionSource,
+};
+pub use live_adapter_host::{
+    LiveAdapterChannelSnapshot, LiveAdapterFactory, LiveAdapterHost, LiveAdapterHostError,
+    LiveChannelId, LiveProjectionBuilder, LiveResolvedTarget, LiveTargetResolver,
 };
 pub use meerkat_core::types::HandlingMode;
 pub use meerkat_machine::{

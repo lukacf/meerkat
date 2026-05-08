@@ -188,13 +188,13 @@ else
 fi
 
 if [[ ! -e vendor/oai-rt-rs ]] &&
-  grep -Fq 'oai-rt-rs = "0.3.0"' Cargo.toml &&
+  grep -Fq 'oai-rt-rs = "0.4.0"' Cargo.toml &&
   ! grep -Fq '//vendor/oai-rt-rs:package_runfiles' BUILD.bazel xtask/BUILD.bazel &&
   ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
   ! grep -Fq 'additive_build_file_content' MODULE.bazel &&
   ! grep -Fq 'vendor/oai-rt-rs' MODULE.bazel.lock &&
   ! grep -Fq 'crates__oai-rt-rs-0.2.1' MODULE.bazel.lock &&
-  grep -Fq 'crates__oai-rt-rs-0.3.0' MODULE.bazel.lock; then
+  grep -Fq 'crates__oai-rt-rs-0.4.0' MODULE.bazel.lock; then
   pass "oai-rt-rs resolves from crates.io without vendored runfiles plumbing"
 else
   bad "oai-rt-rs still appears to use vendored runfiles plumbing"

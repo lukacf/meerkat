@@ -372,6 +372,7 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
+                        phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText {
                             text: text.to_string(),
@@ -385,6 +386,7 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
+                        phase: None,
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText {
                             text: text.to_string(),
@@ -403,6 +405,7 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
+                        phase: None,
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText { text }],
                     })
@@ -428,6 +431,7 @@ fn openai_realtime_history_events(
             ProjectionHistoryItem::RuntimeSystem(Item::Message {
                 id: None,
                 status: None,
+                phase: None,
                 role: Role::System,
                 content: vec![ContentPart::InputText {
                     text: text.to_string(),
@@ -548,6 +552,7 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
                     format: Some(AudioFormat::pcm_24khz()),
                     voice: Some(openai_realtime_voice()),
                     speed: None,
+                    language: None,
                 }),
             }),
             instructions: openai_realtime_instructions(
@@ -695,6 +700,7 @@ fn openai_audio_response_config() -> ResponseConfig {
                 format: Some(AudioFormat::pcm_24khz()),
                 voice: Some(openai_realtime_voice()),
                 speed: None,
+                language: None,
             }),
         }),
         // OpenAI accepts per-response voice selection under the nested audio
@@ -1856,6 +1862,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         item: Box::new(Item::Message {
                             id: Some(synthetic_item_id.clone()),
                             status: None,
+                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText { text: text.clone() }],
                         }),
@@ -2474,6 +2481,7 @@ pub fn openai_live_function_call_success_events(
             previous_item_id: None,
             item: Box::new(Item::FunctionCallOutput {
                 id: None,
+                phase: None,
                 call_id: call_id.into(),
                 output: output.into(),
             }),
@@ -2495,6 +2503,7 @@ pub fn openai_live_function_call_error_result_event(
         previous_item_id: None,
         item: Box::new(Item::FunctionCallOutput {
             id: None,
+            phase: None,
             call_id: call_id.into(),
             output: output.into(),
         }),
@@ -2512,6 +2521,7 @@ pub fn openai_live_function_call_error_event(
         previous_item_id: None,
         item: Box::new(Item::FunctionCallOutput {
             id: None,
+            phase: None,
             call_id: call_id.into(),
             output,
         }),
@@ -2683,6 +2693,7 @@ mod tests {
                 item: Item::Message {
                     id: Some(format!("msg_seed_{index}")),
                     status: None,
+                    phase: None,
                     role: Role::System,
                     content: vec![ContentPart::InputText {
                         text: format!("seed ack {index}"),
@@ -2727,6 +2738,7 @@ mod tests {
                                 format: Some(AudioFormat::Pcm { rate: 24_000 }),
                                 voice: Some(_),
                                 speed: None,
+                                ..
                             }),
                         })
                     ),
@@ -4041,6 +4053,7 @@ mod tests {
                         item: Item::FunctionCall {
                             id: Some("item_tool".to_string()),
                             status: None,
+                            phase: None,
                             name: "lookup".to_string(),
                             call_id: "call_tool".to_string(),
                             arguments: "{}".to_string(),
@@ -4090,6 +4103,7 @@ mod tests {
                         item: Item::Message {
                             id: Some("item_seed_user".to_string()),
                             status: None,
+                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText {
                                 text: "remember amber lantern".to_string(),
@@ -4102,6 +4116,7 @@ mod tests {
                         item: Item::Message {
                             id: Some("item_seed_user".to_string()),
                             status: None,
+                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText {
                                 text: "remember amber lantern".to_string(),
@@ -4934,6 +4949,7 @@ mod tests {
                         item: Item::McpCall {
                             id: Some("item_mcp_1".to_string()),
                             status: None,
+                            phase: None,
                             call_id: "call_mcp_1".to_string(),
                             server_label: "meerkat".to_string(),
                             name: "send_request".into(),
@@ -4980,6 +4996,7 @@ mod tests {
                         item: Item::McpCall {
                             id: Some("item_mcp_2".to_string()),
                             status: None,
+                            phase: None,
                             call_id: "call_mcp_2".to_string(),
                             server_label: "meerkat".to_string(),
                             name: "send_request".into(),

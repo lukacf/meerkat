@@ -395,7 +395,6 @@ mod tests {
             "/config",
             "/schedules",
             "/schedules/{id}/occurrences",
-            "/sessions/{id}/realtime-attachment-status",
             "/auth/bindings/{binding_id}",
             "/auth/bindings/{binding_id}/test",
             "/auth/login/complete",

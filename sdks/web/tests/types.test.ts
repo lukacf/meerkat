@@ -42,8 +42,10 @@ import type {
   WireCredentialSourceKind,
   WireAuthStatusState,
   EventEnvelope,
+  BrowserLiveAudioCapture,
+  BrowserLiveAudioOptions,
 } from '../src/index.js';
-import { Auth } from '../src/index.js';
+import { Auth, liveAudioMediaConstraints } from '../src/index.js';
 
 // ─── RuntimeConfig ──────────────────────────────────────────────
 
@@ -196,6 +198,17 @@ const rejectedStringExternalAuthResolver: ExternalAuthResolver = () => 'bearer-d
 // @ts-expect-error resolver results must preserve lease metadata structurally.
 const rejectedStringExternalAuthResult: ExternalAuthResolverResult = 'bearer-default-openai';
 
+const liveAudioOptions: BrowserLiveAudioOptions = {
+  sampleRate: 24_000,
+  channelCount: 1,
+  closeSocketOnStop: true,
+};
+const liveAudioCapture: Promise<BrowserLiveAudioCapture> = Promise.resolve(
+  {} as BrowserLiveAudioCapture,
+);
+const liveAudioConstraints = liveAudioMediaConstraints(liveAudioOptions);
+liveAudioConstraints.audio;
+
 const appendSystemContextOptions: AppendSystemContextOptions = {
   text: 'Coordinate with the orchestrator.',
   source: 'mob',
@@ -336,8 +349,16 @@ function handleEvent(event: AgentEvent): string {
       return `${event.stop_reason} ${event.usage.input_tokens}+${event.usage.output_tokens}`;
     case 'run_completed':
       return event.result;
+    case 'extraction_succeeded':
+      return `${event.session_id}:${event.schema_warnings?.length ?? 0}`;
+    case 'extraction_failed':
+      return `${event.session_id}:${event.attempts}:${event.reason}`;
     case 'run_failed':
       return event.error;
+    case 'server_tool_content':
+      return `${event.name}:${event.id ?? ''}`;
+    case 'assistant_image_appended':
+      return event.image.image_id;
     case 'tool_execution_started':
       return `exec:${event.name}`;
     case 'tool_execution_completed':

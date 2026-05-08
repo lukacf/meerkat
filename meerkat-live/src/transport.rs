@@ -100,12 +100,12 @@ async fn handle_live_socket(mut socket: WebSocket, token: String, state: Arc<Liv
             client_msg = socket.recv() => {
                 match client_msg {
                     Some(Ok(WsMessage::Text(text))) => {
-                        if let Ok(chunk) = serde_json::from_str::<LiveInputChunk>(text.as_str()) {
-                            if let Err(err) = state.host.send_input(&channel_id, chunk).await {
-                                tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
-                                let err_json = serde_json::json!({"error": err.to_string()}).to_string();
-                                let _ = socket.send(WsMessage::Text(err_json.into())).await;
-                            }
+                        if let Ok(chunk) = serde_json::from_str::<LiveInputChunk>(text.as_str())
+                            && let Err(err) = state.host.send_input(&channel_id, chunk).await
+                        {
+                            tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
+                            let err_json = serde_json::json!({"error": err.to_string()}).to_string();
+                            let _ = socket.send(WsMessage::Text(err_json.into())).await;
                         }
                     }
                     Some(Ok(WsMessage::Binary(data))) => {
@@ -129,10 +129,10 @@ async fn handle_live_socket(mut socket: WebSocket, token: String, state: Arc<Liv
                         let is_closed = matches!(obs, LiveAdapterObservation::StatusChanged {
                             status: LiveAdapterStatus::Closed
                         });
-                        if let Ok(json) = serde_json::to_string(&obs) {
-                            if socket.send(WsMessage::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                        if let Ok(json) = serde_json::to_string(&obs)
+                            && socket.send(WsMessage::Text(json.into())).await.is_err()
+                        {
+                            break;
                         }
                         if is_closed {
                             break;

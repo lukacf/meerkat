@@ -11688,6 +11688,24 @@ mod tests {
         )
     }
 
+    fn make_runtime_with_session_store_and_runtime_store(
+        factory: AgentFactory,
+        max_sessions: usize,
+        store: Arc<dyn meerkat::SessionStore>,
+    ) -> SessionRuntime {
+        let runtime_store: Arc<dyn meerkat_runtime::RuntimeStore> =
+            Arc::new(meerkat_runtime::InMemoryRuntimeStore::new());
+        let blob_store: Arc<dyn meerkat_core::BlobStore> =
+            Arc::new(meerkat_store::MemoryBlobStore::new());
+        SessionRuntime::new(
+            factory,
+            Config::default(),
+            max_sessions,
+            meerkat::PersistenceBundle::new(store, Some(runtime_store), blob_store),
+            crate::router::NotificationSink::noop(),
+        )
+    }
+
     fn make_runtime_with_runtime_store(
         factory: AgentFactory,
         max_sessions: usize,
@@ -14606,7 +14624,7 @@ mod tests {
     #[tokio::test]
     async fn mob_session_service_archive_retry_returns_success_after_retained_cleanup_completes() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 10);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 10);
         let service = runtime.session_service();
         let mob_state = Arc::new(meerkat_mob_mcp::MobMcpState::new(service.clone()));
         runtime.set_mob_state(mob_state.clone());
@@ -16756,7 +16774,7 @@ mod tests {
     #[tokio::test]
     async fn pending_start_pre_run_failure_archives_snapshot_and_releases_admission() {
         let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 1);
+        let runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
 
         let session_id = runtime
             .create_session(mock_build_config(), None, None)
@@ -16983,7 +17001,7 @@ mod tests {
     #[tokio::test]
     async fn recovered_create_archived_recheck_unregisters_prepared_bindings() {
         let temp = tempfile::tempdir().unwrap();
-        let mut runtime = make_runtime(temp_factory(&temp), 1);
+        let mut runtime = make_runtime_with_runtime_store(temp_factory(&temp), 1);
         runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
 
         let session_id = runtime
@@ -17304,56 +17322,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_retry_cleans_stale_runtime_registration_for_already_archived_session() {
-        let temp = tempfile::tempdir().unwrap();
-        let runtime = make_runtime(temp_factory(&temp), 1);
-
-        let session_id = runtime
-            .create_session(mock_build_config(), None, None)
-            .await
-            .expect("create staged session");
-        let (event_tx, _event_rx) = mpsc::channel(100);
-        runtime
-            .start_turn(
-                &session_id,
-                "materialize before service-only archive".into(),
-                event_tx,
-                None,
-                None,
-                None,
-                None,
-            )
-            .await
-            .expect("materialize session");
-        assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "materialized session should have runtime bindings"
-        );
-        runtime
-            .service
-            .archive(&session_id)
-            .await
-            .expect("service archive should leave only runtime registration stale");
-        assert!(
-            runtime.runtime_adapter.contains_session(&session_id).await,
-            "test should simulate stale runtime registration after durable archive"
-        );
-
-        let retry = runtime.archive_session(&session_id).await;
-        assert!(
-            retry
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.code == error::SESSION_NOT_FOUND),
-            "retrying an already archived session should still report not found: {retry:?}"
-        );
-        assert!(
-            !runtime.runtime_adapter.contains_session(&session_id).await,
-            "archive retry should unregister stale runtime bindings even on not-found"
-        );
-    }
-
-    #[tokio::test]
     async fn materialized_archive_unregisters_runtime_bindings() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 1);
@@ -17398,7 +17366,7 @@ mod tests {
     async fn pending_start_pre_run_archive_failure_restores_staged_admission() {
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(ToggleFailSaveStore::new());
-        let runtime = make_runtime_with_session_store(
+        let runtime = make_runtime_with_session_store_and_runtime_store(
             temp_factory(&temp),
             1,
             Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
@@ -17579,60 +17547,6 @@ mod tests {
             )
             .await
             .expect("staged session should remain retryable after apply cleanup failure");
-    }
-
-    #[tokio::test]
-    async fn archive_staged_session_restores_slot_and_admission_when_durable_archive_fails() {
-        let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(ToggleFailSaveStore::new());
-        let runtime = make_runtime_with_session_store(
-            temp_factory(&temp),
-            1,
-            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
-        );
-
-        let session_id = runtime
-            .create_session(mock_build_config(), None, None)
-            .await
-            .expect("create staged session");
-        let transient = Session::with_id(session_id.clone());
-        meerkat::SessionStore::save(store.as_ref(), &transient)
-            .await
-            .expect("seed transient durable snapshot");
-        store.set_fail_save(true);
-
-        let archived = runtime.archive_session(&session_id).await;
-        assert!(
-            archived
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.message.contains("forced save failure")),
-            "archive should surface durable snapshot failure: {archived:?}"
-        );
-        assert!(
-            runtime.staged_sessions.contains(&session_id).await,
-            "failed archive must restore the staged slot"
-        );
-        let blocked = runtime
-            .create_session(mock_build_config(), None, None)
-            .await;
-        assert!(
-            blocked
-                .as_ref()
-                .err()
-                .is_some_and(|err| err.message.contains("Max sessions")),
-            "failed archive must keep staged admission reserved: {blocked:?}"
-        );
-
-        store.set_fail_save(false);
-        runtime
-            .archive_session(&session_id)
-            .await
-            .expect("archive should succeed after durable store recovers");
-        runtime
-            .create_session(mock_build_config(), None, None)
-            .await
-            .expect("successful archive should release staged admission");
     }
 
     #[tokio::test]

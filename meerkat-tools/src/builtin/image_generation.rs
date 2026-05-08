@@ -131,6 +131,8 @@ pub struct GenerateImageTool {
 
 const GENERATE_IMAGE_TOOL_DOCUMENTATION: &str = r#"Generate or edit an assistant image through the session-owned image substrate.
 
+Use this tool whenever the user asks you to generate, create, draw, render, or edit an image. If the user asks to save the result to disk, generate the image here first, then save the returned blob with `blob_save_file`. Do not use shell scripts, drawing libraries, or placeholder files as a substitute for requested image generation when this tool is available.
+
 Use a simple request shape unless you explicitly need the canonical internal shape:
 {"request":{"intent":"generate","prompt":"a cozy tabby cat by a sunlit window","size":"1024x1024","quality":"auto","format":"png","count":1}}
 

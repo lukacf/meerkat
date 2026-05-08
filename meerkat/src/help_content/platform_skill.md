@@ -515,16 +515,19 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 
-**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; user-facing surfaces fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
+**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; the model can save them to project files with `blob_save_file`, and user-facing surfaces can fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
+
+**Blob file builtin tools:** `blob_save_file` writes decoded blob bytes to a project-root-contained file, `blob_load_file` reads a project file into the blob store, and `blob_inspect` returns metadata (`blob_id`, `media_type`, decoded size) without raw base64. These are available only when builtins are enabled and the session has a blob store. No list/delete model tools are exposed.
 
 **Image generation via CLI:** There is no direct image-generation CLI command and no `rkat rpc` subcommand. Ask the assistant through a session, allow the image tool, and fetch the resulting blob:
 
 ```bash
 rkat run --allow-tool generate_image "Use generate_image to create a square PNG of a cozy tabby cat by a sunlit window. Return the blob id."
 rkat blob get <BLOB-ID> --output cat.png
+rkat run "Create a square PNG of a cozy tabby cat by a sunlit window and save it to cat.png." --yolo -m gpt-5.5
 ```
 
-Use `rkat blob get <BLOB-ID> --json` to inspect the blob payload. If the answer does not include a blob id, resume the session and ask for the blob id.
+Use `rkat blob get <BLOB-ID> --json` or the model-facing `blob_inspect` tool to inspect blob metadata. If the answer does not include a blob id or file path, resume the session and ask for it.
 
 **Provider capabilities:**
 | Provider | `vision` | `image_tool_results` | `inline_video` |

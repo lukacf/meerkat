@@ -700,6 +700,7 @@ mod ordered_transcript_types {
         let meta = ProviderMeta::OpenAi {
             id: "reasoning_item_123".to_string(),
             encrypted_content: Some("encrypted_tokens_abc".to_string()),
+            phase: Some("reasoning".to_string()),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -711,6 +712,7 @@ mod ordered_transcript_types {
         assert_eq!(value["provider"], "open_ai");
         assert_eq!(value["id"], "reasoning_item_123");
         assert_eq!(value["encrypted_content"], "encrypted_tokens_abc");
+        assert_eq!(value["phase"], "reasoning");
     }
 
     #[test]
@@ -718,6 +720,7 @@ mod ordered_transcript_types {
         let meta = ProviderMeta::OpenAi {
             id: "reasoning_item_456".to_string(),
             encrypted_content: None,
+            phase: None,
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -798,6 +801,7 @@ mod ordered_transcript_types {
             meta: Some(Box::new(ProviderMeta::OpenAi {
                 id: "reasoning_123".to_string(),
                 encrypted_content: Some("encrypted".to_string()),
+                phase: None,
             })),
         };
 

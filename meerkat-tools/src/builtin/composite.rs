@@ -8,6 +8,8 @@ use crate::builtin::store::TaskStore;
 use crate::builtin::{BuiltinTool, BuiltinToolConfig, BuiltinToolError, ToolOutput};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::BlobStore;
 use meerkat_core::ExternalToolUpdate;
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::ToolCategoryOverride;
@@ -43,6 +45,11 @@ struct ImageGenerationToolBinding {
     visibility: ToolCategoryOverride,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct BlobToolBinding {
+    blob_store: Arc<dyn BlobStore>,
+}
+
 /// A composite dispatcher that combines multiple sources of tools.
 pub struct CompositeDispatcher {
     builtin_tools: Vec<Arc<dyn BuiltinTool>>,
@@ -66,6 +73,8 @@ pub struct CompositeDispatcher {
     job_manager: Option<Arc<JobManager>>,
     #[cfg(not(target_arch = "wasm32"))]
     image_generation_runtime: Option<ImageGenerationToolBinding>,
+    #[cfg(not(target_arch = "wasm32"))]
+    blob_tools: Option<BlobToolBinding>,
     allowed_tools: HashSet<String>,
 }
 
@@ -200,6 +209,7 @@ impl CompositeDispatcher {
             image_tool_results: _image_tool_results,
             job_manager,
             image_generation_runtime: None,
+            blob_tools: None,
             allowed_tools,
         })
     }
@@ -282,6 +292,32 @@ impl CompositeDispatcher {
             runtime,
             visibility,
         });
+    }
+
+    /// Register blob file bridge builtins backed by the session blob store.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn register_blob_file_tools(&mut self, blob_store: Arc<dyn BlobStore>) {
+        let Some(project_root) = self.project_root.clone() else {
+            return;
+        };
+        use crate::builtin::utility::{BlobInspectTool, BlobLoadFileTool, BlobSaveFileTool};
+        let tools: [Arc<dyn BuiltinTool>; 3] = [
+            Arc::new(BlobSaveFileTool::new(
+                project_root.clone(),
+                Arc::clone(&blob_store),
+            )),
+            Arc::new(BlobLoadFileTool::new(project_root, Arc::clone(&blob_store))),
+            Arc::new(BlobInspectTool::new(Arc::clone(&blob_store))),
+        ];
+        let resolved_policy = self.builtin_config.resolve();
+        for tool in tools {
+            let name = tool.name().to_string();
+            if resolved_policy.is_enabled(&name, tool.default_enabled()) {
+                self.allowed_tools.insert(name);
+            }
+            self.builtin_tools.push(tool);
+        }
+        self.blob_tools = Some(BlobToolBinding { blob_store });
     }
 
     /// Get usage instructions for all enabled tools.
@@ -637,7 +673,11 @@ impl AgentToolDispatcher for CompositeDispatcher {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if owned.job_manager.is_none() && rebound_external.is_none() {
+            if owned.job_manager.is_none()
+                && rebound_external.is_none()
+                && owned.image_generation_runtime.is_none()
+                && owned.blob_tools.is_none()
+            {
                 return Err(OpsLifecycleBindError::Unsupported);
             }
 
@@ -660,6 +700,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
             if let Some(binding) = owned.image_generation_runtime.take() {
                 rebound.register_image_generation_tool(binding.runtime, binding.visibility);
+            }
+            if let Some(binding) = owned.blob_tools.take() {
+                rebound.register_blob_file_tools(binding.blob_store);
             }
 
             Ok(BindOutcome::Bound(Arc::new(rebound)))
@@ -693,10 +736,56 @@ impl AgentToolDispatcher for CompositeDispatcher {
 mod tests {
     use super::*;
     use crate::builtin::MemoryTaskStore;
+    use crate::builtin::ToolPolicyLayer;
     use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
     use meerkat_core::types::SessionId;
+    use meerkat_core::{BlobId, BlobPayload, BlobRef, BlobStoreError};
     use serde_json::json;
+    use std::collections::HashMap;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestBlobStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+    }
+
+    #[async_trait]
+    impl BlobStore for TestBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::new(format!("sha256:{media_type}:{data}"));
+            self.blobs.lock().await.insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .await
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().await.remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
 
     struct MockExternalDispatcher {
         tools: Arc<[Arc<ToolDef>]>,
@@ -1132,6 +1221,159 @@ mod tests {
             .await
             .expect("external tool dispatch should succeed even with a stale allow-set entry");
         assert_eq!(result.result.text_content(), "{}");
+    }
+
+    #[test]
+    fn blob_file_tools_register_when_blob_store_is_wired() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        dispatcher.register_blob_file_tools(Arc::new(TestBlobStore::default()));
+
+        let names: Vec<_> = dispatcher
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for expected in ["blob_save_file", "blob_load_file", "blob_inspect"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} should be exposed when a blob store is wired; tools={names:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_file_tools_are_absent_without_blob_store() {
+        let temp_dir = TempDir::new().unwrap();
+        let dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .all(|tool| !tool.name.starts_with("blob_")),
+            "blob tools should not be advertised without a session blob store"
+        );
+
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"blob_id":"sha256:missing"}"#.into())
+                .unwrap();
+        let call = ToolCallView {
+            id: "blob-inspect",
+            name: "blob_inspect",
+            args: &call_json,
+        };
+        let err = dispatcher.dispatch(call).await.unwrap_err();
+        assert!(matches!(err, ToolError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn blob_file_tools_respect_builtin_policy() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = BuiltinToolConfig {
+            policy: ToolPolicyLayer::new().disable_tool("blob_save_file"),
+            ..Default::default()
+        };
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &config,
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            None,
+            true,
+        )
+        .expect("composite dispatcher should build");
+
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = store.put_image("image/png", "iVBORw0KGgo=").await.unwrap();
+        dispatcher.register_blob_file_tools(store);
+
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .all(|tool| tool.name != "blob_save_file"),
+            "disabled blob_save_file must not be advertised"
+        );
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .any(|tool| tool.name == "blob_inspect"),
+            "other blob tools should remain available"
+        );
+
+        let call_json = serde_json::value::RawValue::from_string(
+            serde_json::json!({
+                "blob_id": blob_ref.blob_id.as_str(),
+                "path": "out.png",
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let call = ToolCallView {
+            id: "blob-save",
+            name: "blob_save_file",
+            args: &call_json,
+        };
+        let err = dispatcher.dispatch(call).await.unwrap_err();
+        assert!(matches!(err, ToolError::AccessDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn blob_file_tools_survive_ops_lifecycle_rebind() {
+        let temp_dir = TempDir::new().unwrap();
+        let store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let mut dispatcher = CompositeDispatcher::new(
+            Arc::new(MemoryTaskStore::new()),
+            &BuiltinToolConfig::default(),
+            Some(temp_dir.path().to_path_buf()),
+            None,
+            None,
+            Some(SessionId::new().to_string()),
+            true,
+        )
+        .expect("composite dispatcher should build");
+        dispatcher.register_blob_file_tools(store);
+
+        let registry: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(meerkat_runtime::RuntimeOpsLifecycleRegistry::new());
+        let rebound = Arc::new(dispatcher)
+            .bind_ops_lifecycle(registry, SessionId::new())
+            .expect("ops lifecycle binding should preserve blob tools")
+            .into_dispatcher();
+
+        let names: Vec<_> = rebound
+            .tools()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        for expected in ["blob_save_file", "blob_load_file", "blob_inspect"] {
+            assert!(
+                names.contains(&expected.to_string()),
+                "{expected} should survive ops lifecycle rebinding; tools={names:?}"
+            );
+        }
     }
 
     #[test]

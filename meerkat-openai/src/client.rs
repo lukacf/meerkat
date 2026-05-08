@@ -111,6 +111,14 @@ fn project_openai_tool_result(result: &ToolResult) -> Result<ToolResult, LlmErro
     ))
 }
 
+fn openai_reasoning_replayable(
+    mode: OpenAiReplayProjectionMode,
+    meta: &Option<Box<ProviderMeta>>,
+) -> bool {
+    matches!(mode, OpenAiReplayProjectionMode::Responses)
+        && matches!(meta.as_deref(), Some(ProviderMeta::OpenAi { .. }))
+}
+
 fn openai_server_tool_content_replayable(
     mode: OpenAiReplayProjectionMode,
     content: &Value,
@@ -118,7 +126,17 @@ fn openai_server_tool_content_replayable(
     match mode {
         OpenAiReplayProjectionMode::Responses => matches!(
             content.get("type").and_then(Value::as_str),
-            Some("web_search_call" | "web_search_result")
+            Some(
+                "web_search_call"
+                    | "web_search_result"
+                    | "file_search_call"
+                    | "computer_call"
+                    | "code_interpreter_call"
+                    | "image_generation_call"
+                    | "mcp_call"
+                    | "mcp_list_tools"
+                    | "mcp_approval_request"
+            )
         ),
         OpenAiReplayProjectionMode::ChatCompletions => false,
     }
@@ -128,22 +146,41 @@ fn project_openai_assistant_blocks(
     mode: OpenAiReplayProjectionMode,
     blocks: &[AssistantBlock],
 ) -> Vec<AssistantBlock> {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
+    let mut projected = Vec::with_capacity(blocks.len());
+    let mut has_output_item = false;
+
+    for block in blocks {
+        let projected_block = match block {
             AssistantBlock::Text { text, .. } if text.is_empty() => None,
-            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => {
+                has_output_item = true;
+                Some(block.clone())
+            }
+            AssistantBlock::Reasoning { meta, .. } if openai_reasoning_replayable(mode, meta) => {
+                Some(block.clone())
+            }
             AssistantBlock::ServerToolContent { content, .. }
                 if openai_server_tool_content_replayable(mode, content) =>
             {
+                has_output_item = true;
                 Some(block.clone())
             }
             AssistantBlock::Reasoning { .. }
             | AssistantBlock::ServerToolContent { .. }
             | AssistantBlock::Image { .. } => None,
             _ => None,
-        })
-        .collect()
+        };
+
+        if let Some(block) = projected_block {
+            projected.push(block);
+        }
+    }
+
+    if has_output_item {
+        projected
+    } else {
+        Vec::new()
+    }
 }
 
 fn tool_ids_from_assistant(message: &Message) -> HashSet<String> {
@@ -213,12 +250,6 @@ pub(crate) fn project_openai_replay_messages(
             continue;
         }
 
-        if pending_tool_ids.is_some() {
-            return Err(invalid_replay(
-                "OpenAI replay projection found a tool use without adjacent tool results",
-            ));
-        }
-
         let next_message = match message {
             Message::System(_) | Message::SystemNotice(_) => Some(message.clone()),
             Message::User(user) => Some(Message::User(UserMessage {
@@ -248,13 +279,21 @@ pub(crate) fn project_openai_replay_messages(
             Message::ToolResults { .. } => unreachable!("handled above"),
         };
 
-        if let Some(message) = next_message {
-            let tool_ids = tool_ids_from_assistant(&message);
-            if !tool_ids.is_empty() {
-                pending_tool_ids = Some(tool_ids);
-            }
-            projected.push(message);
+        let Some(message) = next_message else {
+            continue;
+        };
+
+        if pending_tool_ids.is_some() {
+            return Err(invalid_replay(
+                "OpenAI replay projection found a tool use without adjacent tool results",
+            ));
         }
+
+        let tool_ids = tool_ids_from_assistant(&message);
+        if !tool_ids.is_empty() {
+            pending_tool_ids = Some(tool_ids);
+        }
+        projected.push(message);
     }
 
     if pending_tool_ids.is_some() {
@@ -503,16 +542,52 @@ impl OpenAiClient {
 
     /// Convert messages to Responses API input format.
     ///
-    /// Note: we intentionally do not replay prior `reasoning` items.
-    /// OpenAI enforces strict adjacency invariants for reasoning replay, and
-    /// violating them causes hard request failures. Replaying only user/assistant
-    /// messages and tool items is robust across retries and tool-call turns.
+    /// OpenAI-hosted tool output items can depend on paired reasoning output
+    /// items. `project_openai_replay_messages` filters provider-specific
+    /// history before this point so Responses replay keeps OpenAI reasoning and
+    /// final hosted-tool items together, while provider switches and Chat
+    /// Completions mode do not receive OpenAI-private transcript state.
     fn convert_to_responses_input(messages: &[Message]) -> Result<Vec<Value>, LlmError> {
         Self::convert_to_responses_input_with_system_mode(
             messages,
             SystemMessageMode::IncludeInInput,
         )
         .map(|(input, _)| input)
+    }
+
+    fn openai_reasoning_input_item(text: &str, meta: &ProviderMeta) -> Option<Value> {
+        let ProviderMeta::OpenAi {
+            id,
+            encrypted_content,
+            phase,
+            ..
+        } = meta
+        else {
+            return None;
+        };
+
+        let summary = if text.is_empty() {
+            Value::Array(Vec::new())
+        } else {
+            serde_json::json!([{
+                "type": "summary_text",
+                "text": text
+            }])
+        };
+        let mut item = serde_json::json!({
+            "type": "reasoning",
+            "id": id,
+            "summary": summary
+        });
+
+        if let Some(encrypted_content) = encrypted_content {
+            item["encrypted_content"] = Value::String(encrypted_content.clone());
+        }
+        if let Some(phase) = phase {
+            item["phase"] = Value::String(phase.clone());
+        }
+
+        Some(item)
     }
 
     fn convert_to_responses_input_with_system_mode(
@@ -623,12 +698,19 @@ impl OpenAiClient {
                                     "arguments": args.get()  // Already JSON string
                                 }));
                             }
+                            AssistantBlock::Reasoning { text, meta } => {
+                                if let Some(item) = meta
+                                    .as_deref()
+                                    .and_then(|meta| Self::openai_reasoning_input_item(text, meta))
+                                {
+                                    items.push(item);
+                                }
+                            }
                             AssistantBlock::ServerToolContent { content, .. } => {
                                 items.push(content.clone());
                             }
-                            // Reasoning replay can violate Responses API adjacency
-                            // constraints and hard-fail requests; skip it and any
-                            // unknown future variants.
+                            // Unknown future variants are omitted unless the
+                            // OpenAI projection explicitly admits them above.
                             _ => {}
                         }
                     }
@@ -1279,10 +1361,14 @@ impl LlmClient for OpenAiClient {
                                                     let encrypted = item.get("encrypted_content")
                                                         .and_then(|v| v.as_str())
                                                         .map(std::string::ToString::to_string);
+                                                    let phase = item.get("phase")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(std::string::ToString::to_string);
 
                                                     let meta = Some(Box::new(ProviderMeta::OpenAi {
                                                         id: reasoning_id.to_string(),
                                                         encrypted_content: encrypted,
+                                                        phase,
                                                     }));
 
                                                     assembler.on_reasoning_start();
@@ -1466,10 +1552,14 @@ impl LlmClient for OpenAiClient {
                                 let encrypted = item.get("encrypted_content")
                                     .and_then(|v| v.as_str())
                                     .map(std::string::ToString::to_string);
+                                let phase = item.get("phase")
+                                    .and_then(|v| v.as_str())
+                                    .map(std::string::ToString::to_string);
 
                                 let meta = Some(Box::new(ProviderMeta::OpenAi {
                                     id: reasoning_id.to_string(),
                                     encrypted_content: encrypted,
+                                    phase,
                                 }));
 
                                 assembler.on_reasoning_start();
@@ -1700,6 +1790,16 @@ mod tests {
         }
     }
 
+    fn build_projected_request_body(client: &OpenAiClient, request: &LlmRequest) -> Value {
+        let mut projected = request.clone();
+        projected.messages = client
+            .project_replay_messages(&request.messages)
+            .expect("project replay messages");
+        client
+            .build_request_body(&projected)
+            .expect("build request")
+    }
+
     async fn responses_sse(State(payload): State<String>) -> impl IntoResponse {
         ([("content-type", "text/event-stream")], payload)
     }
@@ -1735,6 +1835,7 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_1".to_string(),
                             encrypted_content: Some("ciphertext".to_string()),
+                            phase: Some("reasoning".to_string()),
                         })),
                     },
                     AssistantBlock::ServerToolContent {
@@ -1819,11 +1920,11 @@ mod tests {
             panic!("expected assistant message");
         };
         assert!(
-            !assistant
+            assistant
                 .blocks
                 .iter()
                 .any(|block| matches!(block, AssistantBlock::Reasoning { .. })),
-            "OpenAI replay projection should drop reasoning blocks"
+            "OpenAI Responses replay projection should keep OpenAI reasoning blocks"
         );
         assert!(assistant.blocks.iter().any(|block| matches!(
             block,
@@ -1848,6 +1949,30 @@ mod tests {
                 .any(|block| matches!(block, AssistantBlock::Image { .. })),
             "assistant images must be removed from OpenAI replay"
         );
+        let body = client.build_request_body(&LlmRequest::new("gpt-5.4", projected.clone()))?;
+        let input = body["input"].as_array().expect("input array");
+        assert!(input.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("reasoning")
+                && item.get("id").and_then(Value::as_str) == Some("rs_1")
+                && item.get("encrypted_content").and_then(Value::as_str) == Some("ciphertext")
+                && item.get("phase").and_then(Value::as_str) == Some("reasoning")
+        }));
+        assert!(input.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("web_search_call")
+                && item.get("id").and_then(Value::as_str) == Some("ws_1")
+        }));
+        let reasoning_pos = input
+            .iter()
+            .position(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+            .expect("reasoning item");
+        let web_search_pos = input
+            .iter()
+            .position(|item| item.get("type").and_then(Value::as_str) == Some("web_search_call"))
+            .expect("web search item");
+        assert!(
+            reasoning_pos < web_search_pos,
+            "reasoning must replay before dependent hosted-tool item"
+        );
 
         let Message::ToolResults { results, .. } = &projected[2] else {
             panic!("expected tool results");
@@ -1871,6 +1996,93 @@ mod tests {
             )])])
             .expect_err("orphan tool results must be rejected");
         assert!(matches!(err, LlmError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn replay_projection_drops_openai_provider_items_for_chat_completions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let messages = vec![Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Reasoning {
+                    text: "private".to_string(),
+                    meta: Some(Box::new(ProviderMeta::OpenAi {
+                        id: "rs_1".to_string(),
+                        encrypted_content: Some("enc".to_string()),
+                        phase: Some("reasoning".to_string()),
+                    })),
+                },
+                AssistantBlock::ServerToolContent {
+                    id: Some("ws_1".to_string()),
+                    name: "web_search_call".to_string(),
+                    content: serde_json::json!({
+                        "type": "web_search_call",
+                        "id": "ws_1",
+                        "status": "completed"
+                    }),
+                    meta: None,
+                },
+                AssistantBlock::Text {
+                    text: "visible".to_string(),
+                    meta: None,
+                },
+            ],
+            StopReason::EndTurn,
+        ))];
+
+        let projected =
+            project_openai_replay_messages(&messages, OpenAiReplayProjectionMode::ChatCompletions)?;
+
+        let Message::BlockAssistant(assistant) = &projected[0] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(assistant.blocks.len(), 1);
+        assert!(matches!(
+            &assistant.blocks[0],
+            AssistantBlock::Text { text, .. } if text == "visible"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_projection_allows_dropped_image_between_tool_use_and_result()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = OpenAiClient::new("test-key".to_string());
+        let tool_args = RawValue::from_string(r#"{"path":"out.png"}"#.to_string())?;
+        let messages = vec![
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::ToolUse {
+                    id: "tool_1".to_string(),
+                    name: "blob_save_file".to_string(),
+                    args: tool_args,
+                    meta: None,
+                }],
+                StopReason::ToolUse,
+            )),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![assistant_image_block()],
+                StopReason::EndTurn,
+            )),
+            Message::tool_results(vec![ToolResult::new(
+                "tool_1".to_string(),
+                r#"{"path":"out.png"}"#.to_string(),
+                false,
+            )]),
+        ];
+
+        let projected = client.project_replay_messages(&messages)?;
+
+        assert_eq!(projected.len(), 2);
+        let Message::BlockAssistant(assistant) = &projected[0] else {
+            panic!("expected assistant tool use");
+        };
+        assert!(assistant.blocks.iter().any(|block| {
+            matches!(
+                block,
+                AssistantBlock::ToolUse { name, .. } if name == "blob_save_file"
+            )
+        }));
+        assert!(matches!(projected[1], Message::ToolResults { .. }));
+        Ok(())
     }
 
     #[derive(Clone)]
@@ -2624,7 +2836,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
         assert_eq!(input[1]["type"], "message");
@@ -2633,7 +2845,7 @@ mod tests {
     }
 
     #[test]
-    fn test_request_input_format_block_assistant_reasoning_with_output_skips_reasoning_replay() {
+    fn test_request_input_format_block_assistant_reasoning_with_output_replays_reasoning() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -2648,6 +2860,7 @@ mod tests {
                             meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_abc123".to_string(),
                                 encrypted_content: Some("encrypted_data".to_string()),
+                                phase: None,
                             })),
                         },
                         AssistantBlock::Text {
@@ -2661,13 +2874,15 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning is intentionally not replayed; assistant text remains.
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[1]["type"], "message");
-        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_abc123");
+        assert_eq!(input[1]["encrypted_content"], "encrypted_data");
+        assert_eq!(input[2]["type"], "message");
+        assert_eq!(input[2]["role"], "assistant");
     }
 
     #[test]
@@ -3443,6 +3658,7 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_orphan".to_string(),
                             encrypted_content: None,
+                            phase: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -3451,7 +3667,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
         // Orphaned reasoning should be stripped, leaving only the user message
@@ -3476,6 +3692,7 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_mid".to_string(),
                             encrypted_content: None,
+                            phase: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -3485,7 +3702,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
         // Reasoning followed by user message (not assistant output) should be stripped
@@ -3501,10 +3718,21 @@ mod tests {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
+        let args = RawValue::from_string(r"{}".to_string()).unwrap();
         let request = LlmRequest::new(
             "gpt-5.4",
             vec![
                 Message::User(UserMessage::text("Hello".to_string())),
+                Message::BlockAssistant(BlockAssistantMessage {
+                    blocks: vec![AssistantBlock::ToolUse {
+                        id: "call_123".to_string(),
+                        name: "lookup".to_string(),
+                        args,
+                        meta: None,
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    created_at: meerkat_core::types::message_timestamp_now(),
+                }),
                 // Reasoning-only at end of one assistant message
                 Message::BlockAssistant(BlockAssistantMessage {
                     blocks: vec![AssistantBlock::Reasoning {
@@ -3512,12 +3740,14 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_before_tool".to_string(),
                             encrypted_content: None,
+                            phase: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
                     created_at: meerkat_core::types::message_timestamp_now(),
                 }),
-                // Next message is tool results — not a valid follower for reasoning
+                // Next message is tool results; the reasoning-only message
+                // must be dropped without breaking tool-call adjacency.
                 Message::ToolResults {
                     results: vec![meerkat_core::ToolResult::new(
                         "call_123".to_string(),
@@ -3529,17 +3759,18 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning should be stripped; user message + tool result remain
-        assert_eq!(input.len(), 2);
+        // Reasoning should be stripped; tool call/result adjacency remains.
+        assert_eq!(input.len(), 3);
         assert_eq!(input[0]["type"], "message");
-        assert_eq!(input[1]["type"], "function_call_output");
+        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[2]["type"], "function_call_output");
     }
 
     #[test]
-    fn test_reasoning_followed_by_function_call_skips_reasoning_replay() {
+    fn test_reasoning_followed_by_function_call_replays_reasoning() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -3555,6 +3786,7 @@ mod tests {
                             meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_valid".to_string(),
                                 encrypted_content: Some("enc_valid".to_string()),
+                                phase: None,
                             })),
                         },
                         AssistantBlock::ToolUse {
@@ -3573,9 +3805,11 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning is intentionally not replayed; function_call remains.
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_valid");
+        assert_eq!(input[1]["encrypted_content"], "enc_valid");
+        assert_eq!(input[2]["type"], "function_call");
     }
 
     #[test]
@@ -3606,7 +3840,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
         // Non-OpenAI reasoning is not serialized at all, only text remains
@@ -3633,6 +3867,7 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_first".to_string(),
                             encrypted_content: Some("enc_1".to_string()),
+                            phase: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -3644,6 +3879,7 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_second".to_string(),
                             encrypted_content: None,
+                            phase: None,
                         })),
                     }],
                     stop_reason: StopReason::EndTurn,
@@ -3653,7 +3889,7 @@ mod tests {
             ],
         );
 
-        let body = client.build_request_body(&request).expect("build request");
+        let body = build_projected_request_body(&client, &request);
         let input = body["input"].as_array().expect("input should be array");
 
         // Both orphaned reasoning items stripped, only user messages remain
@@ -3692,11 +3928,11 @@ mod tests {
     }
 
     // =========================================================================
-    // Reasoning encrypted_content stripping tests
+    // Reasoning encrypted_content replay tests
     // =========================================================================
 
     #[test]
-    fn test_reasoning_without_encrypted_content_is_stripped() {
+    fn test_reasoning_without_encrypted_content_is_replayed_without_encrypted_content() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -3712,6 +3948,7 @@ mod tests {
                             meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_no_enc".to_string(),
                                 encrypted_content: None,
+                                phase: None,
                             })),
                         },
                         AssistantBlock::ToolUse {
@@ -3730,14 +3967,16 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning without encrypted_content is stripped even with valid follower
-        assert_eq!(input.len(), 2);
+        assert_eq!(input.len(), 3);
         assert_eq!(input[0]["type"], "message");
-        assert_eq!(input[1]["type"], "function_call");
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_no_enc");
+        assert!(input[1].get("encrypted_content").is_none());
+        assert_eq!(input[2]["type"], "function_call");
     }
 
     #[test]
-    fn test_reasoning_with_encrypted_content_is_not_replayed() {
+    fn test_reasoning_with_encrypted_content_is_replayed() {
         use meerkat_core::BlockAssistantMessage;
 
         let client = OpenAiClient::new("test-key".to_string());
@@ -3752,6 +3991,7 @@ mod tests {
                             meta: Some(Box::new(ProviderMeta::OpenAi {
                                 id: "rs_enc".to_string(),
                                 encrypted_content: Some("enc_data_here".to_string()),
+                                phase: None,
                             })),
                         },
                         AssistantBlock::Text {
@@ -3768,9 +4008,11 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
         let input = body["input"].as_array().expect("input should be array");
 
-        // Reasoning is intentionally not replayed; assistant text remains.
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["id"], "rs_enc");
+        assert_eq!(input[1]["encrypted_content"], "enc_data_here");
+        assert_eq!(input[2]["type"], "message");
     }
 
     // =========================================================================

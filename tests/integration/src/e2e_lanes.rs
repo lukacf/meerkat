@@ -4052,7 +4052,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         73 => Some(&Spec {
             id: Some(73),
             lane: Lane::Smoke,
-            title: "CLI generate_image OpenAI default",
+            title: "CLI generate_image blob save",
             timeout_secs: 900,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],

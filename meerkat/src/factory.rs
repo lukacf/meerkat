@@ -2706,6 +2706,10 @@ impl AgentFactory {
                 .register_skill_tools(meerkat_tools::builtin::skills::SkillToolSet::new(engine));
         }
 
+        if let Some(blob_store) = image_generation_blob_store.clone() {
+            composite.register_blob_file_tools(blob_store);
+        }
+
         if let (Some(session_id), Some(machine), Some(executor), Some(planner), Some(blob_store)) = (
             session_id
                 .as_deref()
@@ -4203,11 +4207,14 @@ mod tests {
         SourceIdentityLineageEvent, SourceIdentityRecord, SourceIdentityRegistry,
         SourceIdentityStatus, SourceTransportKind, SourceUuid,
     };
+    use meerkat_core::types::ToolCallView;
     use meerkat_core::{
-        BackendProfileConfig, BindingId, CredentialSourceSpec, ProviderBindingConfig,
-        RealmConfigSection, SelfHostedApiStyle, SelfHostedModelConfig, SelfHostedServerConfig,
-        SelfHostedTransport,
+        BackendProfileConfig, BindingId, BlobId, BlobPayload, BlobRef, BlobStoreError,
+        CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, SelfHostedApiStyle,
+        SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport,
     };
+    use std::collections::HashMap;
+    use tokio::sync::Mutex;
 
     struct NeverLlmClient;
 
@@ -4270,6 +4277,48 @@ mod tests {
             _id: &meerkat_core::SessionId,
         ) -> Result<(), meerkat_store::SessionStoreError> {
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestBlobStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+    }
+
+    #[async_trait]
+    impl BlobStore for TestBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::new(format!("sha256:{media_type}:{data}"));
+            self.blobs.lock().await.insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .await
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs.lock().await.remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
         }
     }
 
@@ -7313,6 +7362,118 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&explicit_root);
 
         assert_eq!(factory.shell_project_root(), explicit_root);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn factory_exposes_blob_tools_when_blob_store_is_wired() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+        tokio::fs::write(
+            project_root.join("source.png"),
+            [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+        )
+        .await
+        .unwrap();
+        let blob_store = Arc::new(TestBlobStore::default());
+        let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&project_root);
+        let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        let (dispatcher, usage) = factory
+            .build_tool_dispatcher_for_agent_with_overrides(
+                &Config::default(),
+                None,
+                true,
+                false,
+                None,
+                None,
+                SessionId::new().to_string(),
+                ops_lifecycle,
+                true,
+                None,
+                None,
+                None,
+                Some(blob_store.clone()),
+                ToolCategoryOverride::Inherit,
+            )
+            .await
+            .expect("dispatcher should build with blob store");
+
+        for expected in ["blob_save_file", "blob_load_file", "blob_inspect"] {
+            assert!(
+                dispatcher.tools().iter().any(|tool| tool.name == expected),
+                "{expected} should be visible through factory-built builtins"
+            );
+            assert!(
+                usage.contains(expected),
+                "{expected} should appear in usage instructions"
+            );
+        }
+
+        let call_json =
+            serde_json::value::RawValue::from_string(r#"{"path":"source.png"}"#.to_string())
+                .unwrap();
+        let call = ToolCallView {
+            id: "blob-load",
+            name: "blob_load_file",
+            args: &call_json,
+        };
+        let outcome = dispatcher
+            .dispatch(call)
+            .await
+            .expect("blob_load_file dispatch should succeed");
+        let payload: serde_json::Value =
+            serde_json::from_str(&outcome.result.text_content()).unwrap();
+        let blob_id = BlobId::new(payload["blob_id"].as_str().unwrap());
+        assert_eq!(
+            blob_store.get(&blob_id).await.unwrap().media_type,
+            "image/png"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn factory_does_not_expose_blob_tools_without_blob_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let project_root = temp.path().join("workspace");
+        tokio::fs::create_dir_all(&project_root).await.unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions")).project_root(&project_root);
+        let ops_lifecycle: Arc<dyn OpsLifecycleRegistry> =
+            Arc::new(RuntimeOpsLifecycleRegistry::new());
+
+        let (dispatcher, usage) = factory
+            .build_tool_dispatcher_for_agent_with_overrides(
+                &Config::default(),
+                None,
+                true,
+                false,
+                None,
+                None,
+                SessionId::new().to_string(),
+                ops_lifecycle,
+                true,
+                None,
+                None,
+                None,
+                None,
+                ToolCategoryOverride::Inherit,
+            )
+            .await
+            .expect("dispatcher should build without blob store");
+
+        assert!(
+            dispatcher
+                .tools()
+                .iter()
+                .all(|tool| !tool.name.starts_with("blob_")),
+            "blob tools should be absent without a session blob store"
+        );
+        assert!(
+            !usage.contains("blob_save_file"),
+            "blob tool usage should be absent without a session blob store"
+        );
     }
 }
 

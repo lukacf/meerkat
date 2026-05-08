@@ -76,6 +76,35 @@ fn smoke_model() -> String {
     std::env::var("SMOKE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
 }
 
+async fn read_jsonl_files_under(
+    root: &std::path::Path,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut combined = String::new();
+    while let Some(dir) = stack.pop() {
+        let mut entries = match tokio::fs::read_dir(&dir).await {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(Box::new(err)),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "jsonl")
+            {
+                combined.push_str(&tokio::fs::read_to_string(path).await?);
+                combined.push('\n');
+            }
+        }
+    }
+    Ok(combined)
+}
+
 /// Returns `true` if prerequisites are missing and the test should be skipped.
 fn skip_if_no_prereqs() -> bool {
     if rkat_binary_path().is_none() {
@@ -375,7 +404,7 @@ async fn inner_e2e_cli_shell_tool() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 // ===========================================================================
-// Scenario 73: CLI generate_image with OpenAI image default
+// Scenario 73: CLI generate_image blob save smoke
 // ===========================================================================
 
 #[tokio::test]
@@ -422,13 +451,14 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(
-        Duration::from_secs(240),
+        Duration::from_secs(600),
         Command::new(&rkat)
             .current_dir(&project_dir)
             .args([
                 "run",
-                "Generate a picture of a cat using the generate_image tool.",
-                "--model",
+                "Check today's news and generate an infographic image with the top news. Save it to top-news-infographic.png",
+                "--yolo",
+                "-m",
                 "gpt-5.5",
             ])
             .output(),
@@ -462,14 +492,35 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
             "CLI generate_image smoke hit failure marker {failure:?}: {combined}"
         );
     }
-    let lower = combined.to_ascii_lowercase();
-    let tool_was_called = lower.contains("generate_image");
-    let text_mentions_image =
-        (lower.contains("generated") || lower.contains("created") || lower.contains("here"))
-            && (lower.contains("cat") || lower.contains("image") || lower.contains("picture"));
+    let saved_path = project_dir.join("top-news-infographic.png");
+    let saved = tokio::fs::read(&saved_path)
+        .await
+        .map_err(|err| format!("expected saved PNG at '{}': {err}", saved_path.display()))?;
     assert!(
-        tool_was_called || text_mentions_image,
-        "CLI generate_image smoke should call the tool or report an image, got: {combined}"
+        !saved.is_empty(),
+        "saved infographic should be nonempty at '{}'",
+        saved_path.display()
+    );
+    assert!(
+        saved.len() >= 8,
+        "saved infographic should be long enough to include a PNG signature"
+    );
+    assert_eq!(
+        &saved[..8],
+        &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+        "saved infographic should be a PNG file; output was: {combined}"
+    );
+    let temp_root = project_dir
+        .parent()
+        .ok_or("project dir should have a parent temp root")?;
+    let events = read_jsonl_files_under(temp_root).await?;
+    assert!(
+        events.contains(r#""name":"generate_image""#),
+        "smoke should exercise generate_image, not just create a PNG by other means; output was: {combined}"
+    );
+    assert!(
+        events.contains(r#""name":"blob_save_file""#),
+        "smoke should exercise blob_save_file to materialize the generated blob; output was: {combined}"
     );
 
     Ok(())

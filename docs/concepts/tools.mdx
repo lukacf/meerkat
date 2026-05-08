@@ -75,7 +75,7 @@ Meerkat ships with tool categories you enable per-agent. Nothing is on by defaul
 
 | Category | Tools | Enable with |
 |----------|-------|-------------|
-| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `generate_image` | `enable_builtins` |
+| Builtins | `task_create`, `task_list`, `task_get`, `task_update`, `datetime`, `apply_patch`, `view_image`, `generate_image`, `blob_save_file`, `blob_load_file`, `blob_inspect` | `enable_builtins` |
 | Shell | `shell`, `shell_jobs`, `shell_job_status`, `shell_job_cancel` | `enable_shell` |
 | Memory | `memory_search` | `enable_memory` |
 | Scheduler | `meerkat_schedule_*` | `enable_schedule` |
@@ -143,7 +143,9 @@ Tools can return rich content beyond plain text. The injected runtime shape is `
 
 The built-in `view_image` tool reads an image file from disk and returns a result containing image content blocks. It supports PNG, JPEG, GIF, WebP, and SVG formats up to 5 MB. The tool is automatically hidden from models that lack vision support via capability-aware tool visibility.
 
-The built-in `generate_image` tool is session-owned runtime dispatch. It lets a model request generated or edited images through universal fields plus provider-owned `provider_params`. Generated image bytes are stored as blobs and committed as `AssistantBlock::Image` transcript blocks, so every surface reads the same `image_id`/`blob_ref` history and fetches bytes through `blob/get`.
+The built-in `generate_image` tool is session-owned runtime dispatch. It lets a model request generated or edited images through universal fields plus provider-owned `provider_params`. Generated image bytes are stored as blobs and committed as `AssistantBlock::Image` transcript blocks, so every surface reads the same `image_id`/`blob_ref` history and fetches bytes through `blob/get` or model-facing `blob_save_file`.
+
+The blob file bridge tools are registered only when the session has a blob store. `blob_save_file` writes decoded blob bytes to a file inside the project root, `blob_load_file` reads a project file into the blob store, and `blob_inspect` returns blob metadata without raw payload bytes. They do not expose blob listing or deletion.
 
 Custom tools can return multimodal content by returning `ToolResult::with_blocks(...)` with the appropriate content blocks.
 
@@ -151,7 +153,7 @@ Custom tools can return multimodal content by returning `ToolResult::with_blocks
 
 `generate_image` is a session-owned builtin for creating or editing assistant images. It is registered when builtins are enabled and the runtime-backed surface supplies the image-generation machine, provider executor, planner, and blob store. CLI sessions wire this automatically; the default `--tools safe` preset includes builtins.
 
-The tool accepts a typed request under `request`, routes it to OpenAI or Gemini image backends, stores generated image bytes in the realm blob store, and returns structured `ImageGenerationToolResult` JSON with durable `images[].blob_ref` values.
+The tool accepts a typed request under `request`, routes it to OpenAI or Gemini image backends, stores generated image bytes in the realm blob store, and returns structured `ImageGenerationToolResult` JSON with durable `images[].blob_ref` values. A model can then call `blob_save_file` to materialize that blob as a project file, for example `top-news-infographic.png`.
 
 For setup, provider parameters, result fields, and troubleshooting, see [Image generation](/guides/image-generation).
 

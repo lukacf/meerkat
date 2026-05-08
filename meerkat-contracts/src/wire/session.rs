@@ -198,8 +198,12 @@ pub enum WireProviderMeta {
     },
     OpenAi {
         id: String,
+        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
     Unknown,
 }
@@ -214,9 +218,12 @@ impl From<ProviderMeta> for WireProviderMeta {
             ProviderMeta::OpenAi {
                 id,
                 encrypted_content,
+                phase,
+                ..
             } => Self::OpenAi {
                 id,
                 encrypted_content,
+                phase,
             },
             _ => Self::Unknown,
         }

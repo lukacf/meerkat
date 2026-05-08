@@ -13308,6 +13308,19 @@ default_model = "gemma"
     }
 
     #[test]
+    fn test_run_cli_surface_does_not_add_full_flag_alias() {
+        let err = match Cli::try_parse_from(["rkat", "run", "hello", "--full"]) {
+            Ok(_) => panic!("run should not accept a new --full alias"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("unexpected argument '--full'")
+                || err.to_string().contains("Found argument '--full'"),
+            "unexpected parse error for --full: {err}"
+        );
+    }
+
+    #[test]
     fn test_auth_realm_option_does_not_select_runtime_realm() {
         let cli = Cli::try_parse_from(["rkat", "auth", "test", "--realm", "dev", "google_oauth"])
             .expect("auth test should parse");

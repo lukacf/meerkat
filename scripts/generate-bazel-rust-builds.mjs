@@ -1244,7 +1244,7 @@ for (const pkg of localPackages.values()) {
         ...workspaceDataLabels(target).filter((label) => label !== currentPackageRunfiles),
       ];
       const unitEnv = [`        "RUST_MIN_STACK": "16777216",`];
-      const unitSize = key === "meerkat-mob" ? "large" : "small";
+      const unitSize = key === "meerkat-mob" ? "large" : key === "xtask" ? "medium" : "small";
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";
         const rustfmtLib = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustc_lib";

@@ -16,7 +16,7 @@ This is not a standalone `image/generate` RPC. Use it by running a session with 
 - `count` must be `1`. Multiple image output is rejected today with `unsupported_count`; run multiple operations if you need several variants.
 
 <Note>
-`generate_image` is separate from `view_image`. `view_image` reads an existing file into the model as image input. `generate_image` creates a new assistant-owned image and stores it as a blob.
+`generate_image` is separate from `view_image`. `view_image` reads an existing file into the model as image input. `generate_image` creates a new assistant-owned image and stores it as a blob. When the model needs to save a generated blob to disk during the same run, it can call `blob_save_file`.
 </Note>
 
 ## CLI quickstart
@@ -34,6 +34,12 @@ When the tool succeeds, the tool result includes `images[].blob_ref.blob_id`. Sa
 
 ```bash
 rkat blob get <blob_id> --output cat.png
+```
+
+You can also ask the agent to save the image itself:
+
+```bash
+rkat run "Create a PNG infographic about today's top news and save it to top-news-infographic.png" --yolo -m gpt-5.5
 ```
 
 Inspect the stored payload instead of writing raw bytes:
@@ -225,7 +231,7 @@ Important fields:
 |-------|---------|
 | `operation_id` | Runtime identity for this image operation. |
 | `terminal` | Final state: `generated`, `empty_result`, `denied`, `refused_by_provider`, `safety_filtered`, `failed`, `cancelled`, `timeout`, or `scoped_restore_failed`. |
-| `images` | Durable assistant image references. Use `blob_ref.blob_id` with `rkat blob get`. |
+| `images` | Durable assistant image references. Use `blob_ref.blob_id` with `blob_save_file` inside a run or `rkat blob get` outside the run. |
 | `provider_text` | Captured provider-side text when the image backend emits text alongside images. |
 | `revised_prompt` | Provider-revised prompt when the backend returns one. |
 | `native_metadata` | Provider-specific metadata such as response ids and target model. |

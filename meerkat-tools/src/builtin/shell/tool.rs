@@ -399,10 +399,13 @@ impl BuiltinTool for ShellTool {
         ToolDef {
             name: "shell".into(),
             description:
-                "Execute a shell command (POSIX-style parsing for policy checks; runs via Nushell or fallback shell)"
+                "Execute a shell command (POSIX-style parsing for policy checks; runs via Nushell or fallback shell). Do not use shell scripts or drawing libraries to satisfy image-generation requests when generate_image is available; use generate_image and blob_save_file instead."
                     .into(),
             input_schema: crate::schema::schema_for::<ShellInput>(),
-            provenance: Some(ToolProvenance { kind: ToolSourceKind::Shell, source_id: "shell".into() }),
+            provenance: Some(ToolProvenance {
+                kind: ToolSourceKind::Shell,
+                source_id: "shell".into(),
+            }),
         }
     }
 

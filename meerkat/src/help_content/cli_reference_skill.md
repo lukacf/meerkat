@@ -130,11 +130,13 @@ global/realm options.
 ## Image Generation Via CLI
 
 Image generation is assistant-mediated. Ask through `rkat run`, allow the image
-tool, and fetch the returned blob id:
+tool, and fetch the returned blob id or ask the assistant to save the generated
+blob with `blob_save_file`:
 
 ```bash
 rkat run --allow-tool generate_image "Use generate_image to create a 1024x1024 PNG of a red fox in snow. Return the blob id."
 rkat blob get <BLOB-ID> --output fox.png
+rkat run "Use generate_image to create a 1024x1024 PNG of a red fox in snow. Save it to fox.png." --yolo -m gpt-5.5
 ```
 
 If the assistant did not print the blob id, resume the same session and ask for

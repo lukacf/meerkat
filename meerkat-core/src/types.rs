@@ -435,13 +435,19 @@ pub enum ProviderMeta {
         thought_signature: String,
     },
     /// OpenAI reasoning item metadata for stateless replay.
-    /// Both `id` and `encrypted_content` are required for faithful round-trip.
+    /// The `id`, `encrypted_content`, and `phase` fields must be preserved
+    /// verbatim when present so Responses API output items can be replayed.
     OpenAi {
         /// Reasoning item ID (required by OpenAI schema)
         id: String,
         /// Encrypted reasoning tokens for continuity
+        #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<String>,
+        /// Responses API phase marker for manual stateless replay.
+        #[serde(default)]
+        #[serde(skip_serializing_if = "Option::is_none")]
+        phase: Option<String>,
     },
 }
 

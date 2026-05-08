@@ -68,7 +68,7 @@ pub use schema::{empty_object_schema, schema_for};
 inventory::submit! {
     meerkat_contracts::CapabilityRegistration {
         id: meerkat_contracts::CapabilityId::Builtins,
-        description: "Built-in tools: task_list, task_create, task_get, task_update, datetime, apply_patch",
+        description: "Built-in tools: task_list, task_create, task_get, task_update, datetime, apply_patch, view_image, generate_image, blob_save_file, blob_load_file, blob_inspect",
         scope: meerkat_contracts::CapabilityScope::Universal,
         requires_feature: None,
         prerequisites: &[],

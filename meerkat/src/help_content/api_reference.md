@@ -246,6 +246,7 @@ CLI image generation is assistant-mediated; there is no direct `rkat image` comm
 ```bash
 rkat run --allow-tool generate_image "Use generate_image to create a 1024x1024 PNG of a meerkat on a laptop. Return the blob id."
 rkat blob get <BLOB-ID> --output meerkat.png
+rkat run "Use generate_image to create a 1024x1024 PNG of a meerkat on a laptop. Save it to meerkat.png." --yolo -m gpt-5.5
 ```
 
 ### Realtime (capability-driven)

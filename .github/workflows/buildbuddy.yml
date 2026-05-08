@@ -54,6 +54,14 @@ on:
         required: false
   workflow_dispatch:
     inputs:
+      backend:
+        description: Bazel backend to use.
+        required: true
+        default: buildbuddy-hosted
+        type: choice
+        options:
+          - buildbuddy-hosted
+          - gcp-buildbuddy
       mode:
         description: BuildBuddy gate to run
         required: true

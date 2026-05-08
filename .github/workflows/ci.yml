@@ -17,6 +17,22 @@ on:
       - unlabeled
       - ready_for_review
   workflow_dispatch:
+    inputs:
+      backend:
+        description: CI backend to run.
+        required: false
+        default: auto
+        type: choice
+        options:
+          - auto
+          - cargo
+          - buildbuddy-hosted
+          - gcp-buildbuddy
+      mode:
+        description: BuildBuddy gate to run when using a BuildBuddy backend.
+        required: false
+        default: ""
+        type: string
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
@@ -30,12 +46,90 @@ env:
   MEERKAT_DOGMA_CLEANUP_GATE: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE || 'false' }}
 
 jobs:
-  bazel:
-    name: GCP Bazel CI
+  select_backend:
+    name: Select CI backend
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    outputs:
+      backend: ${{ steps.select.outputs.backend }}
+      mode: ${{ steps.select.outputs.mode }}
+    steps:
+      - name: Select backend
+        id: select
+        shell: bash
+        env:
+          INPUT_BACKEND: ${{ inputs.backend || 'auto' }}
+          INPUT_MODE: ${{ inputs.mode || '' }}
+          VAR_BACKEND: ${{ vars.MEERKAT_CI_BACKEND || '' }}
+          VAR_BUILDBUDDY_MODE: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || '' }}
+          LEGACY_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || '' }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          backend="${INPUT_BACKEND:-auto}"
+          if [[ -z "${backend}" || "${backend}" == "auto" ]]; then
+            backend="${VAR_BACKEND:-}"
+          fi
+
+          if [[ -z "${backend}" ]]; then
+            case "${LEGACY_BUILDBUDDY}" in
+              true|1) backend="buildbuddy-hosted" ;;
+              *) backend="cargo" ;;
+            esac
+          fi
+
+          case "${backend}" in
+            cargo|buildbuddy-hosted|gcp-buildbuddy) ;;
+            *)
+              echo "::error::Unsupported MEERKAT_CI_BACKEND '${backend}'. Expected cargo, buildbuddy-hosted, or gcp-buildbuddy."
+              exit 2
+              ;;
+          esac
+
+          if [[ "${EVENT_NAME}" == "pull_request" && -n "${PR_HEAD_REPO}" && "${PR_HEAD_REPO}" != "${REPOSITORY}" && "${backend}" != "cargo" ]]; then
+            echo "External pull request cannot use secret-backed CI backend '${backend}'; using cargo."
+            backend="cargo"
+          fi
+
+          mode="${INPUT_MODE:-}"
+          if [[ -z "${mode}" ]]; then
+            mode="${VAR_BUILDBUDDY_MODE:-full-warm}"
+          fi
+
+          echo "Selected CI backend: ${backend}"
+          echo "Selected BuildBuddy mode: ${mode}"
+          echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
+
+  cargo:
+    name: Cargo CI
+    needs: [select_backend]
+    if: ${{ needs.select_backend.outputs.backend == 'cargo' }}
+    uses: ./.github/workflows/cargo.yml
+    with:
+      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+      machine_authority_head_sha: ${{ github.sha }}
+
+  buildbuddy_hosted:
+    name: BuildBuddy hosted CI
+    needs: [select_backend]
+    if: ${{ needs.select_backend.outputs.backend == 'buildbuddy-hosted' }}
+    uses: ./.github/workflows/buildbuddy.yml
+    with:
+      backend: buildbuddy-hosted
+      mode: ${{ needs.select_backend.outputs.mode }}
+      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+      machine_authority_head_sha: ${{ github.sha }}
+    secrets: inherit
+
+  gcp_buildbuddy:
+    name: GCP BuildBuddy CI
+    needs: [select_backend]
+    if: ${{ needs.select_backend.outputs.backend == 'gcp-buildbuddy' }}
     uses: ./.github/workflows/buildbuddy.yml
     with:
       backend: gcp-buildbuddy
-      mode: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-warm' }}
+      mode: ${{ needs.select_backend.outputs.mode }}
       machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
@@ -101,12 +195,20 @@ jobs:
   gate:
     name: CI gate
     if: always()
-    needs: [bazel, dogma-cleanup-gate]
+    needs:
+      - select_backend
+      - cargo
+      - buildbuddy_hosted
+      - gcp_buildbuddy
+      - dogma-cleanup-gate
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - name: Check selected backend
         run: |
-          bazel_result="${{ needs.bazel.result }}"
+          selected_backend="${{ needs.select_backend.outputs.backend }}"
+          cargo_result="${{ needs.cargo.result }}"
+          hosted_result="${{ needs.buildbuddy_hosted.result }}"
+          gcp_result="${{ needs.gcp_buildbuddy.result }}"
           dogma_result="${{ needs.dogma-cleanup-gate.result }}"
           dogma_enabled="${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}"
 
@@ -115,5 +217,23 @@ jobs:
             exit 1
           fi
 
-          echo "GCP Bazel CI selected: $bazel_result"
-          [[ "$bazel_result" == "success" ]]
+          echo "Selected CI backend: $selected_backend"
+          echo "Cargo CI: $cargo_result"
+          echo "BuildBuddy hosted CI: $hosted_result"
+          echo "GCP BuildBuddy CI: $gcp_result"
+
+          case "$selected_backend" in
+            cargo)
+              [[ "$cargo_result" == "success" ]]
+              ;;
+            buildbuddy-hosted)
+              [[ "$hosted_result" == "success" ]]
+              ;;
+            gcp-buildbuddy)
+              [[ "$gcp_result" == "success" ]]
+              ;;
+            *)
+              echo "::error::Unknown selected CI backend '$selected_backend'"
+              exit 2
+              ;;
+          esac

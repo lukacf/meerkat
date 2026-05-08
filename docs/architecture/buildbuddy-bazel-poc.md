@@ -209,8 +209,17 @@ reuse a stable output root for repeated local or agent gates. The optional
 `.github/workflows/buildbuddy.yml` workflow can run manually or as a reusable
 workflow called by CI, requires a `BUILDBUDDY_API_KEY` secret, installs the
 pinned `bb` binary, and exposes the same standard lane boundaries as Cargo CI.
-Normal GitHub CI remains Cargo-based unless the repository variable
-`MEERKAT_BUILDBUDDY=true` (or `1`) enables the optional CI job.
+Top-level GitHub CI selects one reusable backend at a time:
+
+- `cargo`: the GitHub Actions Cargo workflow.
+- `buildbuddy-hosted`: the existing hosted BuildBuddy Bazel workflow.
+- `gcp-buildbuddy`: the GCP-owned self-hosted BuildBuddy control plane and
+  executor fleet.
+
+Set `MEERKAT_CI_BACKEND` to one of those values for automatic CI. If that
+variable is unset, the legacy `MEERKAT_BUILDBUDDY=true` (or `1`) switch selects
+`buildbuddy-hosted`; otherwise CI falls back to `cargo`. Manual `CI` workflow
+dispatch can override the backend for a single run.
 
 The dispatch modes are:
 
@@ -242,8 +251,9 @@ metadata after the cache is warm.
 
 ## GCP CI Shape
 
-Normal GitHub CI now calls this workflow with `backend: gcp-buildbuddy`. In that
-mode GitHub Actions is only the submitter/coordinator:
+When top-level CI selects `MEERKAT_CI_BACKEND=gcp-buildbuddy`, or a manual run
+uses `backend: gcp-buildbuddy`, GitHub Actions is only the
+submitter/coordinator:
 
 1. `gcp-control-plane-up` authenticates to GCP, ensures the always-on
    self-hosted BuildBuddy control plane/cache VM is running, and publishes its

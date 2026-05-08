@@ -292,10 +292,17 @@ fi
 rm -rf "${dispatch_log_root}"
 
 if grep -Fq 'name: CI' .github/workflows/ci.yml &&
-  ! grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
+  grep -Fq 'name: Select CI backend' .github/workflows/ci.yml &&
+  grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
+  grep -Fq 'LEGACY_BUILDBUDDY' .github/workflows/ci.yml &&
+  grep -Fq 'External pull request cannot use secret-backed CI backend' .github/workflows/ci.yml &&
+  grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
   grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
+  grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
   grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
-  grep -Fq 'mode: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || '"'"'full-warm'"'"' }}' .github/workflows/ci.yml &&
+  grep -Fq 'mode: ${{ needs.select_backend.outputs.mode }}' .github/workflows/ci.yml &&
+  grep -Fq 'name: BuildBuddy hosted CI' .github/workflows/ci.yml &&
+  grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/ci.yml &&
   grep -Fq 'name: CI gate' .github/workflows/ci.yml &&
   grep -Fq 'name: Cargo CI' .github/workflows/cargo.yml &&
   grep -Fq 'workflow_call:' .github/workflows/cargo.yml &&
@@ -306,20 +313,25 @@ if grep -Fq 'name: CI' .github/workflows/ci.yml &&
   ! grep -Fq 'push:' .github/workflows/cargo.yml &&
   ! grep -Fq 'pull_request:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'push:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'backend:' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcp-buildbuddy' .github/workflows/buildbuddy.yml &&
   grep -Fq 'BuildBuddy CI gate' .github/workflows/buildbuddy.yml; then
-  pass "Automatic CI selects the reusable GCP BuildBuddy workflow"
+  pass "Top-level CI exposes Cargo, hosted BuildBuddy, and GCP BuildBuddy backend paths"
 else
-  bad "Automatic CI does not route to the GCP BuildBuddy backend"
+  bad "Top-level CI backend selector is not wired correctly"
 fi
 
-if grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
+if grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
+  grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
+  grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
   grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY_CI_MODE' .github/workflows/ci.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/architecture/buildbuddy-bazel-poc.md &&
+  grep -Fq 'MEERKAT_CI_BACKEND' docs/architecture/buildbuddy-bazel-poc.md &&
   grep -Fq 'scripts/buildbuddy-dev' docs/architecture/buildbuddy-bazel-poc.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' scripts/agent-gate &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND' scripts/build-backend-env &&
@@ -329,9 +341,9 @@ if grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
   grep -Fq 'source "${ROOT}/scripts/build-backend-env"' scripts/pre-push-unit.sh &&
   grep -Fq 'scripts/agent-gate" --staged' scripts/test-changed-crates.sh &&
   grep -Fq 'scripts/agent-gate" --committed --clippy-only' scripts/pre-push-clippy.sh; then
-  pass "GCP CI and local BuildBuddy opt-in switches are wired consistently"
+  pass "CI backend selector and local BuildBuddy opt-in switches are wired consistently"
 else
-  bad "BuildBuddy opt-in switch is not wired consistently"
+  bad "CI backend selector or BuildBuddy opt-in switch is not wired consistently"
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
@@ -470,11 +482,14 @@ if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   ! grep -Fq 'e2e-smoke:' .github/workflows/cargo.yml &&
   grep -Fq 'Cargo E2E live lane' .github/workflows/live-e2e.yml &&
   grep -Fq 'BuildBuddy E2E smoke lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'needs: [bazel, dogma-cleanup-gate]' .github/workflows/ci.yml &&
-  grep -Fq 'echo "GCP Bazel CI selected: $bazel_result"' .github/workflows/ci.yml &&
+  grep -Fq 'selected_backend="${{ needs.select_backend.outputs.backend }}"' .github/workflows/ci.yml &&
+  grep -Fq 'cargo_result="${{ needs.cargo.result }}"' .github/workflows/ci.yml &&
+  grep -Fq 'hosted_result="${{ needs.buildbuddy_hosted.result }}"' .github/workflows/ci.yml &&
+  grep -Fq 'gcp_result="${{ needs.gcp_buildbuddy.result }}"' .github/workflows/ci.yml &&
+  grep -Fq 'case "$selected_backend" in' .github/workflows/ci.yml &&
   grep -Fq 'needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/cargo.yml &&
   ! grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging' .github/workflows/cargo.yml; then
-  pass "CI gate selects GCP BuildBuddy and Cargo gate preserves standard Cargo lane coverage"
+  pass "CI gate follows the selected backend and Cargo gate preserves standard Cargo lane coverage"
 else
   bad "CI gate does not match the backend selector and standard/nightly lane split"
 fi

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-05-08
+
+Meerkat 0.6.3 is a patch release for published Rust crate consumers. It fixes
+the AgentFactory facade/core bridge symbol selection in registry layouts and
+adds a packaged-crate downstream link smoke to the release gate.
+
 ### Fixed
 
 - **Published facade linking** — `meerkat` now resolves the exact same-version

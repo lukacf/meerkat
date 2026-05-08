@@ -37,7 +37,11 @@ done < <("$ROOT/scripts/release-rust-crates.sh")
 
 if [[ -z "${MEERKAT_PUBLISHED_FACADE_PACKAGE_TARGET:-}" ]]; then
   for crate in "${release_crates[@]}"; do
-    CARGO_TARGET_DIR="$package_target" "$CARGO" package -p "$crate" --locked --allow-dirty --no-verify >/dev/null
+    package_cfg="$tmp_dir/$crate.package.toml"
+    "$ROOT/scripts/generate-patch-config.sh" "$ROOT" "$crate" > "$package_cfg"
+    CARGO_TARGET_DIR="$package_target" \
+      "$CARGO" package -p "$crate" --locked --allow-dirty --no-verify --config "$package_cfg" \
+      >/dev/null
   done
 fi
 

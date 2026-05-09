@@ -950,7 +950,7 @@ mod tests {
             seed_messages: Vec::new(),
             visible_tools: Vec::new(),
             system_prompt: None,
-            model_id: "gpt-realtime".into(),
+            model_id: "gpt-realtime-2".into(),
             provider_id: Provider::OpenAI.as_str().into(),
             audio_config: None,
             runtime_system_context: Vec::new(),
@@ -1278,7 +1278,7 @@ mod tests {
             seed_messages: vec![],
             visible_tools: vec![],
             system_prompt: None,
-            model_id: "gpt-realtime".into(),
+            model_id: "gpt-realtime-2".into(),
             provider_id: "openai".into(),
             audio_config: None,
             runtime_system_context: vec![],
@@ -1300,7 +1300,7 @@ mod tests {
             } => {
                 assert_eq!(recv_snapshot.snapshot_version, 7);
                 assert_eq!(recv_snapshot.session_id, session_id);
-                assert_eq!(recv_snapshot.model_id, "gpt-realtime");
+                assert_eq!(recv_snapshot.model_id, "gpt-realtime-2");
             }
             other => panic!("expected Refresh command, got {other:?}"),
         }
@@ -1443,7 +1443,7 @@ mod tests {
                 seed_messages: vec![],
                 visible_tools: vec![],
                 system_prompt: None,
-                model_id: "gpt-realtime".into(),
+                model_id: "gpt-realtime-2".into(),
                 provider_id: "openai".into(),
                 audio_config: None,
                 runtime_system_context: vec![],

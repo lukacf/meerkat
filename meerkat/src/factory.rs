@@ -2957,7 +2957,7 @@ impl AgentFactory {
                             }
                         }
 
-                        // Realtime-capable OpenAI models (e.g. gpt-realtime-1.5)
+                        // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
                         // cannot go through the Responses API — POST /v1/responses
                         // returns 404 model_not_found. Route those through the
                         // OpenAI Realtime WebSocket via `OpenAiRealtimeTextAdapter`.
@@ -7125,7 +7125,7 @@ mod tests {
 
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(NativeImageProfile)]);
         let status = meerkat_core::SessionModelRoutingStatus::new(
-            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-realtime"),
+            meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-realtime-2"),
             None,
             None,
             None,

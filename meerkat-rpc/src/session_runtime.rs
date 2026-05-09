@@ -4132,6 +4132,122 @@ impl SessionRuntime {
         self.approval_service.clone()
     }
 
+    /// Promote a staged (deferred) session into the live service map without
+    /// running a turn, so realtime-open paths (`export_realtime_open_session_snapshot`,
+    /// `live_session_llm_identity`) can find it. Mirrors the staged-promotion
+    /// branch of `start_turn` but creates with `InitialTurnPolicy::Defer` and
+    /// preserves any staged prompt for the first follow-up turn.
+    async fn materialize_staged_session_for_realtime_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let pending_session = match self.staged_sessions.begin_promotion(session_id).await {
+            Ok(slot) => slot,
+            Err(meerkat::StagedLifecycleError::AlreadyPromoting(_)) => {
+                return Err(SessionError::Busy {
+                    id: session_id.clone(),
+                });
+            }
+            Err(e) => {
+                return Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "staged session lifecycle error for {session_id}: {e}"
+                    )),
+                ));
+            }
+        };
+
+        let Some(slot) = pending_session else {
+            return Ok(());
+        };
+
+        let staged_capacity_admission = self.take_staged_capacity_admission(session_id);
+        let mut promotion_cleanup = PendingPromotionCleanup::new(
+            Arc::clone(&self.staged_sessions),
+            Arc::clone(&self.staged_capacity_admissions),
+            session_id,
+            &slot,
+            staged_capacity_admission,
+        );
+
+        let PromotingSlot {
+            build_config,
+            labels,
+            deferred_prompt,
+            ..
+        } = slot;
+        let mut build_config = *build_config;
+
+        if build_config.llm_client_override.is_none()
+            && let Some(client) = self.default_llm_client()
+        {
+            build_config.llm_client_override = Some(client);
+            promotion_cleanup.update_build_config(&build_config);
+        }
+
+        let runtime_generation = if build_config.config_generation.is_none() {
+            if let Some(runtime) = self.config_runtime() {
+                runtime.get().await.ok().map(|snapshot| snapshot.generation)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut build = build_config.to_session_build_options();
+        build.realm_id = build
+            .realm_id
+            .or_else(|| self.realm_id.as_ref().map(ToString::to_string));
+        build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
+        build.backend = build.backend.or_else(|| self.backend.clone());
+        build.config_generation = build.config_generation.or(runtime_generation);
+
+        let (prompt, deferred_prompt_policy) = match deferred_prompt {
+            Some(prompt) => (prompt, DeferredPromptPolicy::Stage),
+            None => (
+                ContentInput::Text(String::new()),
+                DeferredPromptPolicy::Discard,
+            ),
+        };
+
+        let create_req = CreateSessionRequest {
+            model: build_config.model.clone(),
+            prompt,
+            render_metadata: None,
+            system_prompt: build_config.system_prompt.clone(),
+            max_tokens: build_config.max_tokens,
+            event_tx: None,
+            skill_references: None,
+            initial_turn: InitialTurnPolicy::Defer,
+            deferred_prompt_policy,
+            build: Some(build),
+            labels,
+        };
+
+        let admission = match promotion_cleanup.take_staged_capacity_admission() {
+            Some(adm) => adm,
+            None => self.service.reserve_create_session_admission().await?,
+        };
+
+        match self
+            .service
+            .create_session_with_reserved_admission(create_req, admission)
+            .await
+        {
+            Ok(_) => {
+                promotion_cleanup.mark_materialized();
+                let _ = promotion_cleanup.finish_now().await;
+                promotion_cleanup.disarm();
+                Ok(())
+            }
+            Err(error) => {
+                promotion_cleanup.restore_now().await;
+                Err(error)
+            }
+        }
+    }
+
     async fn recover_live_session_for_realtime_open(
         &self,
         session_id: &SessionId,
@@ -4140,18 +4256,19 @@ impl SessionRuntime {
             return Ok(());
         }
 
-        // Wave-3 retry: deferred sessions live in `staged_sessions` until the
-        // first turn promotes them into the live service map. They are
-        // **not** in the persistent store yet, so jumping straight to
-        // `load_persisted_session` returns `None` and surfaces a spurious
-        // `NotFound` to the precheck path. Treat a staged session as
-        // "already in memory" — no recovery needed; the live service will
-        // materialize it when the first turn or `live/open` admits it.
-        // Without this short-circuit, the production `SqliteSessionStore`
-        // path that rkat-rpc uses would always reject deferred sessions
-        // even though `MemoryStore`-backed unit tests happily accept them
-        // (the unit-vs-prod divergence team-lead caught after Wave 3).
+        // Round-5 fix: deferred sessions live in `staged_sessions` until a
+        // first turn or `live/open` materializes them. The earlier short-
+        // circuit returned `Ok(())` here without admitting the session into
+        // the live service map, so the realtime-open snapshot export below
+        // would still raise `NotFound` and break e2e scenarios 71/72.
+        // `live/open` is not a turn — we materialize the staged slot with
+        // `InitialTurnPolicy::Defer`, preserving any staged prompt for the
+        // first follow-up turn while making the session visible to
+        // `export_realtime_open_session_snapshot` and
+        // `live_session_llm_identity`.
         if self.staged_sessions.contains(session_id).await {
+            self.materialize_staged_session_for_realtime_open(session_id)
+                .await?;
             return Ok(());
         }
 
@@ -9162,7 +9279,7 @@ mod tests {
     #[test]
     fn r11_close_required_when_model_id_swapped() {
         let prev = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -9181,7 +9298,7 @@ mod tests {
     #[test]
     fn r11_close_required_when_provider_swapped() {
         let prev = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -9200,7 +9317,7 @@ mod tests {
     #[test]
     fn r11_close_not_required_when_identity_unchanged() {
         let id = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             // Other fields differ — provider_params change must NOT trigger a
@@ -9224,7 +9341,7 @@ mod tests {
         // recorded identity. The runtime must NOT assume a swap and force
         // a close — the legacy Refresh fallthrough is correct.
         let new = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -9261,7 +9378,7 @@ mod tests {
         );
 
         let identity = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -9337,7 +9454,7 @@ mod tests {
         use meerkat_core::Provider;
         use meerkat_core::model_profile::capabilities::capabilities_for;
 
-        let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime")
+        let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime-2")
             .expect("gpt-realtime should be present in the catalog");
         assert!(
             realtime.realtime,
@@ -9436,7 +9553,7 @@ mod tests {
     /// rejects all inputs after a refactor.
     #[test]
     fn apply_precheck_gates_accepts_realtime_openai() {
-        apply_precheck_gates(meerkat_core::Provider::OpenAI, "gpt-realtime", true)
+        apply_precheck_gates(meerkat_core::Provider::OpenAI, "gpt-realtime-2", true)
             .expect("realtime-capable OpenAI must pass both gates");
     }
 
@@ -19989,7 +20106,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let mut build = AgentBuildConfig::new("gpt-realtime");
+        let mut build = AgentBuildConfig::new("gpt-realtime-2");
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = runtime.create_session(build, None, None).await.unwrap();
@@ -20001,7 +20118,7 @@ mod tests {
         let capabilities = info
             .resolved_capabilities
             .expect("realtime session should expose resolved capabilities");
-        assert_eq!(info.model, "gpt-realtime");
+        assert_eq!(info.model, "gpt-realtime-2");
         assert_eq!(info.provider, "openai");
         assert!(capabilities.realtime);
         assert!(!capabilities.image_input);
@@ -20029,7 +20146,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let mut build = AgentBuildConfig::new("gpt-realtime");
+        let mut build = AgentBuildConfig::new("gpt-realtime-2");
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = runtime
@@ -21677,7 +21794,7 @@ mod tests {
         // opened with). Different from the session's resolved identity
         // (gpt-realtime-1.5), so the swap branch fires.
         let stale_bound = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: meerkat_core::Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -21723,7 +21840,7 @@ mod tests {
                     meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason } => {
                         assert!(
                             reason.contains("model_swap")
-                                && reason.contains("gpt-realtime")
+                                && reason.contains("gpt-realtime-2")
                                 && reason.contains("gpt-realtime-1.5"),
                             "ConfigRejected.reason must name swap + both model ids; got: {reason}"
                         );

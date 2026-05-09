@@ -3638,13 +3638,30 @@ fn observe_live_json_frame(
                 capture.input_finals.push(t.to_string());
             }
         }
-        "assistant_text_delta" => {
+        "assistant_text_delta" | "assistant_transcript_delta" => {
+            // R5-9 lane discrimination: `assistant_text_delta` is the
+            // display lane (text-modality responses); `assistant_transcript_delta`
+            // is the spoken-audio transcript lane. For test capture
+            // both contain assistant-emitted text, so both accumulate
+            // into `output_text`. With gpt-realtime-2 pinned to Audio
+            // output modality, only transcript deltas arrive on the
+            // happy path; text deltas appear if a future per-response
+            // override switches to Text modality.
             if let Some(delta) = value["delta"].as_str() {
                 capture.output_text.push_str(delta);
             }
         }
         "assistant_audio_chunk" => {
-            if let Some(data) = value["data"].as_array() {
+            // Wire format pins `data` to a standard-base64 string (see
+            // `meerkat_core::live_adapter::base64_bytes`). Earlier helper
+            // assumed a JSON array of bytes; that branch is preserved for
+            // legacy fixtures but base64 is the canonical path.
+            if let Some(data_str) = value["data"].as_str() {
+                use base64::Engine as _;
+                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data_str) {
+                    capture.output_audio_pcm.extend_from_slice(&bytes);
+                }
+            } else if let Some(data) = value["data"].as_array() {
                 let bytes: Vec<u8> = data
                     .iter()
                     .filter_map(|v| v.as_u64().map(|n| n as u8))

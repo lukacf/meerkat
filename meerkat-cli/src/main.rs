@@ -16028,7 +16028,7 @@ capabilities = ["definitely_missing_capability"]
             Some(Provider::Openai)
         );
         assert_eq!(
-            Provider::infer_from_model("gpt-realtime"),
+            Provider::infer_from_model("gpt-realtime-2"),
             Some(Provider::Openai)
         );
         assert_eq!(Provider::infer_from_model("gpt-4"), None);

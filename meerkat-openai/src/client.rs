@@ -3000,7 +3000,7 @@ mod tests {
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-realtime",
+            "gpt-realtime-2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);

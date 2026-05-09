@@ -566,16 +566,27 @@ async fn configure_openai_live_session(
     Ok(())
 }
 
-/// R5-2 (FIX-OPENAI follow-up): build a `SessionUpdateConfig` with the
-/// live-channel modality invariant enforced — `output_modalities` is
-/// **always** `Some(OutputModalities::AudioText)`. Use this constructor
-/// for every `session.update` we emit on the live channel; never construct
-/// `SessionUpdateConfig` literally with `..Default::default()`, because
-/// the `Default` impl leaves `output_modalities = None`. OpenAI's session
-/// merge semantics preserve unset fields (so today's happy path is fine),
-/// but a future code path constructing a `SessionUpdateConfig` with
-/// default modality could silently revert the channel to audio-only and
-/// break the `text_out=true` capability advertisement.
+/// R5-2 follow-up (gpt-realtime-2 API constraint): build a
+/// `SessionUpdateConfig` with the live-channel modality invariant
+/// enforced — `output_modalities` is **always**
+/// `Some(OutputModalities::Audio)`.
+///
+/// Earlier R5-2 used `OutputModalities::AudioText` to satisfy
+/// `text_out=true` advertised on the channel. The live `gpt-realtime-2`
+/// API rejects that combination — "Supported combinations are: ['text']
+/// and ['audio']" — so the canonical realtime session pins `Audio` and
+/// the capability advertisement keeps both `text_out=true` (per-response
+/// text-only override available via `response.create`) and
+/// `transcript_supported=true` (spoken transcript delivered alongside
+/// audio via `ResponseOutputAudioTranscriptDelta`).
+///
+/// Use this constructor for every `session.update` we emit on the live
+/// channel; never construct `SessionUpdateConfig` literally with
+/// `..Default::default()`, because the `Default` impl leaves
+/// `output_modalities = None`. OpenAI's session merge semantics preserve
+/// unset fields (so today's happy path is fine), but a future code path
+/// constructing a `SessionUpdateConfig` with default modality could
+/// silently leave the channel un-pinned.
 ///
 /// `SessionUpdateConfig` is a foreign struct (from `oai-rt-rs`), so we
 /// cannot remove `Default::default()` directly — the constructor is the
@@ -588,10 +599,11 @@ fn session_update_with_audio_text_modality(
     tools: Option<Vec<Tool>>,
 ) -> SessionUpdateConfig {
     SessionUpdateConfig {
-        // R5-2 invariant: never `None`. The whole point of this
-        // constructor is to make the modality un-revertable from the
-        // call sites.
-        output_modalities: Some(OutputModalities::AudioText),
+        // R5-2 follow-up invariant: never `None`, never `AudioText`.
+        // Audio is the only `gpt-realtime-2`-accepted realtime output
+        // modality; spoken text continuity flows through audio
+        // transcript events.
+        output_modalities: Some(OutputModalities::Audio),
         instructions,
         audio,
         tools,
@@ -613,11 +625,15 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
     };
 
     SessionUpdate {
-        // R5-2: live channel advertises `text_out=true` (Audio + Text
-        // continuity). `OutputModalities::Audio` would silence
-        // `ResponseOutputTextDelta` — making the capability advertisement
-        // a lie. The typed constructor pins `AudioText` so OpenAI
-        // Realtime emits display text alongside the spoken transcript.
+        // R5-2 follow-up: gpt-realtime-2 rejects `[audio, text]`
+        // combined output modalities — "Supported combinations are:
+        // ['text'] and ['audio']". Pin the session-level default to
+        // `Audio` (per the typed constructor); per-response
+        // `output_modalities=Text` overrides remain available via
+        // `response.create` so the channel's `text_out=true`
+        // advertisement is honest. Spoken-text continuity arrives as
+        // `ResponseOutputAudioTranscriptDelta` →
+        // `AssistantTranscriptDelta` (`transcript_supported=true`).
         config: session_update_with_audio_text_modality(
             openai_realtime_instructions(
                 &open_config.seed_messages,
@@ -648,12 +664,12 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
 
 fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpdate {
     SessionUpdate {
-        // R5-2: even the projection refresh path must pin `AudioText`.
-        // OpenAI's session-merge semantics preserve unset fields — so
-        // omitting `output_modalities` here is happy-path safe today —
-        // but if the upstream session were ever opened with `Audio`
-        // (or future code regressed the open-time default), this seam
-        // would silently inherit it. Pin it via the typed constructor.
+        // R5-2 follow-up: even the projection refresh path must pin
+        // `Audio`. OpenAI's session-merge semantics preserve unset
+        // fields — so omitting `output_modalities` here is happy-path
+        // safe today — but if a future code path opened the upstream
+        // session with a different modality, this seam would silently
+        // inherit it. Pin it via the typed constructor.
         config: session_update_with_audio_text_modality(
             openai_realtime_instructions(
                 &open_config.seed_messages,
@@ -732,13 +748,14 @@ fn openai_refresh_session_update_from_snapshot(
     });
 
     SessionUpdate {
-        // R5-2 (FIX-OPENAI follow-up): the refresh-from-snapshot seam
-        // previously used `..SessionUpdateConfig::default()` and so
-        // emitted `output_modalities = None`. OpenAI preserves unset
-        // fields on merge, so happy-path was fine — but a future
-        // refresh-time invariant change (or upstream regression) could
-        // silently revert the channel modality. The typed constructor
-        // pins `AudioText` so the modality cannot drift.
+        // R5-2 follow-up: the refresh-from-snapshot seam previously
+        // used `..SessionUpdateConfig::default()` and so emitted
+        // `output_modalities = None`. OpenAI preserves unset fields on
+        // merge, so happy-path was fine — but a future refresh-time
+        // invariant change (or upstream regression) could silently
+        // revert the channel modality. The typed constructor pins
+        // `Audio` (the only gpt-realtime-2-accepted live modality) so
+        // the modality cannot drift.
         config: session_update_with_audio_text_modality(
             instructions,
             audio,
@@ -898,11 +915,11 @@ fn openai_audio_response_config() -> ResponseConfig {
     // semantics here.
     ResponseConfig {
         conversation: Some(ConversationMode::Auto),
-        // R5-2: keep response-level modality in lock-step with session-level
-        // (`AudioText`). A response that drops back to `Audio` would silence
-        // `ResponseOutputTextDelta` for that response despite the live channel
-        // advertising `text_out=true`.
-        output_modalities: Some(OutputModalities::AudioText),
+        // R5-2 follow-up: keep response-level modality in lock-step with
+        // session-level (`Audio`). gpt-realtime-2 rejects `[audio, text]`
+        // — see `session_update_with_audio_text_modality`. Spoken-text
+        // continuity flows via `ResponseOutputAudioTranscriptDelta`.
+        output_modalities: Some(OutputModalities::Audio),
         audio: Some(AudioConfig {
             input: None,
             output: Some(OutputAudioConfig {
@@ -3056,6 +3073,16 @@ impl LiveAdapter for OpenAiLiveAdapter {
             audio_in: true,
             audio_out: true,
             text_in: true,
+            // gpt-realtime-2 supports text modality. The live session
+            // pins `Audio` for the default voice loop because
+            // `[audio, text]` combined is rejected at session level
+            // ("Supported combinations are: ['text'] and ['audio']"),
+            // but per-response `response.create` may switch to
+            // `Text` output, and audio-mode responses still surface
+            // spoken text via `ResponseOutputAudioTranscriptDelta` →
+            // `AssistantTranscriptDelta`. Both delivery paths are
+            // genuine: the display-text lane (`text_out=true`) and
+            // the spoken-transcript lane (`transcript_supported=true`).
             text_out: true,
             image_in: false,
             video_in: false,
@@ -3628,24 +3655,26 @@ mod tests {
         assert!(id.starts_with("mk_text_"));
     }
 
-    /// R5-2 (FIX-OPENAI follow-up): the typed constructor for
-    /// `SessionUpdateConfig` MUST always set
-    /// `output_modalities = Some(OutputModalities::AudioText)` regardless
-    /// of which other fields the call site supplies. This is the
-    /// structural enforcement that replaces ad-hoc
-    /// `..SessionUpdateConfig::default()` literals (which leave
-    /// `output_modalities = None` and risk silently reverting the live
-    /// channel to audio-only on a future code path).
+    /// R5-2 follow-up: the typed constructor for `SessionUpdateConfig`
+    /// MUST always set `output_modalities = Some(OutputModalities::Audio)`
+    /// regardless of which other fields the call site supplies. The
+    /// live `gpt-realtime-2` API rejects the `[audio, text]` combination
+    /// — only `[audio]` or `[text]` are accepted — so the live realtime
+    /// channel pins `Audio` and surfaces spoken text via
+    /// `ResponseOutputAudioTranscriptDelta`. This test is the structural
+    /// enforcement that replaces ad-hoc `..SessionUpdateConfig::default()`
+    /// literals (which leave `output_modalities = None` and risk a
+    /// future regression silently letting the modality drift).
     #[test]
     fn session_update_constructor_always_sets_audio_text_modality() {
         // No instructions, no audio, no tools — the constructor must
-        // still pin AudioText. This is the corner that
+        // still pin Audio. This is the corner that
         // `..SessionUpdateConfig::default()` would have failed.
         let config = session_update_with_audio_text_modality(None, None, None);
         assert_eq!(
             config.output_modalities,
-            Some(OutputModalities::AudioText),
-            "constructor must pin AudioText even when every other field is None"
+            Some(OutputModalities::Audio),
+            "constructor must pin Audio even when every other field is None"
         );
 
         // With instructions and tools but no audio (the projection
@@ -3657,8 +3686,8 @@ mod tests {
         );
         assert_eq!(
             config.output_modalities,
-            Some(OutputModalities::AudioText),
-            "projection-refresh shape must still pin AudioText"
+            Some(OutputModalities::Audio),
+            "projection-refresh shape must still pin Audio"
         );
 
         // With every field populated (the open-time shape).
@@ -3672,8 +3701,8 @@ mod tests {
         );
         assert_eq!(
             config.output_modalities,
-            Some(OutputModalities::AudioText),
-            "open-time shape must still pin AudioText"
+            Some(OutputModalities::Audio),
+            "open-time shape must still pin Audio"
         );
     }
 
@@ -3778,10 +3807,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(response.conversation, Some(ConversationMode::Auto));
-                assert_eq!(
-                    response.output_modalities,
-                    Some(OutputModalities::AudioText)
-                );
+                assert_eq!(response.output_modalities, Some(OutputModalities::Audio));
                 assert_eq!(response.voice, None);
                 assert!(
                     matches!(
@@ -3807,7 +3833,7 @@ mod tests {
         RealtimeSessionOpenConfig::new(
             turning_mode,
             SessionLlmIdentity {
-                model: "gpt-realtime".to_string(),
+                model: "gpt-realtime-2".to_string(),
                 provider: Provider::OpenAI,
                 self_hosted_server_id: None,
                 provider_params: None,
@@ -5547,7 +5573,7 @@ mod tests {
                     })),
                     Ok(Some(ServerEvent::SessionUpdated {
                         event_id: "evt_session_updated".to_string(),
-                        session: sample_server_session("gpt-realtime"),
+                        session: sample_server_session("gpt-realtime-2"),
                     })),
                     Ok(None),
                 ]))),
@@ -5578,14 +5604,15 @@ mod tests {
                     Some(open_config.visible_tools.len())
                 );
                 assert!(session.config.audio.is_none());
-                // R5-2 (FIX-OPENAI follow-up): the projection refresh
-                // path now pins `AudioText` via the typed constructor
-                // rather than relying on OpenAI's "unset = preserve"
-                // semantics. The modality is structural, not a
-                // happy-path inheritance.
+                // R5-2 follow-up: the projection refresh path pins
+                // `Audio` via the typed constructor rather than relying
+                // on OpenAI's "unset = preserve" semantics. The
+                // modality is structural, not a happy-path inheritance,
+                // and the live `gpt-realtime-2` API rejects
+                // `[audio, text]`.
                 assert_eq!(
                     session.config.output_modalities,
-                    Some(OutputModalities::AudioText)
+                    Some(OutputModalities::Audio)
                 );
             }
             other => panic!("unexpected refresh event: {other:?}"),
@@ -6069,7 +6096,7 @@ mod tests {
                 ClientEvent::SessionUpdate { session, .. }
                     if matches!(
                         session.config.output_modalities,
-                        Some(oai_rt_rs::protocol::models::OutputModalities::AudioText)
+                        Some(oai_rt_rs::protocol::models::OutputModalities::Audio)
                     )
             )
         }));
@@ -6248,7 +6275,7 @@ mod tests {
         // Non-realtime session models must be rejected upstream (capability
         // guard at attach seam), not silently swapped.
         let realtime_identity = SessionLlmIdentity {
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: Provider::OpenAI,
             self_hosted_server_id: None,
             provider_params: None,
@@ -6256,7 +6283,7 @@ mod tests {
         };
         assert_eq!(
             openai_realtime_connect_model(&realtime_identity),
-            "gpt-realtime".to_string()
+            "gpt-realtime-2".to_string()
         );
 
         // Even for a non-realtime model, we return it verbatim. The capability
@@ -6728,7 +6755,7 @@ mod tests {
             seed_messages: seed_messages.clone(),
             visible_tools: Vec::new(),
             system_prompt: None,
-            model_id: "gpt-realtime".to_string(),
+            model_id: "gpt-realtime-2".to_string(),
             provider_id: Provider::OpenAI.as_str().to_string(),
             audio_config: None,
             runtime_system_context: Vec::new(),
@@ -6859,7 +6886,7 @@ mod tests {
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin.
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -6880,7 +6907,7 @@ mod tests {
                 seed_messages: seed_messages.clone(),
                 visible_tools: Vec::new(),
                 system_prompt: Some(format!("instructions revision {refresh_index}")),
-                model_id: "gpt-realtime".to_string(),
+                model_id: "gpt-realtime-2".to_string(),
                 provider_id: Provider::OpenAI.as_str().to_string(),
                 audio_config: None,
                 runtime_system_context: runtime_system_context.clone(),
@@ -6902,7 +6929,7 @@ mod tests {
             server_tx
                 .send(Ok(Some(ServerEvent::SessionUpdated {
                     event_id: format!("evt_refresh_session_updated_{refresh_index}"),
-                    session: sample_server_session("gpt-realtime"),
+                    session: sample_server_session("gpt-realtime-2"),
                 })))
                 .expect("server channel must accept SessionUpdated ack");
         }
@@ -6966,7 +6993,7 @@ mod tests {
         let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> =
             VecDeque::from(vec![Ok(Some(ServerEvent::SessionUpdated {
                 event_id: "evt_refresh_session_updated".to_string(),
-                session: sample_server_session("gpt-realtime"),
+                session: sample_server_session("gpt-realtime-2"),
             }))]);
 
         let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -6977,7 +7004,7 @@ mod tests {
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         // Stamp identity so the model-swap guard sees a stable origin
         // and proceeds (matching model + provider).
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain initial Ready so the pump is in its select! loop.
@@ -7004,7 +7031,7 @@ mod tests {
             seed_messages: seed_messages.clone(),
             visible_tools: mutated_tools.clone(),
             system_prompt: Some(mutated_prompt.clone()),
-            model_id: "gpt-realtime".to_string(),
+            model_id: "gpt-realtime-2".to_string(),
             provider_id: Provider::OpenAI.as_str().to_string(),
             audio_config: None,
             runtime_system_context: Vec::new(),
@@ -7099,7 +7126,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
         let adapter = OpenAiLiveAdapter::new(session);
 
         // Drain Ready.
@@ -7202,7 +7229,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(
@@ -7268,7 +7295,7 @@ mod tests {
             next_events: Arc::new(Mutex::new(ack_queue)),
         });
         let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
         let adapter = OpenAiLiveAdapter::new(session);
 
         let first = tokio::time::timeout(

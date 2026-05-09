@@ -224,7 +224,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime-1.5` and the runtime attaches the OpenAI Realtime transport automatically. Surfaces expose attachment status, `realtime/open_info`, and SDK helpers; JSON-RPC hosts need the realtime WebSocket listener enabled for audio bootstrap. `gpt-realtime` remains a compatibility alias.
+**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime-2` and the runtime attaches the OpenAI Realtime transport automatically. Surfaces expose attachment status, `realtime/open_info`, and SDK helpers; JSON-RPC hosts need the realtime WebSocket listener enabled for audio bootstrap. `gpt-realtime` remains a compatibility alias.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 

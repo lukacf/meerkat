@@ -119,20 +119,20 @@ Notes:
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
-- Public realtime attachment capability is named `realtime`, not `voice`: surfaces describe `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-1.5`) and the runtime manages attach/detach automatically.
+- Public realtime attachment capability is named `realtime`, not `voice`: surfaces describe `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-2`) and the runtime manages attach/detach automatically.
 ### Realtime voice attachment
 
-Realtime is a delivery mode of the session's LLM, not a separate subsystem. Enable it by setting the session's model to a realtime-capable one (today `gpt-realtime-1.5`; `gpt-realtime` is a compatibility alias). The runtime reads `ModelCapabilities.realtime` and attaches an OpenAI Realtime transport automatically. The session keeps a single canonical history; audio commits at turn boundaries.
+Realtime is a delivery mode of the session's LLM, not a separate subsystem. Enable it by setting the session's model to a realtime-capable one (today `gpt-realtime-2`; `gpt-realtime` is a compatibility alias). The runtime reads `ModelCapabilities.realtime` and attaches an OpenAI Realtime transport automatically. The session keeps a single canonical history; audio commits at turn boundaries.
 
 | Surface | Enable | Observe status | Open audio channel |
 |---------|--------|----------------|--------------------|
 | CLI | Start or resume a session/member on a realtime-capable model | `rkat realtime status session <SESSION-ID>` / `rkat realtime status member <MOB-ID> <AGENT-IDENTITY>` | `rkat realtime open-info session <SESSION-ID>` / `... member <MOB-ID> <AGENT-IDENTITY>` |
-| JSON-RPC | `session/create` with `model: "gpt-realtime-1.5"` | `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
-| REST | `POST /sessions` `{ "model": "gpt-realtime-1.5" }` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
+| JSON-RPC | `session/create` with `model: "gpt-realtime-2"` | `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
+| REST | `POST /sessions` `{ "model": "gpt-realtime-2" }` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
 | MCP (public) | host sets model via composition | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
-| Python SDK | `client.create_session(model="gpt-realtime-1.5", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
-| TypeScript SDK | `client.createSession({ model: "gpt-realtime-1.5", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
-| Rust | `SessionBuildOptions { model: Some("gpt-realtime-1.5".into()), .. }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-openai` |
+| Python SDK | `client.create_session(model="gpt-realtime-2", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
+| TypeScript SDK | `client.createSession({ model: "gpt-realtime-2", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
+| Rust | `SessionBuildOptions { model: Some("gpt-realtime-2".into()), .. }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-openai` |
 
 `RealtimeAttachmentStatus` reports `Unattached` / `IntentPresentUnbound` / `BindingNotReady` / `BindingReady` / `ReplacementPending` / `ReattachRequired`. There is no caller-initiated attach/detach RPC — transport follows the resolved model capability.
 

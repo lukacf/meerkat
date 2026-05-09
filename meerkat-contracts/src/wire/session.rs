@@ -1029,7 +1029,7 @@ mod tests {
             updated_at: 2000,
             message_count: 3,
             is_active: true,
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: "openai".to_string(),
             last_assistant_text: None,
             labels: BTreeMap::new(),

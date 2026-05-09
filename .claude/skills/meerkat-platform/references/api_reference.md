@@ -252,7 +252,7 @@ rkat blob get <BLOB-ID> --output meerkat.png
 - `session/realtime_attachment_status` — single-session status (no batch sibling)
 - `mob/member_status` includes `realtime_attachment_status` per member
 
-Set `model: "gpt-realtime-1.5"` on `session/create` to enable realtime; transport follows the resolved model's `ModelCapabilities.realtime`.
+Set `model: "gpt-realtime-2"` on `session/create` to enable realtime; transport follows the resolved model's `ModelCapabilities.realtime`.
 
 ### Auth (realm/binding model)
 

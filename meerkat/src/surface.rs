@@ -748,7 +748,7 @@ family = "gemma-4"
         assert!(gpt.supports_web_search);
         assert!(gpt.image_generation);
 
-        let realtime = find_profile("openai", "gpt-realtime");
+        let realtime = find_profile("openai", "gpt-realtime-2");
         assert!(!realtime.image_input);
         assert!(realtime.realtime);
     }

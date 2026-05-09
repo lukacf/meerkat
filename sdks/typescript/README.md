@@ -75,10 +75,11 @@ new MeerkatClient(rkatPath?: string)
 ### connect()
 
 ```ts
-async connect(): Promise<this>
+async connect(options?: ConnectOptions): Promise<this>
 ```
 
 Spawns `rkat-rpc` as a child process, performs the `initialize` handshake, checks contract version compatibility, and fetches runtime capabilities via `capabilities/get`. Returns `this` for chaining.
+Pass `{ liveWs: true }` only for live-adapter flows that need `live/*`; it requires a configured live provider.
 
 Throws `MeerkatError` with code `"VERSION_MISMATCH"` if the server's contract version is incompatible with the SDK's `CONTRACT_VERSION`.
 

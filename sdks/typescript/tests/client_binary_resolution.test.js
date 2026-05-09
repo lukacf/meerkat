@@ -138,4 +138,15 @@ describe("MeerkatClient binary resolution", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("does not enable live websocket transport by default", () => {
+    assert.deepEqual(MeerkatClient.buildArgs(false), []);
+  });
+
+  it("enables live websocket transport only when requested", () => {
+    assert.deepEqual(
+      MeerkatClient.buildArgs(false, { liveWs: true }),
+      ["--live-ws", "127.0.0.1:0"],
+    );
+  });
 });

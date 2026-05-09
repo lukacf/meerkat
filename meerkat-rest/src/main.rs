@@ -41,9 +41,6 @@ struct Args {
     /// Expose resolved filesystem paths in config API responses.
     #[arg(long, default_value_t = false)]
     expose_paths: bool,
-    /// Optional rkat-rpc TCP address to delegate realtime bootstrap through.
-    #[arg(long)]
-    realtime_rpc_tcp: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -80,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Build app state
-    let mut state = AppState::load_with_bootstrap_and_options(
+    let state = AppState::load_with_bootstrap_and_options(
         RuntimeBootstrap {
             realm: RealmConfig {
                 selection,
@@ -99,7 +96,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.expose_paths,
     )
     .await?;
-    state.realtime_rpc_tcp_addr = args.realtime_rpc_tcp;
     tracing::info!(
         realm_id = %state.realm,
         backend = %state.backend,

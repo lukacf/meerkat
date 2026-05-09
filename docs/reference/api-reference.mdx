@@ -21,8 +21,10 @@ committed with the repository:
 
 `rkat-rpc initialize` returns the compiled feature subset at runtime. The
 catalog above is the full documented surface with blob, sessions, events,
-streams, schedule, skills, runtime, realtime, mob, MCP, comms, auth, realm, and
-approval methods enabled.
+streams, schedule, skills, runtime, mob, MCP, comms, auth, realm, and
+approval methods enabled. Live audio/text adapter surfaces (`live/*`)
+appear when `rkat-rpc` is started with `--live-ws` and the runtime has a
+provider-backed live adapter wired in.
 
 ## Surface entry points
 
@@ -69,10 +71,8 @@ approval methods enabled.
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
 | `FailureLedgerEntry` | `meerkat_mob` | Flow-level failure log record |
 | `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
-| `RealtimeAttachmentStatus` | `meerkat_runtime` | Runtime-owned realtime attachment state (`Unattached`, `IntentPresentUnbound`, `BindingNotReady`, `BindingReady`, `ReplacementPending`, `ReattachRequired`) |
-| `RealtimeAttachmentSignalAuthority` | `meerkat_runtime` | Authority-epoch token (`session_id` + `authority_epoch`) required on every provider callback |
-| `SessionLlmReconfigureRequest` | `meerkat_runtime` | Request to swap provider/model on a session; capability-driven realtime transport branch attaches/detaches the binding based on the target model's `ModelCapabilities.realtime` (`model`, `provider`, `provider_params`) |
-| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` drives automatic realtime transport attach/detach |
+| `SessionLlmReconfigureRequest` | `meerkat_runtime` | Request to swap provider/model on a session (`model`, `provider`, `provider_params`) |
+| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` is consulted by the live-adapter precheck before opening a `live/*` channel |
 
 ## Traits
 

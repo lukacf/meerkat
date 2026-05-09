@@ -411,7 +411,6 @@ export interface MobMemberSnapshot {
   tokens_used: number;
   is_final: boolean;
   current_session_id?: string;
-  realtime_attachment_status?: string;
   resolved_capabilities?: ResolvedModelCapabilities;
   external_member?: unknown;
   kickoff?: Record<string, unknown>;

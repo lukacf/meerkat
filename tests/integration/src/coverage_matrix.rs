@@ -2,17 +2,12 @@
 //!
 //! Background:
 //!
-//! The s71 turn-8 regression (peer-response-triggered turn in a turn-driven
-//! realtime-attached session) escaped every existing test lane because no
-//! single test owned the composite axes. Each axis is individually covered,
-//! but the *combination* `TurnDriven × RealtimeAttached × ResponseTerminal ×
-//! None × RuntimeLoopStaged` had no home. W1-C formalizes the matrix so empty
-//! cells are visible and every `Covered` cell points at a real, passing test.
+//! Formalizes the matrix of composite axes so empty cells are visible and
+//! every `Covered` cell points at a real, passing test.
 //!
 //! Axes:
 //!
 //! - `runtime_mode`       — who drives the loop
-//! - `transport`          — whether a provider realtime side-channel is attached
 //! - `peer_input_class`   — the shape of the peer-originated input the session receives
 //! - `stream_mode`        — whether a subscriber has reserved an interaction stream
 //! - `assertion_surface`  — where the test observes outcomes
@@ -37,8 +32,7 @@ pub enum RuntimeMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Transport {
-    NonRealtime,
-    RealtimeAttached,
+    Standard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -150,40 +144,12 @@ pub struct CellEntry {
 /// cell here is a deliberate act.
 pub fn cells() -> &'static [CellEntry] {
     &[
-        // --- W1-C populated cells ------------------------------------------------
-        //
-        // The s71 shape: turn-driven + realtime-attached, peer-response
-        // terminal triggers the next turn. The canonical W2-E fix lives in
-        // the `ProjectionFreshness` typed state machine — a mid-turn
-        // context-advancement effect lands as `StaleDeferred`, promotes
-        // to `StaleImmediate` on turn completion, and drains at the
-        // turn-end refresh site. The in-crate unit tests exercise every
-        // transition in that state machine (positive + negative pairs
-        // per W1-B's test-discipline lesson). A full mob+realtime+peer
-        // e2e test arrives in follow-up work when the mob-side factory
-        // wiring plumbs through to a real `RealtimeWsHost` (the seam on
-        // `MobBuilder::with_realtime_session_factory` lands here).
+        // Peer-response terminal is turned into an immediate-boundary staged
+        // input by the runtime loop. Covered by an in-crate test in meerkat-runtime.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::RealtimeAttached,
-                peer_input_class: PeerInputClass::ResponseTerminal,
-                stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::RuntimeLoopStaged,
-            },
-            coverage: Coverage::Covered {
-                test_name: "meerkat_rpc::realtime_ws::tests::\
-                            projection_freshness_turn_completed_promotes_deferred_to_immediate",
-                scope: CoverageScope::InCrateUnit,
-            },
-        },
-        // Non-realtime analogue: peer-response terminal is turned into an
-        // immediate-boundary staged input by the runtime loop. Already covered
-        // by an in-crate test in meerkat-runtime.
-        CellEntry {
-            cell: Cell {
-                runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::NonRealtime,
+                transport: Transport::Standard,
                 peer_input_class: PeerInputClass::ResponseTerminal,
                 stream_mode: StreamMode::None,
                 assertion_surface: AssertionSurface::RuntimeLoopStaged,
@@ -194,22 +160,6 @@ pub fn cells() -> &'static [CellEntry] {
                 scope: CoverageScope::InCrateUnit,
             },
         },
-        // Autonomous host + realtime-attached: host loop drives while audio is
-        // attached; peer-response terminals should be absorbed into context.
-        // Blocked on the same mob-side realtime factory injection seam as s71.
-        CellEntry {
-            cell: Cell {
-                runtime_mode: RuntimeMode::AutonomousHost,
-                transport: Transport::RealtimeAttached,
-                peer_input_class: PeerInputClass::ResponseTerminal,
-                stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::RuntimeLoopStaged,
-            },
-            coverage: Coverage::PendingFix {
-                blocked_by: "W2-E (mob-side RealtimeSessionFactory injection seam, \
-                             see task #10)",
-            },
-        },
         // Peer-request + reserve-interaction: subscriber must be registered
         // on the requester, the response must route back from the responder,
         // and the reservation correlates via the request envelope id carried
@@ -218,7 +168,7 @@ pub fn cells() -> &'static [CellEntry] {
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::NonRealtime,
+                transport: Transport::Standard,
                 peer_input_class: PeerInputClass::Request,
                 stream_mode: StreamMode::ReserveInteraction,
                 assertion_surface: AssertionSurface::SubscriberStream,
@@ -237,7 +187,7 @@ pub fn cells() -> &'static [CellEntry] {
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::NonRealtime,
+                transport: Transport::Standard,
                 peer_input_class: PeerInputClass::Message,
                 stream_mode: StreamMode::ReserveInteraction,
                 assertion_surface: AssertionSurface::SubscriberStream,
@@ -252,7 +202,7 @@ pub fn cells() -> &'static [CellEntry] {
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::NonRealtime,
+                transport: Transport::Standard,
                 peer_input_class: PeerInputClass::LifecycleAdded,
                 stream_mode: StreamMode::ReserveInteraction,
                 assertion_surface: AssertionSurface::SubscriberStream,
@@ -261,44 +211,12 @@ pub fn cells() -> &'static [CellEntry] {
                 rationale: "lifecycle events don't correlate to a reserved interaction",
             },
         },
-        // Gap: we do not yet have a deterministic test for lifecycle-retired
-        // during a realtime-attached turn. Needed once member-retire
-        // semantics settle under realtime (tracked in 0.7 roadmap).
-        CellEntry {
-            cell: Cell {
-                runtime_mode: RuntimeMode::AutonomousHost,
-                transport: Transport::RealtimeAttached,
-                peer_input_class: PeerInputClass::LifecycleRetired,
-                stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::MobEventStream,
-            },
-            coverage: Coverage::Gap {
-                rationale: "lifecycle-retired semantics under realtime attachment \
-                            are still in flux; add once authority stabilizes",
-            },
-        },
-        // Gap: peer response-progress (non-terminal) while realtime-attached.
-        // Progress frames shouldn't trigger a next turn, but we don't yet have
-        // a regression pin for the turn-driven path.
-        CellEntry {
-            cell: Cell {
-                runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::RealtimeAttached,
-                peer_input_class: PeerInputClass::ResponseProgress,
-                stream_mode: StreamMode::None,
-                assertion_surface: AssertionSurface::MobEventStream,
-            },
-            coverage: Coverage::Gap {
-                rationale: "progress frames must not trigger a next turn; \
-                            add after W1-A lands typed OutboundPeerRequestState",
-            },
-        },
         // Gap: polling-based assertion for a peer-message append. Polling is
         // a stopgap surface; we prefer event-stream assertions.
         CellEntry {
             cell: Cell {
                 runtime_mode: RuntimeMode::TurnDriven,
-                transport: Transport::NonRealtime,
+                transport: Transport::Standard,
                 peer_input_class: PeerInputClass::Message,
                 stream_mode: StreamMode::None,
                 assertion_surface: AssertionSurface::Polling,
@@ -352,29 +270,6 @@ mod tests {
             );
             seen.push(entry.cell);
         }
-    }
-
-    #[test]
-    fn the_s71_shape_is_enumerated_and_covered() {
-        let s71 = Cell {
-            runtime_mode: RuntimeMode::TurnDriven,
-            transport: Transport::RealtimeAttached,
-            peer_input_class: PeerInputClass::ResponseTerminal,
-            stream_mode: StreamMode::None,
-            assertion_surface: AssertionSurface::RuntimeLoopStaged,
-        };
-        let found = cells().iter().find(|e| e.cell == s71);
-        assert!(found.is_some(), "s71 shape must be in the matrix");
-        // W2-E: the s71 shape is now Covered via the `ProjectionFreshness`
-        // state-machine tests in `meerkat-rpc`. The prior PendingFix
-        // status (blocked on the mob-side RealtimeSessionFactory
-        // injection seam) is resolved — the seam lands in this PR and
-        // the canonical fix (deferred-to-immediate promotion on turn
-        // end) is proven by deterministic unit tests.
-        assert!(
-            matches!(found.unwrap().coverage, Coverage::Covered { .. }),
-            "s71 shape must be Covered after W2-E lands",
-        );
     }
 
     #[test]

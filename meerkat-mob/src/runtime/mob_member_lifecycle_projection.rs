@@ -47,7 +47,6 @@ impl CanonicalMemberSnapshotMaterial {
             error: self.error.clone(),
             tokens_used: self.tokens_used,
             is_final: self.is_terminal,
-            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: self.peer_connectivity.clone(),

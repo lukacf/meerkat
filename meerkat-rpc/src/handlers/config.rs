@@ -314,6 +314,13 @@ pub async fn handle_patch(
                     snapshot.generation,
                     committed_registry,
                 );
+                // P1#5: a committed config patch may change the resolved
+                // model/provider for sessions that already have an active
+                // live channel. Propagate a `Refresh` (or `Close` if the
+                // new resolution is no longer realtime-capable) command to
+                // every active live channel so adapters re-seed against
+                // canonical state. No-op when no live host is attached.
+                runtime.propagate_config_to_live_channels().await;
                 RpcResponse::success(id, config_response_body(snapshot))
             }
             Err(e) => runtime_error_to_response(id, e),
@@ -350,6 +357,8 @@ pub async fn handle_patch(
         match config_store.patch(ConfigDelta(patch)).await {
             Ok(config) => {
                 runtime.set_skill_identity_registry(registry);
+                // P1#5: propagate to live channels. See doc-comment above.
+                runtime.propagate_config_to_live_channels().await;
                 RpcResponse::success(
                     id,
                     config_response_body(snapshot_from_store(config, config_store)),

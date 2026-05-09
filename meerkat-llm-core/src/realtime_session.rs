@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 use meerkat_contracts::{
-    RealtimeAudioChunk, RealtimeCapabilities, RealtimeEvent, RealtimeInputChunk,
-    RealtimeTurningMode, RealtimeVideoChunk,
+    RealtimeAudioChunk, RealtimeCapabilities, RealtimeInputChunk, RealtimeTurningMode,
+    RealtimeVideoChunk,
 };
 use meerkat_core::{PendingSystemContextAppend, RealtimeTranscriptEvent, ToolResult};
 use meerkat_core::{SessionLlmIdentity, StopReason, ToolDef, types::Message, types::Usage};
@@ -68,6 +68,25 @@ pub enum RealtimeSessionEvent {
         content_index: u32,
         delta: String,
     },
+    /// Spoken-transcript lane delta for an output item — text derived from
+    /// the provider's audio output (OpenAI realtime
+    /// `response.output_audio_transcript.delta`).
+    ///
+    /// T9/T10: distinct from [`Self::OutputTextDeltaForItem`] (display
+    /// text). The adapter forwards this to
+    /// `LiveAdapterObservation::AssistantTranscriptDelta`, which the
+    /// runtime materializes as
+    /// [`meerkat_core::types::AssistantBlock::Transcript`] with
+    /// `source: TranscriptSource::Spoken` rather than as authored display
+    /// text.
+    OutputAudioTranscriptDeltaForItem {
+        response_id: String,
+        delta_id: String,
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        delta: String,
+    },
     OutputAudioChunk {
         chunk: RealtimeAudioChunk,
     },
@@ -88,6 +107,13 @@ pub enum RealtimeSessionEvent {
     AssistantTranscriptTruncated {
         response_id: Option<String>,
         item_id: String,
+        /// Content segment index that was truncated. Some providers (OpenAI
+        /// realtime) carry this on the truncation client command and echo it
+        /// implicitly through the server `conversation.item.truncated` ack.
+        /// `None` means the provider did not surface a content segment id and
+        /// downstream projectors should treat the truncation as covering the
+        /// item's primary content segment.
+        content_index: Option<u32>,
         audio_played_ms: u64,
         truncated_text: Option<String>,
     },
@@ -96,63 +122,26 @@ pub enum RealtimeSessionEvent {
     RealtimeTranscript {
         event: RealtimeTranscriptEvent,
     },
-}
-
-impl RealtimeSessionEvent {
-    /// Project an internal provider event into the public channel event shape.
-    #[must_use]
-    pub fn to_public_event(&self) -> Option<RealtimeEvent> {
-        Some(match self {
-            Self::InputTranscriptPartial { text } => {
-                RealtimeEvent::InputTranscriptPartial { text: text.clone() }
-            }
-            Self::InputTranscriptFinal { text } => RealtimeEvent::InputTranscriptFinal {
-                text: text.clone(),
-                // Provider-layer prosody annotations are not surfaced
-                // through the internal adapter today; when a provider
-                // starts exposing structured prosody, the adapter fills
-                // this field before emitting the public event.
-                prosody_hint: None,
-            },
-            Self::InputTranscriptFinalForItem { text, .. } => RealtimeEvent::InputTranscriptFinal {
-                text: text.clone(),
-                prosody_hint: None,
-            },
-            Self::TurnStarted => RealtimeEvent::TurnStarted,
-            Self::TurnCommitted => RealtimeEvent::TurnCommitted,
-            Self::TurnCompleted { .. } => RealtimeEvent::TurnCompleted,
-            Self::OutputTextDelta { delta } => RealtimeEvent::OutputTextDelta {
-                delta: delta.clone(),
-            },
-            Self::OutputTextDeltaForItem { delta, .. } => RealtimeEvent::OutputTextDelta {
-                delta: delta.clone(),
-            },
-            Self::OutputAudioChunk { chunk } => RealtimeEvent::OutputAudioChunk {
-                chunk: chunk.clone(),
-            },
-            Self::OutputVideoChunk { chunk } => RealtimeEvent::OutputVideoChunk {
-                chunk: chunk.clone(),
-            },
-            Self::Interrupted { .. } => RealtimeEvent::Interrupted,
-            Self::ToolCallRequested {
-                call_id, tool_name, ..
-            } => RealtimeEvent::ToolCallRequested {
-                call_id: call_id.clone(),
-                tool_name: tool_name.clone(),
-            },
-            Self::AssistantTranscriptTruncated {
-                response_id: _,
-                item_id,
-                audio_played_ms,
-                truncated_text,
-            } => RealtimeEvent::AssistantTranscriptTruncated {
-                item_id: item_id.clone(),
-                audio_played_ms: *audio_played_ms,
-                truncated_text: truncated_text.clone(),
-            },
-            Self::RealtimeTranscript { .. } => return None,
-        })
-    }
+    /// Provider finalized the assistant transcript for an output item.
+    ///
+    /// Emitted by providers that surface a single terminal "transcript done"
+    /// fact (OpenAI: `response.output_audio_transcript.done`). The adapter
+    /// forwards this 1:1 to `LiveAdapterObservation::AssistantTranscriptFinal`
+    /// so the runtime's projection layer has an authoritative end-of-item
+    /// signal carrying the full transcript text. `stop_reason`/`usage` are
+    /// best-effort: providers that do not deliver them atomically with the
+    /// transcript-done event use sentinel defaults (the runtime layer will
+    /// reconcile against a subsequent `TurnCompleted` if it carries the
+    /// authoritative values).
+    AssistantTranscriptFinal {
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: Option<u32>,
+        response_id: Option<String>,
+        text: String,
+        stop_reason: StopReason,
+        usage: Usage,
+    },
 }
 
 /// Provider-neutral realtime session surface.
@@ -302,6 +291,28 @@ pub trait RealtimeSessionFactory: Send + Sync {
         target: &RealtimeExternalSessionTarget,
         turning_mode: RealtimeTurningMode,
     ) -> Result<Box<dyn RealtimeSession>, LlmError>;
+
+    /// E25: Open a provider-native `LiveAdapter` directly.
+    ///
+    /// The default impl returns `Unsupported` so providers that have not
+    /// yet implemented the direct seam keep working (their callers continue
+    /// to go through the `RealtimeSession` trait via mob/test harnesses).
+    /// The OpenAI factory overrides this to construct an `OpenAiLiveAdapter`
+    /// without boxing the session as `Box<dyn RealtimeSession>`.
+    ///
+    /// Returns an `Arc<dyn LiveAdapter>` because the live-adapter host owns
+    /// adapters by `Arc` and exposes `&self` methods (concurrent
+    /// send/receive without an outer mutex).
+    async fn open_live_adapter(
+        &self,
+        _open_config: &RealtimeSessionOpenConfig,
+    ) -> Result<std::sync::Arc<dyn meerkat_core::live_adapter::LiveAdapter>, LlmError> {
+        Err(LlmError::InvalidRequest {
+            message: "this provider has not implemented direct LiveAdapter; \
+                      callers must wrap a RealtimeSession via meerkat-live"
+                .to_string(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -316,23 +327,5 @@ mod tests {
             Err(error) => error,
         };
         assert!(matches!(error, LlmError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn tool_call_projection_strips_internal_arguments_for_public_event() {
-        let public = RealtimeSessionEvent::ToolCallRequested {
-            call_id: "call_1".to_string(),
-            tool_name: "lookup".to_string(),
-            arguments: serde_json::json!({ "q": "otter" }),
-        }
-        .to_public_event();
-
-        assert_eq!(
-            public,
-            Some(RealtimeEvent::ToolCallRequested {
-                call_id: "call_1".to_string(),
-                tool_name: "lookup".to_string(),
-            })
-        );
     }
 }

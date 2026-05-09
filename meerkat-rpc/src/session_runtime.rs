@@ -114,6 +114,75 @@ fn pending_system_context_appends(
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
 
+/// Errors returned by [`SessionRuntime::precheck_live_open`].
+///
+/// These map onto well-known RPC error codes:
+///
+/// * `SessionLookup` — `INTERNAL_ERROR` if the session lookup fails for an
+///   unrelated reason; `INVALID_PARAMS` when the session is genuinely missing.
+/// * `ModelNotRealtime` — `INVALID_PARAMS`; the resolved model has no
+///   realtime capability and live transport must be refused.
+/// * `ProviderHasNoLiveAdapter` — `INTERNAL_ERROR`; we recognize the provider
+///   but no realtime factory is wired for it in this build (Wave 1 = OpenAI
+///   only). Distinguished from a missing realtime capability so the operator
+///   can tell "model unsupported by us" from "provider not yet wired".
+#[derive(Debug, thiserror::Error)]
+pub enum LiveOpenPrecheckError {
+    #[error("failed to resolve live session {session_id}: {source}")]
+    SessionLookup {
+        session_id: SessionId,
+        #[source]
+        source: SessionError,
+    },
+    #[error("model {model} (provider {provider}) does not support realtime")]
+    ModelNotRealtime {
+        model: String,
+        provider: &'static str,
+    },
+    #[error("provider {provider} has no live adapter wired in this build")]
+    ProviderHasNoLiveAdapter { provider: &'static str },
+}
+
+/// Apply the B19 (realtime-capability) and B18 (provider-supported) gates to
+/// a resolved LLM identity. Shared between the staged-session and live-session
+/// branches of `precheck_live_open` so both paths enforce identical contracts.
+fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPrecheckError> {
+    let realtime_capable = meerkat_core::model_profile::capabilities::capabilities_for(
+        identity.provider,
+        &identity.model,
+    )
+    .map(|caps| caps.realtime)
+    .unwrap_or(false);
+    apply_precheck_gates(identity.provider, &identity.model, realtime_capable)
+}
+
+/// Pure gate-ordering helper: B19 (realtime capability) fires before B18
+/// (provider has live adapter). Split out from `precheck_identity` so unit
+/// tests can pin the B18 branch — the catalog cannot naturally produce a
+/// realtime-capable non-OpenAI row, so e2e never reaches `ProviderHasNoLiveAdapter`
+/// and a synthetic `realtime_capable: true` is the only way to assert the
+/// non-OpenAI rejection contract. Also documents the gate ordering as
+/// intentional: a non-realtime non-OpenAI session reports `ModelNotRealtime`
+/// (the more specific failure), not `ProviderHasNoLiveAdapter`.
+fn apply_precheck_gates(
+    provider: meerkat_core::Provider,
+    model: &str,
+    realtime_capable: bool,
+) -> Result<(), LiveOpenPrecheckError> {
+    if !realtime_capable {
+        return Err(LiveOpenPrecheckError::ModelNotRealtime {
+            model: model.to_string(),
+            provider: provider.as_str(),
+        });
+    }
+    if !matches!(provider, meerkat_core::Provider::OpenAI) {
+        return Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter {
+            provider: provider.as_str(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
     tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
@@ -229,6 +298,112 @@ struct PendingSessionEventStreamDrop {
 impl Drop for PendingSessionEventStreamDrop {
     fn drop(&mut self) {
         self.receiver_dropped.notify_one();
+    }
+}
+
+/// R10: extract the root system prompt from a projected `seed_messages`
+/// vector for use in `LiveProjectionSnapshot.system_prompt`.
+///
+/// Mirror of `extract_system_prompt_from_seed_messages` in
+/// `handlers/live.rs`; duplicated here so the runtime-side
+/// `propagate_config_to_live_channels` builder can populate the snapshot
+/// without depending on handler-private helpers (matches the existing
+/// duplication pattern between the two snapshot builders). See R10 in
+/// `LIVE_ADAPTER_REVIEW2_TODO.md` for the full rationale.
+///
+/// **Why both `System` AND `SystemNotice` are valid lead messages.**
+/// `realtime_projection_messages` (lines 435-444 below) only rewrites
+/// `seed_messages[0]` when `realtime_projection_root_system_message`
+/// returns `Some` (resolved system prompt or build instructions present);
+/// when that returns `None`, the canonical session transcript's original
+/// first message is left in place — and that can legitimately be a
+/// `Message::SystemNotice` (e.g. an idle pre-prompt session whose only
+/// lead is a runtime-injected `[SYSTEM NOTICE][MCP_PENDING]` notice).
+/// Without honoring `SystemNotice` here, a `propagate_config_to_live_channels`
+/// refresh whose snapshot leads with one would silently emit empty
+/// instructions on `session.update` and wipe the realtime provider's
+/// session-level instructions. We use `SystemNoticeMessage::rendered_text()`
+/// (the prefix-tagged form, matching the projection the root-system helper
+/// itself emits on line 405) so the provider sees the same string the
+/// agent loop would.
+fn extract_system_prompt_from_seed_messages_runtime(seed_messages: &[Message]) -> Option<String> {
+    match seed_messages.first()? {
+        Message::System(system) => Some(system.content.clone()),
+        Message::SystemNotice(notice) => Some(notice.rendered_text()),
+        _ => None,
+    }
+}
+
+/// P1#5: build a [`LiveProjectionSnapshot`] from the resolved
+/// [`RealtimeSessionOpenConfig`].
+///
+/// Mirror of `build_live_projection_snapshot` in
+/// `handlers/live.rs`; we duplicate here so `propagate_config_to_live_channels`
+/// can run from the runtime layer without depending on handler-private
+/// helpers.
+///
+/// R8: this builder stamps `snapshot_version: 0` as a placeholder. The
+/// caller (`propagate_config_to_live_channels`) overwrites it with
+/// `host.next_snapshot_version(channel_id)` before dispatch so adapters
+/// gating on `snapshot_version` for stale-refresh detection see strictly
+/// increasing generations. Do not treat the field returned here as the
+/// final stamp.
+fn build_live_projection_snapshot_for_runtime(
+    session_id: &SessionId,
+    open_config: &RealtimeSessionOpenConfig,
+) -> meerkat_core::live_adapter::LiveProjectionSnapshot {
+    meerkat_core::live_adapter::LiveProjectionSnapshot {
+        session_id: session_id.clone(),
+        snapshot_version: 0,
+        seed_messages: open_config.seed_messages.clone(),
+        visible_tools: open_config.visible_tools.clone(),
+        // R10: extract the root system prompt from the first
+        // `Message::System` entry in `seed_messages`.
+        // `RealtimeSessionOpenConfig` does not model `system_prompt` as a
+        // typed field today; `realtime_projection_messages` (above)
+        // guarantees that when a session has a resolved system prompt it
+        // sits at `seed_messages[0]`. Pre-fix this field was always `None`
+        // here, so refresh-time `session.update` rebuilt provider
+        // instructions from `runtime_system_context` alone and silently
+        // wiped the actual Meerkat system prompt on every
+        // `propagate_config_to_live_channels`.
+        system_prompt: extract_system_prompt_from_seed_messages_runtime(&open_config.seed_messages),
+        model_id: open_config.llm_identity.model.clone(),
+        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        audio_config: None,
+        // R3: forward typed runtime system-context so refresh snapshots
+        // carry the same authoritative system instructions the open path
+        // emitted (peer terminal, ops_lifecycle, etc.). Pre-fix this field
+        // was dropped here too — `propagate_config_to_live_channels`
+        // shipped a thinner snapshot than `live/open` even though the
+        // doc-comment claimed they were equivalent.
+        runtime_system_context: open_config.runtime_system_context.clone(),
+    }
+}
+
+/// R11: pure helper deciding whether a `config/patch`-resolved live identity
+/// represents a model or provider swap relative to the identity the channel
+/// was opened with.
+///
+/// Returns `true` when the channel must be closed (so the SDK can reopen
+/// against the new identity); `false` when an in-place `Refresh` is safe.
+///
+/// `bound_identity = None` means the channel was opened without identity
+/// recording (degraded factory-less path). Treat as "no swap" so the legacy
+/// Refresh fallthrough path still applies.
+///
+/// Audio-rate change is intentionally NOT checked here. The OpenAI Refresh
+/// guard rejects it, but R11's typed runtime path is scoped to
+/// model + provider until `audio_config` is plumbed into the projection
+/// snapshot. Audio mismatches still surface as the existing async
+/// `LiveAdapterErrorCode::ConfigRejected` error from the adapter.
+fn live_channel_requires_close_for_identity_change(
+    bound_identity: Option<&meerkat_core::SessionLlmIdentity>,
+    new_identity: &meerkat_core::SessionLlmIdentity,
+) -> bool {
+    match bound_identity {
+        Some(prev) => prev.model != new_identity.model || prev.provider != new_identity.provider,
+        None => false,
     }
 }
 
@@ -2286,6 +2461,15 @@ pub struct SessionRuntime {
     /// Runtime-owned approval records. Surfaces only project decisions into
     /// this service; approval status is service-owned.
     approval_service: meerkat_core::ApprovalService,
+    /// P1#5: live adapter host, attached when the surface wires
+    /// `with_live_ws`. Held as an interior-mutable slot so it can be set
+    /// after the runtime is wrapped in `Arc` (matches the
+    /// `callback_request_tx` / `mob_state` pattern). Used by
+    /// `propagate_config_to_live_channels` to fan out `Refresh` (or `Close`)
+    /// commands to active live channels when an upstream model/provider
+    /// resolution change requires a re-seed.
+    #[allow(clippy::type_complexity)]
+    live_adapter_host: Arc<StdRwLock<Option<Arc<meerkat_live::LiveAdapterHost>>>>,
 }
 
 #[cfg(test)]
@@ -2656,6 +2840,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host: Arc::new(StdRwLock::new(None)),
         }
     }
 
@@ -2757,6 +2942,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host: Arc::new(StdRwLock::new(None)),
         }
     }
 
@@ -3954,6 +4140,21 @@ impl SessionRuntime {
             return Ok(());
         }
 
+        // Wave-3 retry: deferred sessions live in `staged_sessions` until the
+        // first turn promotes them into the live service map. They are
+        // **not** in the persistent store yet, so jumping straight to
+        // `load_persisted_session` returns `None` and surfaces a spurious
+        // `NotFound` to the precheck path. Treat a staged session as
+        // "already in memory" — no recovery needed; the live service will
+        // materialize it when the first turn or `live/open` admits it.
+        // Without this short-circuit, the production `SqliteSessionStore`
+        // path that rkat-rpc uses would always reject deferred sessions
+        // even though `MemoryStore`-backed unit tests happily accept them
+        // (the unit-vs-prod divergence team-lead caught after Wave 3).
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(());
+        }
+
         let session = self
             .load_persisted_session(session_id)
             .await
@@ -4026,6 +4227,83 @@ impl SessionRuntime {
         .with_runtime_system_context(realtime_projection_runtime_system_context(&session)))
     }
 
+    /// Build a live open config for a session that may be deferred (no turns yet).
+    ///
+    /// B20: previously this method silently fell back to a degraded config with
+    /// empty history and empty visible tools when the rich session-projection
+    /// path failed. That fallback shape is invariant-violating — a live session
+    /// without its resolved tool set or system context would silently route
+    /// through providers as a clean-room session — so the open is now refused
+    /// rather than served with a degraded config. Callers receive the typed
+    /// projection error from `realtime_session_open_config`.
+    pub async fn live_open_config_for_session(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+        self.realtime_session_open_config(session_id, turning_mode)
+            .await
+    }
+
+    /// Pre-flight checks for `live/open` before any infra is minted.
+    ///
+    /// B18: live/open must dispatch to a provider-specific realtime factory.
+    /// Wave 1 only ships the OpenAI factory; sessions resolved to any other
+    /// provider must be rejected with `NoLiveAdapter` rather than silently
+    /// routed through the OpenAI factory.
+    ///
+    /// B19: live/open must reject sessions whose resolved model has no
+    /// `realtime` capability in `meerkat_core::model_profile::capabilities`.
+    /// Without this, a non-realtime model would silently bind to a realtime
+    /// transport and the provider would reject the WebSocket handshake at
+    /// connect time, surfacing as an opaque adapter error.
+    ///
+    /// Wave-3 deferred-session bug: `live_session_llm_identity` only consults
+    /// the live-sessions map. Sessions created with `initial_turn: deferred`
+    /// live in `staged_sessions` until first turn or until
+    /// `recover_live_session_for_realtime_open` materializes them. Without the
+    /// recovery dance below, every deferred-session `live/open` precheck
+    /// returned `SessionLookup` (`INTERNAL_ERROR "session not found"`) before
+    /// the B18/B19 gates ever fired, breaking e2e scenarios 71/72. The
+    /// recover-then-`NotFound`-fallback pattern mirrors
+    /// `realtime_session_open_config` (lines 4030-4046) so deferred and live
+    /// sessions traverse the same materialization path.
+    pub async fn precheck_live_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), LiveOpenPrecheckError> {
+        let map_lookup_err = |err: SessionError| LiveOpenPrecheckError::SessionLookup {
+            session_id: session_id.clone(),
+            source: err,
+        };
+        // Wave-3 retry: deferred sessions live in `staged_sessions` until the
+        // first turn promotes them into the live service map. Reading from
+        // staged here lets the precheck gate fire on the resolved model and
+        // provider before any infra is minted, even though
+        // `live_session_llm_identity` would still return `NotFound` for the
+        // session.
+        if let Some(info) = self.staged_sessions.info(session_id).await {
+            return precheck_identity(&info.effective_llm_identity);
+        }
+        self.recover_live_session_for_realtime_open(session_id)
+            .await
+            .map_err(map_lookup_err)?;
+        let identity = match self.service.live_session_llm_identity(session_id).await {
+            Ok(identity) => identity,
+            Err(SessionError::NotFound { .. }) => {
+                self.recover_live_session_for_realtime_open(session_id)
+                    .await
+                    .map_err(map_lookup_err)?;
+                self.service
+                    .live_session_llm_identity(session_id)
+                    .await
+                    .map_err(map_lookup_err)?
+            }
+            Err(other) => return Err(map_lookup_err(other)),
+        };
+        precheck_identity(&identity)
+    }
+
     fn recovery_overrides_from_turn(
         &self,
         overrides: Option<&crate::handlers::turn::TurnOverrides>,
@@ -4076,6 +4354,17 @@ impl SessionRuntime {
                 vec![],
             )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
         )
+    }
+
+    /// Build a callback-backed tool dispatcher for the live-adapter host.
+    ///
+    /// Returns `None` until `set_callback_channel` has been called (which the
+    /// `RpcServer` constructor does). Callers (`MethodRouter::with_live_ws`)
+    /// invoke this after server construction and pass the dispatcher to
+    /// `LiveAdapterHost::set_tool_dispatcher` so live provider tool calls
+    /// route through Meerkat's callback-tool authority (A4/A5).
+    pub fn live_tool_dispatcher(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        self.recovery_external_tools()
     }
 
     fn recovery_error_to_rpc(error: SurfaceSessionRecoveryError) -> RpcError {
@@ -4784,6 +5073,21 @@ impl SessionRuntime {
             .await
     }
 
+    /// Return distinct in-flight provider `response_id`s for the realtime
+    /// transcript state of `session_id`. CC4: lets the live projection sink
+    /// fan `AssistantTurnInterrupted` events to every staged response on
+    /// barge-in so deltas-in-flight do not survive into the next turn's
+    /// `AssistantTurnCompleted` materializer sweep.
+    pub async fn in_flight_realtime_assistant_response_ids(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<String>, SessionError> {
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(session.in_flight_realtime_assistant_response_ids())
+    }
+
     #[cfg(feature = "mob")]
     pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
         Arc::new(RpcMobSessionService::new(
@@ -4989,6 +5293,243 @@ impl SessionRuntime {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+    }
+
+    /// P1#5: attach the live adapter host so the runtime can fan out
+    /// `Refresh`/`Close` commands to active live channels when an upstream
+    /// model/provider resolution change requires a re-seed.
+    ///
+    /// Takes `&self` so it can be called after the runtime is wrapped in
+    /// `Arc` (matches the `set_callback_channel` pattern). Called by
+    /// `RpcServer`/router construction immediately after `with_live_ws`.
+    pub fn set_live_adapter_host(&self, host: Arc<meerkat_live::LiveAdapterHost>) {
+        if let Ok(mut slot) = self.live_adapter_host.write() {
+            *slot = Some(host);
+        }
+    }
+
+    /// Read the current live adapter host, if attached.
+    pub fn live_adapter_host(&self) -> Option<Arc<meerkat_live::LiveAdapterHost>> {
+        self.live_adapter_host
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// P1#5: fan out `Refresh` (or `Close` if the new resolved model is no
+    /// longer realtime-capable, or if the model/provider was swapped) to
+    /// every active live channel.
+    ///
+    /// Called after a successful `config/patch` commit so live adapters
+    /// sitting on stale model/provider resolution observe the new canonical
+    /// state. Per channel:
+    ///
+    /// 1. If the new resolved model has no realtime capability, close the
+    ///    channel — leaving a live channel attached to an unsupported
+    ///    resolution would silently route audio to a now-incompatible
+    ///    provider session.
+    /// 2. R11: if the new resolved `model_id` / `provider_id` differs from
+    ///    the identity recorded at `live/open` time
+    ///    (`LiveAdapterHost::channel_llm_identity`), close the channel
+    ///    with a structured `model_swap` log so SDK clients can observe
+    ///    and reopen against the new identity. The OpenAI realtime
+    ///    adapter rejects model drift (the wire `session.update` event
+    ///    cannot rebind the model), so dispatching `Refresh` here would
+    ///    land the channel in a permanent `ConfigRejected` error state.
+    /// 3. Otherwise build a fresh `LiveProjectionSnapshot` via
+    ///    `live_open_config_for_session` and dispatch
+    ///    `LiveAdapterCommand::Refresh { snapshot }`.
+    ///
+    /// Best-effort: per-channel errors are swallowed (logged via tracing) so
+    /// one stale channel cannot block propagation across the fleet. The
+    /// caller does not get per-channel error reporting; this method exists
+    /// to keep state honest, not to expose channel-level diagnostics.
+    pub async fn propagate_config_to_live_channels(&self) {
+        let Some(host) = self.live_adapter_host() else {
+            return;
+        };
+        let channels = host.active_channels().await;
+        for channel_id in channels {
+            let session_id = match host.channel_session(&channel_id).await {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?err,
+                        "live channel session lookup failed during config propagation"
+                    );
+                    continue;
+                }
+            };
+            // If the new resolved model/provider is not realtime-capable,
+            // close the channel rather than refreshing — a non-realtime
+            // model bound to a live transport would silently route audio
+            // through an incompatible provider session. We route through
+            // `signal_terminal_error` so the WS client receives a typed
+            // close-frame reason (`terminal:config_rejected`) and the
+            // accompanying JSON Error observation carries the precheck
+            // failure cause; otherwise the SDK sees a generic disconnect
+            // indistinguishable from network drop. Same wire-signal
+            // contract as the model-swap branch below.
+            if let Err(precheck_err) = self.precheck_live_open(&session_id).await {
+                tracing::info!(
+                    target: "meerkat_rpc::session_runtime",
+                    ?channel_id,
+                    ?session_id,
+                    ?precheck_err,
+                    "closing live channel: new resolution not realtime-capable"
+                );
+                let reason = format!("non_realtime_resolution: {precheck_err:?}");
+                let _ = host
+                    .signal_terminal_error(
+                        &channel_id,
+                        meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason },
+                    )
+                    .await;
+                continue;
+            }
+            let open_config = match self
+                .live_open_config_for_session(
+                    &session_id,
+                    meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                )
+                .await
+            {
+                Ok(config) => config,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "failed to build refreshed open_config for live channel"
+                    );
+                    continue;
+                }
+            };
+            // R11: detect a model/provider swap *before* enqueuing Refresh.
+            //
+            // After R1 the OpenAI realtime adapter rejects model and
+            // provider drift inside its Refresh arm via
+            // `LlmError::InvalidRequest` (R-FOUND2 maps this to
+            // `LiveAdapterErrorCode::ConfigRejected`), because the realtime
+            // wire `session.update` event cannot rebind the underlying
+            // model. Refreshing in place would land the channel in a
+            // permanent error state. Instead, when the new resolved
+            // identity differs from the identity the channel was opened
+            // with, close the channel cleanly and emit a structured event
+            // the SDK can observe + reopen against.
+            //
+            // Contract: this code path does NOT mint a new `live/open`.
+            // Reopen is the caller's responsibility — SDK clients observe
+            // the channel-closed event and decide whether to reopen with
+            // the new identity. The runtime only signals the swap.
+            //
+            // Audio-rate change isn't a model swap but is also rejected by
+            // the OpenAI guard. R11 scope is model + provider only; audio
+            // mismatches still surface as the existing async
+            // `ConfigRejected` error from the adapter Refresh arm. The
+            // typed runtime path for audio drift becomes a follow-up once
+            // `audio_config` is part of the projection snapshot.
+            let bound_identity = match host.channel_llm_identity(&channel_id).await {
+                Ok(identity) => identity,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "channel identity lookup failed; skipping live channel"
+                    );
+                    continue;
+                }
+            };
+            if let Some(prev) = bound_identity.as_ref()
+                && live_channel_requires_close_for_identity_change(
+                    Some(prev),
+                    &open_config.llm_identity,
+                )
+            {
+                tracing::info!(
+                    target: "meerkat_rpc::session_runtime",
+                    %channel_id,
+                    %session_id,
+                    old_model_id = %prev.model,
+                    new_model_id = %open_config.llm_identity.model,
+                    old_provider_id = ?prev.provider,
+                    new_provider_id = ?open_config.llm_identity.provider,
+                    reason = "model_swap",
+                    "closing live channel: config patch swapped \
+                     model/provider; SDK must reopen against new identity"
+                );
+                // CC1: push a typed `ConfigRejected` synthetic terminal Error
+                // observation through the host's pending-obs slot. This makes
+                // the model-swap close visible to SDK clients as a
+                // `terminal:config_rejected` close-frame reason on the WS,
+                // distinguishable from a generic network drop. The host
+                // closes the underlying adapter as part of this seam, so a
+                // separate `close_channel` call is unnecessary.
+                let reason = format!(
+                    "model_swap: {old} -> {new}",
+                    old = prev.model,
+                    new = open_config.llm_identity.model,
+                );
+                if let Err(err) = host
+                    .signal_terminal_error(
+                        &channel_id,
+                        meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason },
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "failed to signal terminal error on live channel after model swap"
+                    );
+                }
+                continue;
+            }
+            let mut snapshot =
+                build_live_projection_snapshot_for_runtime(&session_id, &open_config);
+            // R8: stamp via the host's monotonic counter so adapters that
+            // gate on `snapshot_version` for stale-refresh detection see
+            // strictly increasing generations across config propagations.
+            // Pre-fix every refresh shipped `snapshot_version: 0`. A
+            // ChannelNotFound here is benign — another task closed the
+            // channel between `active_channels()` and this point — so we
+            // log and skip rather than aborting the whole sweep.
+            match host.next_snapshot_version(&channel_id).await {
+                Ok(v) => snapshot.snapshot_version = v,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "skipping live channel: snapshot version stamp failed"
+                    );
+                    continue;
+                }
+            }
+            if let Err(err) = host
+                .send_command(
+                    &channel_id,
+                    meerkat_core::live_adapter::LiveAdapterCommand::Refresh { snapshot },
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "meerkat_rpc::session_runtime",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "failed to dispatch Refresh command to live channel"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mob")]
@@ -8531,6 +9072,52 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
+    #[test]
+    fn extract_system_prompt_runtime_returns_rendered_text_for_first_system_notice() {
+        // R10 (review-3 follow-up): the runtime-side extractor must accept a
+        // leading `Message::SystemNotice` because
+        // `realtime_projection_messages` (lines 435-444 in this file) only
+        // rewrites `seed_messages[0]` when the root-system helper returns
+        // `Some`; sessions whose only lead is a runtime-injected
+        // `SystemNotice` (e.g. an idle pre-prompt session with an
+        // `[MCP_PENDING]` notice) would otherwise see refresh `session.update`
+        // wipe the provider's instructions to empty. We surface
+        // `rendered_text()` (prefix-tagged) to match what the agent loop
+        // would project at line 405.
+        use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage, UserMessage};
+
+        let notice =
+            SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
+        let expected = notice.rendered_text();
+        let messages = vec![
+            Message::SystemNotice(notice),
+            Message::User(UserMessage::text("hi".to_string())),
+        ];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&messages),
+            Some(expected),
+        );
+
+        // Also pin the `System` arm and the empty/non-system arms so the
+        // contract is fully covered from the runtime side.
+        use meerkat_core::types::SystemMessage;
+        let sys = vec![Message::System(SystemMessage::new("you are a meerkat"))];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&sys),
+            Some("you are a meerkat".to_string()),
+        );
+        let user_only = vec![Message::User(UserMessage::text("hi"))];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&user_only),
+            None,
+        );
+        let empty: Vec<Message> = Vec::new();
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&empty),
+            None,
+        );
+    }
+
     #[cfg(feature = "comms")]
     fn install_ephemeral_peer_request_response_authority(
         runtime: &Arc<meerkat::CommsRuntime>,
@@ -8562,6 +9149,155 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // R11: model/provider swap on `config/patch` must close the live
+    // channel cleanly instead of dispatching `Refresh` (which the OpenAI
+    // realtime adapter rejects via `ConfigRejected`). The decision lives
+    // in `live_channel_requires_close_for_identity_change`; the
+    // integration tests below pin the host-driven side of the wiring
+    // (`channel_llm_identity` setter/getter + `propagate_config_to_live_channels`
+    // routing the `host.send_command(Refresh)` vs `host.close_channel`).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn r11_close_required_when_model_id_swapped() {
+        let prev = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            model: "gpt-realtime-1.5".to_string(),
+            ..prev.clone()
+        };
+        assert!(
+            live_channel_requires_close_for_identity_change(Some(&prev), &new),
+            "model_id swap on the same provider must require close+reopen"
+        );
+    }
+
+    #[test]
+    fn r11_close_required_when_provider_swapped() {
+        let prev = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            provider: meerkat_core::Provider::Gemini,
+            ..prev.clone()
+        };
+        assert!(
+            live_channel_requires_close_for_identity_change(Some(&prev), &new),
+            "provider swap must require close+reopen even at same model_id"
+        );
+    }
+
+    #[test]
+    fn r11_close_not_required_when_identity_unchanged() {
+        let id = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            // Other fields differ — provider_params change must NOT trigger a
+            // close-and-reopen. R11 scope is model + provider only.
+            provider_params: Some(serde_json::json!({"x": 1})),
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            provider_params: Some(serde_json::json!({"x": 2})),
+            ..id.clone()
+        };
+        assert!(
+            !live_channel_requires_close_for_identity_change(Some(&id), &new),
+            "provider_params drift is in-place-refreshable; only model/provider trigger close"
+        );
+    }
+
+    #[test]
+    fn r11_close_not_required_when_no_bound_identity_recorded() {
+        // Pre-R11 channels (or factory-less degraded test paths) have no
+        // recorded identity. The runtime must NOT assume a swap and force
+        // a close — the legacy Refresh fallthrough is correct.
+        let new = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        assert!(
+            !live_channel_requires_close_for_identity_change(None, &new),
+            "no bound identity must fall through to legacy Refresh, not force close"
+        );
+    }
+
+    /// R11: host-side accessor pair — `set_channel_llm_identity` records the
+    /// identity the channel was opened with, `channel_llm_identity` reads
+    /// it back. This is the seam the live/open handler stamps after
+    /// `attach_adapter` and the seam `propagate_config_to_live_channels`
+    /// reads. Without this round-trip the runtime cannot detect a swap.
+    #[tokio::test]
+    async fn r11_host_records_and_reads_back_bound_llm_identity() {
+        let host = meerkat_live::LiveAdapterHost::new();
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+
+        // Pre-set: channel exists but identity not recorded yet.
+        let initial = host
+            .channel_llm_identity(&channel_id)
+            .await
+            .expect("channel_llm_identity lookup");
+        assert!(
+            initial.is_none(),
+            "newly-opened channel must report None identity until live/open stamps it"
+        );
+
+        let identity = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        host.set_channel_llm_identity(&channel_id, identity.clone())
+            .await
+            .expect("set_channel_llm_identity");
+
+        let recorded = host
+            .channel_llm_identity(&channel_id)
+            .await
+            .expect("channel_llm_identity lookup")
+            .expect("identity must be recorded after set");
+        assert_eq!(recorded.model, identity.model);
+        assert_eq!(recorded.provider, identity.provider);
+    }
+
+    /// R11: an unknown channel id surfaces `ChannelNotFound` from the
+    /// identity getter, not a silent `Ok(None)`. The runtime distinguishes
+    /// "channel disappeared mid-sweep" (skip) from "channel exists but
+    /// no identity recorded" (fall through to legacy Refresh).
+    #[tokio::test]
+    async fn r11_channel_llm_identity_reports_channel_not_found_for_missing_channel() {
+        let host = meerkat_live::LiveAdapterHost::new();
+        let bogus = meerkat_live::LiveChannelId::random_uuid();
+        let result = host.channel_llm_identity(&bogus).await;
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_live::LiveAdapterHostError::ChannelNotFound(_))
+            ),
+            "missing channel must surface as ChannelNotFound, not silent None: {result:?}"
+        );
+    }
+
     #[test]
     fn turn_metadata_from_overrides_does_not_stamp_execution_kind() {
         let metadata = SessionRuntime::turn_metadata_from_overrides(
@@ -8590,6 +9326,118 @@ mod tests {
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
         );
+    }
+
+    /// B19 helper sanity: realtime capability lookup must round-trip the
+    /// catalogued `gpt-realtime*` rows as `realtime: true` and report any
+    /// non-realtime catalog entry as `realtime: false`. This guards the
+    /// `precheck_live_open` gate against silent catalog drift.
+    #[test]
+    fn realtime_capability_lookup_table() {
+        use meerkat_core::Provider;
+        use meerkat_core::model_profile::capabilities::capabilities_for;
+
+        let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime")
+            .expect("gpt-realtime should be present in the catalog");
+        assert!(
+            realtime.realtime,
+            "gpt-realtime is the canonical realtime alias; capability row must mark it realtime"
+        );
+
+        let realtime_15 = capabilities_for(Provider::OpenAI, "gpt-realtime-1.5")
+            .expect("gpt-realtime-1.5 should be present in the catalog");
+        assert!(realtime_15.realtime);
+
+        // Pick an arbitrary non-realtime OpenAI model from the catalog to
+        // confirm the negative path: Codex/standard chat models are not
+        // realtime-capable and must fail the precheck.
+        let codex = capabilities_for(Provider::OpenAI, "gpt-5.3-codex")
+            .expect("gpt-5.3-codex should be present in the catalog");
+        assert!(
+            !codex.realtime,
+            "non-realtime catalog entries must report realtime=false"
+        );
+
+        // Unknown model must return None — callers must treat None as
+        // "not realtime-capable" (precheck_live_open does this via
+        // `unwrap_or(false)`).
+        assert!(capabilities_for(Provider::OpenAI, "no-such-model").is_none());
+    }
+
+    /// B18 contract pin (non-OpenAI rejection).
+    ///
+    /// The B18 branch in `apply_precheck_gates` rejects realtime-capable
+    /// sessions whose provider is not OpenAI (the only realtime factory
+    /// wired in Wave 1). The catalog cannot naturally produce a
+    /// realtime-capable non-OpenAI capability row — every Gemini and
+    /// Anthropic row in `meerkat_core::model_profile::capabilities` has
+    /// `realtime: false` — so e2e tests never reach this branch and M73
+    /// surfaces `ModelNotRealtime` instead of `ProviderHasNoLiveAdapter`
+    /// even when the test exercises a Gemini provider.
+    ///
+    /// This unit test pins the contract directly: with a synthesized
+    /// `realtime_capable: true` for Gemini, the gate must fire B18 and
+    /// return `ProviderHasNoLiveAdapter`. If a future Wave wires a Gemini
+    /// realtime factory and flips this expectation, this test forces the
+    /// owner to update the gate explicitly rather than have the change slip
+    /// through silently.
+    #[test]
+    fn apply_precheck_gates_rejects_non_openai_realtime() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-live-hypothetical",
+            // Synthesized: the catalog cannot produce this combination, so
+            // we set the bool directly to reach the B18 branch.
+            true,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter { provider }) => {
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "expected ProviderHasNoLiveAdapter for realtime-capable Gemini, got {other:?}"
+            ),
+        }
+    }
+
+    /// B19-before-B18 gate ordering pin.
+    ///
+    /// When both gates would reject (non-realtime AND non-OpenAI), B19
+    /// (the more specific "model lacks realtime capability" failure) must
+    /// fire first. Documenting the ordering here prevents a future refactor
+    /// from silently swapping the branches and changing the public error
+    /// code surface from `INVALID_PARAMS` to `INTERNAL_ERROR` on the same
+    /// inputs.
+    #[test]
+    fn apply_precheck_gates_b19_fires_before_b18() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-flash-preview",
+            // Synthesized: matches the catalog reality (Gemini chat models
+            // are realtime: false). Without the explicit ordering check,
+            // a refactor could plausibly choose to reject on provider
+            // first; this test pins the contract.
+            false,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ModelNotRealtime { model, provider }) => {
+                assert_eq!(model, "gemini-3-flash-preview");
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "B19 must fire before B18 — expected ModelNotRealtime for non-realtime Gemini, \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    /// Positive control for the gate helper: realtime-capable OpenAI must
+    /// pass both gates. Catches a regression where the helper accidentally
+    /// rejects all inputs after a refactor.
+    #[test]
+    fn apply_precheck_gates_accepts_realtime_openai() {
+        apply_precheck_gates(meerkat_core::Provider::OpenAI, "gpt-realtime", true)
+            .expect("realtime-capable OpenAI must pass both gates");
     }
 
     #[test]
@@ -19160,6 +20008,94 @@ mod tests {
         assert!(!capabilities.web_search);
     }
 
+    /// Wave-3 regression: a deferred session created with no first turn lives
+    /// in `staged_sessions` and is **not** in the live service map, **not** in
+    /// the persistent store. `precheck_live_open` must read identity directly
+    /// from staging in that case; otherwise the live-map miss surfaces as
+    /// `SessionLookup` (`INTERNAL_ERROR "session not found"`) before the B18
+    /// (provider) and B19 (realtime-capability) gates can fire — the
+    /// production-shape failure mode that the original Wave-3 fix didn't
+    /// catch (the early `recover_live_session_for_realtime_open` dance only
+    /// helped when the session was already persisted).
+    ///
+    /// To make sure this regression test exercises the production-shaped seam
+    /// rather than a `MemoryStore` happy path, we assert before the precheck
+    /// that the session is in `staged_sessions` and **not** yet in the live
+    /// service map. That mirrors how `rkat-rpc` lands a deferred session:
+    /// staged-only until the first turn promotes it.
+    #[tokio::test]
+    async fn precheck_live_open_recovers_deferred_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let mut build = AgentBuildConfig::new("gpt-realtime");
+        build.provider = Some(meerkat_core::Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session for deferred OpenAI realtime build");
+
+        // Production-shape pre-assertion: deferred session must be staged-only.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet — \
+             otherwise the precheck staged-branch is not exercised"
+        );
+
+        runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect("deferred realtime session must pass precheck via staged branch");
+    }
+
+    #[tokio::test]
+    async fn precheck_live_open_rejects_deferred_non_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        // claude-sonnet-4-5 is catalogued with `realtime: false`. The
+        // staged branch of `precheck_live_open` must read the identity from
+        // staging and the B19 model-capability gate must reject it with a
+        // typed `ModelNotRealtime` — not `SessionLookup`. Asserting on the
+        // typed variant guards against a regression where the staged read
+        // silently swallows the gate error.
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session for deferred non-realtime build");
+
+        // Production-shape pre-assertion: deferred non-realtime session must
+        // also be staged-only, so the gate test exercises the staged branch.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet"
+        );
+
+        let err = runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect_err("non-realtime model must be rejected by precheck");
+        assert!(
+            matches!(err, LiveOpenPrecheckError::ModelNotRealtime { .. }),
+            "expected ModelNotRealtime, got {err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn turn_start_on_pending_session_rejects_provider_only_override() {
         use crate::handlers::turn::TurnOverrides;
@@ -20590,6 +21526,329 @@ mod tests {
             error::PROVIDER_ERROR,
             "ALL BuildErrors must map to PROVIDER_ERROR regardless of message content, got code: {}",
             rpc_err.code,
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R11 integration: drive `propagate_config_to_live_channels` end-to-end
+    // through a real `SessionRuntime` + `LiveAdapterHost` with a recording
+    // adapter and assert the model-swap branch closes the channel instead
+    // of dispatching `Refresh`.
+    //
+    // The session's underlying llm_identity is mutated *post-attach* by
+    // overwriting the host-recorded `bound_llm_identity` directly: that
+    // simulates "channel was opened with model A, but the new resolved
+    // identity is model B" without needing a full `config/patch` round-trip
+    // through `MeerkatMachine`. `propagate_config_to_live_channels` reads
+    // the new resolved identity from `live_open_config_for_session` (which
+    // returns the session's *current* identity) and compares against the
+    // host-recorded bound identity, which is exactly the comparison the
+    // production path performs.
+    // ---------------------------------------------------------------------
+
+    /// Recording adapter that captures every command the host forwards via
+    /// `send_command`. Used by R11 integration tests to assert that the
+    /// model-swap close path does NOT enqueue `Refresh`.
+    struct R11RecordingAdapter {
+        log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for R11RecordingAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            self.log.lock().await.push(command);
+            Ok(())
+        }
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    /// Build a deferred-session config whose resolved identity is
+    /// realtime-capable (B19) and uses OpenAI (B18). Without this, the
+    /// upstream `precheck_live_open` rejects the channel before
+    /// `propagate_config_to_live_channels` ever reaches the R11 model-swap
+    /// branch — making the swap-detection logic effectively dead code from
+    /// the perspective of the test. CC2: tests must drive the swap branch,
+    /// not the precheck-close fallback.
+    fn realtime_build_config(model: &str) -> AgentBuildConfig {
+        AgentBuildConfig {
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            provider: Some(meerkat_core::Provider::OpenAI),
+            ..AgentBuildConfig::new(model)
+        }
+    }
+
+    /// CC1: helper to drain every observation the host has queued for the
+    /// channel, including any synthetic terminal Error pushed via
+    /// `signal_terminal_error`. We loop on `next_observation_raw` rather
+    /// than `next_observation` so the synthetic obs is captured before
+    /// `apply_observation` clears it. The recording adapter's
+    /// `next_observation` returns `None`, so the only `Some` we see is the
+    /// pending synthetic.
+    async fn drain_pending_synthetic(
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Option<meerkat_core::live_adapter::LiveAdapterObservation> {
+        // adapter.next_observation returns None for the recording adapter, so
+        // a single read either returns the synthetic obs or the adapter's
+        // None terminal — there's no need to loop. Post-close, the host
+        // returns ChannelNotReady from `adapter_for` only when the pending
+        // slot is empty; treat that as "no synthetic obs queued."
+        host.next_observation_raw(channel_id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// R11/CC2: `propagate_config_to_live_channels` must enqueue a typed
+    /// `ConfigRejected` terminal observation (not `Refresh`) when the
+    /// host-recorded bound identity differs from the new resolved identity
+    /// for the channel's session.
+    ///
+    /// Both identities are realtime-capable OpenAI models (gpt-realtime
+    /// vs. gpt-realtime-1.5) so `precheck_live_open` returns OK and the
+    /// flow actually reaches the R11 swap-detection branch. Without the
+    /// realtime-capable mock identity, precheck would close the channel
+    /// first and the swap branch would never execute (CC2 verifier finding).
+    #[tokio::test]
+    async fn r11_propagate_closes_channel_on_model_id_swap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        // Session resolved identity: gpt-realtime-1.5 (realtime + OpenAI).
+        // We materialize the session via `start_turn` so
+        // `live_open_config_for_session` (called inside `propagate_config_to_live_channels`)
+        // can resolve a real open_config — staged sessions miss the live
+        // service map and would surface NotFound, causing the swap branch
+        // to be skipped entirely (the verifier's CC2 finding).
+        let session_id = runtime
+            .create_session(realtime_build_config("gpt-realtime-1.5"), None, None)
+            .await
+            .expect("create_session for live channel");
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for r11 swap test".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new());
+        runtime.set_live_adapter_host(Arc::clone(&host));
+        let runtime = Arc::new(runtime);
+
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Bound identity: gpt-realtime (the *prior* model the channel was
+        // opened with). Different from the session's resolved identity
+        // (gpt-realtime-1.5), so the swap branch fires.
+        let stale_bound = SessionLlmIdentity {
+            model: "gpt-realtime".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        host.set_channel_llm_identity(&channel_id, stale_bound)
+            .await
+            .expect("set_channel_llm_identity");
+
+        runtime.propagate_config_to_live_channels().await;
+
+        // R11 assertion: NO Refresh command was dispatched on the
+        // model-swap path. The channel was closed instead.
+        let recorded = log.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "R11: model-swap path must NOT enqueue Refresh, got: {recorded:?}"
+        );
+        drop(recorded);
+
+        let status = host
+            .channel_status(&channel_id)
+            .await
+            .expect("channel_status");
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "R11: model-swap path must close the channel; got status {status:?}"
+        );
+
+        // CC1: assert the typed `ConfigRejected` terminal Error observation
+        // is queued for the WS pump. The reason string carries both old +
+        // new model ids so the SDK can route on the typed code AND inspect
+        // the swap details. The pending obs is single-shot, so this also
+        // proves the swap branch ran (only `signal_terminal_error` enqueues
+        // a synthetic obs in this code path).
+        let synthetic = drain_pending_synthetic(&host, &channel_id)
+            .await
+            .expect("R11/CC1: model-swap branch must enqueue a synthetic terminal obs");
+        match synthetic {
+            meerkat_core::live_adapter::LiveAdapterObservation::Error { code, message } => {
+                match code {
+                    meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason } => {
+                        assert!(
+                            reason.contains("model_swap")
+                                && reason.contains("gpt-realtime")
+                                && reason.contains("gpt-realtime-1.5"),
+                            "ConfigRejected.reason must name swap + both model ids; got: {reason}"
+                        );
+                        assert_eq!(
+                            message, reason,
+                            "Error.message must mirror ConfigRejected.reason"
+                        );
+                    }
+                    other => {
+                        panic!("R11/CC1: expected ConfigRejected error code on swap, got {other:?}")
+                    }
+                }
+            }
+            other => panic!("R11/CC1: expected Error observation, got {other:?}"),
+        }
+    }
+
+    /// R11 sibling: when the recorded bound identity matches the session's
+    /// new resolved identity, propagation falls through to the legacy
+    /// Refresh path. The channel must NOT be closed AND no synthetic
+    /// terminal Error must be queued.
+    ///
+    /// CC2: the session is materialized with a realtime-capable model so
+    /// `precheck_live_open` returns OK and the flow reaches the R11
+    /// branch. The earlier shape of this test allowed the precheck-close
+    /// fallback to satisfy assertions — that masked any regression that
+    /// closed channels via the wrong gate. The assertions below now require
+    /// Refresh to land and the channel to remain open.
+    #[tokio::test]
+    async fn r11_propagate_dispatches_refresh_when_identity_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(realtime_build_config("gpt-realtime-1.5"), None, None)
+            .await
+            .expect("create_session for live channel");
+
+        // Materialize the session so `live_open_config_for_session` can
+        // resolve the current llm identity (deferred sessions miss the
+        // live service map and would surface NotFound from the open-config
+        // build path).
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for r11 sibling".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new());
+        runtime.set_live_adapter_host(Arc::clone(&host));
+        let runtime = Arc::new(runtime);
+
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Record the bound identity to match what `live_open_config_for_session`
+        // will return for this session — same model, same provider, so no
+        // swap. We read the current resolved identity off the runtime first
+        // so the test stays robust to changes in the default mock config.
+        let current_identity = runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live_open_config_for_session")
+            .llm_identity;
+        host.set_channel_llm_identity(&channel_id, current_identity)
+            .await
+            .expect("set_channel_llm_identity");
+
+        runtime.propagate_config_to_live_channels().await;
+
+        // CC2: precheck must succeed (gpt-realtime-1.5 is realtime + OpenAI),
+        // so the no-swap branch must dispatch exactly one Refresh and leave
+        // the channel open. The earlier "tolerate precheck close" allowance
+        // is gone — if status is Closed here, the R11 wiring is broken.
+        let recorded = log.lock().await;
+        let status = host
+            .channel_status(&channel_id)
+            .await
+            .expect("channel_status");
+        assert_ne!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "no-swap propagation must NOT close the channel; \
+             a Closed status here means precheck rejected a realtime-capable \
+             model or the swap branch fired on matching identities"
+        );
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected exactly one Refresh dispatch on a no-swap propagation, got: {recorded:?}"
+        );
+        match &recorded[0] {
+            meerkat_core::live_adapter::LiveAdapterCommand::Refresh { .. } => {}
+            other => panic!("expected Refresh, got {other:?}"),
+        }
+        drop(recorded);
+
+        // CC1: no synthetic terminal Error may be queued on the no-swap
+        // path. `signal_terminal_error` is only called from the swap branch.
+        let synthetic = drain_pending_synthetic(&host, &channel_id).await;
+        assert!(
+            synthetic.is_none(),
+            "no-swap propagation must NOT enqueue a synthetic terminal Error, got: {synthetic:?}"
         );
     }
 }

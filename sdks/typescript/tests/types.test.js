@@ -60,18 +60,15 @@ describe("Contract Version", () => {
     assert.equal(CONTRACT_VERSION, packageJson.version);
   });
 
-  it("generated realtime type inventory includes open-info and protocol frames", () => {
+  // J56: realtime channel-framing types (RealtimeOpenInfo / RealtimeProtocolVersion /
+  // RealtimeChannelOpenFrame) deleted as part of the live-adapter-mvp J55 sweep.
+  // The corresponding generated-type inventory test was removed.
+  it("generated wire types include RuntimeStateResult", () => {
     const generated = fs.readFileSync(
       new URL("../src/generated/types.ts", import.meta.url),
       "utf8",
     );
 
-    assert.match(generated, /export interface RealtimeOpenInfo/);
-    assert.match(generated, /export type RealtimeProtocolVersion = "2"/);
-    assert.match(generated, /supported_protocol_versions\??: RealtimeProtocolVersion\[]/);
-    assert.match(generated, /default_protocol_version: RealtimeProtocolVersion/);
-    assert.match(generated, /export interface RealtimeChannelOpenFrame/);
-    assert.match(generated, /protocol_version: RealtimeProtocolVersion/);
     assert.match(generated, /export interface RuntimeStateResult \{\n  state: WireRuntimeState;\n\}/);
   });
 });

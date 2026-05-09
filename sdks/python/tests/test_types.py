@@ -33,7 +33,6 @@ from meerkat import (
     McpAddParams,
     McpLiveOpResponse,
     MeerkatClient,
-    RealtimeChannel,
     RunResult,
     SchemaWarning,
     SessionAssistantBlock,
@@ -88,14 +87,8 @@ from meerkat.events import (
     parse_event,
 )
 from meerkat.generated.types import (
-    RealtimeCapabilities as GeneratedRealtimeCapabilities,
-    RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
-    RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
-    RealtimeProtocolVersion as GeneratedRealtimeProtocolVersion,
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
-
-REALTIME_PROTOCOL_VERSION: GeneratedRealtimeProtocolVersion = "2"
 
 
 def test_contract_version():
@@ -122,42 +115,6 @@ def test_model_profile_type_uses_wire_web_search_key():
 
     resolved_fields = set(ResolvedModelCapabilities.__annotations__)
     assert "web_search" in resolved_fields
-
-
-def test_generated_realtime_types_include_open_info_shape():
-    info = GeneratedRealtimeOpenInfo(
-        ws_url="ws://localhost:9999/realtime/ws",
-        open_token="token-1",
-        expires_at="2026-04-15T12:00:00Z",
-        target={"type": "session_target", "session_id": "session-1"},
-        supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
-        default_protocol_version=REALTIME_PROTOCOL_VERSION,
-        capabilities=GeneratedRealtimeCapabilities(
-            input_kinds=["text", "audio"],
-            output_kinds=["text", "audio"],
-            turning_modes=["provider_managed", "explicit_commit"],
-            interrupt_supported=True,
-            transcript_supported=True,
-            tool_lifecycle_events_supported=True,
-            video_supported=False,
-        ),
-    )
-
-    assert info.ws_url.endswith("/realtime/ws")
-    assert info.default_protocol_version == REALTIME_PROTOCOL_VERSION
-    assert info.supported_protocol_versions == [REALTIME_PROTOCOL_VERSION]
-    assert info.capabilities.turning_modes == [
-        "provider_managed",
-        "explicit_commit",
-    ]
-
-    frame = GeneratedRealtimeChannelOpenFrame(
-        protocol_version=REALTIME_PROTOCOL_VERSION,
-        open_token="token-1",
-        role="primary",
-        turning_mode="provider_managed",
-    )
-    assert frame.protocol_version == REALTIME_PROTOCOL_VERSION
 
 
 def test_generated_runtime_state_result_carries_state():
@@ -2385,7 +2342,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "is_final": False,
                 "agent_runtime_id": {"identity": "agent-a", "generation": 1},
                 "fence_token": 7,
-                "realtime_attachment_status": "binding_ready",
                 "resolved_capabilities": {
                     "vision": False,
                     "image_input": False,
@@ -2438,8 +2394,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         if method == "mob/append_system_context":
             return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "staged"}
-        if method == "session/realtime_attachment_status":
-            return {"status": "binding_ready"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2489,11 +2443,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     status = await client.mob_member_status("mob-1", "agent-a")
     assert "agent_runtime_id" not in status
     assert "fence_token" not in status
-    assert status["realtime_attachment_status"] == "binding_ready"
     assert status["resolved_capabilities"]["realtime"] is True
-
-    runtime_status = await client.runtime_realtime_attachment_status("session-1")
-    assert runtime_status.status == "binding_ready"
 
     client._request = fake_request  # type: ignore[method-assign]
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
@@ -2554,7 +2504,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/spawn",
         "mob/retire",
         "mob/member_status",
-        "session/realtime_attachment_status",
         "mob/respawn",
         "mob/wire",
         "mob/unwire",
@@ -2569,8 +2518,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/flow_status",
         "mob/flow_cancel",
     ]
-    assert calls[9][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
-    assert calls[10][1] == {
+    assert calls[8][1] == {"mob_id": "mob-1", "member": "a", "peer": {"local": "b"}}
+    assert calls[9][1] == {
         "mob_id": "mob-1",
         "member": "a",
         "peer": {
@@ -2584,15 +2533,12 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         },
     }
-    assert calls[7][1] == {
-        "session_id": "session-1",
-    }
-    assert calls[12][1] == {
+    assert calls[11][1] == {
         "mob_id": "mob-1",
         "member_ids": ["agent-a"],
         "timeout_ms": 1234,
     }
-    assert calls[13][1] == {"mob_id": "mob-1", "timeout_ms": 99}
+    assert calls[12][1] == {"mob_id": "mob-1", "timeout_ms": 99}
     assert calls[4][1] == {
         "mob_id": "mob-1",
         "profile": "planner",
@@ -2650,185 +2596,6 @@ async def test_wait_mob_ready_rejects_malformed_member_snapshot():
 
     with pytest.raises(MeerkatError, match="is_final must be boolean"):
         await client.wait_mob_ready("mob-1")
-
-
-@pytest.mark.asyncio
-async def test_realtime_wrappers_and_channel_scaffold() -> None:
-    client = MeerkatClient()
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
-        calls.append((method, params))
-        if method == "realtime/open_info":
-            return {
-                "ws_url": "ws://localhost:9999/realtime/ws",
-                "open_token": "token-1",
-                "expires_at": "2026-04-15T12:00:00Z",
-                "target": params["target"],
-                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
-                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
-                "capabilities": {
-                    "input_kinds": ["text", "audio"],
-                    "output_kinds": ["text", "audio"],
-                    "turning_modes": ["provider_managed"],
-                    "interrupt_supported": True,
-                    "transcript_supported": True,
-                    "tool_lifecycle_events_supported": False,
-                    "video_supported": False,
-                },
-            }
-        if method == "realtime/status":
-            return {"status": {"state": "opening", "attempt_count": 0}}
-        if method == "realtime/capabilities":
-            return {
-                "capabilities": {
-                    "input_kinds": ["text", "audio"],
-                    "output_kinds": ["text", "audio"],
-                    "turning_modes": ["provider_managed"],
-                    "interrupt_supported": True,
-                    "transcript_supported": True,
-                    "tool_lifecycle_events_supported": False,
-                    "video_supported": False,
-                }
-            }
-        raise AssertionError(f"unexpected method {method}")
-
-    client._request = fake_request  # type: ignore[method-assign]
-
-    session_channel = RealtimeChannel.session(client, "session-1")
-    assert session_channel.open_request().target == {
-        "type": "session_target",
-        "session_id": "session-1",
-    }
-    assert session_channel.open_request().role == "primary"
-    assert session_channel.open_request().turning_mode == "provider_managed"
-
-    open_info = await client.realtime_open_info(session_channel.open_request())
-    status = await client.realtime_status({"target": session_channel.target})
-    capabilities = await client.realtime_capabilities({"target": session_channel.target})
-
-    scoped_open_info = await session_channel.open_info()
-    scoped_status = await session_channel.status()
-    scoped_capabilities = await session_channel.capabilities()
-
-    assert open_info.default_protocol_version == REALTIME_PROTOCOL_VERSION
-    assert status.status.state == "opening"
-    assert capabilities.capabilities["turning_modes"] == ["provider_managed"]
-    assert scoped_open_info.open_token == "token-1"
-    assert scoped_status.status.state == "opening"
-    assert scoped_capabilities.capabilities["input_kinds"] == ["text", "audio"]
-    assert [method for method, _ in calls] == [
-        "realtime/open_info",
-        "realtime/status",
-        "realtime/capabilities",
-        "realtime/open_info",
-        "realtime/status",
-        "realtime/capabilities",
-    ]
-
-
-# W3-H: `RealtimeChannelTarget::MobMember { mob_id, agent_identity }` is
-# a first-class wire variant. The SDK builds the MobMember variant
-# directly — no pre-resolution of `mob/member_status → current_session_id`,
-# no session-id pin — so respawn-driven session rotation does not
-# require any SDK round-trip or reconnect. See
-# `meerkat-contracts/src/wire/realtime.rs:224-232` for the contract and
-# `meerkat-mob/tests/member_realtime_bindings.rs` for the machine-owned
-# binding lifecycle this relies on.
-@pytest.mark.asyncio
-async def test_realtime_channel_mob_member_builds_mob_member_wire_target() -> None:
-    client = MeerkatClient()
-    calls: list[tuple[str, dict[str, object]]] = []
-
-    async def fake_request(method: str, params: dict[str, object]) -> dict[str, object]:
-        calls.append((method, params))
-        if method == "realtime/open_info":
-            return {
-                "ws_url": "ws://localhost:9999/realtime/ws",
-                "open_token": "token-mob",
-                "expires_at": "2026-04-15T12:00:00Z",
-                "target": params["target"],
-                "supported_protocol_versions": [REALTIME_PROTOCOL_VERSION],
-                "default_protocol_version": REALTIME_PROTOCOL_VERSION,
-                "capabilities": {
-                    "input_kinds": ["text"],
-                    "output_kinds": ["text"],
-                    "turning_modes": ["explicit_commit"],
-                    "interrupt_supported": True,
-                    "transcript_supported": True,
-                    "tool_lifecycle_events_supported": False,
-                    "video_supported": False,
-                },
-            }
-        if method == "realtime/status":
-            return {"status": {"state": "opening", "attempt_count": 0}}
-        if method == "realtime/capabilities":
-            return {
-                "capabilities": {
-                    "input_kinds": ["text"],
-                    "output_kinds": ["text"],
-                    "turning_modes": ["explicit_commit"],
-                    "interrupt_supported": True,
-                    "transcript_supported": True,
-                    "tool_lifecycle_events_supported": False,
-                    "video_supported": False,
-                }
-            }
-        raise AssertionError(f"unexpected method {method}")
-
-    client._request = fake_request  # type: ignore[method-assign]
-
-    member_channel = RealtimeChannel.mob_member(
-        client,
-        "mob-1",
-        "agent-a",
-        role="observer",
-        turning_mode="explicit_commit",
-    )
-
-    # W3-H: the wire target carries identity — no pre-resolve round-trip,
-    # no pinned session id. `open_request()` returns the MobMember
-    # variant as-is.
-    expected_target = {
-        "type": "mob_member",
-        "mob_id": "mob-1",
-        "agent_identity": "agent-a",
-    }
-    assert member_channel.target == expected_target
-    open_request = member_channel.open_request()
-    assert open_request.target == expected_target
-
-    # open_info() sends the MobMember target directly.
-    open_info = await member_channel.open_info()
-    assert open_info.target == expected_target
-
-    # status() and capabilities() also send the MobMember target with
-    # no `mob/member_status` pre-resolve round-trip.
-    status_result = await member_channel.status()
-    assert status_result.status.state == "opening"
-    await member_channel.capabilities()
-
-    # Call order encodes the new contract: only `realtime/*` calls
-    # cross the wire, never `mob/member_status`. Respawn rotates the
-    # bound session inside the server; the SDK is unaware.
-    assert [method for method, _ in calls] == [
-        "realtime/open_info",
-        "realtime/status",
-        "realtime/capabilities",
-    ]
-
-    # Every outbound target carries the MobMember variant — the SDK
-    # never emits the retired `mob_member_target` shape and never
-    # emits a `session_target` synthesized from `mob/member_status`.
-    for method, params in calls:
-        target = params.get("target") if isinstance(params, dict) else None
-        assert isinstance(target, dict), f"{method} lost the target"
-        assert target.get("type") == "mob_member", (
-            f"{method} leaked non-MobMember wire shape {target!r}"
-        )
-        assert target.get("type") != "mob_member_target", (
-            f"{method} leaked retired mob_member_target wire shape"
-        )
 
 
 @pytest.mark.asyncio
@@ -2944,3 +2711,128 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 
     with pytest.raises(MeerkatError, match="missing member_ref"):
         await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
+
+
+# ---------------------------------------------------------------------------
+# CC5/CC6: typed live-adapter capability + continuity wire mirrors.
+# ---------------------------------------------------------------------------
+
+
+def test_generated_wire_live_channel_capabilities_exposes_typed_booleans():
+    """CC5: SDK consumers must see typed access to every capability boolean.
+
+    Closes the verifier finding that `LiveChannelCapabilities` was projected
+    as `serde_json::Value` and SDKs got raw JSON. The regenerated dataclass
+    must expose every field as a typed `bool` with snake_case names so
+    static type checkers (pyright/mypy) catch typos at field access.
+    """
+    from dataclasses import fields
+
+    from meerkat.types import WireLiveChannelCapabilities
+
+    field_names = {f.name for f in fields(WireLiveChannelCapabilities)}
+    assert field_names == {
+        "audio_in",
+        "audio_out",
+        "text_in",
+        "text_out",
+        "image_in",
+        "video_in",
+        "transcript_supported",
+        "barge_in_supported",
+        "provider_native_resume",
+    }
+    for f in fields(WireLiveChannelCapabilities):
+        assert f.type in {"bool", bool}, (
+            f"WireLiveChannelCapabilities.{f.name} must be typed `bool`, "
+            f"got {f.type!r}"
+        )
+
+
+def test_generated_wire_live_channel_capabilities_constructs_for_gpt_realtime_2():
+    """T8 + CC5: typed booleans represent `gpt-realtime-2` (image_in) and
+    Gemini Live (video_in) without provider-specific fields."""
+    from meerkat.types import WireLiveChannelCapabilities
+
+    gpt_realtime_2 = WireLiveChannelCapabilities(
+        audio_in=True,
+        audio_out=True,
+        text_in=True,
+        text_out=True,
+        image_in=True,
+        video_in=False,
+        transcript_supported=True,
+        barge_in_supported=True,
+        provider_native_resume=False,
+    )
+    gemini_live = WireLiveChannelCapabilities(
+        audio_in=True,
+        audio_out=True,
+        text_in=True,
+        text_out=True,
+        image_in=False,
+        video_in=True,
+        transcript_supported=True,
+        barge_in_supported=True,
+        provider_native_resume=False,
+    )
+    # Typed access at the Python attribute level — closes the SDK boundary
+    # for CC5.
+    assert gpt_realtime_2.image_in is True
+    assert gpt_realtime_2.video_in is False
+    assert gemini_live.image_in is False
+    assert gemini_live.video_in is True
+
+
+def test_generated_wire_live_continuity_mode_is_tagged_union():
+    """CC6: SDK consumers must see a tagged-union shape on `mode`.
+
+    Each variant is a TypedDict with `mode: Literal[...]` so mypy/pyright
+    can narrow on the discriminator. The `provider_native_resume` variant
+    additionally carries `provider_session_id: str`.
+    """
+    from typing import Literal, get_args, get_type_hints
+
+    from meerkat.types import (
+        WireLiveContinuityModeDegraded,
+        WireLiveContinuityModeFresh,
+        WireLiveContinuityModeProviderNativeResume,
+        WireLiveContinuityModeTranscriptOnly,
+    )
+
+    fresh_hints = get_type_hints(WireLiveContinuityModeFresh)
+    assert get_args(fresh_hints["mode"]) == ("fresh",)
+
+    transcript_hints = get_type_hints(WireLiveContinuityModeTranscriptOnly)
+    assert get_args(transcript_hints["mode"]) == ("transcript_only",)
+
+    degraded_hints = get_type_hints(WireLiveContinuityModeDegraded)
+    assert get_args(degraded_hints["mode"]) == ("degraded",)
+
+    resume_hints = get_type_hints(WireLiveContinuityModeProviderNativeResume)
+    assert get_args(resume_hints["mode"]) == ("provider_native_resume",)
+    # Payload field is typed `str`, not `Any` — closes the CC6 finding.
+    assert resume_hints["provider_session_id"] is str
+
+
+def test_generated_live_open_result_references_typed_capabilities_and_continuity():
+    """CC5/CC6: `LiveOpenResult.capabilities` / `.continuity` are typed at
+    the dataclass level — not erased to `Any` / `dict[str, Any]`.
+
+    This is the verifier-facing acceptance test: SDK clients see typed
+    access to image_in / video_in (via `WireLiveChannelCapabilities`) and
+    can route on `result.continuity["mode"]` without parsing raw JSON.
+    """
+    from typing import get_type_hints
+
+    from meerkat.types import (
+        LiveOpenResult,
+        WireLiveChannelCapabilities,
+        WireLiveContinuityMode,
+    )
+
+    hints = get_type_hints(LiveOpenResult)
+    assert hints["capabilities"] is WireLiveChannelCapabilities
+    # `WireLiveContinuityMode` is a `Union[...]` alias; the dataclass field
+    # type must be exactly this alias, not `Any`.
+    assert hints["continuity"] == WireLiveContinuityMode

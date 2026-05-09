@@ -29,14 +29,12 @@ path = "tests/live_smoke_rpc.rs"
 name = "live_rpc_regression"
 path = "tests/live_rpc_regression.rs"
 
-[[test]]
-name = "tcp_e2e"
-path = "tests/tcp_e2e.rs"
-
 [dependencies]
 meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
 meerkat-models = { workspace = true }
 meerkat-core = { workspace = true }
+meerkat-live = { path = "../meerkat-live" }
+base64 = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-client = { workspace = true, features = ["anthropic", "openai", "gemini", "oauth", "openai-realtime"] }
 meerkat-anthropic = { workspace = true, features = ["oauth"] }

@@ -156,6 +156,17 @@ fn project_openai_assistant_blocks(
                 has_output_item = true;
                 Some(block.clone())
             }
+            // Spoken transcripts replay back to the provider as plain text;
+            // OpenAI Responses API sees the assistant's visible output
+            // regardless of capture lane.
+            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
+            AssistantBlock::Transcript { text, .. } => {
+                has_output_item = true;
+                Some(AssistantBlock::Text {
+                    text: text.clone(),
+                    meta: None,
+                })
+            }
             AssistantBlock::Reasoning { meta, .. } if openai_reasoning_replayable(mode, meta) => {
                 Some(block.clone())
             }

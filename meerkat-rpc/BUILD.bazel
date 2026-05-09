@@ -42,8 +42,6 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -63,6 +61,7 @@ rust_library(
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -93,8 +92,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -127,6 +124,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -152,8 +150,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -176,6 +172,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -200,8 +197,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -224,6 +219,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -254,8 +250,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -297,6 +291,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -328,8 +323,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -376,6 +369,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -407,8 +401,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -455,81 +447,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "realtime_ws_protocol_test",
-    aliases = aliases(
-        package_name = "meerkat-rpc",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "realtime_ws_protocol",
-    crate_root = "tests/realtime_ws_protocol.rs",
-    crate_features = [
-        "comms",
-        "mcp",
-        "mob",
-        "schedule",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ] + [
-        "//:live_smoke_support",
-    ],
-    srcs = [
-        "tests/realtime_ws_protocol.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "realtime_ws_protocol",
-        "CARGO_MANIFEST_DIR": "./meerkat-rpc",
-        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [
-        "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
-    ],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
-        "//meerkat-rpc:meerkat_rpc",
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -561,8 +479,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -605,6 +521,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -636,8 +553,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -680,6 +595,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -711,8 +627,6 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ] + [
         "//:live_smoke_support",
     ],
@@ -755,80 +669,7 @@ rust_test(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
-    name = "tcp_e2e_test",
-    aliases = aliases(
-        package_name = "meerkat-rpc",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "tcp_e2e",
-    crate_root = "tests/tcp_e2e.rs",
-    crate_features = [
-        "comms",
-        "mcp",
-        "mob",
-        "schedule",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ] + [
-        "//:live_smoke_support",
-    ],
-    srcs = [
-        "tests/tcp_e2e.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "tcp_e2e",
-        "CARGO_MANIFEST_DIR": "./meerkat-rpc",
-        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
-    },
-    tags = [
-        "e2e",
-    ],
-    data = [
-        "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
-    ],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
-        "//meerkat-rpc:meerkat_rpc",
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -849,8 +690,6 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -873,6 +712,7 @@ rust_library(
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -892,8 +732,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -918,6 +756,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -938,8 +777,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -964,6 +801,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -987,8 +825,6 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1011,6 +847,7 @@ rust_library(
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -1033,8 +870,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1059,6 +894,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -1082,8 +918,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1108,6 +942,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -1130,8 +965,6 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1154,6 +987,7 @@ rust_library(
         "//meerkat:meerkat_client_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -1175,8 +1009,6 @@ rust_binary(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -1201,6 +1033,7 @@ rust_binary(
         "//meerkat:meerkat_comms_agent_factory_build",
         "//meerkat:meerkat_contracts_agent_factory_build",
         "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_live_agent_factory_build",
         "//meerkat:meerkat_models_agent_factory_build",
         "//meerkat:meerkat_providers_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
@@ -1216,7 +1049,6 @@ test_suite(
     name = "fast_tests",
     tests = [
         ":meerkat_rpc_unit_test",
-        ":realtime_ws_protocol_test",
         ":regression_rpc_test",
         ":rpc_auth_methods_test",
         ":runtime_backed_ingress_test",

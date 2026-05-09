@@ -60,40 +60,33 @@ from .generated.types import (
     MobTopologySpecInput as MobTopologySpecInput,
     MobTurnStartParams as MobTurnStartParams,
     MobWiringRulesInput as MobWiringRulesInput,
+    LiveChannelParams as LiveChannelParams,
+    LiveInputChunkWire as LiveInputChunkWire,
+    LiveOpenParams as LiveOpenParams,
+    LiveOpenResult as LiveOpenResult,
+    LiveSendInputParams as LiveSendInputParams,
+    LiveStatusResult as LiveStatusResult,
+    LiveTruncateParams as LiveTruncateParams,
+    # CC5/CC6: typed wire mirrors for the live `capabilities` + `continuity`
+    # shapes. Re-exported alongside `LiveOpenResult` so SDK consumers can
+    # reach the typed booleans (`image_in`, `video_in`, etc.) and the
+    # discriminated continuity-mode union without dipping into the
+    # `meerkat.generated.types` module.
+    WireLiveChannelCapabilities as WireLiveChannelCapabilities,
+    WireLiveContinuityMode as WireLiveContinuityMode,
+    WireLiveContinuityModeFresh as WireLiveContinuityModeFresh,
+    WireLiveContinuityModeTranscriptOnly as WireLiveContinuityModeTranscriptOnly,
+    WireLiveContinuityModeDegraded as WireLiveContinuityModeDegraded,
+    WireLiveContinuityModeProviderNativeResume as WireLiveContinuityModeProviderNativeResume,
     RealtimeAudioChunk as RealtimeAudioChunk,
     RealtimeCapabilities as RealtimeCapabilities,
-    RealtimeCapabilitiesParams as RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult as RealtimeCapabilitiesResult,
-    RealtimeChannelClosedFrame as RealtimeChannelClosedFrame,
-    RealtimeChannelErrorFrame as RealtimeChannelErrorFrame,
-    RealtimeChannelEventFrame as RealtimeChannelEventFrame,
-    RealtimeChannelInputFrame as RealtimeChannelInputFrame,
-    RealtimeChannelOpenFrame as RealtimeChannelOpenFrame,
-    RealtimeChannelOpenedFrame as RealtimeChannelOpenedFrame,
-    RealtimeChannelRole as RealtimeChannelRole,
-    RealtimeChannelState as RealtimeChannelState,
-    RealtimeChannelStatus as RealtimeChannelStatus,
-    RealtimeChannelStatusFrame as RealtimeChannelStatusFrame,
-    RealtimeChannelTarget as RealtimeChannelTarget,
-    RealtimeClientFrame as RealtimeClientFrame,
-    RealtimeEvent as RealtimeEvent,
     RealtimeInputChunk as RealtimeInputChunk,
     RealtimeInputKind as RealtimeInputKind,
-    RealtimeOpenInfo as RealtimeOpenInfo,
-    RealtimeOpenRequest as RealtimeOpenRequest,
-    RealtimeOutputChunk as RealtimeOutputChunk,
     RealtimeOutputKind as RealtimeOutputKind,
-    RealtimeProtocolVersion as RealtimeProtocolVersion,
-    RealtimeReconnectPolicy as RealtimeReconnectPolicy,
-    RealtimeServerFrame as RealtimeServerFrame,
-    RealtimeStatusParams as RealtimeStatusParams,
-    RealtimeStatusResult as RealtimeStatusResult,
     RealtimeTextChunk as RealtimeTextChunk,
-    RealtimeTextDelta as RealtimeTextDelta,
     RealtimeTurningMode as RealtimeTurningMode,
     RealtimeVideoChunk as RealtimeVideoChunk,
     RuntimeAcceptResult as RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusResult as RuntimeRealtimeAttachmentStatusResult,
     RuntimeStateResult as RuntimeStateResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
@@ -485,7 +478,14 @@ class SessionToolResult:
 
 @dataclass(frozen=True, slots=True)
 class SessionAssistantBlock:
-    """Ordered block inside a block-assistant transcript message."""
+    """Ordered block inside a block-assistant transcript message.
+
+    `block_type` carries the lane discriminator (``text``, ``transcript``,
+    ``reasoning``, ``tool_use``, ``server_tool_content``, ``image``, ...).
+    For ``transcript`` blocks ``source`` records the originating lane
+    (today: ``spoken``); both ``text`` and ``transcript`` blocks expose
+    their rendered string in ``text``.
+    """
 
     block_type: str = ""
     text: str | None = None
@@ -499,6 +499,9 @@ class SessionAssistantBlock:
     height: int | None = None
     revised_prompt: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
+    # Lane provenance for ``transcript`` blocks (e.g. ``"spoken"``).
+    # ``None`` for non-transcript block types.
+    source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

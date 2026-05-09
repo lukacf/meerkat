@@ -10,16 +10,9 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 
 <Steps>
   <Step title="Start the server">
-    <CodeGroup>
-    ```bash Installed binary
+    ```bash
     rkat-rest --realm team-alpha
     ```
-
-    ```bash Realtime bootstrap proxy
-    rkat-rpc --realm team-alpha --tcp 127.0.0.1:9001 --realtime-ws 127.0.0.1:9002
-    rkat-rest --realm team-alpha --realtime-rpc-tcp 127.0.0.1:9001
-    ```
-    </CodeGroup>
   </Step>
   <Step title="Set API keys">
     Export the key for your chosen provider:
@@ -50,7 +43,6 @@ Meerkat ships a REST server for running and managing agent sessions over HTTP. T
 - `--context-root <path>`
 - `--user-config-root <path>`
 - `--expose-paths`
-- `--realtime-rpc-tcp <addr>`
 
 If `--realm` is omitted, the server creates a new isolated opaque realm (`realm-...`).
 `--realm-backend` is a creation hint only; after first open, `realm_manifest.json`
@@ -68,7 +60,6 @@ This overview follows the generated OpenAPI artifact at
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
 | `GET` | `/sessions/{id}/status` | Fetch current runtime state for a session |
 | `GET` | `/sessions/{id}/history` | Fetch committed session transcript messages |
-| `GET` | `/sessions/{id}/realtime-attachment-status` | Fetch runtime-owned realtime attachment status |
 | `POST` | `/sessions/{id}/system_context` | Append staged runtime system context |
 | `POST` | `/sessions/{id}/messages` | Continue an existing session |
 | `POST` | `/sessions/{id}/external-events` | Queue a runtime-backed external event |
@@ -91,9 +82,6 @@ This overview follows the generated OpenAPI artifact at
 | `POST` | `/sessions/{id}/mcp/reload` | Reload MCP server(s) (mcp feature) |
 | `POST` | `/comms/send` | Push comms message into a session (comms feature) |
 | `GET` | `/comms/peers` | List discoverable peers (comms feature) |
-| `POST` | `/realtime/open_info` | Proxy realtime channel bootstrap to a configured `rkat-rpc` realtime host |
-| `POST` | `/realtime/status` | Read product-layer realtime status |
-| `POST` | `/realtime/capabilities` | Read product-layer realtime capabilities |
 | `GET` | `/auth/profiles` | List realm auth profiles, backend profiles, and bindings |
 | `POST` | `/auth/profiles` | Store binding-scoped credentials |
 | `GET` | `/auth/bindings/{binding_id}` | Read a binding-scoped auth profile |
@@ -1187,56 +1175,6 @@ List discoverable peers for a session. Requires the `comms` feature.
   ]
 }
 ```
-
-## Realtime attachment
-
-Realtime is a delivery mode of the session's LLM, driven by
-`ModelCapabilities.realtime`. To run a session through the realtime transport,
-create it with a realtime-capable model (for example `gpt-realtime-1.5`):
-
-```bash
-curl -X POST http://127.0.0.1:8080/sessions \
-  -H 'content-type: application/json' \
-  -d '{"prompt":"Ready for realtime interaction.","model":"gpt-realtime-1.5","provider":"openai"}'
-```
-
-The runtime attaches the OpenAI Realtime transport automatically and
-`GET /sessions/{id}/realtime-attachment-status` reports `binding_ready` once the provider
-confirms. There is no caller-initiated attach/detach endpoint — swap
-the session's model (or choose a realtime-capable default) to control
-whether the session runs in realtime mode. See the [Realtime
-guide](/guides/realtime) for the full capability-driven model, state
-machine, and reconfigure flow.
-
-### GET /sessions/{id}/realtime-attachment-status
-
-Read the runtime-owned attachment projection for a session.
-
-```json Response
-{
-  "status": "binding_ready"
-}
-```
-
-Status values: `unattached`, `intent_present_unbound`, `binding_not_ready`,
-`binding_ready`, `replacement_pending`, and `reattach_required`.
-
-### POST /realtime/open_info
-
-Proxy a product-layer `realtime/open_info` request to the configured
-`rkat-rpc --tcp ... --realtime-ws ...` host.
-
-```bash
-curl -X POST http://127.0.0.1:8080/realtime/open_info \
-  -H 'content-type: application/json' \
-  -d '{"target":{"type":"session_target","session_id":"01936f8a-7b2c-7000-8000-000000000001"},"role":"primary","turning_mode":"provider_managed"}'
-```
-
-`/realtime/status` and `/realtime/capabilities` use
-`{"target":{"type":"session_target","session_id":"..."}}`; mob-member targets
-use `{"target":{"type":"mob_member","mob_id":"...","agent_identity":"..."}}`.
-If `--realtime-rpc-tcp` is not configured on `rkat-rest`, these product-layer
-routes return an unavailable transport error.
 
 ## Error responses
 

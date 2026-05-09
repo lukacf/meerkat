@@ -1220,6 +1220,7 @@ rust_test(
         ":package_runfiles",
         "//:workspace_cargo_manifests",
         "//:workspace_metadata",
+        "//meerkat-rpc:package_runfiles",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",

@@ -1591,69 +1591,6 @@ rust_test(
 )
 
 rust_test(
-    name = "session_context_observer_race_test",
-    aliases = aliases(
-        package_name = "meerkat-runtime",
-        normal = True,
-        normal_dev = True,
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    crate_name = "session_context_observer_race",
-    crate_root = "tests/session_context_observer_race.rs",
-    crate_features = [
-        "sqlite-store",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/comms_drain.rs",
-        "src/handles/peer_comms.rs",
-        "src/meerkat_machine/dispatch_ingress.rs",
-        "src/meerkat_machine/mod.rs",
-    ],
-    srcs = [
-        "tests/session_context_observer_race.rs",
-    ],
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "session_context_observer_race",
-        "CARGO_MANIFEST_DIR": "./meerkat-runtime",
-    },
-    tags = [
-        "fast",
-    ],
-    size = "small",
-    data = [],
-    env = {
-        "RUST_MIN_STACK": "16777216",
-    },
-    proc_macro_deps = [
-        "//meerkat-machine-derive:meerkat_machine_derive",
-        "//meerkat-machine-dsl:meerkat_machine_dsl",
-    ] + all_crate_deps(
-        package_name = "meerkat-runtime",
-        proc_macro = True,
-        proc_macro_dev = True,
-    ),
-    deps = [
-        "//meerkat-auth-core:meerkat_auth_core",
-        "//meerkat-comms:meerkat_comms",
-        "//meerkat-contracts:meerkat_contracts",
-        "//meerkat-core:meerkat_core",
-        "//meerkat-machine-kernels:meerkat_machine_kernels",
-        "//meerkat-machine-schema:meerkat_machine_schema",
-        "//meerkat-runtime:meerkat_runtime",
-        "//meerkat-store:meerkat_store",
-    ] + all_crate_deps(
-        package_name = "meerkat-runtime",
-        normal = True,
-        normal_dev = True,
-    ),
-)
-
-rust_test(
     name = "trust_reconcile_add_failure_test",
     aliases = aliases(
         package_name = "meerkat-runtime",
@@ -1941,7 +1878,6 @@ test_suite(
         ":regression_comms_runtime_test",
         ":runtime_bindings_contract_test",
         ":runtime_ingress_control_test",
-        ":session_context_observer_race_test",
         ":trust_reconcile_add_failure_test",
         ":trust_reconcile_concurrency_test",
         ":turn_content_shape_contract_test",

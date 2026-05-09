@@ -56,10 +56,8 @@ use meerkat::{
     schedule_tools_list,
 };
 use meerkat_contracts::{
-    CommsSendParams, CommsSendResult, ErrorCode, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeOpenInfo, RealtimeOpenRequest, RealtimeProtocolVersion,
-    RealtimeStatusParams, RealtimeStatusResult, RuntimeRealtimeAttachmentStatusResult,
-    RuntimeStateResult, SessionLocator, SkillsParams, WireError, format_session_ref,
+    CommsSendParams, CommsSendResult, ErrorCode, RuntimeStateResult, SessionLocator, SkillsParams,
+    WireError, format_session_ref,
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{
@@ -85,7 +83,6 @@ use meerkat_core::{
 use meerkat_mob::MobSessionService as _;
 use meerkat_runtime::SessionServiceRuntimeExt as _;
 use meerkat_store::{RealmBackend, RealmOrigin};
-use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::borrow::Cow;
@@ -93,8 +90,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, Weak};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
 
 #[cfg(feature = "mcp")]
@@ -156,7 +151,6 @@ pub struct AppState {
     pub backend: String,
     pub resolved_paths: meerkat_core::ConfigResolvedPaths,
     pub expose_paths: bool,
-    pub realtime_rpc_tcp_addr: Option<String>,
     pub config_runtime: Arc<meerkat_core::ConfigRuntime>,
     pub realm_lease: Arc<tokio::sync::Mutex<Option<meerkat_store::RealmLeaseGuard>>>,
     pub skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
@@ -542,7 +536,6 @@ impl AppState {
             backend: manifest.backend.as_str().to_string(),
             resolved_paths,
             expose_paths,
-            realtime_rpc_tcp_addr: None,
             config_runtime,
             realm_lease: Arc::new(tokio::sync::Mutex::new(Some(lease))),
             skill_runtime,
@@ -1957,10 +1950,6 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/history", get(get_session_history))
         .route("/sessions/{id}/interrupt", post(interrupt_session))
         .route("/sessions/{id}/status", get(get_runtime_status))
-        .route(
-            "/sessions/{id}/realtime-attachment-status",
-            get(get_realtime_attachment_status),
-        )
         .route("/sessions/{id}/system_context", post(append_system_context))
         .route("/sessions/{id}/messages", post(continue_session))
         .route("/sessions/{id}/external-events", post(post_external_event))
@@ -1998,9 +1987,6 @@ pub fn router(state: AppState) -> Router {
         .route("/runtime/capabilities", get(get_runtime_capabilities))
         .route("/runtime/health", get(get_runtime_health))
         .route("/models/catalog", get(get_models_catalog))
-        .route("/realtime/status", post(realtime_status))
-        .route("/realtime/capabilities", post(realtime_capabilities))
-        .route("/realtime/open_info", post(realtime_open_info))
         // Phase 4d — auth + realm endpoints.
         .route(
             "/auth/profiles",
@@ -2163,90 +2149,6 @@ async fn get_runtime_status(
     }))
 }
 
-async fn get_realtime_attachment_status(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<RuntimeRealtimeAttachmentStatusResult>, Response> {
-    let session_id =
-        resolve_session_id_for_state(&id, &state).map_err(IntoResponse::into_response)?;
-    let adapter = get_runtime_adapter(&state);
-    let status = adapter
-        .realtime_attachment_status(&session_id)
-        .await
-        .map_err(|err| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": err.to_string()})),
-            )
-                .into_response()
-        })?;
-    let wire = match status {
-        meerkat_runtime::RealtimeAttachmentStatus::Unattached => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::Unattached
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::IntentPresentUnbound => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::IntentPresentUnbound
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::BindingNotReady => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::BindingNotReady
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::BindingReady => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::BindingReady
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReplacementPending => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::ReplacementPending
-        }
-        meerkat_runtime::RealtimeAttachmentStatus::ReattachRequired => {
-            meerkat_contracts::WireRealtimeAttachmentStatus::ReattachRequired
-        }
-    };
-    Ok(Json(RuntimeRealtimeAttachmentStatusResult { status: wire }))
-}
-
-// `realtime_status_from_mob_serialized` and
-// `ensure_realtime_mob_member_target_available` were removed in Phase
-// 5G/T5i alongside the `RealtimeChannelTarget::MobMemberTarget` variant.
-
-async fn realtime_status(
-    State(state): State<AppState>,
-    Json(body): Json<RealtimeStatusParams>,
-) -> Result<Json<RealtimeStatusResult>, Response> {
-    call_realtime_rpc(&state, RestRealtimeRpcMethod::Status, &body)
-        .await
-        .map(Json)
-}
-
-#[derive(Debug, Clone, Copy)]
-enum RestRealtimeRpcMethod {
-    Status,
-    Capabilities,
-    OpenInfo,
-}
-
-impl RestRealtimeRpcMethod {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Status => "realtime/status",
-            Self::Capabilities => "realtime/capabilities",
-            Self::OpenInfo => "realtime/open_info",
-        }
-    }
-
-    const fn unavailable_message(self) -> &'static str {
-        match self {
-            Self::Status => {
-                "realtime/status is unavailable until the realtime RPC host is configured"
-            }
-            Self::Capabilities => {
-                "realtime/capabilities is unavailable until the realtime RPC host is configured"
-            }
-            Self::OpenInfo => {
-                "realtime/open_info is unavailable until the realtime websocket host ships"
-            }
-        }
-    }
-}
-
 fn rest_wire_error(
     code: ErrorCode,
     message: impl Into<std::borrow::Cow<'static, str>>,
@@ -2268,113 +2170,6 @@ fn rest_wire_error_with_details(
     let status =
         StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     (status, Json(error)).into_response()
-}
-
-fn realtime_rpc_error_response(error: meerkat_rpc::protocol::RpcError) -> Response {
-    let code = ErrorCode::from_jsonrpc_code(error.code).unwrap_or(ErrorCode::InternalError);
-    rest_wire_error_with_details(code, error.message, error.data)
-}
-
-async fn call_realtime_rpc<TParams, TResult>(
-    state: &AppState,
-    method: RestRealtimeRpcMethod,
-    params: &TParams,
-) -> Result<TResult, Response>
-where
-    TParams: Serialize,
-    TResult: DeserializeOwned,
-{
-    let Some(addr) = state.realtime_rpc_tcp_addr.as_deref() else {
-        return Err(rest_wire_error(
-            ErrorCode::CapabilityUnavailable,
-            method.unavailable_message(),
-        ));
-    };
-
-    let params = serde_json::value::to_raw_value(params).map_err(|err| {
-        rest_wire_error(
-            ErrorCode::InvalidParams,
-            format!("realtime RPC params could not be serialized: {err}"),
-        )
-    })?;
-    let request = meerkat_rpc::protocol::RpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(meerkat_rpc::protocol::RpcId::Num(1)),
-        method: method.as_str().to_string(),
-        params: Some(params),
-    };
-    let line = serde_json::to_string(&request).map_err(|err| {
-        rest_wire_error(
-            ErrorCode::InternalError,
-            format!("realtime RPC request could not be encoded: {err}"),
-        )
-    })?;
-
-    let mut stream = TcpStream::connect(addr).await.map_err(|err| {
-        rest_wire_error(
-            ErrorCode::ProviderError,
-            format!("realtime RPC connection failed: {err}"),
-        )
-    })?;
-    stream
-        .write_all(format!("{line}\n").as_bytes())
-        .await
-        .map_err(|err| {
-            rest_wire_error(
-                ErrorCode::ProviderError,
-                format!("realtime RPC write failed: {err}"),
-            )
-        })?;
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).await.map_err(|err| {
-        rest_wire_error(
-            ErrorCode::ProviderError,
-            format!("realtime RPC read failed: {err}"),
-        )
-    })?;
-    let response: meerkat_rpc::protocol::RpcResponse =
-        serde_json::from_str(&line).map_err(|err| {
-            rest_wire_error(
-                ErrorCode::ProviderError,
-                format!("realtime RPC response was invalid: {err}"),
-            )
-        })?;
-    if let Some(error) = response.error {
-        return Err(realtime_rpc_error_response(error));
-    }
-    let Some(result) = response.result else {
-        return Err(rest_wire_error(
-            ErrorCode::InternalError,
-            "realtime RPC response did not contain a result",
-        ));
-    };
-
-    serde_json::from_str(result.get()).map_err(|err| {
-        rest_wire_error(
-            ErrorCode::ProviderError,
-            format!("realtime RPC result had unexpected shape: {err}"),
-        )
-    })
-}
-
-async fn realtime_capabilities(
-    State(state): State<AppState>,
-    Json(body): Json<RealtimeCapabilitiesParams>,
-) -> Result<Json<RealtimeCapabilitiesResult>, Response> {
-    call_realtime_rpc(&state, RestRealtimeRpcMethod::Capabilities, &body)
-        .await
-        .map(Json)
-}
-
-async fn realtime_open_info(
-    State(state): State<AppState>,
-    Json(body): Json<RealtimeOpenRequest>,
-) -> Result<Json<RealtimeOpenInfo>, Response> {
-    call_realtime_rpc(&state, RestRealtimeRpcMethod::OpenInfo, &body)
-        .await
-        .map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -6471,92 +6266,6 @@ mod tests {
         );
     }
 
-    async fn spawn_realtime_rpc_stub(
-        expected_method: &'static str,
-        rpc_result: Result<Value, Value>,
-    ) -> (
-        String,
-        tokio::sync::oneshot::Receiver<Value>,
-        tokio::task::JoinHandle<()>,
-    ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind realtime rpc stub");
-        let addr = listener
-            .local_addr()
-            .expect("realtime rpc stub local addr")
-            .to_string();
-        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("accept realtime rpc stub");
-            let (read_half, mut write_half) = stream.into_split();
-            let mut reader = tokio::io::BufReader::new(read_half).lines();
-            let mut captured_tx = Some(captured_tx);
-            while let Some(line) = reader
-                .next_line()
-                .await
-                .expect("read realtime rpc stub line")
-            {
-                let value: Value =
-                    serde_json::from_str(&line).expect("parse realtime rpc stub request");
-                let id = value["id"].clone();
-                let method = value["method"]
-                    .as_str()
-                    .expect("realtime rpc stub request method");
-                let response = match method {
-                    "initialize" => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "server": "realtime-stub",
-                        }
-                    }),
-                    method if method == expected_method => {
-                        if let Some(tx) = captured_tx.take() {
-                            let _ = tx.send(value["params"].clone());
-                        }
-                        match &rpc_result {
-                            Ok(result) => json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": result,
-                            }),
-                            Err(error) => json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "error": error,
-                            }),
-                        }
-                    }
-                    other => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32601,
-                            "message": format!("unexpected method: {other}"),
-                        }
-                    }),
-                };
-                write_half
-                    .write_all(response.to_string().as_bytes())
-                    .await
-                    .expect("write realtime rpc stub response");
-                write_half
-                    .write_all(b"\n")
-                    .await
-                    .expect("terminate realtime rpc stub response");
-                write_half
-                    .flush()
-                    .await
-                    .expect("flush realtime rpc stub response");
-                if method == expected_method {
-                    break;
-                }
-            }
-        });
-        (addr, captured_rx, task)
-    }
-
     struct MockLlmClient;
 
     struct BlockingMockLlmClient {
@@ -9555,255 +9264,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_realtime_attachment_status_route_reads_runtime_owned_status() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        state.llm_client_override = Some(Arc::new(MockLlmClient));
-        let session_service = state.session_service.clone();
-        let pre_session = Session::new();
-        let bindings = state
-            .runtime_adapter
-            .prepare_bindings(pre_session.id().clone())
-            .await
-            .expect("runtime bindings should prepare");
-        let create_result = session_service
-            .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
-                prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(state.max_tokens),
-                event_tx: None,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    resume_session: Some(pre_session),
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
-                    ..Default::default()
-                }),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-        state
-            .runtime_adapter
-            .project_realtime_attachment_intent(&create_result.session_id, true)
-            .await
-            .expect("intent projection should succeed");
-
-        let app = router(state);
-        let session_id = create_result.session_id.to_string();
-        let request = axum::http::Request::builder()
-            .method("GET")
-            .uri(format!("/sessions/{session_id}/realtime-attachment-status"))
-            .body(Body::empty())
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "runtime live-attachment-status request failed: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload["status"], "intent_present_unbound");
-    }
-
-    #[tokio::test]
-    async fn test_realtime_capabilities_route_proxies_to_realtime_rpc_host() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        state.llm_client_override = Some(Arc::new(MockLlmClient));
-        let session_service = state.session_service.clone();
-        let created = session_service
-            .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
-                prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(state.max_tokens),
-                event_tx: None,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-
-        let expected = json!({
-            "capabilities": {
-                "input_kinds": ["text", "audio"],
-                "output_kinds": ["text", "audio"],
-                "turning_modes": ["provider_managed"],
-                "interrupt_supported": true,
-                "transcript_supported": true,
-                "tool_lifecycle_events_supported": false,
-                "video_supported": false,
-            }
-        });
-        let (addr, captured_rx, task) =
-            spawn_realtime_rpc_stub("realtime/capabilities", Ok(expected.clone())).await;
-        state.realtime_rpc_tcp_addr = Some(addr);
-
-        let app = router(state);
-        let request_body = json!({
-            "target": {
-                "type": "session_target",
-                "session_id": created.session_id.to_string(),
-            }
-        });
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/capabilities")
-            .header("content-type", "application/json")
-            .body(Body::from(request_body.to_string()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "realtime capabilities route failed: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload, expected);
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request_body);
-        task.await.expect("realtime rpc stub should join");
-    }
-
-    #[tokio::test]
-    async fn test_realtime_status_route_reports_transport_unavailable_without_rpc_host() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let app = router(state);
-        let request_body = json!({
-            "target": {
-                "type": "session_target",
-                "session_id": SessionId::new().to_string(),
-            }
-        });
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/status")
-            .header("content-type", "application/json")
-            .body(Body::from(request_body.to_string()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            status,
-            StatusCode::NOT_IMPLEMENTED,
-            "realtime status should require the realtime RPC host: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload["code"], "CAPABILITY_UNAVAILABLE");
-        assert_eq!(payload["category"], "capability");
-    }
-
-    #[tokio::test]
-    async fn test_realtime_status_route_proxies_to_realtime_rpc_host() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let session_id = SessionId::new();
-        let expected = json!({
-            "status": {
-                "state": "reconnecting",
-                "attempt_count": 5,
-                "next_retry_at": "2026-04-26T12:34:56Z",
-                "deadline_at": "2026-04-26T12:35:56Z",
-                "reason": "transport_rebind",
-            }
-        });
-        let (addr, captured_rx, task) =
-            spawn_realtime_rpc_stub("realtime/status", Ok(expected.clone())).await;
-        state.realtime_rpc_tcp_addr = Some(addr);
-
-        let app = router(state);
-        let request_body = json!({
-            "target": {
-                "type": "session_target",
-                "session_id": session_id.to_string(),
-            }
-        });
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/status")
-            .header("content-type", "application/json")
-            .body(Body::from(request_body.to_string()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "realtime status proxy should succeed: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload, expected);
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request_body);
-        task.await.expect("realtime rpc stub should join");
-    }
-
-    #[tokio::test]
     async fn test_runtime_host_routes_report_read_only_projection() {
         use axum::body::Body;
         use http_body_util::BodyExt;
@@ -9870,223 +9330,6 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         let health: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(health["status"], "ok");
-    }
-
-    #[tokio::test]
-    async fn test_realtime_open_info_route_reports_transport_unavailable() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        state.llm_client_override = Some(Arc::new(MockLlmClient));
-        let session_service = state.session_service.clone();
-        let created = session_service
-            .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
-                prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(state.max_tokens),
-                event_tx: None,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-
-        let app = router(state);
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/open_info")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                serde_json::json!({
-                    "target": {
-                        "type": "session_target",
-                        "session_id": created.session_id.to_string(),
-                    },
-                    "role": "primary",
-                    "turning_mode": "provider_managed",
-                })
-                .to_string(),
-            ))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(
-            status,
-            StatusCode::NOT_IMPLEMENTED,
-            "realtime open-info should stay unavailable until websocket host lands: {}",
-            String::from_utf8_lossy(&body)
-        );
-    }
-
-    #[tokio::test]
-    async fn test_realtime_open_info_route_proxies_to_realtime_rpc_host() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        state.llm_client_override = Some(Arc::new(MockLlmClient));
-        let session_service = state.session_service.clone();
-        let created = session_service
-            .create_session(SvcCreateSessionRequest {
-                model: state.default_model.to_string(),
-                prompt: "Hello".to_string().into(),
-                render_metadata: None,
-                system_prompt: None,
-                max_tokens: Some(state.max_tokens),
-                event_tx: None,
-                skill_references: None,
-                initial_turn: InitialTurnPolicy::Defer,
-                deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
-                labels: None,
-            })
-            .await
-            .expect("deferred session create should succeed");
-
-        let expected = json!({
-            "ws_url": "ws://127.0.0.1:43210/realtime/ws",
-            "open_token": "rest-proxy-token",
-            "expires_at": "2026-04-15T12:00:00Z",
-            "target": {
-                "type": "session_target",
-                "session_id": created.session_id.to_string(),
-            },
-            "supported_protocol_versions": [RealtimeProtocolVersion::CURRENT],
-            "default_protocol_version": RealtimeProtocolVersion::CURRENT,
-            "capabilities": {
-                "input_kinds": ["text", "audio"],
-                "output_kinds": ["text", "audio"],
-                "turning_modes": ["provider_managed"],
-                "interrupt_supported": true,
-                "transcript_supported": true,
-                "tool_lifecycle_events_supported": false,
-                "video_supported": false,
-            }
-        });
-        let (addr, captured_rx, task) =
-            spawn_realtime_rpc_stub("realtime/open_info", Ok(expected.clone())).await;
-        state.realtime_rpc_tcp_addr = Some(addr);
-
-        let app = router(state);
-        let request_body = json!({
-            "target": {
-                "type": "session_target",
-                "session_id": created.session_id.to_string(),
-            },
-            "role": "primary",
-            "turning_mode": "provider_managed",
-        });
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/open_info")
-            .header("content-type", "application/json")
-            .body(Body::from(request_body.to_string()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-
-        assert_eq!(
-            status,
-            StatusCode::OK,
-            "realtime open-info proxy should succeed: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload, expected);
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request_body);
-        task.await.expect("realtime rpc stub should join");
-    }
-
-    #[tokio::test]
-    async fn test_realtime_open_info_route_preserves_rpc_error_code() {
-        use axum::body::Body;
-        use http_body_util::BodyExt;
-        use tower::ServiceExt;
-
-        let temp = TempDir::new().unwrap();
-        let mut state = AppState::load_from(temp.path().to_path_buf())
-            .await
-            .unwrap();
-        let request_body = json!({
-            "target": {
-                "type": "session_target",
-                "session_id": SessionId::new().to_string(),
-            },
-            "role": "primary",
-            "turning_mode": "explicit_commit",
-        });
-        let rpc_error = json!({
-            "code": ErrorCode::CapabilityUnavailable.jsonrpc_code(),
-            "message": "turning mode 'explicit_commit' is not supported for this realtime target",
-            "data": {
-                "turning_mode": "explicit_commit"
-            }
-        });
-        let (addr, captured_rx, task) =
-            spawn_realtime_rpc_stub("realtime/open_info", Err(rpc_error)).await;
-        state.realtime_rpc_tcp_addr = Some(addr);
-
-        let app = router(state);
-        let request = axum::http::Request::builder()
-            .method("POST")
-            .uri("/realtime/open_info")
-            .header("content-type", "application/json")
-            .body(Body::from(request_body.to_string()))
-            .unwrap();
-        let response = app.oneshot(request).await.unwrap();
-        let status = response.status();
-        let body = response.into_body().collect().await.unwrap().to_bytes();
-
-        assert_eq!(
-            status,
-            StatusCode::NOT_IMPLEMENTED,
-            "canonical capability error should map through typed REST envelope: {}",
-            String::from_utf8_lossy(&body)
-        );
-        let payload: serde_json::Value =
-            serde_json::from_slice(&body).expect("response body should be valid json");
-        assert_eq!(payload["code"], "CAPABILITY_UNAVAILABLE");
-        assert_eq!(payload["category"], "capability");
-        assert_eq!(payload["details"]["turning_mode"], "explicit_commit");
-
-        let forwarded = captured_rx
-            .await
-            .expect("realtime proxy request should be captured");
-        assert_eq!(forwarded, request_body);
-        task.await.expect("realtime rpc stub should join");
     }
 
     #[tokio::test]

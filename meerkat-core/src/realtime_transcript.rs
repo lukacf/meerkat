@@ -12,6 +12,7 @@ use crate::types::{StopReason, Usage};
 pub const SESSION_REALTIME_TRANSCRIPT_STATE_KEY: &str = "realtime_transcript_state";
 
 /// Provider-neutral role for a realtime transcript item.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeTranscriptRole {
@@ -19,7 +20,37 @@ pub enum RealtimeTranscriptRole {
     Assistant,
 }
 
+/// Output lane carried by an assistant realtime transcript item.
+///
+/// T9/T10: distinguishes display text (authored output the model writes,
+/// e.g. OpenAI realtime `response.output_text.delta`) from spoken transcript
+/// (text derived from audio output, e.g. `response.output_audio_transcript.*`).
+/// The materializer at [`crate::session::Session::append_realtime_transcript_event`]
+/// dispatches on this to flush either [`crate::types::AssistantBlock::Text`]
+/// (for `Display`) or [`crate::types::AssistantBlock::Transcript`] with
+/// `source: TranscriptSource::Spoken` (for `Spoken`).
+///
+/// `Display` is the default for items that arrive only via
+/// [`RealtimeTranscriptEvent::AssistantTextDelta`]; an item is upgraded to
+/// `Spoken` the first time an [`RealtimeTranscriptEvent::AssistantTranscriptDelta`]
+/// fragment arrives for it. Mixed-lane content on the same `item_id` is not
+/// expected from any provider today; if observed the **first** lane wins
+/// (the materializer cannot retroactively re-classify a partially-flushed
+/// item) and a `tracing::warn!` is emitted.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TranscriptLane {
+    #[default]
+    Display,
+    Spoken,
+}
+
 /// A typed, identity-bearing realtime transcript event consumed by the session.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeTranscriptEvent {
@@ -44,8 +75,28 @@ pub enum RealtimeTranscriptEvent {
         content_index: u32,
         text: String,
     },
-    /// Provider emitted an assistant text delta for an output item.
+    /// Provider emitted an assistant **display-text** delta for an output
+    /// item — authored text the model writes (e.g. OpenAI realtime
+    /// `response.output_text.delta`).
+    ///
+    /// Materializes as [`crate::types::AssistantBlock::Text`].
     AssistantTextDelta {
+        response_id: String,
+        delta_id: String,
+        item_id: String,
+        previous_item_id: Option<String>,
+        content_index: u32,
+        delta: String,
+    },
+    /// Provider emitted an assistant **spoken-transcript** delta for an
+    /// output item — text derived from audio output (e.g. OpenAI realtime
+    /// `response.output_audio_transcript.delta`).
+    ///
+    /// Identity shape mirrors [`Self::AssistantTextDelta`] so the session's
+    /// idempotent ordering / staging logic owns dedup uniformly across
+    /// lanes. Materializes as [`crate::types::AssistantBlock::Transcript`]
+    /// with `source: TranscriptSource::Spoken` (T9/T10).
+    AssistantTranscriptDelta {
         response_id: String,
         delta_id: String,
         item_id: String,
@@ -85,6 +136,12 @@ pub enum RealtimeTranscriptMaterializedMessage {
         text: String,
         stop_reason: StopReason,
         usage: Usage,
+        /// T9/T10: which output lane the staged content arrived on.
+        /// Drives whether the materializer flushes
+        /// [`crate::types::AssistantBlock::Text`] (Display) or
+        /// [`crate::types::AssistantBlock::Transcript`] with
+        /// `source: TranscriptSource::Spoken` (Spoken).
+        lane: TranscriptLane,
     },
 }
 

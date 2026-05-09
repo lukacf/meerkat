@@ -1710,8 +1710,6 @@ pub struct MobMemberStatusResult {
     pub tokens_used: u64,
     pub is_final: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realtime_attachment_status: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub peer_connectivity: Option<Value>,
@@ -1753,7 +1751,6 @@ mod member_status_capability_tests {
             error: None,
             tokens_used: 0,
             is_final: false,
-            realtime_attachment_status: Some("binding_ready".to_string()),
             current_session_id: Some("session-1".to_string()),
             peer_connectivity: None,
             kickoff: None,

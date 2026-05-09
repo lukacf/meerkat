@@ -41,9 +41,6 @@ struct Args {
     /// Expose resolved filesystem paths in config tool responses.
     #[arg(long, default_value_t = false)]
     expose_paths: bool,
-    /// Optional rkat-rpc TCP address to delegate realtime bootstrap through.
-    #[arg(long)]
-    realtime_rpc_tcp: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -76,8 +73,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .realm_backend
         .map(Into::into)
         .map(|b: RealmBackend| b.as_str().to_string());
-    #[cfg_attr(not(feature = "mob"), allow(unused_mut))]
-    let mut state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap_and_options(
+    let state = meerkat_mcp_server::MeerkatMcpState::new_with_bootstrap_and_options(
         RuntimeBootstrap {
             realm: RealmConfig {
                 selection,
@@ -93,8 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.expose_paths,
     )
     .await?;
-    #[cfg(feature = "mob")]
-    state.set_realtime_rpc_tcp_addr(args.realtime_rpc_tcp.clone());
     let state = Arc::new(state);
 
     eprintln!(

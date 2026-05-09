@@ -159,27 +159,6 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
         }
     }
 
-    async fn realtime_attachment_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<crate::meerkat_machine_types::RealtimeAttachmentStatus, RuntimeDriverError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::RealtimeAttachmentStatus(status) => Ok(status),
-            other => Err(RuntimeDriverError::Internal(format!(
-                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::realtime_attachment_status: {other:?}"
-            ))),
-        }
-    }
-
     async fn resolved_session_llm_capabilities(
         &self,
         session_id: &SessionId,
@@ -201,38 +180,6 @@ impl SessionServiceRuntimeExt for MeerkatMachine {
                 "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::resolved_session_llm_capabilities: {other:?}"
             ))),
         }
-    }
-
-    /// Fully-projected public channel status. Reads DSL state (attachment plus
-    /// machine-owned reconnect lifecycle/progress) and returns a
-    /// ready-to-serialize `RealtimeChannelStatus`.
-    async fn realtime_channel_status(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<meerkat_contracts::RealtimeChannelStatus, RuntimeDriverError> {
-        match self
-            .execute_meerkat_machine_command(
-                None,
-                MeerkatMachineCommand::RuntimeRealtimeChannelStatus {
-                    session_id: session_id.clone(),
-                },
-            )
-            .await
-            .map_err(MeerkatMachine::driver_error_from_command_error)?
-        {
-            MeerkatMachineCommandResult::RealtimeChannelStatus(status) => Ok(status),
-            other => Err(RuntimeDriverError::Internal(format!(
-                "unexpected MeerkatMachineCommandResult for SessionServiceRuntimeExt::realtime_channel_status: {other:?}"
-            ))),
-        }
-    }
-
-    async fn realtime_bootstrap_eligibility(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<crate::meerkat_machine_types::RealtimeBootstrapEligibility, RuntimeDriverError>
-    {
-        MeerkatMachine::realtime_bootstrap_eligibility(self, session_id).await
     }
 
     async fn configure_model_routing_baseline(

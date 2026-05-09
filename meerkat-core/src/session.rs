@@ -13,7 +13,7 @@ use crate::Provider;
 use crate::peer_meta::PeerMeta;
 use crate::realtime_transcript::{
     RealtimeTranscriptApplyOutcome, RealtimeTranscriptEvent, RealtimeTranscriptMaterializedMessage,
-    RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
+    RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY, TranscriptLane,
 };
 use crate::service::{AppendSystemContextRequest, MobToolAuthorityContext};
 use crate::time_compat::SystemTime;
@@ -140,6 +140,13 @@ struct RealtimeTranscriptItemState {
     ready: bool,
     #[serde(default)]
     materialized: bool,
+    /// T9/T10: output lane this assistant item carries. `Display` is the
+    /// default (matches all pre-T10 sessions on disk); promoted to `Spoken`
+    /// the first time an [`RealtimeTranscriptEvent::AssistantTranscriptDelta`]
+    /// fragment arrives for the item. User-role items always carry
+    /// `Display` (the field is unused for user transcripts).
+    #[serde(default)]
+    lane: TranscriptLane,
 }
 
 impl RealtimeTranscriptItemState {
@@ -156,6 +163,7 @@ impl RealtimeTranscriptItemState {
             skipped: false,
             ready: false,
             materialized: false,
+            lane: TranscriptLane::Display,
         }
     }
 
@@ -168,6 +176,7 @@ impl RealtimeTranscriptItemState {
             skipped: true,
             ready: true,
             materialized: false,
+            lane: TranscriptLane::Display,
         }
     }
 
@@ -962,6 +971,53 @@ impl Session {
                     RealtimeTranscriptRole::Assistant,
                     Some(response_id),
                 ) {
+                    promote_item_lane(item, TranscriptLane::Display);
+                    item.content_segments
+                        .entry(content_index)
+                        .or_default()
+                        .push_str(&delta);
+                    if response_completed && !item.text().is_empty() {
+                        item.ready = true;
+                    }
+                }
+            }
+            RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                response_id,
+                delta_id,
+                item_id,
+                previous_item_id,
+                content_index,
+                delta,
+            } => {
+                // T9/T10: spoken-transcript lane. Identical staging shape to
+                // `AssistantTextDelta` (same idempotency / ordering / dedup
+                // logic owns both lanes); the only difference is that the
+                // owning item is tagged `Spoken` so the materializer flushes
+                // `AssistantBlock::Transcript` instead of `AssistantBlock::Text`.
+                let Some(response_id) = normalize_realtime_response_id(response_id) else {
+                    return RealtimeTranscriptApplyOutcome::default();
+                };
+                if state
+                    .discarded_assistant_response_ids
+                    .contains(&response_id)
+                {
+                    observe_realtime_skipped_item(&mut state, item_id, previous_item_id);
+                    let outcome = self.materialize_realtime_transcript_ready_items(&mut state);
+                    self.store_realtime_transcript_state(&state);
+                    return outcome;
+                }
+                if !delta_id.trim().is_empty() && !state.seen_delta_ids.insert(delta_id) {
+                    return RealtimeTranscriptApplyOutcome::default();
+                }
+                let response_completed = state.assistant_completions.contains_key(&response_id);
+                if let Some(item) = observe_realtime_item(
+                    &mut state,
+                    item_id,
+                    previous_item_id,
+                    RealtimeTranscriptRole::Assistant,
+                    Some(response_id),
+                ) {
+                    promote_item_lane(item, TranscriptLane::Spoken);
                     item.content_segments
                         .entry(content_index)
                         .or_default()
@@ -1053,6 +1109,52 @@ impl Session {
         outcome
     }
 
+    /// Return every distinct provider `response_id` currently staged in the
+    /// realtime-transcript metadata that has at least one **unmaterialized**
+    /// assistant item and is **not already discarded**.
+    ///
+    /// CC4 (Round-4 architectural reconciliation): when the live boundary
+    /// signals a barge-in (`TurnInterrupted`), the projection sink does not
+    /// know which provider response_ids have streaming deltas staged in
+    /// session metadata. This accessor lets the sink fan
+    /// [`RealtimeTranscriptEvent::AssistantTurnInterrupted`] events out to
+    /// each in-flight response so staged-but-not-yet-materialized transcript
+    /// fragments are discarded — preventing them from silently committing
+    /// when the *next* turn's `AssistantTurnCompleted` (synthesized by the
+    /// CC2 fix in `signal_turn_completed`) sweeps the materializer.
+    ///
+    /// Order is the [`SessionRealtimeTranscriptState::first_seen_order`]
+    /// projection so callers see deterministic iteration. Items already
+    /// materialized or skipped are excluded — only response_ids with at
+    /// least one live unmaterialized assistant item are returned.
+    #[must_use]
+    pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
+        let state = self.realtime_transcript_state();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for item_id in &state.first_seen_order {
+            let Some(item) = state.items.get(item_id) else {
+                continue;
+            };
+            if item.role != RealtimeTranscriptRole::Assistant {
+                continue;
+            }
+            if item.materialized || item.skipped {
+                continue;
+            }
+            let Some(response_id) = item.response_id.as_ref() else {
+                continue;
+            };
+            if state.discarded_assistant_response_ids.contains(response_id) {
+                continue;
+            }
+            if seen.insert(response_id.clone()) {
+                out.push(response_id.clone());
+            }
+        }
+        out
+    }
+
     fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
         self.metadata
             .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
@@ -1075,6 +1177,26 @@ impl Session {
         state: &mut SessionRealtimeTranscriptState,
     ) -> RealtimeTranscriptApplyOutcome {
         let mut materialized = Vec::new();
+
+        // Round-4 CC7: when a single response_id produces both display-text
+        // and spoken-transcript items (mixed-modality response), we emit a
+        // SINGLE `Message::BlockAssistant` whose `blocks` interleave
+        // `AssistantBlock::Text` and `AssistantBlock::Transcript` in
+        // arrival order — not multiple messages. Pending state lives across
+        // outer-loop batches: when chained items (`previous_item_id`) force
+        // serial materialization, batch N may emit the display item and
+        // batch N+1 may emit the spoken item under the same response_id —
+        // we still want one combined message.
+        //
+        // The pending group is flushed when:
+        //   - a User item lands (canonical-history ordering boundary)
+        //   - an assistant item with a different response_id lands
+        //   - the outer materialization loop terminates
+        let mut pending_blocks: Vec<AssistantBlock> = Vec::new();
+        let mut pending_response_id: Option<String> = None;
+        let mut pending_stop_reason: StopReason = StopReason::EndTurn;
+        let mut pending_usage: Usage = Usage::default();
+
         loop {
             let order = realtime_transcript_order(state);
             let mut skipped_batch = Vec::new();
@@ -1125,6 +1247,7 @@ impl Session {
                             text,
                             stop_reason: completion.stop_reason,
                             usage,
+                            lane: item.lane,
                         });
                     }
                 }
@@ -1137,9 +1260,19 @@ impl Session {
                     item.materialized = true;
                 }
             }
+
             for message in batch {
                 match &message {
                     RealtimeTranscriptMaterializedMessage::User { item_id, text } => {
+                        if !pending_blocks.is_empty() {
+                            let drained = std::mem::take(&mut pending_blocks);
+                            self.append_external_assistant_blocks(
+                                drained,
+                                pending_stop_reason,
+                                std::mem::take(&mut pending_usage),
+                            );
+                            pending_response_id = None;
+                        }
                         if let Some(item) = state.items.get_mut(item_id) {
                             item.materialized = true;
                         }
@@ -1151,26 +1284,75 @@ impl Session {
                         text,
                         stop_reason,
                         usage,
+                        lane,
                     } => {
+                        // Flush if this assistant item belongs to a different
+                        // response than the pending group. (Same response_id
+                        // → accumulate; different → emit prior message.)
+                        if pending_response_id
+                            .as_ref()
+                            .is_some_and(|existing| existing != response_id)
+                            && !pending_blocks.is_empty()
+                        {
+                            let drained = std::mem::take(&mut pending_blocks);
+                            self.append_external_assistant_blocks(
+                                drained,
+                                pending_stop_reason,
+                                std::mem::take(&mut pending_usage),
+                            );
+                            pending_response_id = None;
+                        }
                         if let Some(item) = state.items.get_mut(item_id) {
                             item.materialized = true;
                         }
                         if let Some(completion) = state.assistant_completions.get_mut(response_id) {
                             completion.usage_consumed = true;
                         }
-                        self.append_external_assistant_blocks(
-                            vec![AssistantBlock::Text {
+                        // T9/T10: route to the correct canonical block by
+                        // lane. `Display` keeps the legacy `AssistantBlock::Text`
+                        // shape; `Spoken` flushes
+                        // `AssistantBlock::Transcript { source: Spoken }` so
+                        // OpenAI realtime audio transcripts stop being
+                        // persisted as authored display text.
+                        let block = match lane {
+                            TranscriptLane::Display => AssistantBlock::Text {
                                 text: text.clone(),
                                 meta: None,
-                            }],
-                            *stop_reason,
-                            usage.clone(),
-                        );
+                            },
+                            TranscriptLane::Spoken => AssistantBlock::Transcript {
+                                text: text.clone(),
+                                source: crate::types::TranscriptSource::Spoken,
+                                meta: None,
+                            },
+                        };
+                        // First item in a group seeds the response_id /
+                        // stop_reason / usage. `usage_consumed` is flipped
+                        // to true above as the first item is processed, so
+                        // every subsequent item sees `Usage::default()` from
+                        // the materializer's per-item builder — accumulating
+                        // across items in one group is naturally
+                        // single-counted.
+                        if pending_response_id.is_none() {
+                            pending_response_id = Some(response_id.clone());
+                            pending_stop_reason = *stop_reason;
+                            pending_usage = usage.clone();
+                        }
+                        pending_blocks.push(block);
                     }
                 }
                 materialized.push(message);
             }
         }
+
+        // Final flush after the outer materialization loop has drained.
+        if !pending_blocks.is_empty() {
+            self.append_external_assistant_blocks(
+                pending_blocks,
+                pending_stop_reason,
+                pending_usage,
+            );
+        }
+
         RealtimeTranscriptApplyOutcome {
             materialized_messages: materialized,
         }
@@ -1329,13 +1511,22 @@ impl Session {
     }
 
     /// Get the last assistant message text content.
+    ///
+    /// Concatenates both `Text` (display) and `Transcript` (spoken) blocks
+    /// in document order, since both lanes project to the same human-readable
+    /// stream. Lane provenance is preserved on the underlying `AssistantBlock`
+    /// for callers that need it.
     pub fn last_assistant_text(&self) -> Option<String> {
         self.messages.iter().rev().find_map(|m| match m {
             Message::BlockAssistant(a) => {
                 let mut buf = String::new();
                 for block in &a.blocks {
-                    if let crate::types::AssistantBlock::Text { text, .. } = block {
-                        buf.push_str(text);
+                    match block {
+                        crate::types::AssistantBlock::Text { text, .. }
+                        | crate::types::AssistantBlock::Transcript { text, .. } => {
+                            buf.push_str(text);
+                        }
+                        _ => {}
                     }
                 }
                 if buf.is_empty() { None } else { Some(buf) }
@@ -1930,6 +2121,32 @@ fn normalize_realtime_optional_response_id(response_id: Option<String>) -> Optio
     response_id.and_then(normalize_realtime_response_id)
 }
 
+/// T9/T10: tag the assistant item with its output lane (Display vs Spoken).
+///
+/// First lane wins: if a later delta tries to promote an item already
+/// classified as the other lane, we keep the existing lane and emit a
+/// `tracing::warn!`. The materializer can only flush one block-type per
+/// item; mixed-lane content on the same `item_id` is not expected from
+/// any provider and would be a provider-side bug. Items with empty
+/// content (no deltas yet observed) accept any lane.
+fn promote_item_lane(item: &mut RealtimeTranscriptItemState, lane: TranscriptLane) {
+    if item.lane == lane {
+        return;
+    }
+    let has_content = item.content_segments.values().any(|s| !s.is_empty());
+    if !has_content {
+        // No content has been staged on the original lane yet; safe to
+        // re-classify.
+        item.lane = lane;
+        return;
+    }
+    tracing::warn!(
+        existing_lane = ?item.lane,
+        observed_lane = ?lane,
+        "ignoring realtime transcript lane conflict on item with staged content"
+    );
+}
+
 fn observe_realtime_item(
     state: &mut SessionRealtimeTranscriptState,
     item_id: String,
@@ -2182,7 +2399,7 @@ impl From<&Session> for SessionMeta {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::{
@@ -3327,5 +3544,454 @@ mod tests {
             .unwrap_or_default();
         assert!(system_prompt.contains("Authoritative peer token is birch seventeen."));
         assert!(!system_prompt.contains("Conflicting peer token should not reach the prompt."));
+    }
+
+    // ------------------------------------------------------------------
+    // T9/T10: realtime transcript lane materialization.
+    //
+    // The display-text lane (`AssistantTextDelta`) materializes as
+    // `AssistantBlock::Text`; the spoken-transcript lane
+    // (`AssistantTranscriptDelta`) materializes as
+    // `AssistantBlock::Transcript { source: TranscriptSource::Spoken }`.
+    // These regressions pin both flushes and prove the materializer
+    // dispatches on the per-item `TranscriptLane`.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn realtime_transcript_assistant_transcript_delta_materializes_transcript_block() {
+        let mut session = Session::new();
+
+        let delta = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_spoken".to_string(),
+            delta_id: "evt_delta_spoken_1".to_string(),
+            item_id: "item_spoken".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "I said hi".to_string(),
+        };
+        assert!(
+            session.append_realtime_transcript_event(delta).is_inert(),
+            "delta alone is inert until turn-completed flushes"
+        );
+
+        let terminal = RealtimeTranscriptEvent::AssistantTurnCompleted {
+            response_id: "resp_spoken".to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let outcome = session.append_realtime_transcript_event(terminal);
+        assert_eq!(outcome.materialized_messages.len(), 1);
+
+        // T9/T10: must be a Transcript block, NOT Text.
+        let messages = session.messages();
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            Message::BlockAssistant(assistant) => {
+                assert_eq!(assistant.blocks.len(), 1);
+                match &assistant.blocks[0] {
+                    AssistantBlock::Transcript { text, source, .. } => {
+                        assert_eq!(text, "I said hi");
+                        assert_eq!(*source, crate::types::TranscriptSource::Spoken);
+                    }
+                    other => unreachable!(
+                        "AssistantTranscriptDelta must materialize as AssistantBlock::Transcript, got {other:?}"
+                    ),
+                }
+            }
+            other => unreachable!("expected BlockAssistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round4_cc4_in_flight_response_ids_lists_distinct_unmaterialized_responses() {
+        // CC4 (Round-4 architectural reconciliation): the helper that
+        // powers `signal_turn_interrupt`'s cross-layer fan-out must
+        // return every distinct provider response_id that has at least
+        // one unmaterialized assistant item, EXCLUDING already-discarded
+        // responses and EXCLUDING the user role.
+        let mut session = Session::new();
+
+        // Two transcript-delta items on resp_a (different content_index
+        // ranges), one on resp_b. resp_c gets a delta and is then
+        // discarded explicitly via AssistantTurnInterrupted.
+        for (i, response_id) in [
+            ("resp_a", "resp_a"),
+            ("resp_a_extra", "resp_a"),
+            ("resp_b", "resp_b"),
+            ("resp_c", "resp_c"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let event = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                response_id: response_id.1.to_string(),
+                delta_id: format!("delta_{i}"),
+                item_id: response_id.0.to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                delta: "x".to_string(),
+            };
+            let _ = session.append_realtime_transcript_event(event);
+        }
+
+        // Discard resp_c — it should not appear in the in-flight list.
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_c".to_string(),
+            },
+        );
+
+        // User-role item should never appear (CC4 only fans interrupts
+        // to assistant responses).
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "u_item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "hi".to_string(),
+            },
+        );
+
+        let in_flight = session.in_flight_realtime_assistant_response_ids();
+        assert!(in_flight.contains(&"resp_a".to_string()), "{in_flight:?}");
+        assert!(in_flight.contains(&"resp_b".to_string()), "{in_flight:?}");
+        assert!(
+            !in_flight.contains(&"resp_c".to_string()),
+            "discarded response must not appear in in_flight: {in_flight:?}"
+        );
+        // resp_a appears exactly once even though two items reference it.
+        assert_eq!(
+            in_flight.iter().filter(|r| *r == "resp_a").count(),
+            1,
+            "distinct response_ids only: {in_flight:?}"
+        );
+    }
+
+    #[test]
+    fn round4_cc2_assistant_turn_completed_after_transcript_deltas_materializes_transcript() {
+        // CC2 (Round-4 architectural reconciliation): once
+        // `signal_turn_completed` synthesizes
+        // `RealtimeTranscriptEvent::AssistantTurnCompleted`, the staging
+        // materializer commits every staged transcript-delta item for
+        // that response_id as `AssistantBlock::Transcript { Spoken }`.
+        // This pins the production end-to-end shape the sink relies on.
+        let mut session = Session::new();
+
+        let delta = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_cc2".to_string(),
+            delta_id: "delta_cc2_1".to_string(),
+            item_id: "item_cc2".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "hello world".to_string(),
+        };
+        assert!(session.append_realtime_transcript_event(delta).is_inert());
+
+        // Pre-completion: in-flight list reports resp_cc2.
+        assert_eq!(
+            session.in_flight_realtime_assistant_response_ids(),
+            vec!["resp_cc2".to_string()]
+        );
+
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_cc2".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        );
+        assert_eq!(outcome.materialized_messages.len(), 1);
+
+        // Post-completion: in-flight list is empty (item is materialized).
+        assert!(
+            session
+                .in_flight_realtime_assistant_response_ids()
+                .is_empty(),
+            "materialized items must not appear in in_flight_realtime_assistant_response_ids"
+        );
+
+        let messages = session.messages();
+        let assistant = messages.iter().find_map(|m| match m {
+            Message::BlockAssistant(a) => Some(a),
+            _ => None,
+        });
+        let assistant = assistant.expect("assistant block message expected");
+        assert_eq!(assistant.blocks.len(), 1);
+        assert!(matches!(
+            &assistant.blocks[0],
+            AssistantBlock::Transcript {
+                source: crate::types::TranscriptSource::Spoken,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn realtime_transcript_assistant_text_delta_still_materializes_text_block() {
+        // Counter-regression: the display-text lane must continue to
+        // produce `AssistantBlock::Text` after T9/T10. Prevents an
+        // accidental cross-lane flip.
+        let mut session = Session::new();
+
+        let delta = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_display".to_string(),
+            delta_id: "evt_delta_display_1".to_string(),
+            item_id: "item_display".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "I wrote".to_string(),
+        };
+        let _ = session.append_realtime_transcript_event(delta);
+
+        let terminal = RealtimeTranscriptEvent::AssistantTurnCompleted {
+            response_id: "resp_display".to_string(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let outcome = session.append_realtime_transcript_event(terminal);
+        assert_eq!(outcome.materialized_messages.len(), 1);
+
+        let messages = session.messages();
+        match &messages[0] {
+            Message::BlockAssistant(assistant) => match &assistant.blocks[0] {
+                AssistantBlock::Text { text, .. } => assert_eq!(text, "I wrote"),
+                other => unreachable!(
+                    "AssistantTextDelta must keep materializing AssistantBlock::Text, got {other:?}"
+                ),
+            },
+            other => unreachable!("expected BlockAssistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn round4_cc7_mixed_response_persists_text_and_transcript_in_order() {
+        // CC7 (Round-4 adversarial-verifier follow-up): a single mixed-modality
+        // realtime response that emits BOTH display-text deltas
+        // (`AssistantTextDelta`) AND spoken-transcript deltas
+        // (`AssistantTranscriptDelta`) under the same response_id must
+        // materialize as ONE `Message::BlockAssistant` whose `blocks` field
+        // contains exactly two ordered entries:
+        //   1. AssistantBlock::Text       (display-text lane)
+        //   2. AssistantBlock::Transcript { source: Spoken } (spoken lane)
+        // Pre-fix the materializer emitted one Message::BlockAssistant per
+        // staged item, splitting the mixed response into two messages.
+        //
+        // This test drives the production materializer end-to-end: deltas
+        // stage in `SessionRealtimeTranscriptState`; `AssistantTurnCompleted`
+        // triggers the materializer; canonical history is the assertion
+        // surface — exactly the same code path that
+        // `SessionServiceProjectionSink::signal_turn_completed` invokes via
+        // `runtime.append_realtime_transcript_event` in production.
+        let mut session = Session::new();
+
+        // Provider-arrival order: display first, then spoken.
+        let display_a = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_disp_1".to_string(),
+            item_id: "item_display".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "Here's the report:".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(display_a)
+                .is_inert()
+        );
+
+        let display_b = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_disp_2".to_string(),
+            item_id: "item_display".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: " (still writing)".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(display_b)
+                .is_inert()
+        );
+
+        // Spoken items chain after the display item to mirror provider
+        // arrival semantics — `previous_item_id` carries arrival ordering
+        // that the materializer must preserve as block ordering inside the
+        // single emitted message.
+        let spoken_a = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_spoken_1".to_string(),
+            item_id: "item_spoken".to_string(),
+            previous_item_id: Some("item_display".to_string()),
+            content_index: 0,
+            delta: "I'm reading the report aloud:".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(spoken_a)
+                .is_inert()
+        );
+
+        let spoken_b = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_spoken_2".to_string(),
+            item_id: "item_spoken".to_string(),
+            previous_item_id: Some("item_display".to_string()),
+            content_index: 0,
+            delta: " sentence two.".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(spoken_b)
+                .is_inert()
+        );
+
+        // TurnCompleted triggers the materializer to flush all staged items
+        // for this response_id into ONE BlockAssistant message.
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_mixed_1".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 11,
+                    output_tokens: 22,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                },
+            },
+        );
+        // Materializer reports two staged items got materialized.
+        assert_eq!(outcome.materialized_messages.len(), 2);
+
+        // Canonical history MUST contain exactly ONE BlockAssistant message
+        // (the CC7 fix: mixed lanes interleave into one message, not two).
+        let messages = session.messages();
+        let assistants: Vec<&BlockAssistantMessage> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::BlockAssistant(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            assistants.len(),
+            1,
+            "mixed display+spoken response under one response_id must produce exactly ONE BlockAssistant message, got: {assistants:?}"
+        );
+        let assistant = assistants[0];
+        assert_eq!(
+            assistant.blocks.len(),
+            2,
+            "mixed response message must carry both blocks: {:?}",
+            assistant.blocks
+        );
+
+        // Block 0: display-text (concatenated deltas).
+        match &assistant.blocks[0] {
+            AssistantBlock::Text { text, .. } => {
+                assert_eq!(text, "Here's the report: (still writing)");
+            }
+            other => unreachable!(
+                "first block must be AssistantBlock::Text (display lane), got {other:?}"
+            ),
+        }
+        // Block 1: spoken transcript (concatenated deltas), tagged Spoken.
+        match &assistant.blocks[1] {
+            AssistantBlock::Transcript { text, source, .. } => {
+                assert_eq!(text, "I'm reading the report aloud: sentence two.");
+                assert_eq!(*source, crate::types::TranscriptSource::Spoken);
+            }
+            other => unreachable!(
+                "second block must be AssistantBlock::Transcript {{ source: Spoken }}, got {other:?}"
+            ),
+        }
+
+        // Usage was recorded once for the turn.
+        assert_eq!(session.usage.input_tokens, 11);
+        assert_eq!(session.usage.output_tokens, 22);
+    }
+
+    #[test]
+    fn round4_cc7_mixed_response_barge_in_discards_entire_in_flight_response() {
+        // CC7 sibling regression: when a mixed-modality response is
+        // interrupted (barge-in) BEFORE TurnCompleted, the entire in-flight
+        // response is discarded — both the display-text lane and the
+        // spoken-transcript lane. No `BlockAssistant` is committed for the
+        // interrupted response.
+        //
+        // The architectural rationale: barge-in semantics treat the in-flight
+        // response as a single unit because the user spoke over the
+        // assistant's reply mid-stream. The display-text portion of that same
+        // mixed reply is an artifact of the same uncommitted draft and is
+        // discarded with it. (Display text from a SEPARATE, earlier turn
+        // would already have been committed by its own TurnCompleted event;
+        // CC4 tests cover the cross-response isolation. This test pins the
+        // intra-response unit-of-discard contract.)
+        let mut session = Session::new();
+
+        let display = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_2".to_string(),
+            delta_id: "delta_disp_1".to_string(),
+            item_id: "item_display_2".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "Working on the report...".to_string(),
+        };
+        let _ = session.append_realtime_transcript_event(display);
+
+        let spoken = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_2".to_string(),
+            delta_id: "delta_spoken_1".to_string(),
+            item_id: "item_spoken_2".to_string(),
+            previous_item_id: Some("item_display_2".to_string()),
+            content_index: 0,
+            delta: "I'm reading the report".to_string(),
+        };
+        let _ = session.append_realtime_transcript_event(spoken);
+
+        // Barge-in arrives BEFORE TurnCompleted.
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_mixed_2".to_string(),
+            },
+        );
+        // Interruption itself does not materialize anything.
+        assert_eq!(outcome.materialized_messages.len(), 0);
+
+        // Even if a (delayed/late) TurnCompleted arrives after barge-in, the
+        // discarded items must remain unmaterialized — the response is dead.
+        let late_completion = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_mixed_2".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        );
+        assert_eq!(
+            late_completion.materialized_messages.len(),
+            0,
+            "post-barge-in TurnCompleted must not resurrect discarded mixed-response items"
+        );
+
+        // Canonical history is unchanged: no BlockAssistant message survives.
+        let messages = session.messages();
+        let assistants: Vec<&BlockAssistantMessage> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::BlockAssistant(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            assistants.is_empty(),
+            "barge-in on a mixed response must discard ALL in-flight content (display + spoken), got: {assistants:?}"
+        );
+
+        // The in-flight tracker also reports the response as gone.
+        assert!(
+            !session
+                .in_flight_realtime_assistant_response_ids()
+                .contains(&"resp_mixed_2".to_string()),
+            "barged-in response must not appear in in_flight_realtime_assistant_response_ids"
+        );
     }
 }

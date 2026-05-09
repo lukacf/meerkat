@@ -34,13 +34,6 @@ export type {
 } from "./mob.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
-export { RealtimeChannel, RealtimeConnection } from "./realtime.js";
-export type {
-  RealtimeChannelOptions,
-  RealtimeChannelTarget,
-  RealtimeSessionTarget,
-} from "./realtime.js";
-
 export type {
   AgentEventEnvelope,
   AttributedEvent,
@@ -203,34 +196,30 @@ export type {
   MobTopologySpecInput,
   MobTurnStartParams,
   MobWiringRulesInput,
+  LiveChannelParams,
+  LiveInputChunkWire,
+  LiveOpenParams,
+  LiveOpenResult,
+  LiveSendInputParams,
+  LiveStatusResult,
+  LiveTruncateParams,
+  // CC5/CC6: typed wire mirrors for `LiveOpenResult.capabilities` /
+  // `.continuity`. Re-exported from the SDK root so TS consumers can do
+  // typed-narrow on `result.continuity.mode` and read capability booleans
+  // (`image_in`, `video_in`, etc.) without dipping into `./generated/types`.
+  WireLiveChannelCapabilities,
+  WireLiveContinuityMode,
+  WireLiveContinuityModeFresh,
+  WireLiveContinuityModeTranscriptOnly,
+  WireLiveContinuityModeDegraded,
+  WireLiveContinuityModeProviderNativeResume,
   ProviderCatalog,
   RealtimeAudioChunk,
   RealtimeCapabilities,
-  RealtimeCapabilitiesParams,
-  RealtimeCapabilitiesResult,
-  RealtimeChannelClosedFrame,
-  RealtimeChannelErrorFrame,
-  RealtimeChannelEventFrame,
-  RealtimeChannelInputFrame,
-  RealtimeChannelOpenFrame,
-  RealtimeChannelOpenedFrame,
-  RealtimeChannelRole,
-  RealtimeChannelState,
-  RealtimeChannelStatus,
-  RealtimeChannelStatusFrame,
-  RealtimeOpenInfo,
-  RealtimeOpenRequest,
-  RealtimeOutputChunk,
-  RealtimeProtocolVersion,
-  RealtimeReconnectPolicy,
-  RealtimeStatusParams,
-  RealtimeStatusResult,
   RealtimeTextChunk,
-  RealtimeTextDelta,
   RealtimeTurningMode,
   RealtimeVideoChunk,
   RuntimeAcceptResult,
-  RuntimeRealtimeAttachmentStatusResult,
   RuntimeStateResult,
   SupervisorRotationReportWire,
   WireModelProfile,

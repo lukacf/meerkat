@@ -186,16 +186,8 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s53_cli_rest_cli_continuity, 53);
             scenario(e2e_smoke_s54_shared_realm_mob_visibility, 54);
             scenario(e2e_smoke_s55_rpc_rest_callback_peer_storm_resume, 55);
-            scenario(e2e_smoke_s57_python_sdk_realtime_channel_session_exchange, 57);
-            scenario(e2e_smoke_s58_python_sdk_realtime_member_respawn_continuity, 58);
-            scenario(e2e_smoke_s59_typescript_sdk_realtime_channel_session_exchange, 59);
-            scenario(e2e_smoke_s60_rust_sdk_realtime_channel_session_exchange, 60);
-            scenario(e2e_smoke_s61_cli_realtime_bridge_session_roundtrip, 61);
-            scenario(e2e_smoke_s62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange, 62);
-            scenario(e2e_smoke_s63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange, 63);
-            scenario(e2e_smoke_s64_python_sdk_realtime_member_model_switch_continuity, 64);
-            scenario(e2e_smoke_s71_rust_sdk_realtime_audio_mob_collaboration_roundtrip, 71);
-            scenario(e2e_smoke_s72_rust_sdk_realtime_audio_member_model_switch_continuity, 72);
+            scenario(e2e_smoke_s71_live_adapter_channel_lifecycle_rpc_ws, 71);
+            scenario(e2e_smoke_s72_live_adapter_model_switch_continuity, 72);
             scenario(e2e_smoke_s73_cli_generate_image_openai_default, 73);
             scenario(e2e_smoke_s74_python_sdk_gemini_image_provider_params, 74);
             scenario(e2e_smoke_s75_typescript_sdk_openai_image_provider_params, 75);
@@ -387,10 +379,9 @@ pub async fn run_prebuilt_smoke_selection(
     let manifest = Arc::new(ArtifactManifest::from_path(manifest_path)?);
     let scheduler = Arc::new(SmokeScheduler::from_env(selected.len()));
     eprintln!(
-        "e2e smoke scheduler: specs={}, jobs={}, realtime_jobs={}, media_jobs={}, mob_suite_jobs={}",
+        "e2e smoke scheduler: specs={}, jobs={}, media_jobs={}, mob_suite_jobs={}",
         selected.len(),
         scheduler.jobs,
-        scheduler.realtime_jobs,
         scheduler.media_jobs,
         scheduler.mob_suite_jobs
     );
@@ -447,11 +438,9 @@ async fn run_prebuilt_smoke_spec(
 
 struct SmokeScheduler {
     jobs: usize,
-    realtime_jobs: usize,
     media_jobs: usize,
     mob_suite_jobs: usize,
     global: Arc<Semaphore>,
-    realtime: Arc<Semaphore>,
     media: Arc<Semaphore>,
     mob_suite: Arc<Semaphore>,
 }
@@ -459,18 +448,14 @@ struct SmokeScheduler {
 impl SmokeScheduler {
     fn from_env(selected_count: usize) -> Self {
         let jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_JOBS", 12, selected_count);
-        let realtime_jobs =
-            smoke_scheduler_limit("MEERKAT_E2E_SMOKE_REALTIME_JOBS", 4, selected_count);
         let media_jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MEDIA_JOBS", 6, selected_count);
         let mob_suite_jobs =
             smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MOB_SUITE_JOBS", 2, selected_count);
         Self {
             jobs,
-            realtime_jobs,
             media_jobs,
             mob_suite_jobs,
             global: Arc::new(Semaphore::new(jobs)),
-            realtime: Arc::new(Semaphore::new(realtime_jobs)),
             media: Arc::new(Semaphore::new(media_jobs)),
             mob_suite: Arc::new(Semaphore::new(mob_suite_jobs)),
         }
@@ -480,11 +465,6 @@ impl SmokeScheduler {
         let class = smoke_runtime_class(spec);
         let class_permit =
             match class {
-                SmokeRuntimeClass::Realtime => {
-                    Some(self.realtime.clone().acquire_owned().await.map_err(|_| {
-                        format!("realtime scheduler closed for {}", run_label(spec))
-                    })?)
-                }
                 SmokeRuntimeClass::Media => {
                     Some(
                         self.media.clone().acquire_owned().await.map_err(|_| {
@@ -524,7 +504,6 @@ struct SmokePermits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SmokeRuntimeClass {
     Standard,
-    Realtime,
     Media,
     MobSuite,
 }
@@ -539,9 +518,6 @@ fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
     }
     if label.contains("image") || label.contains("audio") {
         return SmokeRuntimeClass::Media;
-    }
-    if label.contains("realtime") {
-        return SmokeRuntimeClass::Realtime;
     }
     SmokeRuntimeClass::Standard
 }
@@ -561,7 +537,6 @@ fn order_smoke_specs_for_runtime(selected: &mut [SelectedSpec]) {
 
 fn smoke_runtime_priority(spec: &Spec) -> u16 {
     match spec.id {
-        Some(71) => return 900,
         Some(73) => return 880,
         Some(74) => return 870,
         Some(76) => return 860,
@@ -574,7 +549,7 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
         Some(78) => return 790,
         Some(54) => return 700,
         Some(55) => return 690,
-        Some(49) | Some(51) | Some(61) => return 680,
+        Some(49) | Some(51) => return 680,
         _ => {}
     }
 
@@ -589,7 +564,6 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
         return 750;
     }
     match smoke_runtime_class(spec) {
-        SmokeRuntimeClass::Realtime => 600,
         SmokeRuntimeClass::Media => 500,
         SmokeRuntimeClass::MobSuite => 400,
         SmokeRuntimeClass::Standard => 100,
@@ -3562,442 +3536,11 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
-        57 => Some(&Spec {
-            id: Some(57),
-            lane: Lane::Smoke,
-            title: "Python SDK realtime channel session exchange",
-            timeout_secs: 1500,
-            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
-            required_bins: &["python3", "cargo"],
-            cwd: "sdks/python",
-            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
-            cargo_bin_env: &[],
-            pre_commands: &[
-                &[
-                    "/bin/sh",
-                    "-c",
-                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::Pytest {
-                test_file: "tests/test_e2e_smoke.py",
-                test_name: "test_smoke_scenario_57_realtime_channel_session_exchange",
-            },
-        }),
-        58 => Some(&Spec {
-            id: Some(58),
-            lane: Lane::Smoke,
-            title: "Python SDK realtime member respawn continuity",
-            timeout_secs: 1800,
-            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
-            required_bins: &["python3", "cargo"],
-            cwd: "sdks/python",
-            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
-            cargo_bin_env: &[],
-            pre_commands: &[
-                &[
-                    "/bin/sh",
-                    "-c",
-                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::Pytest {
-                test_file: "tests/test_e2e_smoke.py",
-                test_name: "test_smoke_scenario_58_realtime_member_channel_respawn_continuity",
-            },
-        }),
-        59 => Some(&Spec {
-            id: Some(59),
-            lane: Lane::Smoke,
-            title: "TypeScript SDK realtime channel session exchange",
-            timeout_secs: 1500,
-            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
-            required_bins: &["node", "npm", "cargo"],
-            cwd: "sdks/typescript",
-            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
-            cargo_bin_env: &[],
-            pre_commands: &[
-                &["npm", "install", "--no-audit", "--no-fund"],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-                &["npm", "run", "build"],
-            ],
-            command: CommandSpec::NodeTest {
-                test_file: "tests/e2e_smoke.test.mjs",
-                test_name: "Scenario 59",
-            },
-        }),
-        60 => Some(&Spec {
-            id: Some(60),
-            lane: Lane::Smoke,
-            title: "Rust SDK realtime channel session exchange",
-            timeout_secs: 1500,
-            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &["rkat-rpc"],
-            pre_commands: &[&[
-                "cargo",
-                "build",
-                "-p",
-                "meerkat-rpc",
-                "--bin",
-                "rkat-rpc",
-                "--features",
-                "mob",
-            ]],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-integration-tests",
-                test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_60_rust_sdk_realtime_channel_session_exchange",
-                features: &[],
-                all_features: false,
-            },
-        }),
-        61 => Some(&Spec {
-            id: Some(61),
-            lane: Lane::Smoke,
-            title: "CLI realtime bridge session roundtrip",
-            timeout_secs: 1500,
-            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &["rkat", "rkat-rpc"],
-            pre_commands: &[
-                &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-integration-tests",
-                test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_61_cli_realtime_bridge_session_roundtrip",
-                features: &[],
-                all_features: false,
-            },
-        }),
-        62 => Some(&Spec {
-            id: Some(62),
-            lane: Lane::Smoke,
-            title: "REST bootstrap to Rust SDK realtime channel exchange",
-            timeout_secs: 1500,
-            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &["rkat-rpc", "rkat-rest"],
-            pre_commands: &[
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rest",
-                    "--bin",
-                    "rkat-rest",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-integration-tests",
-                test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange",
-                features: &[],
-                all_features: false,
-            },
-        }),
-        63 => Some(&Spec {
-            id: Some(63),
-            lane: Lane::Smoke,
-            title: "MCP bootstrap to Rust SDK member realtime exchange",
-            timeout_secs: 1500,
-            required_env: &[
-                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
-                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
-            ],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &["rkat-rpc", "rkat-rest", "rkat-mcp"],
-            pre_commands: &[
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rest",
-                    "--bin",
-                    "rkat-rest",
-                    "--features",
-                    "mob",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-mcp-server",
-                    "--bin",
-                    "rkat-mcp",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-integration-tests",
-                test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_63_mcp_bootstrap_to_rust_sdk_member_realtime_exchange",
-                features: &[],
-                all_features: false,
-            },
-        }),
-        64 => Some(&Spec {
-            id: Some(64),
-            lane: Lane::Smoke,
-            title: "Python SDK realtime member model-switch continuity",
-            timeout_secs: 1800,
-            required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
-            required_bins: &["python3", "cargo"],
-            cwd: "sdks/python",
-            env: &[("MEERKAT_BIN_PATH", "{cargo_target_dir}/debug/rkat-rpc")],
-            cargo_bin_env: &[],
-            pre_commands: &[
-                &[
-                    "/bin/sh",
-                    "-c",
-                    "${MEERKAT_PYTHON_BIN:-python3} -c 'import pytest, pytest_asyncio' >/dev/null 2>&1 || ${MEERKAT_PYTHON_BIN:-python3} -m pip install -e \".[dev]\"",
-                ],
-                &[
-                    "cargo",
-                    "build",
-                    "-p",
-                    "meerkat-rpc",
-                    "--bin",
-                    "rkat-rpc",
-                    "--features",
-                    "mob",
-                ],
-            ],
-            command: CommandSpec::Pytest {
-                test_file: "tests/test_e2e_smoke.py",
-                test_name: "test_smoke_scenario_64_realtime_member_channel_model_switch_continuity",
-            },
-        }),
-        65 => Some(&Spec {
-            id: Some(65),
-            lane: Lane::Live,
-            title: "Realtime channel rejects stale attachment authority",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-runtime",
-                    "realtime_attachment_signal_rejects_stale_authority",
-                    "--lib",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
-        66 => Some(&Spec {
-            id: Some(66),
-            lane: Lane::Live,
-            title: "Realtime reconnect retry machine exhausts within bounded budget",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-rpc",
-                    "reconnect_retry_exhausts_after_attempt_budget",
-                    "--lib",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
-        67 => Some(&Spec {
-            id: Some(67),
-            lane: Lane::Live,
-            title: "Realtime websocket rejects unsupported explicit_commit mode",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-rpc",
-                    "--test",
-                    "realtime_ws_protocol",
-                    "channel_open_rejects_unsupported_explicit_commit_turning_mode",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
-        68 => Some(&Spec {
-            id: Some(68),
-            lane: Lane::Live,
-            title: "Realtime observer channels fan out primary events and stay read-only",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-rpc",
-                    "--test",
-                    "realtime_ws_protocol",
-                    "observer_channels_receive_primary_events_and_remain_read_only",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
-        69 => Some(&Spec {
-            id: Some(69),
-            lane: Lane::Live,
-            title: "Realtime explicit_commit disconnect discards staged transcript",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-rpc",
-                    "--test",
-                    "realtime_ws_protocol",
-                    "explicit_commit_disconnect_discards_uncommitted_transcript",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
-        70 => Some(&Spec {
-            id: Some(70),
-            lane: Lane::Live,
-            title: "Realtime tool continuation failure emits failed lifecycle and provider error",
-            timeout_secs: 300,
-            required_env: &[],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::Raw {
-                argv: &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "meerkat-rpc",
-                    "--test",
-                    "realtime_ws_protocol",
-                    "product_session_tool_call_failures_emit_failed_event_and_submit_provider_error",
-                    "--",
-                    "--nocapture",
-                ],
-                output_policy: OutputPolicy::CargoTest,
-            },
-        }),
         71 => Some(&Spec {
             id: Some(71),
             lane: Lane::Smoke,
-            title: "Rust SDK realtime audio mob collaboration roundtrip",
-            timeout_secs: 2400,
+            title: "Live adapter realtime audio roundtrip with TTS barge-in and tool dispatch",
+            timeout_secs: 600,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
@@ -4008,15 +3551,13 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 "build",
                 "-p",
                 "meerkat-rpc",
-                "--bin",
-                "rkat-rpc",
                 "--features",
-                "mob",
+                "session-store,openai,gemini,anthropic,skills,comms,mcp,schedule,mob",
             ]],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_71_rust_sdk_realtime_audio_mob_collaboration_roundtrip",
+                test_name: "e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws",
                 features: &[],
                 all_features: false,
             },
@@ -4024,8 +3565,8 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
         72 => Some(&Spec {
             id: Some(72),
             lane: Lane::Smoke,
-            title: "Rust SDK realtime audio member model-switch continuity",
-            timeout_secs: 1200,
+            title: "Live adapter model-switch continuity with TTS audio",
+            timeout_secs: 600,
             required_env: &[&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]],
             required_bins: &["cargo"],
             cwd: ".",
@@ -4036,15 +3577,13 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 "build",
                 "-p",
                 "meerkat-rpc",
-                "--bin",
-                "rkat-rpc",
                 "--features",
-                "mob",
+                "session-store,openai,gemini,anthropic,skills,comms,mcp,schedule,mob",
             ]],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_72_rust_sdk_realtime_audio_member_model_switch_continuity",
+                test_name: "e2e_scenario_72_live_adapter_model_switch_continuity",
                 features: &[],
                 all_features: false,
             },
@@ -5369,8 +4908,8 @@ mod tests {
     #[test]
     fn smoke_selection_supports_scenario_suite_and_test_name() {
         assert_eq!(
-            smoke_test_filter_for_selection(&E2eSelection::Scenario(62)).unwrap(),
-            Some("e2e_smoke_s62_".to_string())
+            smoke_test_filter_for_selection(&E2eSelection::Scenario(49)).unwrap(),
+            Some("e2e_smoke_s49_".to_string())
         );
         assert_eq!(
             smoke_test_filter_for_selection(&E2eSelection::Suite("mob-live-smoke".to_string()))
@@ -5448,10 +4987,6 @@ mod tests {
             SmokeRuntimeClass::MobSuite
         );
         assert_eq!(
-            smoke_runtime_class(scenario_spec(62).unwrap()),
-            SmokeRuntimeClass::Realtime
-        );
-        assert_eq!(
             smoke_runtime_class(scenario_spec(81).unwrap()),
             SmokeRuntimeClass::Media
         );
@@ -5487,11 +5022,9 @@ mod tests {
     async fn class_limited_specs_do_not_occupy_global_slots_while_waiting() {
         let scheduler = Arc::new(SmokeScheduler {
             jobs: 1,
-            realtime_jobs: 1,
             media_jobs: 0,
             mob_suite_jobs: 1,
             global: Arc::new(Semaphore::new(1)),
-            realtime: Arc::new(Semaphore::new(1)),
             media: Arc::new(Semaphore::new(0)),
             mob_suite: Arc::new(Semaphore::new(1)),
         });
@@ -5515,7 +5048,7 @@ mod tests {
 
     #[test]
     fn single_scenario_plan_avoids_unrelated_service_bins() {
-        let plan = plan_for_selection(&E2eSelection::Scenario(62)).unwrap();
+        let plan = plan_for_selection(&E2eSelection::Scenario(73)).unwrap();
         let rust_bins = plan
             .requirements
             .iter()
@@ -5524,12 +5057,12 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(rust_bins, vec!["rkat-rest", "rkat-rpc"]);
+        assert_eq!(rust_bins, vec!["rkat"]);
         assert!(plan.requirements.iter().any(|requirement| matches!(
             requirement,
             ArtifactRequirement::RustTest(requirement)
-                if requirement.package == "meerkat-integration-tests"
-                    && requirement.test_target == "smoke_shared_realm"
+                if requirement.package == "rkat"
+                    && requirement.test_target == "live_smoke_cli"
         )));
     }
 
@@ -5558,15 +5091,14 @@ mod tests {
 
     #[test]
     fn command_generation_switches_cargo_test_to_prebuilt_executable() {
-        let spec = scenario_spec(62).unwrap();
+        let spec = scenario_spec(73).unwrap();
         let manifest = ArtifactManifest::from_json_str(
             r#"{
               "rust_bins": {
-                "rkat-rpc": "/tmp/rkat-rpc",
-                "rkat-rest": "/tmp/rkat-rest"
+                "rkat": "/tmp/rkat"
               },
               "rust_tests": {
-                "meerkat-integration-tests:smoke_shared_realm": "/tmp/smoke_shared_realm"
+                "rkat:live_smoke_cli": "/tmp/live_smoke_cli"
               }
             }"#,
         )
@@ -5581,8 +5113,8 @@ mod tests {
         assert_eq!(
             prebuilt.command,
             vec![
-                "/tmp/smoke_shared_realm",
-                "e2e_scenario_62_rest_bootstrap_to_rust_sdk_realtime_channel_exchange",
+                "/tmp/live_smoke_cli",
+                "e2e_scenario_73_cli_generate_image_openai_default",
                 "--ignored",
                 "--nocapture"
             ]

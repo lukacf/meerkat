@@ -214,6 +214,16 @@ fn project_anthropic_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistan
         .filter_map(|block| match block {
             AssistantBlock::Text { text, .. } if text.is_empty() => None,
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            // Spoken transcripts replay back as plain text. Anthropic does
+            // not have a realtime audio surface today; if a Meerkat session
+            // contains transcript blocks (e.g. cross-provider replay),
+            // surface them as plain text so the assistant history is
+            // visible to the model.
+            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
+            AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
+                text: text.clone(),
+                meta: None,
+            }),
             AssistantBlock::Reasoning { meta, .. } => match meta.as_deref() {
                 Some(
                     meerkat_core::ProviderMeta::Anthropic { .. }

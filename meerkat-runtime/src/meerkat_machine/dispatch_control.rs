@@ -477,20 +477,6 @@ impl MeerkatMachine {
                     .ok_or(RuntimeControlPlaneError::NotFound(runtime_id))?;
                 Ok(MeerkatMachineCommandResult::RuntimeState(state))
             }
-            MeerkatMachineCommand::RuntimeRealtimeAttachmentStatus { session_id } => {
-                let sessions = self.sessions.read().await;
-                let entry = sessions.get(&session_id).ok_or_else(|| {
-                    RuntimeControlPlaneError::NotFound(Self::logical_runtime_id(&session_id))
-                })?;
-                let authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let status = project_realtime_attachment_status(&authority.state);
-                Ok(MeerkatMachineCommandResult::RealtimeAttachmentStatus(
-                    status,
-                ))
-            }
             MeerkatMachineCommand::ResolvedSessionLlmCapabilities { session_id } => {
                 let sessions = self.sessions.read().await;
                 let entry = sessions.get(&session_id).ok_or_else(|| {
@@ -504,20 +490,6 @@ impl MeerkatMachine {
                 };
                 Ok(MeerkatMachineCommandResult::ResolvedSessionLlmCapabilities(
                     capabilities,
-                ))
-            }
-            MeerkatMachineCommand::RuntimeRealtimeChannelStatus { session_id } => {
-                let sessions = self.sessions.read().await;
-                let entry = sessions.get(&session_id).ok_or_else(|| {
-                    RuntimeControlPlaneError::NotFound(Self::logical_runtime_id(&session_id))
-                })?;
-                let authority = entry
-                    .dsl_authority
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let channel_status = project_realtime_channel_status(&authority.state);
-                Ok(MeerkatMachineCommandResult::RealtimeChannelStatus(
-                    channel_status,
                 ))
             }
             MeerkatMachineCommand::ConfigureModelRoutingBaseline {
@@ -1130,91 +1102,4 @@ fn project_model_routing_status(
         active_operation_override,
         pending_switch_turn,
     )
-}
-
-/// Project the DSL state's realtime-binding fields onto the shell-facing
-/// `RealtimeAttachmentStatus` enum. The DSL owns the canonical fact; this
-/// projection is pure and maintains the dogma's "derived projections are
-/// rebuildable, never authoritative" principle.
-fn project_realtime_attachment_status(
-    state: &super::dsl::MeerkatMachineState,
-) -> crate::meerkat_machine_types::RealtimeAttachmentStatus {
-    use super::dsl::RealtimeBindingState;
-    use crate::meerkat_machine_types::RealtimeAttachmentStatus;
-    if state.realtime_reattach_required {
-        return RealtimeAttachmentStatus::ReattachRequired;
-    }
-    match state.realtime_binding_state {
-        RealtimeBindingState::Unbound => {
-            if state.realtime_intent_present {
-                RealtimeAttachmentStatus::IntentPresentUnbound
-            } else {
-                RealtimeAttachmentStatus::Unattached
-            }
-        }
-        RealtimeBindingState::BindingNotReady => RealtimeAttachmentStatus::BindingNotReady,
-        RealtimeBindingState::BindingReady => RealtimeAttachmentStatus::BindingReady,
-        RealtimeBindingState::ReplacementPending => RealtimeAttachmentStatus::ReplacementPending,
-    }
-}
-
-/// Project the canonical machine-owned realtime attachment plus reconnect
-/// lifecycle into the public websocket/RPC status shape.
-fn project_realtime_channel_status(
-    state: &super::dsl::MeerkatMachineState,
-) -> meerkat_contracts::RealtimeChannelStatus {
-    if state.realtime_reconnect_cycle_state == super::dsl::RealtimeReconnectCycleState::Exhausted {
-        return meerkat_contracts::RealtimeChannelStatus {
-            state: meerkat_contracts::RealtimeChannelState::Error,
-            attempt_count: 0,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("realtime reconnect attempts exhausted".to_string()),
-        };
-    }
-
-    let status = project_realtime_attachment_status(state);
-    let reconnect = read_realtime_reconnect_progress(state);
-    status.to_channel_status(reconnect.as_ref())
-}
-
-/// Project the DSL's reconnect-progress fields onto the shell-facing
-/// `ReconnectProgress` struct. Returns `None` outside a machine-owned active
-/// reconnect cycle.
-fn read_realtime_reconnect_progress(
-    state: &super::dsl::MeerkatMachineState,
-) -> Option<crate::meerkat_machine_types::ReconnectProgress> {
-    use crate::meerkat_machine_types::ReconnectProgress;
-    use chrono::{DateTime, Utc};
-
-    if state.realtime_reconnect_cycle_state != super::dsl::RealtimeReconnectCycleState::Reconnecting
-    {
-        return None;
-    }
-
-    let attempt_count_u64 = state.realtime_reconnect_attempt_count;
-    let next_retry_at_ms = state.realtime_reconnect_next_retry_at_ms;
-    let deadline_at_ms = state.realtime_reconnect_deadline_at_ms;
-
-    if attempt_count_u64 == 0 && next_retry_at_ms.is_none() && deadline_at_ms.is_none() {
-        return None;
-    }
-
-    fn ms_to_utc(ms: Option<u64>) -> Option<DateTime<Utc>> {
-        ms.and_then(|ms| {
-            let secs = i64::try_from(ms / 1_000).ok()?;
-            let nanos = u32::try_from((ms % 1_000) * 1_000_000).ok()?;
-            DateTime::<Utc>::from_timestamp(secs, nanos)
-        })
-    }
-
-    // Surface clamp: `RealtimeChannelStatus.attempt_count` is u32 on the wire;
-    // any DSL-side overflow pegs at u32::MAX rather than wrapping.
-    let attempt_count = u32::try_from(attempt_count_u64).unwrap_or(u32::MAX);
-
-    Some(ReconnectProgress::new(
-        attempt_count,
-        ms_to_utc(next_retry_at_ms),
-        ms_to_utc(deadline_at_ms),
-    ))
 }

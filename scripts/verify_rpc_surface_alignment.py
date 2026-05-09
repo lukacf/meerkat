@@ -25,9 +25,14 @@ def main() -> int:
     catalog_text = catalog_path.read_text(encoding="utf-8")
     docs_text = docs_path.read_text(encoding="utf-8")
 
+    # Method arms may have an optional `if guard` between the literal and `=>`,
+    # e.g. `"live/open" if self.live_ws_state.is_some() => { ... }` for arms
+    # that are gated on optional infrastructure being attached at construction.
     router_methods = {
         m
-        for m in re.findall(r'"([a-z][a-z_]*(?:/[a-z_]+)*)"\s*=>', router_text)
+        for m in re.findall(
+            r'"([a-z][a-z_]*(?:/[a-z_]+)*)"\s*(?:if[^=]+)?=>', router_text
+        )
     }
 
     catalog_methods = {

@@ -255,9 +255,6 @@ impl MeerkatMachine {
                 Arc::new(crate::handles::RuntimeInteractionStreamHandle::new(
                     Arc::clone(&shared_handle_authority),
                 )),
-                Arc::new(crate::handles::RuntimeRealtimeProductTurnHandle::new(
-                    Arc::clone(&shared_handle_authority),
-                )),
                 runtime_authority,
             ),
         ))

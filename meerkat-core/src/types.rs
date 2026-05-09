@@ -465,6 +465,20 @@ where
     RawValue::from_string(raw).map_err(serde::de::Error::custom)
 }
 
+/// Source lane for a `Transcript` assistant block.
+///
+/// Transcripts originate from a non-text output channel (today only spoken
+/// audio from realtime providers). Modeled as a typed enum so future lanes
+/// (e.g. captions, sign-language gloss) can be added without breaking
+/// downstream consumers.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptSource {
+    /// Spoken-audio transcript (provider audio output → text).
+    Spoken,
+}
+
 /// A block of content in an assistant message, preserving order.
 ///
 /// Uses adjacently tagged serde representation to support `Box<RawValue>` in
@@ -479,6 +493,20 @@ pub enum AssistantBlock {
     Text {
         text: String,
         /// Provider metadata (Gemini thoughtSignature on text parts)
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<Box<ProviderMeta>>,
+    },
+
+    /// Spoken-transcript output captured from a non-text lane (realtime
+    /// provider audio output → transcribed text). Distinguished from
+    /// `Text` so projection sites that care about lane provenance (display
+    /// vs. spoken) can render or filter independently. Both project to the
+    /// same human-readable text stream.
+    Transcript {
+        text: String,
+        /// Origin lane (today: `Spoken`).
+        source: TranscriptSource,
+        /// Provider continuity metadata, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<Box<ProviderMeta>>,
     },
@@ -543,6 +571,18 @@ impl PartialEq for AssistantBlock {
                 AssistantBlock::Reasoning { text: t1, meta: m1 },
                 AssistantBlock::Reasoning { text: t2, meta: m2 },
             ) => t1 == t2 && m1 == m2,
+            (
+                AssistantBlock::Transcript {
+                    text: t1,
+                    source: s1,
+                    meta: m1,
+                },
+                AssistantBlock::Transcript {
+                    text: t2,
+                    source: s2,
+                    meta: m2,
+                },
+            ) => t1 == t2 && s1 == s2 && m1 == m2,
             (
                 AssistantBlock::ToolUse {
                     id: i1,
@@ -1197,21 +1237,35 @@ impl BlockAssistantMessage {
         self.tool_calls().find(|tc| tc.id == id)
     }
 
-    /// Iterate over text blocks without allocation.
+    /// Iterate over visible text blocks without allocation.
+    ///
+    /// Includes both `Text` (display lane) and `Transcript` (spoken lane)
+    /// since both project to the same human-readable text stream. Lane
+    /// provenance is preserved structurally on `AssistantBlock` itself; this
+    /// helper is for callers that just want the rendered text.
     pub fn text_blocks(&self) -> impl Iterator<Item = &str> {
         self.blocks.iter().filter_map(|b| match b {
-            AssistantBlock::Text { text, .. } => Some(text.as_str()),
+            AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+                Some(text.as_str())
+            }
             _ => None,
         })
     }
 }
 
 /// Display implementation for text content - zero intermediate allocations.
+///
+/// Renders both `Text` (display) and `Transcript` (spoken) blocks since both
+/// project to the same human-readable text stream. Lane provenance lives on
+/// the `AssistantBlock` enum itself for callers that need it.
 impl fmt::Display for BlockAssistantMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for block in &self.blocks {
-            if let AssistantBlock::Text { text, .. } = block {
-                f.write_str(text)?;
+            match block {
+                AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+                    f.write_str(text)?;
+                }
+                _ => {}
             }
         }
         Ok(())

@@ -106,22 +106,10 @@ MobMemberSnapshot = TypedDict(
         "error": NotRequired[str],
         "tokens_used": int,
         "is_final": bool,
-        "realtime_attachment_status": NotRequired[
-            Literal[
-                "unattached",
-                "intent_present_unbound",
-                "binding_not_ready",
-                "binding_ready",
-                "replacement_pending",
-                "reattach_required",
-            ]
-        ],
         "resolved_capabilities": NotRequired[ResolvedModelCapabilities],
         "peer_connectivity": NotRequired[MobPeerConnectivitySnapshot],
         "kickoff": NotRequired[dict[str, Any]],
-        # Diagnostic bridge-session id for status/continuity only. Realtime
-        # callers open `RealtimeChannel.mob_member(...)`; the server resolves
-        # the current binding behind the stable mob-member target.
+        # Diagnostic bridge-session id for status/continuity only.
         "current_session_id": NotRequired[str],
     },
 )

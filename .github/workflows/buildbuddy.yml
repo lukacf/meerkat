@@ -244,6 +244,30 @@ jobs:
           lanes: |
             ci-prebuild
 
+  static-submit:
+    name: Static submitter
+    needs: [control-plane-up, executors-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        with:
+          group: gcp-static
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
+          lanes: |
+            fmt-static
+
   native-submit:
     name: Native submitter
     needs: [control-plane-up, executors-up, prebuild-submit]
@@ -267,7 +291,6 @@ jobs:
           {
             echo "lanes<<LANES"
             printf '%s\n' \
-              fmt-static \
               cargo-all-features-clippy \
               test-unit \
               integration-fast
@@ -417,6 +440,7 @@ jobs:
     needs:
       - executors-up
       - prebuild-submit
+      - static-submit
       - native-submit
       - governance-submit
       - wasm-feature-submit
@@ -470,6 +494,7 @@ jobs:
       - control-plane-up
       - executors-up
       - prebuild-submit
+      - static-submit
       - native-submit
       - governance-submit
       - wasm-feature-submit

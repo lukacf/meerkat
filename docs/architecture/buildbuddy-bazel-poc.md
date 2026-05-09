@@ -264,11 +264,13 @@ only the submitter/coordinator:
    lanes start. It deliberately does not execute TLC/RMAT/governance or
    cargo-equivalent WASM/SDK wrappers; those are policy/shell lanes, not the
    shared Bazel-native compilation graph.
-4. The native submitter then runs format/static, clippy, unit, and
-   integration-fast checks against the warmed graph. It uses a small number of
-   local lane submitters so the post-prebuild validation lanes can overlap
-   without several GitHub jobs racing the same first-touch compile actions.
-   Governance and WASM/SDK/feature/audit are path-aware edge lanes;
+4. The static submitter runs format/static source checks in parallel with the
+   prebuild because it does not consume warmed Rust test binaries. The native
+   submitter then runs clippy, unit, and integration-fast checks against the
+   warmed graph. It uses a small number of local lane submitters so the
+   post-prebuild validation lanes can overlap without several GitHub jobs racing
+   the same first-touch compile actions. Governance and
+   WASM/SDK/feature/audit are path-aware edge lanes;
    they start in parallel after the executor pool is up and do not wait for the
    prebuild, because they do not consume the shared Bazel-native prebuild output.
    Governance is intentionally keyed to the machine DSL/generated-machine

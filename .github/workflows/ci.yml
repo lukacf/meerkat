@@ -66,6 +66,13 @@ jobs:
     uses: ./.github/workflows/buildbuddy.yml
     with:
       mode: ${{ inputs.mode || 'full-fresh' }}
+      machine_authority_base_sha: >-
+        ${{
+          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+          github.event_name == 'push' && github.event.before ||
+          ''
+        }}
+      machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
 
   unauthorized-gcp-buildbuddy:

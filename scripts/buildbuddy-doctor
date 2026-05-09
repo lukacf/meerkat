@@ -384,20 +384,23 @@ fi
 
 if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'name: Submit lanes' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'timeout-minutes: 20' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'fetch-depth: 1' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'run-buildbuddy-ci-lane-batch' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'group: gcp' &&
-  job_has_line .github/workflows/buildbuddy.yml submit 'profile: submitter' &&
-  job_has_line .github/workflows/buildbuddy.yml submit "mode: \${{ inputs.mode || 'full-fresh' }}" &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'name: Native submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'name: Governance submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'name: WASM and feature submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'group: gcp-wasm-feature' &&
+  grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
-  pass "GCP BuildBuddy CI uses one GitHub-hosted submitter with Bazel lane fanout"
+  pass "GCP BuildBuddy CI uses split GitHub-hosted submitters with SLO and live heartbeat"
 else
-  bad "GCP BuildBuddy CI is not using the simplified GCP fanout shape"
+  bad "GCP BuildBuddy CI is not using the bounded split-submitter shape"
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&

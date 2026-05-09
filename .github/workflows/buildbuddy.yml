@@ -8,6 +8,16 @@ on:
         required: false
         default: full-fresh
         type: string
+      machine_authority_base_sha:
+        description: Base revision for machine-authority change detection.
+        required: false
+        default: ""
+        type: string
+      machine_authority_head_sha:
+        description: Head revision for machine-authority change detection.
+        required: false
+        default: ""
+        type: string
     secrets:
       BUILDBUDDY_API_KEY:
         required: false
@@ -206,8 +216,8 @@ jobs:
         shell: bash
         run: scripts/gcp-buildbuddy-executor-pool up
 
-  submit:
-    name: Submit lanes
+  native-submit:
+    name: Native submitter
     needs: [control-plane-up, executors-up]
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -215,6 +225,119 @@ jobs:
       BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
       BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
       BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Select native lanes
+        id: lanes
+        shell: bash
+        run: |
+          {
+            echo "lanes<<LANES"
+            printf '%s\n' \
+              fmt-static \
+              cargo-all-features-clippy \
+              test-unit \
+              integration-fast
+            echo "LANES"
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        with:
+          group: gcp
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
+          lanes: ${{ steps.lanes.outputs.lanes }}
+
+  governance-submit:
+    name: Governance submitter
+    needs: [control-plane-up, executors-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Detect machine-authority changes
+        id: machine-changes
+        shell: bash
+        env:
+          MACHINE_AUTHORITY_BASE_SHA: ${{ inputs.machine_authority_base_sha || '' }}
+          MACHINE_AUTHORITY_HEAD_SHA: ${{ inputs.machine_authority_head_sha || github.sha }}
+        run: |
+          changed=true
+          if [[ -z "${MACHINE_AUTHORITY_BASE_SHA}" && "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if git fetch --no-tags --depth=1 origin main; then
+              MACHINE_AUTHORITY_BASE_SHA="$(git rev-parse FETCH_HEAD)"
+              echo "Using origin/main (${MACHINE_AUTHORITY_BASE_SHA}) as the workflow_dispatch diff base."
+            else
+              echo "Could not fetch origin/main; running machine authority conservatively."
+            fi
+          fi
+
+          if [[ -n "${MACHINE_AUTHORITY_BASE_SHA}" && "${MACHINE_AUTHORITY_BASE_SHA}" != "0000000000000000000000000000000000000000" ]]; then
+            if ! git cat-file -e "${MACHINE_AUTHORITY_BASE_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "${MACHINE_AUTHORITY_BASE_SHA}" || true
+            fi
+            set +e
+            scripts/machine-authority-changed --base "${MACHINE_AUTHORITY_BASE_SHA}" --head "${MACHINE_AUTHORITY_HEAD_SHA}"
+            status="$?"
+            set -e
+            case "${status}" in
+              0) changed=true ;;
+              1) changed=false ;;
+              *)
+                echo "Machine-authority diff failed; running conservative check."
+                changed=true
+                ;;
+            esac
+          else
+            echo "No reliable diff base; running machine authority."
+          fi
+          echo "changed=${changed}" >> "${GITHUB_OUTPUT}"
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        if: ${{ steps.machine-changes.outputs.changed == 'true' }}
+        with:
+          group: gcp-governance
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
+          lanes: |
+            seam-inventory
+            rmat-audit
+            machine-authority
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        if: ${{ steps.machine-changes.outputs.changed != 'true' }}
+        with:
+          group: gcp-governance
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
+          lanes: |
+            seam-inventory
+            rmat-audit
+
+  wasm-feature-submit:
+    name: WASM and feature submitter
+    needs: [control-plane-up, executors-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -223,14 +346,10 @@ jobs:
 
       - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
         with:
-          group: gcp
+          group: gcp-wasm-feature
           profile: submitter
           mode: ${{ inputs.mode || 'full-fresh' }}
           lanes: |
-            fmt-static
-            cargo-all-features-clippy
-            test-unit
-            integration-fast
             sdk-suites
             wasm-check
             test-minimal
@@ -246,7 +365,9 @@ jobs:
     if: ${{ always() }}
     needs:
       - executors-up
-      - submit
+      - native-submit
+      - governance-submit
+      - wasm-feature-submit
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -309,7 +430,9 @@ jobs:
     needs:
       - control-plane-up
       - executors-up
-      - submit
+      - native-submit
+      - governance-submit
+      - wasm-feature-submit
       - executors-down
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -318,5 +441,25 @@ jobs:
         run: |
           if [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == "true" ]]; then
             echo "GCP BuildBuddy CI failed"
+            exit 1
+          fi
+      - name: Check GCP CI duration SLO
+        shell: bash
+        env:
+          CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+          MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
+        run: |
+          if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"
+            exit 1
+          fi
+          if ! [[ "${MAX_SECONDS}" =~ ^[0-9]+$ ]] || [[ "${MAX_SECONDS}" == "0" ]]; then
+            echo "::error::Invalid MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: '${MAX_SECONDS}'"
+            exit 1
+          fi
+          elapsed="$(($(date +%s) - CI_STARTED_AT_EPOCH))"
+          echo "GCP BuildBuddy CI elapsed seconds: ${elapsed}/${MAX_SECONDS}"
+          if ((elapsed > MAX_SECONDS)); then
+            echo "::error::GCP BuildBuddy CI exceeded ${MAX_SECONDS}s SLO (${elapsed}s)."
             exit 1
           fi

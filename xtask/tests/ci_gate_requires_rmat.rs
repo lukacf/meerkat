@@ -81,10 +81,14 @@ fn buildbuddy_workflow_is_gcp_only() {
             "executors-down",
             "executors-up",
             "gate",
-            "submit",
+            "governance-submit",
+            "native-submit",
+            "wasm-feature-submit",
         ],
     );
     assert!(buildbuddy.contains("MEERKAT_BAZEL_BACKEND: gcp-buildbuddy"));
+    assert!(buildbuddy.contains("CI_STARTED_AT_EPOCH:"));
+    assert!(buildbuddy.contains("Check GCP CI duration SLO"));
     assert!(buildbuddy.contains("run-buildbuddy-ci-lane-batch"));
     assert!(buildbuddy.contains("profile: submitter"));
     assert!(!buildbuddy.contains("buildbuddy-hosted"));

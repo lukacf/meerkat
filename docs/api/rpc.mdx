@@ -107,6 +107,9 @@ subset.
 | `live/status` | Live | Get the status of a live channel |
 | `live/close` | Live | Close a live channel |
 | `live/send_input` | Live | Send an input chunk (audio/text) to a live channel |
+| `live/commit_input` | Live | Commit pending input on a live channel (turn boundary) |
+| `live/interrupt` | Live | Interrupt the assistant turn on a live channel (barge-in) |
+| `live/truncate` | Live | Truncate assistant output at a client-tracked playback cursor |
 | `mob/create` | Mob | Create a mob from a definition (mob feature) |
 | `mob/list` | Mob | List mobs (mob feature) |
 | `mob/status` | Mob | Get mob status (mob feature) |

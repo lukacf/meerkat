@@ -1670,10 +1670,41 @@ export interface LiveOpenParams {
   session_id: string;
 }
 
+export interface WireLiveChannelCapabilities {
+  audio_in: boolean;
+  audio_out: boolean;
+  barge_in_supported: boolean;
+  image_in: boolean;
+  provider_native_resume: boolean;
+  text_in: boolean;
+  text_out: boolean;
+  transcript_supported: boolean;
+  video_in: boolean;
+}
+
+export interface WireLiveContinuityModeFresh {
+  mode: "fresh";
+}
+
+export interface WireLiveContinuityModeTranscriptOnly {
+  mode: "transcript_only";
+}
+
+export interface WireLiveContinuityModeDegraded {
+  mode: "degraded";
+}
+
+export interface WireLiveContinuityModeProviderNativeResume {
+  mode: "provider_native_resume";
+  provider_session_id: string;
+}
+
+export type WireLiveContinuityMode = WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly | WireLiveContinuityModeDegraded | WireLiveContinuityModeProviderNativeResume;
+
 export interface LiveOpenResult {
-  capabilities: unknown;
+  capabilities: WireLiveChannelCapabilities;
   channel_id: string;
-  continuity: unknown;
+  continuity: WireLiveContinuityMode;
   transport: unknown;
 }
 
@@ -1710,7 +1741,20 @@ export interface LiveInputChunkWireText {
   text: string;
 }
 
-export type LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText;
+export interface LiveInputChunkWireImage {
+  data: string;
+  kind: "image";
+  mime: string;
+}
+
+export interface LiveInputChunkWireVideoFrame {
+  codec: string;
+  data: string;
+  kind: "video_frame";
+  timestamp_ms: number;
+}
+
+export type LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText | LiveInputChunkWireImage | LiveInputChunkWireVideoFrame;
 
 export interface RuntimeAcceptResult {
   existing_id?: string;

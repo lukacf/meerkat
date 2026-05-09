@@ -8784,7 +8784,7 @@
   },
   "LiveInputChunkWire": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Modality-tagged input chunk for `live/send_input`.\n\nAudio payloads are base64 strings (`data`) plus stamped sample-rate /\nchannel metadata so the adapter layer can validate against the negotiated\nprovider format.",
+    "description": "Modality-tagged input chunk for `live/send_input`.\n\nAudio / image / video-frame payloads are base64 strings (`data`); the\nmodality-specific metadata (`sample_rate_hz` / `channels` for audio,\n`mime` for image, `codec` / `timestamp_ms` for video frames) lets the\nadapter validate against the negotiated provider format.\n\nT11: `Image` and `VideoFrame` mirror the typed variants on\n[`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not\nimplement a variant must reject with a typed\n`LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a\nfree-form provider error string.",
     "oneOf": [
       {
         "properties": {
@@ -8830,6 +8830,52 @@
           "text"
         ],
         "type": "object"
+      },
+      {
+        "properties": {
+          "data": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "image",
+            "type": "string"
+          },
+          "mime": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "mime",
+          "data"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "codec": {
+            "type": "string"
+          },
+          "data": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "video_frame",
+            "type": "string"
+          },
+          "timestamp_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "codec",
+          "data",
+          "timestamp_ms"
+        ],
+        "type": "object"
       }
     ],
     "title": "LiveInputChunkWire"
@@ -8849,14 +8895,134 @@
     "type": "object"
   },
   "LiveOpenResult": {
+    "$defs": {
+      "WireLiveChannelCapabilities": {
+        "description": "Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].\n\nTyped-boolean matrix advertised when a live channel opens. SDK consumers\n(Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to\n`image_in` / `video_in` / `transcript_supported` etc. without needing to\nhand-decode an opaque JSON object. CC5: closes the typed-surface gap that\nhid T8's \"anticipate `gpt-realtime-2`\" goal at the SDK boundary.\n\nField shape mirrors the core type 1:1 — adding a new capability requires\nextending both the core type and this mirror; the `From` impls below\nfail-closed if a field is dropped (compile error: missing field). New\nmodalities appear here as additional typed booleans, never as\nstringly-typed lists or provider-specific enums.",
+        "properties": {
+          "audio_in": {
+            "description": "Adapter accepts audio chunks via `live/send_input`.",
+            "type": "boolean"
+          },
+          "audio_out": {
+            "description": "Adapter emits audio chunks via `AssistantAudioChunk` observations.",
+            "type": "boolean"
+          },
+          "barge_in_supported": {
+            "description": "Adapter supports user-initiated barge-in (turn truncation) via\n`live/interrupt` and the `TurnInterrupted` observation.",
+            "type": "boolean"
+          },
+          "image_in": {
+            "description": "Adapter accepts image input via `live/send_input` (e.g. future\n`gpt-realtime-2` image support). Today: `false` for OpenAI realtime.",
+            "type": "boolean"
+          },
+          "provider_native_resume": {
+            "description": "Adapter can resume a prior provider-side session by id (transcript-\nonly resume does not count). `false` until a provider exposes a real\ncontinuation handle.",
+            "type": "boolean"
+          },
+          "text_in": {
+            "description": "Adapter accepts text chunks via `live/send_input`.",
+            "type": "boolean"
+          },
+          "text_out": {
+            "description": "Adapter emits display text via `AssistantTextDelta` observations.",
+            "type": "boolean"
+          },
+          "transcript_supported": {
+            "description": "Adapter emits spoken-audio transcripts via\n`AssistantTranscriptDelta` / `AssistantTranscriptFinal`.",
+            "type": "boolean"
+          },
+          "video_in": {
+            "description": "Adapter accepts video-frame input via `live/send_input` (e.g.\nGemini Live). Today: `false` for OpenAI realtime.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "audio_in",
+          "audio_out",
+          "text_in",
+          "text_out",
+          "image_in",
+          "video_in",
+          "transcript_supported",
+          "barge_in_supported",
+          "provider_native_resume"
+        ],
+        "type": "object"
+      },
+      "WireLiveContinuityMode": {
+        "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
+        "oneOf": [
+          {
+            "description": "Brand-new live channel; no prior session history.",
+            "properties": {
+              "mode": {
+                "const": "fresh",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "History seeded from canonical transcript only. Honest about loss of\nAEC / playback-cursor / pronunciation / provider-native state.",
+            "properties": {
+              "mode": {
+                "const": "transcript_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "History seeded but with known gaps.",
+            "properties": {
+              "mode": {
+                "const": "degraded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Provider surfaced a session id we can attach back to. Only mode that\npreserves provider-native state across reconnects. No provider\nMeerkat ships today returns a usable resume id.",
+            "properties": {
+              "mode": {
+                "const": "provider_native_resume",
+                "type": "string"
+              },
+              "provider_session_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "provider_session_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `live/open`.\n\n`transport`, `capabilities`, `continuity` are typed in Rust as\n`meerkat_core::live_adapter::*` shapes; for schema codegen they are\nprojected as opaque JSON objects (the core crate is not `schemars`-aware\ntoday and adding `JsonSchema` derives to it would propagate a heavy\noptional-feature surface across the entire workspace; the wire-side\nschema therefore documents the field names and types via the\n`Live{TransportBootstrap,ChannelCapabilities,ContinuityMode}` Rust types\nthe SDK codegen sees through the `meerkat-core` re-exports).",
+    "description": "Response payload for `live/open`.\n\n`capabilities` and `continuity` are typed wire-side mirrors of the core\n`LiveChannelCapabilities` / `LiveContinuityMode` so SDK codegen sees the\nreal shape (typed booleans, internally-tagged variant payloads) instead\nof an opaque JSON blob. CC5/CC6 (PR #650 verifier follow-up).\n\n`transport` remains an opaque `serde_json::Value` schema projection: the\ntransport-bootstrap shape is provider-pluggable and the typed wire mirror\nis tracked separately (Round-4 follow-up T4 reintroduces WebRTC with a\nreal signaling shape).",
     "properties": {
-      "capabilities": true,
+      "capabilities": {
+        "$ref": "#/$defs/WireLiveChannelCapabilities"
+      },
       "channel_id": {
         "type": "string"
       },
-      "continuity": true,
+      "continuity": {
+        "$ref": "#/$defs/WireLiveContinuityMode"
+      },
       "transport": true
     },
     "required": [
@@ -8871,7 +9037,7 @@
   "LiveSendInputParams": {
     "$defs": {
       "LiveInputChunkWire": {
-        "description": "Modality-tagged input chunk for `live/send_input`.\n\nAudio payloads are base64 strings (`data`) plus stamped sample-rate /\nchannel metadata so the adapter layer can validate against the negotiated\nprovider format.",
+        "description": "Modality-tagged input chunk for `live/send_input`.\n\nAudio / image / video-frame payloads are base64 strings (`data`); the\nmodality-specific metadata (`sample_rate_hz` / `channels` for audio,\n`mime` for image, `codec` / `timestamp_ms` for video frames) lets the\nadapter validate against the negotiated provider format.\n\nT11: `Image` and `VideoFrame` mirror the typed variants on\n[`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not\nimplement a variant must reject with a typed\n`LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a\nfree-form provider error string.",
         "oneOf": [
           {
             "properties": {
@@ -8915,6 +9081,52 @@
             "required": [
               "kind",
               "text"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "image",
+                "type": "string"
+              },
+              "mime": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "mime",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "codec": {
+                "type": "string"
+              },
+              "data": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "video_frame",
+                "type": "string"
+              },
+              "timestamp_ms": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "codec",
+              "data",
+              "timestamp_ms"
             ],
             "type": "object"
           }
@@ -22440,6 +22652,124 @@
     ],
     "title": "WireInputStateHistoryEntry",
     "type": "object"
+  },
+  "WireLiveChannelCapabilities": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].\n\nTyped-boolean matrix advertised when a live channel opens. SDK consumers\n(Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to\n`image_in` / `video_in` / `transcript_supported` etc. without needing to\nhand-decode an opaque JSON object. CC5: closes the typed-surface gap that\nhid T8's \"anticipate `gpt-realtime-2`\" goal at the SDK boundary.\n\nField shape mirrors the core type 1:1 — adding a new capability requires\nextending both the core type and this mirror; the `From` impls below\nfail-closed if a field is dropped (compile error: missing field). New\nmodalities appear here as additional typed booleans, never as\nstringly-typed lists or provider-specific enums.",
+    "properties": {
+      "audio_in": {
+        "description": "Adapter accepts audio chunks via `live/send_input`.",
+        "type": "boolean"
+      },
+      "audio_out": {
+        "description": "Adapter emits audio chunks via `AssistantAudioChunk` observations.",
+        "type": "boolean"
+      },
+      "barge_in_supported": {
+        "description": "Adapter supports user-initiated barge-in (turn truncation) via\n`live/interrupt` and the `TurnInterrupted` observation.",
+        "type": "boolean"
+      },
+      "image_in": {
+        "description": "Adapter accepts image input via `live/send_input` (e.g. future\n`gpt-realtime-2` image support). Today: `false` for OpenAI realtime.",
+        "type": "boolean"
+      },
+      "provider_native_resume": {
+        "description": "Adapter can resume a prior provider-side session by id (transcript-\nonly resume does not count). `false` until a provider exposes a real\ncontinuation handle.",
+        "type": "boolean"
+      },
+      "text_in": {
+        "description": "Adapter accepts text chunks via `live/send_input`.",
+        "type": "boolean"
+      },
+      "text_out": {
+        "description": "Adapter emits display text via `AssistantTextDelta` observations.",
+        "type": "boolean"
+      },
+      "transcript_supported": {
+        "description": "Adapter emits spoken-audio transcripts via\n`AssistantTranscriptDelta` / `AssistantTranscriptFinal`.",
+        "type": "boolean"
+      },
+      "video_in": {
+        "description": "Adapter accepts video-frame input via `live/send_input` (e.g.\nGemini Live). Today: `false` for OpenAI realtime.",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "audio_in",
+      "audio_out",
+      "text_in",
+      "text_out",
+      "image_in",
+      "video_in",
+      "transcript_supported",
+      "barge_in_supported",
+      "provider_native_resume"
+    ],
+    "title": "WireLiveChannelCapabilities",
+    "type": "object"
+  },
+  "WireLiveContinuityMode": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].\n\nInternally-tagged on `mode` (snake_case) — matches the core enum's serde\nshape exactly so the wire payload is byte-identical. CC6: closes the\ntyped-surface gap. SDK consumers get a discriminated union (TS) or\ntagged-variant (Python) instead of a raw JSON blob, and the\n`ProviderNativeResume { provider_session_id }` payload field is visible\nto schema codegen.\n\n**Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the\ncore enum from a bare-string serde shape (`\"transcript_only\"`) to the\ninternally-tagged form (`{\"mode\":\"transcript_only\"}`). This wire mirror\nmakes that shape change visible to schema codegen and SDK clients.",
+    "oneOf": [
+      {
+        "description": "Brand-new live channel; no prior session history.",
+        "properties": {
+          "mode": {
+            "const": "fresh",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "History seeded from canonical transcript only. Honest about loss of\nAEC / playback-cursor / pronunciation / provider-native state.",
+        "properties": {
+          "mode": {
+            "const": "transcript_only",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "History seeded but with known gaps.",
+        "properties": {
+          "mode": {
+            "const": "degraded",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Provider surfaced a session id we can attach back to. Only mode that\npreserves provider-native state across reconnects. No provider\nMeerkat ships today returns a usable resume id.",
+        "properties": {
+          "mode": {
+            "const": "provider_native_resume",
+            "type": "string"
+          },
+          "provider_session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "provider_session_id"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireLiveContinuityMode"
   },
   "WireLoginReady": {
     "$defs": {

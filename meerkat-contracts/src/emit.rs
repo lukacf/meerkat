@@ -127,6 +127,12 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "LiveSendInputParams": schema_for!(crate::wire::LiveSendInputParams),
         "LiveInputChunkWire": schema_for!(crate::wire::LiveInputChunkWire),
         "LiveTruncateParams": schema_for!(crate::wire::LiveTruncateParams),
+        // CC5/CC6: emit the typed wire mirrors at the top level so SDK
+        // codegen produces named typed shapes (TypedDict / interface /
+        // discriminated union) instead of inlining them as anonymous `Any`
+        // / `unknown` blobs inside `LiveOpenResult`.
+        "WireLiveChannelCapabilities": schema_for!(crate::wire::WireLiveChannelCapabilities),
+        "WireLiveContinuityMode": schema_for!(crate::wire::WireLiveContinuityMode),
         "RuntimeAcceptOutcomeType": schema_for!(crate::wire::RuntimeAcceptOutcomeType),
         "WireInputLifecycleState": schema_for!(crate::wire::WireInputLifecycleState),
         "WireInputStateHistoryEntry": schema_for!(crate::wire::WireInputStateHistoryEntry),

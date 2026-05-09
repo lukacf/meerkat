@@ -67,6 +67,17 @@ from .generated.types import (
     LiveSendInputParams as LiveSendInputParams,
     LiveStatusResult as LiveStatusResult,
     LiveTruncateParams as LiveTruncateParams,
+    # CC5/CC6: typed wire mirrors for the live `capabilities` + `continuity`
+    # shapes. Re-exported alongside `LiveOpenResult` so SDK consumers can
+    # reach the typed booleans (`image_in`, `video_in`, etc.) and the
+    # discriminated continuity-mode union without dipping into the
+    # `meerkat.generated.types` module.
+    WireLiveChannelCapabilities as WireLiveChannelCapabilities,
+    WireLiveContinuityMode as WireLiveContinuityMode,
+    WireLiveContinuityModeFresh as WireLiveContinuityModeFresh,
+    WireLiveContinuityModeTranscriptOnly as WireLiveContinuityModeTranscriptOnly,
+    WireLiveContinuityModeDegraded as WireLiveContinuityModeDegraded,
+    WireLiveContinuityModeProviderNativeResume as WireLiveContinuityModeProviderNativeResume,
     RealtimeAudioChunk as RealtimeAudioChunk,
     RealtimeCapabilities as RealtimeCapabilities,
     RealtimeInputChunk as RealtimeInputChunk,

@@ -5466,6 +5466,50 @@ impl SessionRuntime {
             return;
         };
         let channels = host.active_channels().await;
+        // Resolve the unique set of sessions backing the active channels
+        // and hot-swap each session to the post-patch global agent model
+        // before per-channel precheck. Without this, sessions retain
+        // their creation-time model and `precheck_live_open` always reads
+        // the original identity — closing the gap that makes
+        // `config/patch` a no-op for already-open live sessions and
+        // hides non-realtime resolutions from the realtime-capability
+        // gate (B19) on subsequent `live/open` reopens.
+        let mut unique_sessions: Vec<SessionId> = Vec::new();
+        for channel_id in &channels {
+            if let Ok(session_id) = host.channel_session(channel_id).await
+                && !unique_sessions.iter().any(|sid| sid == &session_id)
+            {
+                unique_sessions.push(session_id);
+            }
+        }
+        if !unique_sessions.is_empty()
+            && let Some(runtime) = self.config_runtime()
+            && let Ok(snapshot) = runtime.get().await
+        {
+            let new_global_model = snapshot.config.agent.model.clone();
+            for session_id in &unique_sessions {
+                let request = SessionLlmReconfigureRequest {
+                    model: Some(new_global_model.clone()),
+                    provider: None,
+                    provider_params: None,
+                    clear_provider_params: false,
+                    auth_binding: None,
+                    clear_auth_binding: false,
+                };
+                if let Err(err) = self
+                    .hot_swap_llm_client_on_idle_session(session_id, &request)
+                    .await
+                {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?session_id,
+                        ?err,
+                        "hot-swap on config propagation failed; per-channel \
+                         precheck will fall back to current session identity"
+                    );
+                }
+            }
+        }
         for channel_id in channels {
             let session_id = match host.channel_session(&channel_id).await {
                 Ok(id) => id,

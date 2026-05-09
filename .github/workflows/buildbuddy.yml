@@ -279,6 +279,7 @@ jobs:
           group: gcp
           profile: submitter
           mode: ${{ inputs.mode || 'full-fresh' }}
+          batch_jobs: "4"
           lanes: ${{ steps.lanes.outputs.lanes }}
 
   governance-submit:

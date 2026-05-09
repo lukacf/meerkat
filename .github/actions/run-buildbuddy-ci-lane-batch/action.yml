@@ -15,6 +15,10 @@ inputs:
     description: BuildBuddy CI mode.
     required: false
     default: full-fresh
+  batch_jobs:
+    description: Maximum number of local lane submitters to run in parallel.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -30,6 +34,7 @@ runs:
         LANES: ${{ inputs.lanes }}
         MEERKAT_BUILDBUDDY_CI_MODE: ${{ inputs.mode }}
         MEERKAT_BUILDBUDDY_LOG_ROOT: ${{ runner.temp }}/buildbuddy-logs
+        MEERKAT_BUILDBUDDY_BATCH_JOBS: ${{ inputs.batch_jobs || env.MEERKAT_BUILDBUDDY_BATCH_JOBS }}
         MEERKAT_BUILDBUDDY_OUTPUT_ROOT: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-output-roots' || '' }}
         MEERKAT_BUILDBUDDY_REPOSITORY_CACHE: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-repository-cache' || format('{0}/buildbuddy-repository-cache', runner.temp) }}
         MEERKAT_BAZEL_DISK_CACHE: ${{ env.MEERKAT_BAZEL_BACKEND == 'gcp-local' && '/home/gha/.cache/meerkat/gcp-bazel-disk-cache' || '' }}

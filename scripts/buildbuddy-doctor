@@ -400,6 +400,7 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'batch_jobs: "4"' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'group: gcp-wasm-feature' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'Detect machine-authority changes' &&
@@ -411,6 +412,7 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   ! job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'rmat-audit' &&
   ! job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'machine-authority' &&
   grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS: ${{ inputs.batch_jobs || env.MEERKAT_BUILDBUDDY_BATCH_JOBS }}' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&

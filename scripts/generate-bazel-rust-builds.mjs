@@ -921,25 +921,12 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
 const surfaceFeatureVariantSpecs = [
   { name: "surface_min", packageKey: "meerkat-rpc", features: [], targetNames: null },
   { name: "surface_comms_mcp", packageKey: "meerkat-rpc", features: ["comms", "mcp"], targetNames: null },
-  { name: "surface_mini", packageKey: "meerkat-rpc", features: ["mini-surface"], targetNames: ["rkat-rpc-mini"] },
   { name: "surface_min", packageKey: "meerkat-rest", features: [], targetNames: null },
   { name: "surface_comms", packageKey: "meerkat-rest", features: ["comms"], targetNames: null },
   { name: "surface_min", packageKey: "meerkat-mcp-server", features: [], targetNames: null },
   { name: "surface_comms", packageKey: "meerkat-mcp-server", features: ["comms"], targetNames: null },
   { name: "surface_session_store", packageKey: "meerkat-cli", features: ["session-store"], targetNames: null },
   { name: "surface_session_store_mcp", packageKey: "meerkat-cli", features: ["session-store", "mcp"], targetNames: null },
-  {
-    name: "surface_mini_providers",
-    packageKey: "meerkat-cli",
-    features: ["anthropic", "openai", "gemini", "jsonl-store", "session-store"],
-    targetNames: ["rkat-mini"],
-  },
-  {
-    name: "surface_mini_providers_skills",
-    packageKey: "meerkat-cli",
-    features: ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills"],
-    targetNames: ["rkat-mini"],
-  },
   { name: "surface_session_store_comms_mcp", packageKey: "meerkat-cli", features: ["session-store", "comms", "mcp"], targetNames: null },
 ];
 
@@ -1066,7 +1053,6 @@ for (const pkg of localPackages.values()) {
       ];
       if (rule === "rust_test" && key === "meerkat-rpc") {
         rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
-        rustcEnv.push(`        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",`);
       }
       attrs.splice(attrs.length - 1, 0, `    rustc_env = {\n${rustcEnv.join("\n")}\n    },`);
     }
@@ -1153,14 +1139,12 @@ for (const pkg of localPackages.values()) {
         env.push(`        "WORKSPACE_ROOT": ".",`);
       }
       if (key === "meerkat-cli") {
-        data.push("//meerkat-cli:rkat", "//meerkat-cli:rkat_mini_bin");
+        data.push("//meerkat-cli:rkat");
         env.push(`        "CARGO_BIN_EXE_rkat": "$(rootpath //meerkat-cli:rkat)",`);
-        env.push(`        "CARGO_BIN_EXE_rkat-mini": "$(rootpath //meerkat-cli:rkat_mini_bin)",`);
       }
       if (key === "meerkat-rpc") {
-        data.push("//meerkat-rpc:rkat_rpc_bin", "//meerkat-rpc:rkat_rpc_mini_bin");
+        data.push("//meerkat-rpc:rkat_rpc_bin");
         env.push(`        "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",`);
-        env.push(`        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",`);
       }
       if (key === "xtask") {
         const rustfmt = "@@rules_rust++rust+rustfmt_nightly-2026-04-16__aarch64-apple-darwin_tools//:rustfmt_bin";

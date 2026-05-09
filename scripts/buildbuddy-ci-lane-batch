@@ -51,6 +51,7 @@ declare -a active_pids=()
 declare -A pid_lanes=()
 declare -A pid_logs=()
 watchdog_pid=""
+heartbeat_pid=""
 
 cleanup_watchdog() {
   if [[ -n "${watchdog_pid}" ]]; then
@@ -60,10 +61,19 @@ cleanup_watchdog() {
   fi
 }
 
+cleanup_heartbeat() {
+  if [[ -n "${heartbeat_pid}" ]]; then
+    kill "${heartbeat_pid}" 2>/dev/null || true
+    wait "${heartbeat_pid}" 2>/dev/null || true
+    heartbeat_pid=""
+  fi
+}
+
 remove_active_pid() {
   local done_pid="$1"
   local remaining=()
   local pid
+  rm -f "${log_root}/active-${done_pid}"
   for pid in "${active_pids[@]}"; do
     if [[ "${pid}" != "${done_pid}" ]]; then
       remaining+=("${pid}")
@@ -85,6 +95,20 @@ print_active_tails() {
   done
 }
 
+print_active_tails_from_files() {
+  local active_file lane lane_log
+  shopt -s nullglob
+  for active_file in "${log_root}"/active-*; do
+    IFS=$'\t' read -r lane lane_log <"${active_file}" || true
+    if [[ -n "${lane_log:-}" && -f "${lane_log}" ]]; then
+      echo "::group::Tail for active BuildBuddy lane ${lane:-unknown}" >&2
+      tail -120 "${lane_log}" >&2 || true
+      echo "::endgroup::" >&2
+    fi
+  done
+  shopt -u nullglob
+}
+
 kill_active_lanes() {
   local pid
   if ((${#active_pids[@]} == 0)); then
@@ -101,6 +125,7 @@ kill_active_lanes() {
   for pid in "${active_pids[@]}"; do
     wait "${pid}" 2>/dev/null || true
   done
+  rm -f "${log_root}"/active-* 2>/dev/null || true
 }
 
 terminate_batch() {
@@ -108,6 +133,7 @@ terminate_batch() {
   echo "::warning::BuildBuddy lane batch received a termination signal; dumping active lane logs." >&2
   print_active_tails
   kill_active_lanes
+  cleanup_heartbeat
   cleanup_watchdog
   exit 143
 }
@@ -117,6 +143,7 @@ deadline_batch() {
   echo "::error::BuildBuddy lane batch reached the GCP CI SLO deadline; dumping active lane logs." >&2
   print_active_tails
   kill_active_lanes
+  cleanup_heartbeat
   cleanup_watchdog
   exit 124
 }
@@ -155,6 +182,31 @@ start_slo_watchdog() {
 
 start_slo_watchdog
 
+start_heartbeat() {
+  local interval="${MEERKAT_BUILDBUDDY_BATCH_HEARTBEAT_SECONDS:-60}"
+  if ! [[ "${interval}" =~ ^[0-9]+$ ]] || ((interval < 1)); then
+    interval=60
+  fi
+
+  (
+    while true; do
+      sleep "${interval}"
+      shopt -s nullglob
+      active_files=("${log_root}"/active-*)
+      shopt -u nullglob
+      if ((${#active_files[@]} == 0)); then
+        continue
+      fi
+      echo "::group::Active BuildBuddy lane heartbeat" >&2
+      print_active_tails_from_files
+      echo "::endgroup::" >&2
+    done
+  ) &
+  heartbeat_pid="$!"
+}
+
+start_heartbeat
+
 start_lane() {
   local lane="$1"
   local lane_log="${log_root}/batch-${lane}.log"
@@ -176,6 +228,7 @@ start_lane() {
   active_pids+=("${pid}")
   pid_lanes["${pid}"]="${lane}"
   pid_logs["${pid}"]="${lane_log}"
+  printf '%s\t%s\n' "${lane}" "${lane_log}" >"${log_root}/active-${pid}"
   echo "Started BuildBuddy lane ${lane} (pid ${pid})."
 }
 
@@ -207,6 +260,7 @@ reap_one_lane() {
   fi
   print_active_tails
   kill_active_lanes
+  cleanup_heartbeat
   cleanup_watchdog
   exit "${lane_status}"
 }
@@ -225,4 +279,5 @@ while ((next_lane < ${#lanes[@]} || ${#active_pids[@]} > 0)); do
   fi
 done
 
+cleanup_heartbeat
 cleanup_watchdog

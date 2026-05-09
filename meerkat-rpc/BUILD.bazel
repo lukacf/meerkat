@@ -186,54 +186,6 @@ rust_binary(
     ),
 )
 
-rust_binary(
-    name = "rkat_rpc_mini_bin",
-    aliases = aliases(package_name = "meerkat-rpc"),
-    crate_name = "rkat_rpc_mini",
-    crate_root = "src/main.rs",
-    crate_features = [
-        "comms",
-        "mcp",
-        "mob",
-        "schedule",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ],
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "rkat-rpc-mini",
-        "CARGO_MANIFEST_DIR": "meerkat-rpc",
-    },
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-    ),
-    deps = [
-        "//meerkat-mob-mcp:meerkat_mob_mcp",
-        "//meerkat-mob:meerkat_mob",
-        "//meerkat-rpc:meerkat_rpc",
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-    ),
-)
-
 rust_test(
     name = "integration_server_test",
     aliases = aliases(
@@ -268,19 +220,16 @@ rust_test(
         "CARGO_BIN_NAME": "integration_server",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "integration",
     ],
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -342,7 +291,6 @@ rust_test(
         "CARGO_BIN_NAME": "live_rpc_regression",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "live",
@@ -354,12 +302,10 @@ rust_test(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -421,7 +367,6 @@ rust_test(
         "CARGO_BIN_NAME": "live_smoke_rpc",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "live",
@@ -433,12 +378,10 @@ rust_test(
         "//test-fixtures/mcp-test-server:package_runfiles",
         "//test-fixtures/surface-build-fixtures:package_runfiles",
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -500,7 +443,6 @@ rust_test(
         "CARGO_BIN_NAME": "realtime_ws_protocol",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "fast",
@@ -508,12 +450,10 @@ rust_test(
     size = "small",
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -575,7 +515,6 @@ rust_test(
         "CARGO_BIN_NAME": "regression_rpc",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "fast",
@@ -583,12 +522,10 @@ rust_test(
     size = "small",
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -650,7 +587,6 @@ rust_test(
         "CARGO_BIN_NAME": "rpc_auth_methods",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "fast",
@@ -658,12 +594,10 @@ rust_test(
     size = "small",
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -725,7 +659,6 @@ rust_test(
         "CARGO_BIN_NAME": "runtime_backed_ingress",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "fast",
@@ -733,12 +666,10 @@ rust_test(
     size = "small",
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -800,19 +731,16 @@ rust_test(
         "CARGO_BIN_NAME": "tcp_e2e",
         "CARGO_MANIFEST_DIR": "./meerkat-rpc",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     tags = [
         "e2e",
     ],
     data = [
         "//meerkat-rpc:rkat_rpc_bin",
-        "//meerkat-rpc:rkat_rpc_mini_bin",
     ],
     env = {
         "RUST_MIN_STACK": "16777216",
         "CARGO_BIN_EXE_rkat-rpc": "$(rootpath //meerkat-rpc:rkat_rpc_bin)",
-        "CARGO_BIN_EXE_rkat-rpc-mini": "$(rootpath //meerkat-rpc:rkat_rpc_mini_bin)",
     },
     proc_macro_deps = all_crate_deps(
         package_name = "meerkat-rpc",
@@ -900,52 +828,6 @@ rust_binary(
     rustc_env = {
         "CARGO_PKG_VERSION": "0.6.4",
         "CARGO_BIN_NAME": "rkat-rpc",
-        "CARGO_MANIFEST_DIR": "meerkat-rpc",
-    },
-    tags = [
-        "buildbuddy",
-        "feature-matrix",
-        "surface",
-    ],
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-    ),
-    deps = [
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-        ":meerkat_rpc_surface_min",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-    ),
-)
-
-rust_binary(
-    name = "rkat_rpc_mini_surface_min_bin",
-    aliases = aliases(package_name = "meerkat-rpc"),
-    crate_name = "rkat_rpc_mini",
-    crate_root = "src/main.rs",
-    crate_features = [],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ],
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "rkat-rpc-mini",
         "CARGO_MANIFEST_DIR": "meerkat-rpc",
     },
     tags = [
@@ -1064,148 +946,6 @@ rust_binary(
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_store_agent_factory_build",
         ":meerkat_rpc_surface_comms_mcp",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-    ),
-)
-
-rust_binary(
-    name = "rkat_rpc_mini_surface_comms_mcp_bin",
-    aliases = aliases(package_name = "meerkat-rpc"),
-    crate_name = "rkat_rpc_mini",
-    crate_root = "src/main.rs",
-    crate_features = [
-        "comms",
-        "mcp",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ],
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "rkat-rpc-mini",
-        "CARGO_MANIFEST_DIR": "meerkat-rpc",
-    },
-    tags = [
-        "buildbuddy",
-        "feature-matrix",
-        "surface",
-    ],
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-    ),
-    deps = [
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-        ":meerkat_rpc_surface_comms_mcp",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-    ),
-)
-
-rust_library(
-    name = "meerkat_rpc_surface_mini",
-    aliases = aliases(package_name = "meerkat-rpc"),
-    crate_name = "meerkat_rpc",
-    crate_root = "src/lib.rs",
-    crate_features = [
-        "mini-surface",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ],
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_MANIFEST_DIR": "meerkat-rpc",
-    },
-    tags = [
-        "buildbuddy",
-        "feature-matrix",
-        "surface",
-    ],
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-    ),
-    deps = [
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-    ] + all_crate_deps(
-        package_name = "meerkat-rpc",
-        normal = True,
-    ),
-)
-
-rust_binary(
-    name = "rkat_rpc_mini_surface_mini_bin",
-    aliases = aliases(package_name = "meerkat-rpc"),
-    crate_name = "rkat_rpc_mini",
-    crate_root = "src/main.rs",
-    crate_features = [
-        "mini-surface",
-    ],
-    edition = "2024",
-    compile_data = [
-        "Cargo.toml",
-        "src/handlers/realtime.rs",
-        "src/realtime_ws.rs",
-    ],
-    srcs = glob(["src/**/*.rs"]),
-    visibility = ["//visibility:public"],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.4",
-        "CARGO_BIN_NAME": "rkat-rpc-mini",
-        "CARGO_MANIFEST_DIR": "meerkat-rpc",
-    },
-    tags = [
-        "buildbuddy",
-        "feature-matrix",
-        "surface",
-    ],
-    proc_macro_deps = all_crate_deps(
-        package_name = "meerkat-rpc",
-        proc_macro = True,
-    ),
-    deps = [
-        "//meerkat:meerkat",
-        "//meerkat:meerkat_anthropic_agent_factory_build",
-        "//meerkat:meerkat_client_agent_factory_build",
-        "//meerkat:meerkat_comms_agent_factory_build",
-        "//meerkat:meerkat_contracts_agent_factory_build",
-        "//meerkat:meerkat_core_agent_factory_build",
-        "//meerkat:meerkat_models_agent_factory_build",
-        "//meerkat:meerkat_providers_agent_factory_build",
-        "//meerkat:meerkat_runtime_agent_factory_build",
-        "//meerkat:meerkat_store_agent_factory_build",
-        ":meerkat_rpc_surface_mini",
     ] + all_crate_deps(
         package_name = "meerkat-rpc",
         normal = True,

@@ -288,10 +288,16 @@ fn gcp_feature_matrix_lane_fans_out_remote_cargo_actions() {
         "submitter profile must install Rust because Bazel target selection still reads cargo metadata locally"
     );
     assert!(
-        workflow.contains("group: gcp\n          profile: submitter")
-            && workflow.contains("group: gcp-governance\n          profile: submitter")
-            && workflow.contains("group: gcp-wasm-feature\n          profile: submitter"),
-        "GCP submit-only jobs should use the lightweight submitter profile and let remote Bazel executors do compilation"
+        workflow.contains("group: gcp\n          profile: submitter"),
+        "GCP submit-only job should use the lightweight submitter profile and let remote Bazel executors do compilation"
+    );
+    assert!(
+        workflow.contains("group: gcp-governance\n          profile: submitter"),
+        "GCP governance submitter should remain a separate visible job"
+    );
+    assert!(
+        workflow.contains("group: gcp-wasm-feature\n          profile: submitter"),
+        "GCP WASM/feature submitter should remain a separate visible job"
     );
 }
 

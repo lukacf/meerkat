@@ -16,11 +16,6 @@ categories.workspace = true
 name = "rkat"
 path = "src/main.rs"
 
-[[bin]]
-name = "rkat-mini"
-path = "src/main.rs"
-test = false
-
 [[test]]
 name = "system_cli_init"
 path = "tests/system_cli_init.rs"

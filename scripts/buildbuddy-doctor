@@ -262,7 +262,7 @@ else
 fi
 
 if [[ -x scripts/run-surface-feature-matrix ]] &&
-  grep -Fq './scripts/run-surface-feature-matrix' .github/workflows/cargo.yml &&
+  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
   grep -Fq -- '-p meerkat-rpc \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-rest \' scripts/run-surface-feature-matrix &&
   grep -Fq -- '-p meerkat-mcp-server' scripts/run-surface-feature-matrix &&
@@ -334,56 +334,40 @@ fi
 rm -rf "${dispatch_log_root}"
 
 if grep -Fq 'name: CI' .github/workflows/ci.yml &&
-  grep -Fq 'name: Select CI backend' .github/workflows/ci.yml &&
-  grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
-  grep -Fq 'LEGACY_BUILDBUDDY' .github/workflows/ci.yml &&
-  grep -Fq 'External pull request cannot use secret-backed CI backend' .github/workflows/ci.yml &&
+  grep -Fq 'name: GHA Cargo' .github/workflows/ci.yml &&
+  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
+  grep -Fq "github.actor == 'lukacf'" .github/workflows/ci.yml &&
+  grep -Fq 'Only lukacf can run the secret-backed GCP BuildBuddy lane.' .github/workflows/ci.yml &&
   grep -Fq 'uses: ./.github/workflows/cargo.yml' .github/workflows/ci.yml &&
   grep -Fq 'uses: ./.github/workflows/buildbuddy.yml' .github/workflows/ci.yml &&
-  grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
-  grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
-  grep -Fq 'mode: ${{ needs.select_backend.outputs.mode }}' .github/workflows/ci.yml &&
-  grep -Fq 'ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}' .github/workflows/ci.yml &&
-  grep -Fq 'name: BuildBuddy hosted CI' .github/workflows/ci.yml &&
-  grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/ci.yml &&
-  grep -Fq 'name: CI gate' .github/workflows/ci.yml &&
   grep -Fq 'name: Cargo CI' .github/workflows/cargo.yml &&
   grep -Fq 'workflow_call:' .github/workflows/cargo.yml &&
-  grep -Fq 'name: Cargo CI gate' .github/workflows/cargo.yml &&
-  grep -Fq 'name: BuildBuddy CI' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
+  grep -Fq 'name: GCP BuildBuddy CI' .github/workflows/buildbuddy.yml &&
   grep -Fq 'workflow_call:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'pull_request:' .github/workflows/cargo.yml &&
   ! grep -Fq 'push:' .github/workflows/cargo.yml &&
   ! grep -Fq 'pull_request:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'push:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'backend:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'ci_started_at_epoch:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcp-buildbuddy' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'BuildBuddy CI gate' .github/workflows/buildbuddy.yml; then
-  pass "Top-level CI exposes Cargo, hosted BuildBuddy, and GCP BuildBuddy backend paths"
+  ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml &&
+  ! grep -Fq 'buildbuddy-hosted' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'GCP BuildBuddy gate' .github/workflows/buildbuddy.yml; then
+  pass "Top-level CI exposes default Cargo and owner-gated GCP BuildBuddy lanes"
 else
-  bad "Top-level CI backend selector is not wired correctly"
+  bad "Top-level CI two-lane routing is not wired correctly"
 fi
 
-if grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
-  grep -Fq 'backend: buildbuddy-hosted' .github/workflows/ci.yml &&
-  grep -Fq 'backend: gcp-buildbuddy' .github/workflows/ci.yml &&
-  grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
+if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
   grep -Fq 'buildbuddy-gcp-executors' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN' .github/workflows/buildbuddy.yml &&
   grep -Fq 'gcloud compute instance-groups managed resize "${MEERKAT_GCP_BUILDBUDDY_MIG}"' .github/workflows/buildbuddy.yml &&
   grep -Fq 'resize_existing_pool 0' scripts/gcp-buildbuddy-executor-pool &&
   grep -Fq 'Skipping wait for executor pool scale-down' scripts/gcp-buildbuddy-executor-pool &&
-  grep -Fq 'vars.MEERKAT_BUILDBUDDY == '"'"'true'"'"'' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'MEERKAT_BUILDBUDDY_CI_MODE' .github/workflows/ci.yml &&
   ! grep -Fq "mode: \${{ (github.event_name == 'workflow_dispatch'" .github/workflows/buildbuddy.yml &&
-  grep -Fq 'MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/architecture/buildbuddy-bazel-poc.md &&
-  grep -Fq 'MEERKAT_CI_BACKEND' docs/architecture/buildbuddy-bazel-poc.md &&
   grep -Fq 'scripts/buildbuddy-dev' docs/architecture/buildbuddy-bazel-poc.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' scripts/agent-gate &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND' scripts/build-backend-env &&
@@ -393,84 +377,60 @@ if grep -Fq 'MEERKAT_CI_BACKEND' .github/workflows/ci.yml &&
   grep -Fq 'source "${ROOT}/scripts/build-backend-env"' scripts/pre-push-unit.sh &&
   grep -Fq 'scripts/agent-gate" --staged' scripts/test-changed-crates.sh &&
   grep -Fq 'scripts/agent-gate" --committed --clippy-only' scripts/pre-push-clippy.sh; then
-  pass "CI backend selector and local BuildBuddy opt-in switches are wired consistently"
+  pass "CI and local BuildBuddy opt-in switches are wired consistently"
 else
-  bad "CI backend selector or BuildBuddy opt-in switch is not wired consistently"
+  bad "CI or BuildBuddy opt-in switch is not wired consistently"
 fi
 
-if job_has_line .github/workflows/ci.yml select_backend 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/ci.yml gate 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'name: GCP BuildBuddy submitter' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'timeout-minutes: 20' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'fetch-depth: 1' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'Select GCP BuildBuddy lanes' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'run-buildbuddy-ci-lane-batch' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit "CI_STARTED_AT_EPOCH: \${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'group: gcp' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'profile: submitter' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit "mode: \${{ inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh' }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-native-submit 'lanes: ${{ steps.gcp-lanes.outputs.lanes }}' &&
+if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
+  job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'name: Native submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'name: Governance submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'name: WASM and feature submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'CI_STARTED_AT_EPOCH:' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'group: gcp-wasm-feature' &&
+  grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'timeout-minutes: 20' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'fetch-depth: 1' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit "CI_STARTED_AT_EPOCH: \${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'group: gcp-governance' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit 'profile: submitter' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-governance-submit "mode: \${{ inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh' }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'timeout-minutes: 20' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'fetch-depth: 1' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit "CI_STARTED_AT_EPOCH: \${{ needs.gcp-control-plane-up.outputs.started_at_epoch }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'group: gcp-wasm-feature' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit 'profile: submitter' &&
-  job_has_line .github/workflows/buildbuddy.yml gcp-wasm-feature-submit "mode: \${{ inputs.mode || vars.MEERKAT_BUILDBUDDY_CI_MODE || 'full-fresh' }}" &&
-  job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest' &&
-  job_has_line .github/workflows/buildbuddy.yml gate "CI_STARTED_AT_EPOCH: \${{ inputs.ci_started_at_epoch || needs.gcp-control-plane-up.outputs.started_at_epoch }}"; then
-  pass "GCP BuildBuddy CI uses a few GitHub-hosted submitters with Bazel lane fanout"
+  job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
+  pass "GCP BuildBuddy CI uses split GitHub-hosted submitters with SLO and live heartbeat"
 else
-  bad "GCP BuildBuddy CI is not using the bounded few-submitter GCP fanout shape"
+  bad "GCP BuildBuddy CI is not using the bounded split-submitter shape"
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'fmt-lint:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'test-unit:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'integration-fast:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'e2e-system:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'SDK suites + parity gates' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'fmt-static' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'test-unit' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'integration-fast' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'sdk-suites' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'changed-gate:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'Changed-path gate (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'rust-release-packaging:' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'e2e-smoke:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'BuildBuddy E2E smoke lane' .github/workflows/live-e2e.yml &&
   ! grep -Fq 'Build + clippy (Bazel/RBE)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq '(compat)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'strategy:' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'run-buildbuddy-ci-lane' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'scripts/buildbuddy-ci-lane' .github/actions/run-buildbuddy-ci-lane/action.yml &&
+  grep -Fq 'run-buildbuddy-ci-lane-batch' .github/workflows/buildbuddy.yml &&
   grep -Fq 'workspace-unit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'e2e-fast-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'e2e-live-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'e2e-auth-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'machine-authority-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'rmat-audit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'seam-inventory-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'sdk-suites-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'wasm-contract-rbe' scripts/buildbuddy-bazel-poc &&
+  grep -Fq 'wasm-check-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'security-audit-rbe' scripts/buildbuddy-bazel-poc &&
-  grep -Fq 'buildbuddy-ci-full:' Makefile &&
-  grep -Fq 'e2e-live' scripts/buildbuddy-ci-lane &&
   ! grep -Fq 'run_compat_lane' scripts/buildbuddy-ci-lane &&
   ! grep -Fq './scripts/repo-cargo' scripts/buildbuddy-ci-lane &&
   ! grep -Fq 'cargo-deny check' scripts/buildbuddy-ci-lane &&
   ! grep -Fq 'wasm-pack test' scripts/buildbuddy-ci-lane; then
-  pass "BuildBuddy workflow exposes standard CI as a 1:1 Cargo lane map"
+  pass "BuildBuddy workflow exposes the GCP Bazel lane batch"
 else
-  bad "BuildBuddy workflow does not match the Cargo lane map"
+  bad "BuildBuddy workflow does not match the simplified GCP lane map"
 fi
 
 if grep -Fq 'default_target="//tools/buildbuddy:sdk_suites_cargo_equivalent_test"' scripts/buildbuddy-bazel-poc &&
@@ -522,15 +482,8 @@ release_surface_count="$(
   ' scripts/buildbuddy-bazel-poc
 )"
 if [[ "${release_surface_count}" -eq 5 ]] &&
-  awk '
-    /release-build-/ { lane = 1 }
-    lane && /default_target=/ && /rkat_mini|rkat_rpc_mini_bin/ { bad = 1 }
-    lane && /;;/ { lane = 0 }
-    END { exit bad ? 1 : 0 }
-  ' scripts/buildbuddy-bazel-poc &&
-  ! grep -Fq 'rkat-rpc-mini' .github/workflows/release.yml &&
   grep -Fq 'MEERKAT_RELEASE_BUILDBUDDY_JOBS' .github/workflows/release.yml; then
-  pass "BuildBuddy release lanes omit mini binaries and package only public runtime surfaces"
+  pass "BuildBuddy release lanes package only public runtime surfaces"
 else
   bad "BuildBuddy release lanes are not aligned with the shipped binary surface set"
 fi
@@ -567,21 +520,14 @@ fi
 
 if ! grep -Fq 'rust-release-packaging:' .github/workflows/cargo.yml &&
   grep -Fq 'Verify Rust release config' .github/workflows/release.yml &&
-  grep -Fq 'e2e-system' .github/workflows/cargo.yml &&
-  ! grep -Fq 'e2e-live:' .github/workflows/cargo.yml &&
-  ! grep -Fq 'e2e-smoke:' .github/workflows/cargo.yml &&
-  grep -Fq 'Cargo E2E live lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'BuildBuddy E2E smoke lane' .github/workflows/live-e2e.yml &&
-  grep -Fq 'selected_backend="${{ needs.select_backend.outputs.backend }}"' .github/workflows/ci.yml &&
-  grep -Fq 'cargo_result="${{ needs.cargo.result }}"' .github/workflows/ci.yml &&
-  grep -Fq 'hosted_result="${{ needs.buildbuddy_hosted.result }}"' .github/workflows/ci.yml &&
-  grep -Fq 'gcp_result="${{ needs.gcp_buildbuddy.result }}"' .github/workflows/ci.yml &&
-  grep -Fq 'case "$selected_backend" in' .github/workflows/ci.yml &&
-  grep -Fq 'needs: [fmt-lint, sdk-suites, machine-authority, test-unit, integration-fast, e2e-fast, e2e-system, test-minimal' .github/workflows/cargo.yml &&
-  ! grep -Fq 'needs: [fmt-lint, sdk-suites, rust-release-packaging' .github/workflows/cargo.yml; then
-  pass "CI gate follows the selected backend and Cargo gate preserves standard Cargo lane coverage"
+  grep -Fq 'scripts/cargo-agent-gate' .github/workflows/cargo.yml &&
+  grep -Fq 'name: GHA Cargo' .github/workflows/ci.yml &&
+  grep -Fq 'name: GCP BuildBuddy' .github/workflows/ci.yml &&
+  ! grep -Fq 'BuildBuddy hosted' .github/workflows/ci.yml &&
+  ! grep -Fq 'buildbuddy-hosted' .github/workflows/ci.yml; then
+  pass "CI exposes one default Cargo lane plus one owner-gated GCP BuildBuddy lane"
 else
-  bad "CI gate does not match the backend selector and standard/nightly lane split"
+  bad "CI does not match the simplified two-lane shape"
 fi
 
 if grep -Fq 'name = "e2e_system_tests"' BUILD.bazel &&

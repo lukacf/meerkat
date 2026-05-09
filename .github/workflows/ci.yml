@@ -12,26 +12,21 @@ on:
       - opened
       - synchronize
       - reopened
-      - edited
-      - labeled
-      - unlabeled
       - ready_for_review
   workflow_dispatch:
     inputs:
-      backend:
-        description: CI backend to run.
-        required: false
-        default: auto
+      lane:
+        description: CI lane to run.
+        required: true
+        default: cargo
         type: choice
         options:
-          - auto
           - cargo
-          - buildbuddy-hosted
           - gcp-buildbuddy
       mode:
-        description: BuildBuddy gate to run when using a BuildBuddy backend.
+        description: GCP BuildBuddy mode.
         required: false
-        default: ""
+        default: full-fresh
         type: string
 
 concurrency:
@@ -42,203 +37,50 @@ permissions:
   contents: read
   id-token: write
 
-env:
-  MEERKAT_DOGMA_CLEANUP_GATE: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE || 'false' }}
-
 jobs:
-  select_backend:
-    name: Select CI backend
-    runs-on: ubuntu-latest
-    outputs:
-      backend: ${{ steps.select.outputs.backend }}
-      mode: ${{ steps.select.outputs.mode }}
-      started_at_epoch: ${{ steps.select.outputs.started_at_epoch }}
-    steps:
-      - name: Select backend
-        id: select
-        shell: bash
-        env:
-          INPUT_BACKEND: ${{ inputs.backend || 'auto' }}
-          INPUT_MODE: ${{ inputs.mode || '' }}
-          VAR_BACKEND: ${{ vars.MEERKAT_CI_BACKEND || '' }}
-          VAR_BUILDBUDDY_MODE: ${{ vars.MEERKAT_BUILDBUDDY_CI_MODE || '' }}
-          LEGACY_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || '' }}
-          EVENT_NAME: ${{ github.event_name }}
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name || '' }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          ci_started_at_epoch="$(date +%s)"
-          backend="${INPUT_BACKEND:-auto}"
-          if [[ -z "${backend}" || "${backend}" == "auto" ]]; then
-            backend="${VAR_BACKEND:-}"
-          fi
-
-          if [[ -z "${backend}" ]]; then
-            case "${LEGACY_BUILDBUDDY}" in
-              true|1) backend="buildbuddy-hosted" ;;
-              *) backend="cargo" ;;
-            esac
-          fi
-
-          case "${backend}" in
-            cargo|buildbuddy-hosted|gcp-buildbuddy) ;;
-            *)
-              echo "::error::Unsupported MEERKAT_CI_BACKEND '${backend}'. Expected cargo, buildbuddy-hosted, or gcp-buildbuddy."
-              exit 2
-              ;;
-          esac
-
-          if [[ "${EVENT_NAME}" == "pull_request" && -n "${PR_HEAD_REPO}" && "${PR_HEAD_REPO}" != "${REPOSITORY}" && "${backend}" != "cargo" ]]; then
-            echo "External pull request cannot use secret-backed CI backend '${backend}'; using cargo."
-            backend="cargo"
-          fi
-
-          mode="${INPUT_MODE:-}"
-          if [[ -z "${mode}" ]]; then
-            mode="${VAR_BUILDBUDDY_MODE:-full-warm}"
-          fi
-
-          echo "Selected CI backend: ${backend}"
-          echo "Selected BuildBuddy mode: ${mode}"
-          echo "backend=${backend}" >> "${GITHUB_OUTPUT}"
-          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
-          echo "started_at_epoch=${ci_started_at_epoch}" >> "${GITHUB_OUTPUT}"
-
   cargo:
-    name: Cargo CI
-    needs: [select_backend]
-    if: ${{ needs.select_backend.outputs.backend == 'cargo' }}
+    name: GHA Cargo
+    if: >-
+      ${{
+        (github.event_name == 'workflow_dispatch' && inputs.lane == 'cargo') ||
+        (github.event_name != 'workflow_dispatch' && github.actor != 'lukacf')
+      }}
     uses: ./.github/workflows/cargo.yml
     with:
-      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
-      machine_authority_head_sha: ${{ github.sha }}
+      base_sha: >-
+        ${{
+          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+          github.event_name == 'push' && github.event.before ||
+          ''
+        }}
 
-  buildbuddy_hosted:
-    name: BuildBuddy hosted CI
-    needs: [select_backend]
-    if: ${{ needs.select_backend.outputs.backend == 'buildbuddy-hosted' }}
+  gcp-buildbuddy:
+    name: GCP BuildBuddy
+    if: >-
+      ${{
+        github.actor == 'lukacf' &&
+        ((github.event_name == 'workflow_dispatch' && inputs.lane == 'gcp-buildbuddy') ||
+         github.event_name == 'push' ||
+         github.event_name == 'pull_request')
+      }}
     uses: ./.github/workflows/buildbuddy.yml
     with:
-      backend: buildbuddy-hosted
-      mode: ${{ needs.select_backend.outputs.mode }}
-      ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}
-      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
+      mode: ${{ inputs.mode || 'full-fresh' }}
+      machine_authority_base_sha: >-
+        ${{
+          github.event_name == 'pull_request' && github.event.pull_request.base.sha ||
+          github.event_name == 'push' && github.event.before ||
+          ''
+        }}
       machine_authority_head_sha: ${{ github.sha }}
     secrets: inherit
 
-  gcp_buildbuddy:
-    name: GCP BuildBuddy CI
-    needs: [select_backend]
-    if: ${{ needs.select_backend.outputs.backend == 'gcp-buildbuddy' }}
-    uses: ./.github/workflows/buildbuddy.yml
-    with:
-      backend: gcp-buildbuddy
-      mode: ${{ needs.select_backend.outputs.mode }}
-      ci_started_at_epoch: ${{ needs.select_backend.outputs.started_at_epoch }}
-      machine_authority_base_sha: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event_name == 'push' && github.event.before || '' }}
-      machine_authority_head_sha: ${{ github.sha }}
-    secrets: inherit
-
-  dogma-cleanup-gate:
-    name: Dogma cleanup review gate
-    if: ${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}
-    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
-    env:
-      DOGMA_CLEANUP_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
-    steps:
-      - name: Checkout pull request
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          path: pr
-
-      - name: Checkout immutable gate source
-        if: ${{ github.event_name == 'pull_request' }}
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.pull_request.base.sha }}
-          fetch-depth: 1
-          path: dogma-gate-source
-
-      - name: Enforce dogma cleanup review packet
-        shell: bash
-        run: |
-          pr_repo="$GITHUB_WORKSPACE/pr"
-          gate_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/dogma_cleanup_gate.py"
-          if [[ ! -f "$gate_script" ]]; then
-            gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"
-            echo "Base dogma cleanup gate is not available; using PR checkout for bootstrap."
-          fi
-          python3 "$gate_script" --repo "$pr_repo" --base "$DOGMA_CLEANUP_BASE" --github-event "$GITHUB_EVENT_PATH"
-
-      - name: Validate PR-head dogma gate fixtures
-        shell: bash
-        run: |
-          pr_repo="$GITHUB_WORKSPACE/pr"
-          pr_gate_script="$pr_repo/scripts/dogma_cleanup_gate.py"
-          pr_fixture_dir="$pr_repo/scripts/fixtures/dogma_cleanup_gate"
-          pr_test_script="$pr_repo/scripts/tests/dogma_cleanup_gate_test.py"
-          base_test_script="$GITHUB_WORKSPACE/dogma-gate-source/scripts/tests/dogma_cleanup_gate_test.py"
-          if [[ ! -f "$pr_test_script" ]]; then
-            echo "::error::PR-head dogma gate fixture suite is missing: scripts/tests/dogma_cleanup_gate_test.py"
-            exit 1
-          fi
-          if [[ ! -f "$pr_gate_script" ]]; then
-            echo "::error::PR-head dogma gate script is missing: scripts/dogma_cleanup_gate.py"
-            exit 1
-          fi
-          if [[ -f "$base_test_script" ]]; then
-            DOGMA_GATE_REPO_ROOT="$pr_repo" \
-            DOGMA_GATE_SCRIPT="$pr_gate_script" \
-            DOGMA_GATE_FIXTURE_DIR="$pr_fixture_dir" \
-              python3 "$base_test_script" -v
-          else
-            echo "Base dogma cleanup fixture oracle is not available; using PR checkout for bootstrap."
-            python3 "$pr_test_script" -v
-          fi
-
-  gate:
-    name: CI gate
-    if: always()
-    needs:
-      - select_backend
-      - cargo
-      - buildbuddy_hosted
-      - gcp_buildbuddy
-      - dogma-cleanup-gate
+  unauthorized-gcp-buildbuddy:
+    name: GCP BuildBuddy authorization
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'gcp-buildbuddy' && github.actor != 'lukacf' }}
     runs-on: ubuntu-latest
     steps:
-      - name: Check selected backend
+      - name: Reject unauthorized GCP BuildBuddy run
         run: |
-          selected_backend="${{ needs.select_backend.outputs.backend }}"
-          cargo_result="${{ needs.cargo.result }}"
-          hosted_result="${{ needs.buildbuddy_hosted.result }}"
-          gcp_result="${{ needs.gcp_buildbuddy.result }}"
-          dogma_result="${{ needs.dogma-cleanup-gate.result }}"
-          dogma_enabled="${{ vars.MEERKAT_DOGMA_CLEANUP_GATE == 'true' || vars.MEERKAT_DOGMA_CLEANUP_GATE == '1' }}"
-
-          echo "Dogma cleanup gate: $dogma_result"
-          if [[ "$dogma_enabled" == "true" && "$dogma_result" != "success" ]]; then
-            exit 1
-          fi
-
-          echo "Selected CI backend: $selected_backend"
-          echo "Cargo CI: $cargo_result"
-          echo "BuildBuddy hosted CI: $hosted_result"
-          echo "GCP BuildBuddy CI: $gcp_result"
-
-          case "$selected_backend" in
-            cargo)
-              [[ "$cargo_result" == "success" ]]
-              ;;
-            buildbuddy-hosted)
-              [[ "$hosted_result" == "success" ]]
-              ;;
-            gcp-buildbuddy)
-              [[ "$gcp_result" == "success" ]]
-              ;;
-            *)
-              echo "::error::Unknown selected CI backend '$selected_backend'"
-              exit 2
-              ;;
-          esac
+          echo "::error::Only lukacf can run the secret-backed GCP BuildBuddy lane."
+          exit 1

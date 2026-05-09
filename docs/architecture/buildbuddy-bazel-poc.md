@@ -206,20 +206,16 @@ It runs `workspace-fast-clippy-rbe` and `workspace-build-clippy-rbe` in parallel
 on isolated fresh lanes, writes compact summaries and per-lane logs outside the
 Bazel output root, and cleans up the temporary output roots. Use `--warm` to
 reuse a stable output root for repeated local or agent gates. The optional
-`.github/workflows/buildbuddy.yml` workflow can run manually or as a reusable
-workflow called by CI, requires a `BUILDBUDDY_API_KEY` secret, installs the
-pinned `bb` binary, and exposes the same standard lane boundaries as Cargo CI.
-Top-level GitHub CI selects one reusable backend at a time:
+`.github/workflows/buildbuddy.yml` workflow is the reusable GCP BuildBuddy lane
+called by CI. Top-level GitHub CI exposes two paths:
 
-- `cargo`: the GitHub Actions Cargo workflow.
-- `buildbuddy-hosted`: the existing hosted BuildBuddy Bazel workflow.
-- `gcp-buildbuddy`: the GCP-owned self-hosted BuildBuddy control plane and
+- `cargo`: the default GitHub Actions Cargo workflow for pushes, pull requests,
+  and manual dispatches.
+- `gcp-buildbuddy`: the owner-gated GCP self-hosted BuildBuddy control plane and
   executor fleet.
 
-Set `MEERKAT_CI_BACKEND` to one of those values for automatic CI. If that
-variable is unset, the legacy `MEERKAT_BUILDBUDDY=true` (or `1`) switch selects
-`buildbuddy-hosted`; otherwise CI falls back to `cargo`. Manual `CI` workflow
-dispatch can override the backend for a single run.
+Manual `CI` workflow dispatch can run the GCP BuildBuddy lane, but the
+secret-backed lane is restricted to the repository owner.
 
 The dispatch modes are:
 
@@ -251,9 +247,8 @@ metadata after the cache is warm.
 
 ## GCP CI Shape
 
-When top-level CI selects `MEERKAT_CI_BACKEND=gcp-buildbuddy`, or a manual run
-uses `backend: gcp-buildbuddy`, GitHub Actions is only the
-submitter/coordinator:
+When the owner manually dispatches the GCP BuildBuddy lane, GitHub Actions is
+only the submitter/coordinator:
 
 1. `gcp-control-plane-up` authenticates to GCP, ensures the always-on
    self-hosted BuildBuddy control plane/cache VM is running, and publishes its
@@ -262,13 +257,9 @@ submitter/coordinator:
    Secret Manager for the executors, creates the executor managed instance group
    if it is missing, and scales it to
    `MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE` (default `12`).
-3. Three thin submitter jobs batch the Bazel lanes:
-   - native: `fmt-lint`, `test-unit`, `integration-fast`
-   - governance: `seam-inventory`, `rmat-audit`, and path-aware
-     `machine-authority`
-   - wasm/feature: `sdk-suites`, `wasm-contract-tests`, `wasm-check`,
-     `test-minimal`, `test-feature-matrix-lib`,
-     `test-feature-matrix-surface-checks`, `audit`
+3. One thin submitter job batches the Bazel lanes, including format/static,
+   clippy, unit, integration-fast, SDK, WASM, feature-matrix, audit, RMAT,
+   seam-inventory, and machine-authority checks.
 4. Bazel uses `--config=buildbuddy-linux-gcp-ci-rbe`, which selects
    `//platforms:linux_x86_64_gcp_ci`. That platform routes actions to
    BuildBuddy pool `meerkat-ci`, enables external network, and runs actions in
@@ -304,12 +295,9 @@ scripts/gcp-buildbuddy-executor-pool up
 scripts/gcp-buildbuddy-executor-pool down
 ```
 
-The GCP CI backend refuses hosted `*.buildbuddy.io` endpoints. Hosted
-BuildBuddy remains available to release-specific lanes through the existing
-`buildbuddy-hosted` backend; `gcp-buildbuddy` is reserved for the GCP-owned
-control plane and burst executor fleet. The GCP platform intentionally does not
-set BuildBuddy Cloud's `use-self-hosted-executors` execution property; on the
-self-hosted control plane the GCP executors are the native scheduler pool.
+The GCP platform intentionally does not set BuildBuddy Cloud's
+`use-self-hosted-executors` execution property; on the self-hosted control plane
+the GCP executors are the native scheduler pool.
 
 The image bake is explicit and separate from per-PR CI. Rebuild it when
 `Cargo.lock`, crate manifests, Rust toolchain, Node/Python versions, or CI tool

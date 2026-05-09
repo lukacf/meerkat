@@ -38,7 +38,7 @@
 2. The introduction's "single 5MB binary" positioning does not match the current shipped surface layout.
 
    - `docs/introduction.mdx:12` and `docs/introduction.mdx:25` describe Meerkat as a "Single 5MB binary" with "<10ms startup".
-   - The current repo ships multiple binaries across separate surface crates, not a single user-facing binary: `rkat` and `rkat-mini` in `meerkat-cli/Cargo.toml:15-21`, `rkat-rpc` and `rkat-rpc-mini` in `meerkat-rpc/Cargo.toml:15-21`, `rkat-rest` in `meerkat-rest/Cargo.toml:15-17`, and `rkat-mcp` in `meerkat-mcp-server/Cargo.toml:15-17`.
+   - The current repo ships multiple binaries across separate surface crates, not a single user-facing binary: `rkat` in `meerkat-cli/Cargo.toml`, `rkat-rpc` in `meerkat-rpc/Cargo.toml`, `rkat-rest` in `meerkat-rest/Cargo.toml`, and `rkat-mcp` in `meerkat-mcp-server/Cargo.toml`.
    - `docs/quickstart.mdx:21` and `docs/quickstart.mdx:29` also explicitly tell Python and TypeScript users that the SDK auto-resolves `rkat-rpc`, which further reinforces that the current product story is "multiple surfaces and helper binaries", not "one binary".
    - Impact: this is likely to confuse readers evaluating installation/distribution options from the landing page.
 

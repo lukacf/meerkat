@@ -417,11 +417,6 @@ test_suite(
 filegroup(
     name = "surface_feature_matrix_builds",
     srcs = [
-        "//meerkat-cli:rkat_mini_surface_mini_providers_bin",
-        "//meerkat-cli:rkat_mini_surface_mini_providers_skills_bin",
-        "//meerkat-cli:rkat_mini_surface_session_store_bin",
-        "//meerkat-cli:rkat_mini_surface_session_store_comms_mcp_bin",
-        "//meerkat-cli:rkat_mini_surface_session_store_mcp_bin",
         "//meerkat-cli:rkat_surface_session_store_bin",
         "//meerkat-cli:rkat_surface_session_store_comms_mcp_bin",
         "//meerkat-cli:rkat_surface_session_store_mcp_bin",
@@ -435,10 +430,6 @@ filegroup(
         "//meerkat-rest:rkat_rest_surface_min_bin",
         "//meerkat-rpc:meerkat_rpc_surface_comms_mcp",
         "//meerkat-rpc:meerkat_rpc_surface_min",
-        "//meerkat-rpc:meerkat_rpc_surface_mini",
-        "//meerkat-rpc:rkat_rpc_mini_surface_comms_mcp_bin",
-        "//meerkat-rpc:rkat_rpc_mini_surface_min_bin",
-        "//meerkat-rpc:rkat_rpc_mini_surface_mini_bin",
         "//meerkat-rpc:rkat_rpc_surface_comms_mcp_bin",
         "//meerkat-rpc:rkat_rpc_surface_min_bin",
     ],

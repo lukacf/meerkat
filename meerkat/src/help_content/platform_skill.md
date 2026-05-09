@@ -1,6 +1,6 @@
 ---
 name: meerkat-platform
-description: "Build on the Meerkat agent platform. Covers every shipping surface (CLI, REST, JSON-RPC stdio/TCP, MCP, Python/TypeScript/Web/Rust SDKs, the `rkat-mini`/`rkat-rpc-mini` reduced binaries), realm-scoped sessions, streaming, skills, hooks, memory, multimodal content, mob orchestration (spawn/fork/helpers/flows/profiles), durable scheduling, and provider auth via `auth_binding` + AuthMachine (env keys, OAuth, cloud IAM). Use when integrating with Meerkat, picking a surface, wiring auth, building agents, scheduling automated runs, deploying mobpacks, or asking how a feature exposes through a particular SDK."
+description: "Build on the Meerkat agent platform. Covers every shipping surface (CLI, REST, JSON-RPC stdio/TCP, MCP, Python/TypeScript/Web/Rust SDKs), realm-scoped sessions, streaming, skills, hooks, memory, multimodal content, mob orchestration (spawn/fork/helpers/flows/profiles), durable scheduling, and provider auth via `auth_binding` + AuthMachine (env keys, OAuth, cloud IAM). Use when integrating with Meerkat, picking a surface, wiring auth, building agents, scheduling automated runs, deploying mobpacks, or asking how a feature exposes through a particular SDK."
 ---
 
 # Meerkat Platform Guide
@@ -57,10 +57,8 @@ When a mob member runs in a different process or host, declare it with `MobBacke
 | Surface | Protocol | Use case |
 |---------|----------|----------|
 | `rkat` CLI | Shell commands | Developer workflows, scripting |
-| `rkat-mini` CLI | Shell commands | Reduced/embeddable CLI build (intentionally smaller command set) |
 | REST (`rkat-rest`) | HTTP/JSON + SSE | Services and language-agnostic clients |
 | JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional realtime websocket hosting | IDE integration, SDK backend, embeddable services |
-| `rkat-rpc-mini` | JSON-RPC 2.0 (reduced method set) | Minimal embeddable RPC binary |
 | MCP (`rkat-mcp`) | Model Context Protocol | Expose Meerkat as tools to other agents |
 | Python SDK (`meerkat`) | Async Python over RPC | Python applications |
 | TypeScript SDK (`@rkat/sdk`) | TypeScript over RPC | Node.js applications |

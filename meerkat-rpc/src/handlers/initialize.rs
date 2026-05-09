@@ -21,20 +21,16 @@ pub struct ServerInfo {
 
 /// Handle the `initialize` method.
 pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
-    let options = if cfg!(feature = "mini-surface") {
-        meerkat_contracts::RpcMethodCatalogOptions::mini_surface()
-    } else {
-        meerkat_contracts::RpcMethodCatalogOptions {
-            runtime_available,
-            mob_enabled: cfg!(feature = "mob"),
-            mcp_enabled: cfg!(feature = "mcp"),
-            comms_enabled: cfg!(feature = "comms"),
-            blob_enabled: true,
-            session_events_enabled: true,
-            session_streams_enabled: true,
-            schedule_enabled: cfg!(feature = "schedule"),
-            skills_enabled: true,
-        }
+    let options = meerkat_contracts::RpcMethodCatalogOptions {
+        runtime_available,
+        mob_enabled: cfg!(feature = "mob"),
+        mcp_enabled: cfg!(feature = "mcp"),
+        comms_enabled: cfg!(feature = "comms"),
+        blob_enabled: true,
+        session_events_enabled: true,
+        session_streams_enabled: true,
+        schedule_enabled: cfg!(feature = "schedule"),
+        skills_enabled: true,
     };
     let caps = ServerCapabilities {
         server_info: ServerInfo {

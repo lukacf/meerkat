@@ -43,8 +43,8 @@ meerkat (facade)              (AgentFactory, FactoryAgentBuilder, persistence he
   └── meerkat-web-runtime      (WASM embedded runtime — wasm_bindgen exports)
 
 Surface binaries:
-  ├── meerkat-cli           → rkat, rkat-mini             (full CLI + reduced/embeddable CLI)
-  ├── meerkat-rpc           → rkat-rpc, rkat-rpc-mini     (full and reduced JSON-RPC; stdio default, --tcp opt-in)
+  ├── meerkat-cli           → rkat                       (CLI)
+  ├── meerkat-rpc           → rkat-rpc                   (JSON-RPC; stdio default, --tcp opt-in)
   ├── meerkat-rest          → rkat-rest                   (REST + SSE)
   └── meerkat-mcp-server    → rkat-mcp                    (MCP server)
 ```

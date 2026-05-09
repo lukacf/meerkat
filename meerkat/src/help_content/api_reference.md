@@ -78,8 +78,6 @@ rkat capabilities
 rkat doctor
 rkat-rpc                                # JSON-RPC stdio
 rkat-rpc --tcp 127.0.0.1:9000           # JSON-RPC over TCP (stdio is default)
-rkat-rpc-mini                           # reduced-method-set RPC binary
-rkat-mini ...                           # reduced CLI
 ```
 
 CLI keep-alive terminology:
@@ -216,7 +214,7 @@ CAS writes:
 
 ---
 
-## JSON-RPC (`rkat-rpc` / `rkat-rpc-mini`)
+## JSON-RPC (`rkat-rpc`)
 
 Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; some realtime hosts attach an optional websocket alongside):
 
@@ -224,8 +222,6 @@ Start the server (stdio is default; `--tcp <addr>` exposes the same protocol ove
 rkat-rpc --realm team-alpha
 rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000
 ```
-
-`rkat-rpc-mini` is a reduced binary with the same wire protocol but a smaller method set, intended for embeddable hosts.
 
 ### Sessions, turns, history
 

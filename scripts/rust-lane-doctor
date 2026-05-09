@@ -99,26 +99,6 @@ else
   bad "nextest fast profile is invalid"
 fi
 
-mini_bin_test_flags="$(
-  ./scripts/repo-cargo metadata --no-deps --format-version 1 |
-    node -e '
-const fs = require("fs");
-const metadata = JSON.parse(fs.readFileSync(0, "utf8"));
-for (const pkg of metadata.packages.filter((p) => p.name === "rkat" || p.name === "meerkat-rpc")) {
-  for (const target of pkg.targets.filter((t) => t.name === "rkat-mini" || t.name === "rkat-rpc-mini")) {
-    console.log(`${target.name}=${target.test}`);
-  }
-}
-'
-)"
-if contains_line "rkat-mini=false" "${mini_bin_test_flags}" &&
-  contains_line "rkat-rpc-mini=false" "${mini_bin_test_flags}"; then
-  pass "mini binary duplicate unit-test harnesses are disabled"
-else
-  bad "mini binary duplicate unit-test harnesses are still enabled"
-  printf '%s\n' "${mini_bin_test_flags}" >&2
-fi
-
 if grep -q '^e2e-build = ' .cargo/config.toml &&
   grep -q -- '--test e2e_build_lane' .cargo/config.toml &&
   grep -q -- '--run-ignored ignored-only' .cargo/config.toml; then
@@ -176,9 +156,7 @@ if [[ -n "${rust_channel}" ]] &&
   grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-rust-ci/action.yml &&
   grep -Fq "dtolnay/rust-toolchain@${rust_channel}" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq "uses: ./.github/actions/setup-rust-ci" .github/workflows/cargo.yml &&
-  grep -Fq "uses: ./.github/actions/setup-rust-ci" .github/workflows/live-e2e.yml &&
   ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/workflows/cargo.yml &&
-  ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/workflows/live-e2e.yml &&
   ! grep -Fq 'dtolnay/rust-toolchain@stable' .github/actions/setup-buildbuddy-ci/action.yml; then
   pass "Cargo and BuildBuddy CI install the pinned Rust toolchain"
 else
@@ -189,7 +167,6 @@ if [[ -n "${rust_channel}" ]] &&
   [[ "${default_rustup_toolchain}" == "${rust_channel}" ]] &&
   grep -Fq "RUSTUP_TOOLCHAIN: ${rust_channel}" .github/workflows/cargo.yml &&
   grep -Fq "RUSTUP_TOOLCHAIN: ${rust_channel}" .github/workflows/buildbuddy.yml &&
-  grep -Fq "RUSTUP_TOOLCHAIN: ${rust_channel}" .github/workflows/live-e2e.yml &&
   grep -Fq "RUSTUP_TOOLCHAIN: ${rust_channel}" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq "scripts/ci-pin-rust-toolchain-env" .github/actions/setup-rust-ci/action.yml &&
   grep -Fq "scripts/ci-pin-rust-toolchain-env" .github/actions/setup-buildbuddy-ci/action.yml &&
@@ -202,7 +179,6 @@ fi
 
 if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/cargo.yml &&
   grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/buildbuddy.yml &&
-  grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/live-e2e.yml &&
   grep -Fq '${GITHUB_JOB:-job}' scripts/ci-pin-rust-toolchain-env; then
   pass "CI and BuildBuddy workflows isolate Cargo home per GitHub job before cache restore"
 else

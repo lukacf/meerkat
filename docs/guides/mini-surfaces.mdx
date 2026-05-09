@@ -1,168 +1,30 @@
 ---
 title: "Mini surfaces"
-description: "Build reduced Meerkat surfaces from source for custom distributions."
+description: "Historical note for the removed reduced Meerkat binary surfaces."
 icon: "boxes-stacked"
 ---
 
-Meerkat keeps mini surfaces as source-build profiles for teams that want smaller
-task-first or JSON-RPC command surfaces in their own packaging. These profiles
-are static, capability-gated builds of the existing CLI and RPC crates. They
-are not separate reimplementations, and they are not runtime-dynamic command
-subsets.
+The reduced Meerkat binary surfaces have been retired. The repository no longer
+builds or publishes separate reduced CLI or JSON-RPC binaries.
 
-## What this guide is for
+## Current surfaces
 
-Use this guide when you want:
-
-- a source-built reduced CLI profile
-- a source-built reduced RPC profile
-- a smaller surface for embedding or packaging
-- a starting point for custom product-surface builds
-
-## Surface tiers
+Use the public runtime surfaces instead:
 
 | Surface | Purpose |
 |---------|---------|
 | `rkat` | Batteries-included terminal UX |
-| `rkat-mini` | Source-build-only task-first CLI profile for run/session/config workflows |
-| `rkat-rpc` | Full JSON-RPC surface used by the Python and TypeScript SDKs |
-| `rkat-rpc-mini` | Source-build-only small JSON-RPC runtime for create/list/read/archive/start/interrupt/config/catalog/capabilities |
-| `rkat-rest` | Full REST surface |
-| `rkat-mcp` | Full MCP server surface |
+| `rkat-rpc` | JSON-RPC surface used by the Python and TypeScript SDKs |
+| `rkat-rest` | REST surface |
+| `rkat-mcp` | MCP server surface |
 
-The documented mini profiles keep the same provider support:
+## Custom distributions
 
-- Anthropic
-- OpenAI
-- Gemini
-- configured self-hosted aliases and local model paths
-
-## `rkat-mini`
-
-`rkat-mini` is a source-build-only CLI profile. It is not published as a
-GitHub release asset or Homebrew resource; build it from source when you want
-to carry a reduced CLI in your own product or deployment.
-
-Included commands:
-
-- `run`
-- `init`
-- `blob`
-- `skill`
-- `config`
-- `session`
-- `realm`
-- `models`
-- `capabilities`
-- `doctor`
-
-Omitted commands:
-
-- `mob`
-- `mcp`
-- peer/comms-facing UX
-- schedule-facing UX
-
-The built-in shell and patch tools are still available through `--tools workspace`.
-
-<Note>
-The CLI now gates command visibility by compiled capability features rather than by a special UI-only profile. That means `rkat-mini` still exposes core commands like `blob`, while capability-backed surfaces like `mob` and `mcp` disappear when their supporting features are not compiled in.
-</Note>
-
-### Skill support and size expectations
-
-The repository still includes a stripped-binary size check for the canonical
-Linux source profile so maintainers can see how much `skill` support adds to a
-custom CLI build. That gate no longer participates in the public release
-preflight because the CLI mini profile is not shipped.
-
-### Using a source-built `rkat-mini`
-
-```bash
-rkat-mini "summarize this repository"
-rkat-mini run --resume "keep going"
-git diff | rkat-mini run --json "review these changes"
-rkat-mini run -t workspace "fix the failing test"
-rkat-mini skill list
-```
-
-## `rkat-rpc-mini`
-
-`rkat-rpc-mini` keeps a deliberately small JSON-RPC contract.
-
-Included methods:
-
-- `initialize`
-- `initialized`
-- `session/create`
-- `session/list`
-- `session/read`
-- `session/history`
-- `session/archive`
-- `turn/start`
-- `turn/interrupt`
-- `config/get`
-- `config/set`
-- `config/patch`
-- `models/catalog`
-- `capabilities/get`
-
-Omitted methods:
-
-- `runtime/*`
-- `input/*`
-- stream methods
-- `blob/get`
-- `session/external_event`
-- `session/inject_context`
-- `mob/*`
-- `comms/*`
-- `mcp/*`
-- `schedule/*`
-- `skills/*`
-
-<Note>
-`rkat-rpc` remains the SDK backend contract for Python and TypeScript. `rkat-rpc-mini` is a custom source-build surface, not the compatibility target for the SDK wrappers.
-</Note>
-
-## Building your own custom surface
-
-The source-built CLI and RPC mini profiles use the same shared surface seams you
-can use for custom builds.
-
-### Build `rkat-mini`
-
-```bash
-./scripts/repo-cargo build -p rkat --bin rkat-mini \
-  --no-default-features \
-  --features anthropic,openai,gemini,jsonl-store,session-store,skills
-```
-
-### Build an even smaller variant without `skill`
-
-```bash
-./scripts/repo-cargo build -p rkat --bin rkat-mini \
-  --no-default-features \
-  --features anthropic,openai,gemini,jsonl-store,session-store
-```
-
-### Build `rkat-rpc-mini`
-
-```bash
-./scripts/repo-cargo build -p meerkat-rpc --bin rkat-rpc-mini \
-  --no-default-features \
-  --features mini-surface
-```
-
-## Relationship to the shared surface layer
-
-These profiles exist because the shared surface/runtime work moved the product surfaces onto common composition seams:
-
-- embedded/minimal bootstrap
-- runtime-backed bootstrap
-- shared runtime materialization and binding helpers
-
-If you want to build a smaller surface than the documented mini profiles, start from those shared seams rather than forking the full batteries-included CLI.
+If you need a smaller product surface for embedding or custom packaging, start
+from the shared runtime and surface composition layers rather than reviving the
+old reduced binaries. The current codebase keeps feature-gated capabilities in
+the main surfaces and no longer carries dedicated mini binary targets or a
+separate reduced RPC method catalog.
 
 ## See also
 

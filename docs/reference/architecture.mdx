@@ -41,9 +41,7 @@ and optional mob tooling.
 | Surface | Runtime mode | Primary contract |
 |---------|--------------|------------------|
 | `rkat` CLI | Runtime-backed | Developer and automation workflows over the shared session service |
-| `rkat-mini` | Runtime-backed source-build reduced profile | Smaller CLI command set for custom embeddable/product distributions |
 | `rkat-rpc` | Runtime-backed | JSON-RPC 2.0 over stdio/TCP, SDK backend, optional realtime WebSocket bootstrap |
-| `rkat-rpc-mini` | Runtime-backed source-build reduced profile | Core session/config/catalog/capability RPC subset for custom distributions |
 | `rkat-rest` | Runtime-backed | HTTP/SSE adapter over the same session, schedule, auth, config, comms, and limited mob helper surfaces |
 | `rkat-mcp` | Runtime-backed | Public `meerkat_*` MCP tools backed by `SessionService` plus typed public mob tools when compiled |
 | Rust SDK | Runtime-backed or standalone | Direct `SessionService` embedding; `StandaloneEphemeral` is explicit for tests and local-only embeddings |

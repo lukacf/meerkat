@@ -965,34 +965,14 @@ fn ordinary_bazel_core_dependents_do_not_use_internal_factory_variant() {
 fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
     for (build_file, target) in [
         ("meerkat-cli/BUILD.bazel", "rkat"),
-        (
-            "meerkat-cli/BUILD.bazel",
-            "rkat_mini_surface_mini_providers_bin",
-        ),
-        (
-            "meerkat-cli/BUILD.bazel",
-            "rkat_mini_surface_mini_providers_skills_bin",
-        ),
         ("meerkat-cli/BUILD.bazel", "rkat_surface_session_store_bin"),
-        (
-            "meerkat-cli/BUILD.bazel",
-            "rkat_mini_surface_session_store_bin",
-        ),
         (
             "meerkat-cli/BUILD.bazel",
             "rkat_surface_session_store_mcp_bin",
         ),
         (
             "meerkat-cli/BUILD.bazel",
-            "rkat_mini_surface_session_store_mcp_bin",
-        ),
-        (
-            "meerkat-cli/BUILD.bazel",
             "rkat_surface_session_store_comms_mcp_bin",
-        ),
-        (
-            "meerkat-cli/BUILD.bazel",
-            "rkat_mini_surface_session_store_comms_mcp_bin",
         ),
         ("meerkat-mcp-server/BUILD.bazel", "meerkat_mcp_server"),
         (
@@ -1017,15 +997,8 @@ fn bazel_facade_consumers_do_not_mix_public_core_with_factory_graph() {
         ("meerkat-rpc/BUILD.bazel", "meerkat_rpc"),
         ("meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_min"),
         ("meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_comms_mcp"),
-        ("meerkat-rpc/BUILD.bazel", "meerkat_rpc_surface_mini"),
         ("meerkat-rpc/BUILD.bazel", "rkat_rpc_surface_min_bin"),
-        ("meerkat-rpc/BUILD.bazel", "rkat_rpc_mini_surface_min_bin"),
         ("meerkat-rpc/BUILD.bazel", "rkat_rpc_surface_comms_mcp_bin"),
-        (
-            "meerkat-rpc/BUILD.bazel",
-            "rkat_rpc_mini_surface_comms_mcp_bin",
-        ),
-        ("meerkat-rpc/BUILD.bazel", "rkat_rpc_mini_surface_mini_bin"),
     ] {
         let Some(bazel) = try_repo_file(build_file) else {
             // Cargo-only source layouts may not include generated Bazel files.

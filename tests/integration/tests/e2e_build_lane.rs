@@ -22,16 +22,8 @@ build_suite!(
     "surface-rkat-deterministic"
 );
 build_suite!(
-    e2e_build_surface_rkat_mini_deterministic,
-    "surface-rkat-mini-deterministic"
-);
-build_suite!(
     e2e_build_surface_rkat_rpc_deterministic,
     "surface-rkat-rpc-deterministic"
-);
-build_suite!(
-    e2e_build_surface_rkat_rpc_mini_deterministic,
-    "surface-rkat-rpc-mini-deterministic"
 );
 build_suite!(
     e2e_build_surface_rkat_rest_deterministic,

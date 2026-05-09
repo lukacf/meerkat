@@ -107,8 +107,6 @@ The shared-surface/runtime work from this proposal is now reflected in the codeb
 The product-layering work also produced one shipped slim binary and one
 source-build-only CLI profile:
 
-- `rkat-mini` (source build)
-- `rkat-rpc-mini` (release artifact)
 
 These are static capability-gated builds of the existing CLI/RPC crates, not
 new reimplementations and not runtime-dynamic command subsets. On the CLI side,

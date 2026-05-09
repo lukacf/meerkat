@@ -67,11 +67,6 @@ Include a checksum manifest with all artifacts:
 - `checksums.sha256`
 - `index.json`
 
-Mini binaries such as `rkat-mini` and `rkat-rpc-mini` are intentionally
-source-build-only. They remain available as reduced profiles for custom
-packaging, but they are not GitHub release assets or Homebrew resources. See
-[Mini surfaces](/guides/mini-surfaces) for build commands.
-
 ### 2) Python SDK distribution
 
 Package behavior should be pure-Python with optional runtime auto-download:

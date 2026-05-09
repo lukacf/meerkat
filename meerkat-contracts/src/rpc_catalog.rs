@@ -29,20 +29,6 @@ impl RpcMethodCatalogOptions {
             skills_enabled: true,
         }
     }
-
-    pub const fn mini_surface() -> Self {
-        Self {
-            runtime_available: false,
-            mob_enabled: false,
-            mcp_enabled: false,
-            comms_enabled: false,
-            blob_enabled: false,
-            session_events_enabled: false,
-            session_streams_enabled: false,
-            schedule_enabled: false,
-            skills_enabled: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -881,12 +867,6 @@ mod tests {
         assert!(methods.iter().any(|m| m == "schedule/list"));
         assert!(methods.iter().any(|m| m == "schedule/occurrences"));
         assert!(methods.iter().any(|m| m == "schedule/call"));
-    }
-
-    #[test]
-    fn mini_surface_excludes_runtime_help_method() {
-        let methods = rpc_method_names(RpcMethodCatalogOptions::mini_surface());
-        assert!(!methods.iter().any(|m| m == "help/ask"));
     }
 
     #[test]

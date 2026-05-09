@@ -16,7 +16,7 @@ use meerkat_core::live_adapter::LiveAdapterObservation;
 /// payload) and serialize as a single-field JSON object tagged
 /// `"observation": "turn_interrupted"`.
 #[test]
-fn turn_interrupted_serializes_as_tagged_unit_variant() {
+fn realtime_barge_in() {
     let obs = LiveAdapterObservation::TurnInterrupted;
     let value = serde_json::to_value(&obs).unwrap();
     assert_eq!(

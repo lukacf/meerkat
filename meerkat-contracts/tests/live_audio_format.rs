@@ -17,7 +17,7 @@ use meerkat_core::live_adapter::LiveAdapterObservation;
 /// string, not a JSON array of integers. JSON integer arrays bloat the wire
 /// ~6× and force a JSON parse on every audio frame.
 #[test]
-fn assistant_audio_chunk_data_is_base64_string_not_int_array() {
+fn realtime_audio_format() {
     let obs = LiveAdapterObservation::AssistantAudioChunk {
         data: vec![1u8, 2, 3, 4, 5],
         sample_rate_hz: 24_000,

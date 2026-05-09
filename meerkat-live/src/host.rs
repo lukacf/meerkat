@@ -2152,7 +2152,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn tool_call_dispatch_times_out_when_dispatcher_exceeds_deadline() {
+    async fn realtime_tool_timeout() {
         // K61: a dispatcher that takes longer than the host's `tool_timeout`
         // must produce a typed `ToolCallTimedOut` outcome and a
         // `SubmitToolError` to the adapter — no phantom dispatch result.

@@ -115,7 +115,7 @@ impl LiveAdapter for ScriptedAdapter {
 /// within `BUDGET` of its producer-side emit time, regardless of
 /// producer-side bursting. No chunks may be dropped or reordered.
 #[tokio::test(start_paused = true)]
-async fn audio_chunks_arrive_in_order_within_deadline_budget() {
+async fn realtime_deadline_and_jitter() {
     let start = tokio::time::Instant::now();
     let adapter = ScriptedAdapter::spawn(EMIT_SCHEDULE_MS, start);
 

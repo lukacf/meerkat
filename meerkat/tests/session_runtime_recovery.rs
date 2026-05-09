@@ -18,6 +18,46 @@ fn binding_mode_variants_are_distinct() {
 }
 
 #[test]
+fn parse_provider_override_accepts_known_providers() {
+    use meerkat::session_runtime::recovery::{parse_provider_override, unknown_provider_message};
+
+    assert!(parse_provider_override("openai").is_ok());
+    assert!(parse_provider_override("anthropic").is_ok());
+    assert!(parse_provider_override("gemini").is_ok());
+
+    let err = parse_provider_override("nope").expect_err("unknown provider must reject");
+    assert_eq!(err, unknown_provider_message("nope"));
+    assert!(err.contains("unknown provider"));
+}
+
+#[test]
+fn recovery_error_code_maps_each_variant() {
+    use meerkat::session_runtime::errors::RecoveryError;
+    use meerkat_core::SurfaceSessionRecoveryError;
+    use meerkat_core::service::SessionError;
+    use meerkat_core::types::SessionId;
+
+    let invalid: RecoveryError = SurfaceSessionRecoveryError::InvalidOverride("bad".into()).into();
+    assert_eq!(invalid.code(), "INVALID_OVERRIDE");
+
+    let missing: RecoveryError =
+        SurfaceSessionRecoveryError::MissingSessionMetadata("sid".into()).into();
+    assert_eq!(missing.code(), "MISSING_SESSION_METADATA");
+
+    let binding = RecoveryError::BindingPreparation {
+        session_id: SessionId::new(),
+        message: "boom".into(),
+    };
+    assert_eq!(binding.code(), "BINDING_PREPARATION");
+
+    let session: RecoveryError = SessionError::NotFound {
+        id: SessionId::new(),
+    }
+    .into();
+    assert_eq!(session.code(), "SESSION");
+}
+
+#[test]
 fn recovered_create_request_holds_registration_flag() {
     let request = CreateSessionRequest {
         model: "test-model".into(),

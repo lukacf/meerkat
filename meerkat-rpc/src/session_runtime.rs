@@ -73,13 +73,7 @@ use meerkat::{
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
 
-fn unknown_provider_message(provider: &str) -> String {
-    format!("unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)")
-}
-
-fn parse_provider_override(provider: &str) -> Result<meerkat_core::Provider, String> {
-    meerkat_core::Provider::parse_strict(provider).ok_or_else(|| unknown_provider_message(provider))
-}
+use meerkat::session_runtime::recovery::{parse_provider_override, unknown_provider_message};
 
 fn render_context_append_text(content: &CoreRenderable) -> String {
     match content {
@@ -4009,18 +4003,54 @@ impl SessionRuntime {
         self.recovery_external_tools()
     }
 
-    fn recovery_error_to_rpc(error: SurfaceSessionRecoveryError) -> RpcError {
+    /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
+    /// onto an RPC wire error. Stays in `meerkat-rpc` because the
+    /// destination type (`RpcError`) is RPC-private.
+    fn recovery_error_to_rpc(error: meerkat::session_runtime::errors::RecoveryError) -> RpcError {
+        use meerkat::session_runtime::errors::RecoveryError;
         match error {
-            SurfaceSessionRecoveryError::InvalidOverride(message) => RpcError {
-                code: error::INVALID_PARAMS,
-                message,
-                data: None,
-            },
-            other => RpcError {
+            RecoveryError::Recovery(SurfaceSessionRecoveryError::InvalidOverride(message)) => {
+                RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                }
+            }
+            RecoveryError::Recovery(other) => RpcError {
                 code: error::INTERNAL_ERROR,
                 message: other.to_string(),
                 data: None,
             },
+            RecoveryError::BindingPreparation { .. } => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: error.to_string(),
+                data: None,
+            },
+            RecoveryError::Session(session_error) => session_error_to_rpc(session_error),
+        }
+    }
+
+    /// Build a [`RecoveryContext`] borrowing this runtime's resolved
+    /// state. Used by the `recovered_create_request*` shims and any
+    /// surface that wants direct access to the surface-agnostic
+    /// recovery flow without an RPC translation.
+    fn recovery_context(&self) -> meerkat::session_runtime::recovery::RecoveryContext<'_> {
+        let agent_llm_client_decorator = {
+            self.agent_llm_client_decorator
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        meerkat::session_runtime::recovery::RecoveryContext {
+            service: &self.service,
+            runtime_adapter: &self.runtime_adapter,
+            realm_id: self.realm_id.as_ref(),
+            instance_id: self.instance_id.as_deref(),
+            backend: self.backend.as_deref(),
+            default_llm_client: self.default_llm_client(),
+            agent_llm_client_decorator,
+            external_tools: self.recovery_external_tools(),
+            config_runtime: self.config_runtime(),
         }
     }
 
@@ -4030,13 +4060,10 @@ impl SessionRuntime {
         session: Session,
         overrides: SurfaceSessionRecoveryOverrides,
     ) -> Result<RecoveredCreateRequest, RpcError> {
-        self.recovered_create_request_with_runtime_binding_mode(
-            session_id,
-            session,
-            overrides,
-            RecoveryRuntimeBindingMode::Authoritative,
-        )
-        .await
+        self.recovery_context()
+            .recovered_create_request(session_id, session, overrides)
+            .await
+            .map_err(Self::recovery_error_to_rpc)
     }
 
     async fn recovered_create_request_with_runtime_binding_mode(
@@ -4046,64 +4073,15 @@ impl SessionRuntime {
         overrides: SurfaceSessionRecoveryOverrides,
         binding_mode: RecoveryRuntimeBindingMode,
     ) -> Result<RecoveredCreateRequest, RpcError> {
-        let current_generation = match self.config_runtime() {
-            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
-            None => None,
-        };
-        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let bindings = match binding_mode {
-            RecoveryRuntimeBindingMode::Authoritative => {
-                self.runtime_adapter
-                    .prepare_bindings(session_id.clone())
-                    .await
-            }
-            RecoveryRuntimeBindingMode::LocalResources => {
-                self.runtime_adapter
-                    .prepare_local_session_bindings(session_id.clone())
-                    .await
-            }
-        }
-        .map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!("failed to prepare runtime bindings for session {session_id}: {e}"),
-            data: None,
-        })?;
-        let agent_llm_client_decorator = {
-            self.agent_llm_client_decorator
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
-        let recovered = match build_recovered_session(
-            session,
-            &overrides,
-            SurfaceSessionRecoveryContext {
-                llm_client_override: self
-                    .default_llm_client()
-                    .map(encode_llm_client_override_for_service),
-                agent_llm_client_decorator,
-                external_tools: self.recovery_external_tools(),
-                checkpointer: None,
-                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
-                require_runtime_build_mode: true,
-                realm_id: self.realm_id.as_ref().map(ToString::to_string),
-                instance_id: self.instance_id.clone(),
-                backend: self.backend.clone(),
-                config_generation: current_generation,
-            },
-        ) {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                if !runtime_was_registered {
-                    self.runtime_adapter.unregister_session(session_id).await;
-                }
-                return Err(Self::recovery_error_to_rpc(error));
-            }
-        };
-        Ok(RecoveredCreateRequest {
-            request: recovered.into_deferred_create_request(),
-            runtime_was_registered,
-        })
+        self.recovery_context()
+            .recovered_create_request_with_runtime_binding_mode(
+                session_id,
+                session,
+                overrides,
+                binding_mode,
+            )
+            .await
+            .map_err(Self::recovery_error_to_rpc)
     }
 
     pub fn schedule_service(&self) -> ScheduleService {
@@ -7475,21 +7453,10 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, RpcError> {
-        let Some(session) = self
-            .service
-            .load_authoritative_session(session_id)
+        self.recovery_context()
+            .load_persisted_session(session_id)
             .await
-            .map_err(session_error_to_rpc)?
-        else {
-            return Ok(None);
-        };
-        if self
-            .session_archived_by_authority(session_id, &session)
-            .await?
-        {
-            return Ok(None);
-        }
-        Ok(Some(session))
+            .map_err(session_error_to_rpc)
     }
 
     async fn session_archived_by_authority(

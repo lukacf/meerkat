@@ -5,6 +5,7 @@
 //! every consumer can adapt without pulling in `meerkat-rpc`.
 
 use meerkat_core::SessionId;
+use meerkat_core::SurfaceSessionRecoveryError;
 use meerkat_core::service::SessionError;
 
 /// Pre-flight rejection reasons for `live/open`-style channel opens.
@@ -50,6 +51,57 @@ pub enum LiveOpenPrecheckError {
         /// Resolved provider id.
         provider: &'static str,
     },
+}
+
+/// Surface-agnostic recovery error for persisted-session reconstruction.
+///
+/// Surfaces map this onto their wire format. The `Recovery` variant
+/// carries the canonical [`SurfaceSessionRecoveryError`] from
+/// `meerkat-core`; `BindingPreparation` and `Session` capture the two
+/// other failure modes (runtime-binding prep failure and underlying
+/// service errors) the recovery flow can hit.
+///
+/// Variants:
+/// * `Recovery` — `build_recovered_session` rejected the override or
+///   the persisted snapshot is inconsistent.
+/// * `BindingPreparation` — `MeerkatMachine::prepare_bindings` (or
+///   `prepare_local_session_bindings`) failed; the wrapped string is the
+///   underlying error rendered with `Display`.
+/// * `Session` — the underlying service surfaced a [`SessionError`].
+#[derive(Debug, thiserror::Error)]
+pub enum RecoveryError {
+    /// `build_recovered_session` rejected the recovery context.
+    #[error(transparent)]
+    Recovery(#[from] SurfaceSessionRecoveryError),
+    /// Runtime binding preparation failed for the recovered session.
+    #[error("failed to prepare runtime bindings for session {session_id}: {message}")]
+    BindingPreparation {
+        /// Session whose bindings could not be prepared.
+        session_id: SessionId,
+        /// Rendered binding error.
+        message: String,
+    },
+    /// Underlying service surfaced a [`SessionError`].
+    #[error(transparent)]
+    Session(#[from] SessionError),
+}
+
+impl RecoveryError {
+    /// Stable error code slug for surface→wire mapping.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Recovery(SurfaceSessionRecoveryError::InvalidOverride(_)) => "INVALID_OVERRIDE",
+            Self::Recovery(SurfaceSessionRecoveryError::MissingSessionMetadata(_)) => {
+                "MISSING_SESSION_METADATA"
+            }
+            Self::Recovery(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)) => {
+                "MISSING_RUNTIME_BUILD_MODE"
+            }
+            Self::BindingPreparation { .. } => "BINDING_PREPARATION",
+            Self::Session(_) => "SESSION",
+        }
+    }
 }
 
 impl LiveOpenPrecheckError {

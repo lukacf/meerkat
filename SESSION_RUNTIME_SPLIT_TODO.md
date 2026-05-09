@@ -277,7 +277,7 @@ self-verify.
   `#[cfg(feature = "live")]`. The `LiveAdapterHost` parameter remains
   injected; the orchestrator does not own it.
 
-- [ ] fix · [ ] verify · **W2-B.** Move session-recovery helpers
+- [x] fix · [ ] verify · **W2-B.** Move session-recovery helpers
   (`load_persisted_session`, `recovered_create_request`,
   `recovered_create_request_with_runtime_binding_mode`,
   `recovery_overrides_from_turn`, `recovery_external_tools`,
@@ -285,6 +285,21 @@ self-verify.
   `meerkat::session_runtime::recovery`. These are zero-RPC; they
   build `CreateSessionRequest` and `Session` values from durable
   store + runtime config.
+  *Deviation:* `recovery_overrides_from_turn` (depends on the
+  RPC-private `crate::handlers::turn::TurnOverrides`),
+  `recovery_external_tools` (depends on the RPC callback dispatcher
+  `crate::callback_dispatcher::CallbackToolDispatcher`), and
+  `cleanup_recovered_runtime_if_new` (depends on the RPC-private
+  `ArchiveRuntimeCleanup` whose move is deferred to W3-A) stay in
+  `meerkat-rpc` until those upstream blockers clear. Moved cleanly:
+  `parse_provider_override`, `unknown_provider_message`, and a new
+  `RecoveryContext<'a>` orchestrator that owns the
+  `load_persisted_session`, `recovered_create_request`, and
+  `recovered_create_request_with_runtime_binding_mode` flows behind a
+  surface-agnostic `RecoveryError` (variants
+  `Recovery`/`BindingPreparation`/`Session`). The SessionRuntime
+  shims remain RPC-typed (RpcError) and translate via a new
+  `recovery_error_to_rpc` adapter.
 
 - [ ] fix · [ ] verify · **W2-C.** Move LLM hot-swap surface
   (`hot_swap_llm_client_on_idle_session`, `hot_swap_llm_client`

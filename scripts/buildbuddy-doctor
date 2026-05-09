@@ -400,7 +400,7 @@ if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
-  job_has_line .github/workflows/buildbuddy.yml native-submit 'batch_jobs: "4"' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'batch_jobs: "2"' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'group: gcp-wasm-feature' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'Detect machine-authority changes' &&

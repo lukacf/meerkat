@@ -98,13 +98,6 @@ fn project_realtime_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<Assistant
         .filter_map(|block| match block {
             AssistantBlock::Text { text, .. } if text.is_empty() => None,
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
-            // Spoken transcripts replay back as plain text; provider sees
-            // the assistant's visible output regardless of capture lane.
-            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
-            AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
-                text: text.clone(),
-                meta: None,
-            }),
             AssistantBlock::Reasoning { .. }
             | AssistantBlock::ServerToolContent { .. }
             | AssistantBlock::Image { .. } => None,
@@ -458,7 +451,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     items.push(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText { text: rendered }],
                     });
@@ -493,7 +485,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                         items.push(Item::Message {
                             id: None,
                             status: None,
-                            phase: None,
                             role: Role::User,
                             content: parts,
                         });
@@ -502,7 +493,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     items.push(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText { text }],
                     });
@@ -513,7 +503,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     items.push(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText {
                             text: a.content.clone(),
@@ -524,7 +513,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     items.push(Item::FunctionCall {
                         id: None,
                         status: None,
-                        phase: None,
                         name: tc.name.clone(),
                         call_id: tc.id.clone(),
                         arguments: tc.args.to_string(),
@@ -539,7 +527,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                                 items.push(Item::Message {
                                     id: None,
                                     status: None,
-                                    phase: None,
                                     role: Role::Assistant,
                                     content: vec![ContentPart::OutputText { text: text.clone() }],
                                 });
@@ -549,7 +536,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                             items.push(Item::FunctionCall {
                                 id: None,
                                 status: None,
-                                phase: None,
                                 name: name.clone(),
                                 call_id: id.clone(),
                                 arguments: args.get().to_string(),
@@ -574,7 +560,6 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                     }
                     items.push(Item::FunctionCallOutput {
                         id: None,
-                        phase: None,
                         call_id: r.tool_use_id.clone(),
                         output: r.text_content(),
                     });

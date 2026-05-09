@@ -17,8 +17,8 @@
 pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;
-pub mod live_projection_sink;
 pub mod protocol;
+pub mod realtime_ws;
 pub mod router;
 pub mod secure_rpc;
 pub mod server;
@@ -26,9 +26,14 @@ pub mod session_executor;
 pub mod session_runtime;
 pub mod transport;
 
+pub use realtime_ws::{
+    REALTIME_WS_PATH, RealtimeOpenError, RealtimeOpenGrant, RealtimeWsHost, serve_realtime_ws,
+    serve_realtime_ws_listener,
+};
 pub use server::{
-    LiveWsConfig, serve_stdio, serve_stdio_with_options, serve_stdio_with_skill_runtime, serve_tcp,
-    serve_tcp_connection, serve_tcp_connection_with_options, serve_tcp_with_options,
+    serve_stdio, serve_stdio_with_skill_runtime,
+    serve_stdio_with_skill_runtime_and_realtime_ws_host, serve_tcp, serve_tcp_connection,
+    serve_tcp_connection_with_realtime_ws_host, serve_tcp_with_realtime_ws_host,
 };
 
 /// Default capacity for notification / event channels throughout the crate.

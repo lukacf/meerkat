@@ -39,6 +39,12 @@ pub use meerkat_openai::live::{
     openai_live_function_call_error_event, openai_live_function_call_success_events,
     pump_openai_live_session,
 };
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+pub use meerkat_openai::realtime_attachment::RealtimeAttachmentToolDispatchHost;
 #[cfg(feature = "openai")]
 pub use meerkat_openai::{OpenAiClient, OpenAiCompatibleClient};
 
@@ -93,6 +99,15 @@ pub mod openai_compatible {
 pub mod openai_live {
     pub use meerkat_openai::live::*;
 }
+#[cfg(all(
+    feature = "openai",
+    feature = "openai-realtime",
+    not(target_arch = "wasm32")
+))]
+pub mod openai_realtime_attachment {
+    pub use meerkat_openai::realtime_attachment::*;
+}
+
 #[cfg(feature = "gemini")]
 pub mod gemini {
     pub use meerkat_gemini::*;

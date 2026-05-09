@@ -12,11 +12,11 @@ pub mod config;
 pub mod event;
 pub mod help;
 pub mod initialize;
-pub mod live;
 pub mod mcp;
 #[cfg(feature = "mob")]
 pub mod mob;
 pub mod models;
+pub mod realtime;
 pub mod runtime;
 pub mod runtime_host;
 pub mod schedule;

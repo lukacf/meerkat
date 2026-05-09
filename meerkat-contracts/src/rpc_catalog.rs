@@ -463,52 +463,28 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     if options.runtime_available {
         methods.extend([
             RpcMethodDescriptor::typed(
-                "live/open",
-                "Open a live audio/text channel for a session",
-                "LiveOpenParams",
-                "LiveOpenResult",
+                "realtime/open_info",
+                "Get bootstrap metadata for opening a realtime channel",
+                "RealtimeOpenRequest",
+                "RealtimeOpenInfo",
             ),
             RpcMethodDescriptor::typed(
-                "live/status",
-                "Get the status of a live channel",
-                "LiveChannelParams",
-                "LiveStatusResult",
+                "realtime/status",
+                "Get product-layer realtime channel status for a target",
+                "RealtimeStatusParams",
+                "RealtimeStatusResult",
             ),
             RpcMethodDescriptor::typed(
-                "live/close",
-                "Close a live channel",
-                "LiveChannelParams",
-                "Value",
+                "realtime/capabilities",
+                "Get product-layer realtime capabilities for a target",
+                "RealtimeCapabilitiesParams",
+                "RealtimeCapabilitiesResult",
             ),
             RpcMethodDescriptor::typed(
-                "live/send_input",
-                "Send an input chunk (audio/text) to a live channel",
-                "LiveSendInputParams",
-                "Value",
-            ),
-            RpcMethodDescriptor::typed(
-                "live/commit_input",
-                "Commit any buffered input on a live channel",
-                "LiveChannelParams",
-                "Value",
-            ),
-            RpcMethodDescriptor::typed(
-                "live/interrupt",
-                "Interrupt the in-progress assistant turn on a live channel",
-                "LiveChannelParams",
-                "Value",
-            ),
-            RpcMethodDescriptor::typed(
-                "live/truncate",
-                "Truncate the assistant output on a live channel at the client-tracked playback cursor",
-                "LiveTruncateParams",
-                "Value",
-            ),
-            RpcMethodDescriptor::typed(
-                "live/refresh",
-                "Re-seed an open live channel against the latest canonical session state without tearing the channel down",
-                "LiveChannelParams",
-                "Value",
+                "session/realtime_attachment_status",
+                "Get a session's realtime attachment status",
+                "RuntimeRealtimeAttachmentStatusParams",
+                "RuntimeRealtimeAttachmentStatusResult",
             ),
         ]);
     }
@@ -1000,6 +976,7 @@ mod tests {
             "session/external_event",
             "session/peer_response_terminal",
             "session/inject_context",
+            "session/realtime_attachment_status",
         ] {
             assert!(
                 methods.iter().any(|m| m == supported),

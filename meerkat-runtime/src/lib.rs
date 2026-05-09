@@ -114,8 +114,8 @@ pub use handles::{
     HandleDslAuthority, RuntimeAuthLeaseHandle, RuntimeCommsDrainHandle,
     RuntimeExternalToolSurfaceHandle, RuntimeInteractionStreamHandle,
     RuntimeMcpServerLifecycleHandle, RuntimeModelRoutingHandle, RuntimePeerCommsHandle,
-    RuntimePeerInteractionHandle, RuntimeSessionAdmissionHandle, RuntimeSessionContextHandle,
-    RuntimeTurnStateHandle,
+    RuntimePeerInteractionHandle, RuntimeRealtimeProductTurnHandle, RuntimeSessionAdmissionHandle,
+    RuntimeSessionContextHandle, RuntimeTurnStateHandle,
 };
 pub use identifiers::{
     CausationId, ConversationId, CorrelationId, EventCodeId, IdempotencyKey, InputKind, KindId,
@@ -141,7 +141,8 @@ pub use meerkat_machine::{
 };
 pub use meerkat_machine_types::{
     HydratedSessionLlmState, ImageOperationRoutingRequest, ImageOperationRoutingResult,
-    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, ResolvedSessionLlmReconfigure,
+    ModelRoutingApprovalDisposition, ModelRoutingRealtimePolicy, RealtimeAttachmentSignalAuthority,
+    RealtimeAttachmentStatus, RealtimeBootstrapEligibility, ResolvedSessionLlmReconfigure,
     SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
     SessionLlmReconfigureReport, SessionLlmReconfigureRequest, SessionToolVisibilityDelta,
 };

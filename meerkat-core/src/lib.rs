@@ -42,7 +42,6 @@ pub mod image_content;
 pub mod image_generation;
 pub mod interaction;
 pub mod lifecycle;
-pub mod live_adapter;
 pub mod mcp_config;
 pub mod memory;
 pub mod model_defaults;
@@ -176,8 +175,9 @@ pub use handles::{
     PeerResponseTerminalCorrelationId, PeerResponseTerminalDisplayIdentity,
     PeerResponseTerminalFact, PeerResponseTerminalFactError, PeerResponseTerminalProjectionStatus,
     PeerResponseTerminalRenderPayload, PeerResponseTerminalRouteIdentity,
-    PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, SessionAdmissionHandle,
-    SurfaceDiagnosticSnapshot, SurfaceSnapshot, TurnStateHandle, TurnStateSnapshot,
+    PeerResponseTerminalSource, PeerResponseTerminalTransportIdentity, RealtimeProductTurnHandle,
+    RealtimeProductTurnPhase, SessionAdmissionHandle, SurfaceDiagnosticSnapshot, SurfaceSnapshot,
+    TurnStateHandle, TurnStateSnapshot,
 };
 pub use hooks::{
     HookCapability, HookDecision, HookEngine, HookEngineError, HookExecutionMode,
@@ -299,7 +299,7 @@ pub use types::{
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
     SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
     ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptSource, Usage, UserMessage, VideoData, has_images, has_non_text_content, has_video,
+    Usage, UserMessage, VideoData, has_images, has_non_text_content, has_video,
     is_supported_video_media_type, validate_inline_video_blocks,
 };
 

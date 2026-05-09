@@ -187,15 +187,11 @@ fn render_fork_context(
                 }
             }
             Message::BlockAssistant(ba) => {
-                // Both `Text` (display) and `Transcript` (spoken) lanes
-                // project to the rendered text stream; supervisor sees the
-                // assistant's full visible output regardless of lane.
                 let text: String = ba
                     .blocks
                     .iter()
                     .filter_map(|b| match b {
-                        meerkat_core::types::AssistantBlock::Text { text, .. }
-                        | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
+                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
                             Some(text.as_str())
                         }
                         _ => None,
@@ -3416,6 +3412,21 @@ impl MobActor {
                     reply_tx,
                 } => {
                     let _ = reply_tx.send(self.machine_projection_for_identity(&agent_identity));
+                }
+                MobCommand::CurrentRealtimeBinding {
+                    agent_identity,
+                    reply_tx,
+                } => {
+                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
+                    let binding = self
+                        .dsl_authority
+                        .state
+                        .member_session_bindings
+                        .get(&dsl_identity)
+                        .and_then(|dsl_session_id| {
+                            meerkat_core::types::SessionId::parse(&dsl_session_id.0).ok()
+                        });
+                    let _ = reply_tx.send(binding);
                 }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.probe_command_admission(

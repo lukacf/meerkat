@@ -39,6 +39,41 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Point-in-time snapshot of a mob member's execution state.
+/// Serializable projection of the member's current realtime attachment
+/// state, mapped one-to-one from `meerkat_runtime::RealtimeAttachmentStatus`.
+///
+/// Semantic ownership remains with MeerkatMachine (capability-driven
+/// transport). This enum is a transport shape so `mob/member_status`
+/// consumers can observe the attachment lifecycle for a member without
+/// reaching into runtime internals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MobRealtimeAttachmentStatus {
+    Unattached,
+    IntentPresentUnbound,
+    BindingNotReady,
+    BindingReady,
+    ReplacementPending,
+    ReattachRequired,
+}
+
+#[cfg(feature = "runtime-adapter")]
+fn map_runtime_realtime_attachment_status(
+    status: meerkat_runtime::RealtimeAttachmentStatus,
+) -> MobRealtimeAttachmentStatus {
+    use meerkat_runtime::RealtimeAttachmentStatus as Rt;
+    match status {
+        Rt::Unattached => MobRealtimeAttachmentStatus::Unattached,
+        Rt::IntentPresentUnbound => MobRealtimeAttachmentStatus::IntentPresentUnbound,
+        Rt::BindingNotReady => MobRealtimeAttachmentStatus::BindingNotReady,
+        Rt::BindingReady => MobRealtimeAttachmentStatus::BindingReady,
+        Rt::ReplacementPending => MobRealtimeAttachmentStatus::ReplacementPending,
+        Rt::ReattachRequired => MobRealtimeAttachmentStatus::ReattachRequired,
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberSnapshot {
@@ -66,8 +101,19 @@ pub struct MobMemberSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
+    /// Current realtime attachment state of the member's bridge session,
+    /// projected from MeerkatMachine's capability-driven transport.
+    /// `None` when no bridge session exists yet or the runtime adapter is
+    /// unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_attachment_status: Option<MobRealtimeAttachmentStatus>,
     /// Diagnostic session id for the member's current bridge session.
-    /// Observable for status/continuity diagnostics only.
+    ///
+    /// This remains observable for status/continuity diagnostics, but it is
+    /// not a realtime routing contract. Public realtime callers must address
+    /// mob members through `RealtimeChannelTarget::MobMember` so the runtime
+    /// resolves the current machine-owned bridge binding at open/reconnect
+    /// time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<SessionId>,
     /// Bridge-internal session binding — not part of the public identity contract.
@@ -741,6 +787,33 @@ impl MobHandle {
         &self,
     ) -> Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> {
         self.realtime_session_factory.as_ref().map(Arc::clone)
+    }
+
+    /// W3-H: read the current bridge session id bound to `agent_identity`
+    /// in this mob, projected from the MobMachine's canonical
+    /// `member_session_bindings` map. Returns `None` if the identity has
+    /// no binding. Used by the realtime WS surface at `MobMember` channel
+    /// open time to initialize the task-local current_session_id before
+    /// subscribing to binding events.
+    pub async fn current_realtime_binding(
+        &self,
+        agent_identity: crate::ids::AgentIdentity,
+    ) -> Result<Option<meerkat_core::types::SessionId>, crate::MobError> {
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        self.command_tx
+            .send(super::state::MobCommand::CurrentRealtimeBinding {
+                agent_identity,
+                reply_tx,
+            })
+            .await
+            .map_err(|_| {
+                crate::MobError::Internal(
+                    "mob actor exited before responding to CurrentRealtimeBinding".to_string(),
+                )
+            })?;
+        reply_rx.await.map_err(|_| {
+            crate::MobError::Internal("mob actor dropped CurrentRealtimeBinding reply".to_string())
+        })
     }
 
     async fn member_machine_projection(
@@ -3417,6 +3490,8 @@ impl MobHandle {
                 None
             }
         };
+        snapshot.realtime_attachment_status =
+            self.project_realtime_attachment_status(&snapshot).await;
         snapshot.resolved_capabilities = self.project_resolved_capabilities(&snapshot).await;
         snapshot.external_member = self
             .project_external_member_observation(identity, &snapshot)
@@ -3444,6 +3519,7 @@ impl MobHandle {
                 error: None,
                 tokens_used: 0,
                 is_final: false,
+                realtime_attachment_status: None,
                 current_session_id: None,
                 current_bridge_session_id: None,
                 peer_connectivity: None,
@@ -3494,6 +3570,27 @@ impl MobHandle {
 
     /// Project the current realtime attachment status for the given member
     /// snapshot by consulting the MeerkatMachine runtime adapter. Returns
+    /// `None` when the adapter is unavailable, the session is not yet bound
+    /// in the runtime (bridge session unknown), or the runtime query fails.
+    async fn project_realtime_attachment_status(
+        &self,
+        snapshot: &MobMemberSnapshot,
+    ) -> Option<MobRealtimeAttachmentStatus> {
+        #[cfg(feature = "runtime-adapter")]
+        {
+            use meerkat_runtime::service_ext::SessionServiceRuntimeExt as _;
+            let session_id = snapshot.current_bridge_session_id().cloned()?;
+            let runtime = self.runtime_adapter.as_ref()?.as_ref();
+            let status = runtime.realtime_attachment_status(&session_id).await.ok()?;
+            Some(map_runtime_realtime_attachment_status(status))
+        }
+        #[cfg(not(feature = "runtime-adapter"))]
+        {
+            let _ = snapshot;
+            None
+        }
+    }
+
     async fn project_resolved_capabilities(
         &self,
         snapshot: &MobMemberSnapshot,
@@ -3980,6 +4077,7 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
+            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -4012,6 +4110,7 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
+            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -4043,6 +4142,7 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
+            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,

@@ -42,7 +42,7 @@ and optional mob tooling.
 |---------|--------------|------------------|
 | `rkat` CLI | Runtime-backed | Developer and automation workflows over the shared session service |
 | `rkat-mini` | Runtime-backed source-build reduced profile | Smaller CLI command set for custom embeddable/product distributions |
-| `rkat-rpc` | Runtime-backed | JSON-RPC 2.0 over stdio/TCP, SDK backend, optional `live/*` audio/text WebSocket adapter (`--live-ws`) |
+| `rkat-rpc` | Runtime-backed | JSON-RPC 2.0 over stdio/TCP, SDK backend, optional realtime WebSocket bootstrap |
 | `rkat-rpc-mini` | Runtime-backed source-build reduced profile | Core session/config/catalog/capability RPC subset for custom distributions |
 | `rkat-rest` | Runtime-backed | HTTP/SSE adapter over the same session, schedule, auth, config, comms, and limited mob helper surfaces |
 | `rkat-mcp` | Runtime-backed | Public `meerkat_*` MCP tools backed by `SessionService` plus typed public mob tools when compiled |
@@ -80,7 +80,7 @@ state unless the embedding provides a store.
 | Memory | Semantic memory and compaction are optional build-time capabilities attached to the factory/session service |
 | Scheduling | `meerkat-schedule` materializes sessions or mobs from durable trigger/target/policy records |
 | Mobs | `meerkat-mob` owns roster, lifecycle, wiring, flows, task board, and member runtime bindings; public host surfaces use typed `mob/*` or `meerkat_mob_*` control planes |
-| Live audio/text adapter | Optional `meerkat-live` adapter exposed by `rkat-rpc --live-ws`; provider session lifecycle is owned by the live adapter, not by `MeerkatMachine`. `live/open` requires a runtime model whose `ModelCapabilities.realtime == true` and a provider with a wired live adapter |
+| Realtime | Model capability drives OpenAI Realtime attach/detach; RPC owns the audio WebSocket bootstrap and runtime status is observed through attachment projections |
 | Blobs/artifacts | Blob-backed content, including generated images, is stored in the realm blob store and exposed through history plus blob/artifact APIs |
 
 ## Architectural rules
@@ -89,7 +89,7 @@ state unless the embedding provides a store.
 - Canonical semantic state changes flow through generated machine kernels, not handwritten reducers.
 - Runtime-backed surfaces own runtime semantics; standalone Rust/WASM paths opt into explicit ephemeral mode instead of silently emulating the runtime.
 - Mob orchestration is the multi-agent runtime path; member identity is stable via `AgentIdentity`, while live runtime bindings rotate through `AgentRuntimeId` plus `FenceToken`.
-- The `live/*` adapter surface is capability-gated: opening a live channel for a session requires the session's resolved model to have `ModelCapabilities.realtime == true` and the provider to have a registered live adapter factory.
+- Public realtime APIs are capability-driven: a session becomes realtime by selecting a model with `ModelCapabilities.realtime == true`.
 - Public app hosts should use typed control planes (`mob/*`, `schedule/*`, REST schedule endpoints, MCP `meerkat_*` tools). Agent-facing orchestration tools are injected separately into running sessions.
 
 ## Canonical machines
@@ -99,7 +99,7 @@ The current catalog exposes **five** canonical machines from
 
 | Machine | Owns |
 |---------|------|
-| `MeerkatMachine` | Session runtime lifecycle, ingress, turn execution, tool visibility, comms drain |
+| `MeerkatMachine` | Session runtime lifecycle, ingress, turn execution, tool visibility, comms drain, realtime attachment, live-topology reconfigure |
 | `MobMachine` | Mob lifecycle, roster, coordinator wiring, member runtime binding, flow execution, shared tasks |
 | `ScheduleLifecycleMachine` | Schedule lifecycle, trigger state, and scheduler control |
 | `OccurrenceLifecycleMachine` | Occurrence dispatch, delivery, and terminalization |
@@ -132,7 +132,7 @@ Generated specs for the machine and composition surfaces live under
 |-------|------|
 | `meerkat-core` | Agent loop, shared types, runtime/session/tool contracts |
 | `meerkat-contracts` | Wire types, error codes, public protocol schemas, contract version |
-| `meerkat-runtime` | `MeerkatMachine`, runtime control plane, session binding/recovery, live-adapter host orchestration |
+| `meerkat-runtime` | `MeerkatMachine`, runtime control plane, session binding/recovery, realtime transport orchestration |
 | `meerkat-session` | Persistent and ephemeral `SessionService` implementations |
 | `meerkat-store` | Session and realm persistence backends (`sqlite`, `jsonl`, schedule store helpers) |
 | `meerkat-tools` | Builtin tools, tool scoping, MCP live-surface integration points |
@@ -171,3 +171,4 @@ Generated specs for the machine and composition surfaces live under
 - [Design philosophy](/reference/design-philosophy)
 - [Session contracts](/reference/session-contracts)
 - [Capability matrix](/reference/capability-matrix)
+- [Realtime guide](/guides/realtime)

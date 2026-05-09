@@ -84,10 +84,14 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
 
-### Auth wrappers
+### Realtime and auth wrappers
 
-The SDK also exposes the auth-profile wrappers from the RPC surface:
+The SDK also exposes the runtime/product realtime helpers and auth-profile wrappers from the RPC surface:
 
+- `runtimeRealtimeAttachmentStatus(...)`
+- `realtimeOpenInfo(...)`
+- `realtimeStatus(...)`
+- `realtimeCapabilities(...)`
 - `authProfileList(...)`, `authProfileGet(...)`, `authProfileCreate(...)`, `authProfileDelete(...)`
 - `authLoginStart(...)`, `authLoginComplete(...)`, `authLoginDeviceStart(...)`, `authLoginDeviceComplete(...)`, `authLoginProvisionApiKey(...)`
 - `authStatusGet(...)`, `authLogout(...)`
@@ -185,12 +189,10 @@ export interface ConnectOptions {
   stateRoot?: string;
   contextRoot?: string;
   userConfigRoot?: string;
-  liveWs?: boolean;
 }
 ```
 
 `realmId` and `isolated` are mutually exclusive. If `realmId` is omitted and `isolated` is not set, the spawned `rkat-rpc` process uses its normal isolated-mode default rather than a shared default realm. Reuse `realmId` explicitly to share sessions and config across processes or surfaces.
-Set `liveWs: true` only for live-adapter flows that need `live/*`; it requires a configured live provider.
 
 ### createSession()
 

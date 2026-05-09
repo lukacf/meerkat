@@ -41,6 +41,7 @@
               "concepts/comms",
               "concepts/mobs",
               "concepts/scheduling",
+              "concepts/realtime",
               "concepts/tools",
               "concepts/providers",
               "concepts/configuration"
@@ -62,6 +63,7 @@
               "guides/memory",
               "guides/hooks",
               "guides/skills",
+              "guides/realtime",
               "guides/scheduling"
             ]
           },

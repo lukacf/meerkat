@@ -678,6 +678,7 @@ class MobMemberStatusResult:
     kickoff: Optional[Any] = None
     output_preview: Optional[str] = None
     peer_connectivity: Optional[Any] = None
+    realtime_attachment_status: Optional[str] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
@@ -1299,6 +1300,34 @@ class SessionStreamCloseResult:
 
 
 @dataclass
+class RuntimeRealtimeAttachmentStatusParams:
+    """Request payload for `session/realtime_attachment_status`."""
+    session_id: str
+
+
+@dataclass
+class RealtimeOpenRequest:
+    """Request payload for `realtime/open_info`."""
+    role: RealtimeChannelRole
+    target: RealtimeChannelTarget
+    turning_mode: RealtimeTurningMode
+    channel_config: Optional[RealtimeChannelConfig] = None
+    reconnect_policy: Optional[RealtimeReconnectPolicy] = None
+
+
+@dataclass
+class RealtimeStatusParams:
+    """Request payload for `realtime/status`."""
+    target: RealtimeChannelTarget
+
+
+@dataclass
+class RealtimeCapabilitiesParams:
+    """Request payload for `realtime/capabilities`."""
+    target: RealtimeChannelTarget
+
+
+@dataclass
 class ScheduleIdParams:
     """Request payload for schedule id lookups."""
     schedule_id: str
@@ -1369,6 +1398,44 @@ class RuntimeStateResult:
 
 
 @dataclass
+class RuntimeRealtimeAttachmentStatusResult:
+    """Response payload for `session/realtime_attachment_status`."""
+    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
+
+
+@dataclass
+class RealtimeReconnectPolicy:
+    """Public reconnect policy for a realtime channel."""
+    initial_backoff_ms: int
+    max_attempts: int
+    max_backoff_ms: int
+    max_total_ms: int
+
+
+# Typed per-channel tool timeout policy.
+class RealtimeToolTimeoutPolicyDefault(TypedDict, total=False):
+    type: Required[Literal['default']]
+
+class RealtimeToolTimeoutPolicyDisabled(TypedDict, total=False):
+    type: Required[Literal['disabled']]
+
+class RealtimeToolTimeoutPolicyFinite(TypedDict, total=False):
+    timeout_ms: Required[int]
+    type: Required[Literal['finite']]
+
+RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite
+
+@dataclass
+class RealtimeChannelConfig:
+    """Per-channel runtime knobs negotiated at open time.
+
+Additive fields only — clients that do not carry this struct inherit the
+server-default behavior via `#[serde(default)]` on the parent
+[`RealtimeOpenRequest`]."""
+    tool_timeout: Optional[RealtimeToolTimeoutPolicy] = None
+
+
+@dataclass
 class RealtimeAudioFormat:
     """Descriptor for an expected or actual realtime audio format."""
     channels: int
@@ -1378,8 +1445,7 @@ class RealtimeAudioFormat:
 
 @dataclass
 class RealtimeCapabilities:
-    """Provider-session capability projection used by the live adapter to
-publish what the negotiated provider session can actually do."""
+    """Product-facing realtime capability set for one target/provider combination."""
     interrupt_supported: bool
     tool_lifecycle_events_supported: bool
     transcript_supported: bool
@@ -1392,9 +1458,49 @@ publish what the negotiated provider session can actually do."""
 
 
 @dataclass
+class RealtimeChannelStatus:
+    """Public realtime channel status projection."""
+    state: RealtimeChannelState
+    attempt_count: Optional[int] = None
+    deadline_at: Optional[str] = None
+    next_retry_at: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@dataclass
+class RealtimeOpenInfo:
+    """Response payload for `realtime/open_info`."""
+    capabilities: RealtimeCapabilities
+    default_protocol_version: RealtimeProtocolVersion
+    expires_at: str
+    open_token: str
+    target: RealtimeChannelTarget
+    ws_url: str
+    supported_protocol_versions: Optional[list[RealtimeProtocolVersion]] = None
+
+
+@dataclass
+class RealtimeStatusResult:
+    """Response payload for `realtime/status`."""
+    status: RealtimeChannelStatus
+
+
+@dataclass
+class RealtimeCapabilitiesResult:
+    """Response payload for `realtime/capabilities`."""
+    capabilities: RealtimeCapabilities
+
+
+@dataclass
 class RealtimeTextChunk:
     """A text chunk for realtime ingress/egress."""
     text: str
+
+
+@dataclass
+class RealtimeTextDelta:
+    """A text delta chunk for realtime output."""
+    delta: str
 
 
 @dataclass
@@ -1419,124 +1525,81 @@ class RealtimeVideoChunk:
 
 
 @dataclass
-class LiveOpenParams:
-    """Request payload for `live/open`."""
-    session_id: str
+class RealtimeBargeInTruncateFrame:
+    """Payload for `channel.barge_in_truncate`.
 
-
-@dataclass
-class WireLiveChannelCapabilities:
-    """Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
-
-Typed-boolean matrix advertised when a live channel opens. SDK consumers
-(Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to
-`image_in` / `video_in` / `transcript_supported` etc. without needing to
-hand-decode an opaque JSON object. CC5: closes the typed-surface gap that
-hid T8's "anticipate `gpt-realtime-2`" goal at the SDK boundary.
-
-Field shape mirrors the core type 1:1 — adding a new capability requires
-extending both the core type and this mirror; the `From` impls below
-fail-closed if a field is dropped (compile error: missing field). New
-modalities appear here as additional typed booleans, never as
-stringly-typed lists or provider-specific enums."""
-    audio_in: bool
-    audio_out: bool
-    barge_in_supported: bool
-    image_in: bool
-    provider_native_resume: bool
-    text_in: bool
-    text_out: bool
-    transcript_supported: bool
-    video_in: bool
-
-
-# Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].
-#
-# Internally-tagged on `mode` (snake_case) — matches the core enum's serde
-# shape exactly so the wire payload is byte-identical. CC6: closes the
-# typed-surface gap. SDK consumers get a discriminated union (TS) or
-# tagged-variant (Python) instead of a raw JSON blob, and the
-# `ProviderNativeResume { provider_session_id }` payload field is visible
-# to schema codegen.
-#
-# **Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the
-# core enum from a bare-string serde shape (`"transcript_only"`) to the
-# internally-tagged form (`{"mode":"transcript_only"}`). This wire mirror
-# makes that shape change visible to schema codegen and SDK clients.
-class WireLiveContinuityModeFresh(TypedDict, total=False):
-    mode: Required[Literal['fresh']]
-
-class WireLiveContinuityModeTranscriptOnly(TypedDict, total=False):
-    mode: Required[Literal['transcript_only']]
-
-class WireLiveContinuityModeDegraded(TypedDict, total=False):
-    mode: Required[Literal['degraded']]
-
-class WireLiveContinuityModeProviderNativeResume(TypedDict, total=False):
-    mode: Required[Literal['provider_native_resume']]
-    provider_session_id: Required[str]
-
-WireLiveContinuityMode = WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly | WireLiveContinuityModeDegraded | WireLiveContinuityModeProviderNativeResume
-
-@dataclass
-class LiveOpenResult:
-    """Response payload for `live/open`.
-
-`capabilities` and `continuity` are typed wire-side mirrors of the core
-`LiveChannelCapabilities` / `LiveContinuityMode` so SDK codegen sees the
-real shape (typed booleans, internally-tagged variant payloads) instead
-of an opaque JSON blob. CC5/CC6 (PR #650 verifier follow-up).
-
-`transport` remains an opaque `serde_json::Value` schema projection: the
-transport-bootstrap shape is provider-pluggable and the typed wire mirror
-is tracked separately (Round-4 follow-up T4 reintroduces WebRTC with a
-real signaling shape)."""
-    capabilities: WireLiveChannelCapabilities
-    channel_id: str
-    continuity: WireLiveContinuityMode
-    transport: Any
-
-
-@dataclass
-class LiveChannelParams:
-    """Request payload for `live/status`, `live/close`, `live/commit_input`, and
-`live/interrupt`. They all take the same `{channel_id}` shape; this
-struct is the typed name for it."""
-    channel_id: str
-
-
-@dataclass
-class LiveStatusResult:
-    """Response payload for `live/status`. See `LiveOpenResult` for the
-rationale on the schema-side opaque projection of the core type."""
-    channel_id: str
-    status: Any
-
-
-@dataclass
-class LiveSendInputParams:
-    """Request payload for `live/send_input`.
-
-**`BREAKING_LIVE_WIRE_FORMAT_V1`** (H48): `chunk` is a nested object, not
-a flattened sibling of `channel_id`. WS protocol clients that piggyback on
-this shape must use the nested form."""
-    channel_id: str
-    chunk: dict[str, Any]
-
-
-@dataclass
-class LiveTruncateParams:
-    """Request payload for `live/truncate`.
-
-`item_id` and `content_index` are the provider-side handle for the
-assistant item being truncated; `audio_played_ms` is the client-tracked
-playback cursor at the moment of truncation. There is no server-side
-playback-cursor read API — clients track playback locally and pass the
-cursor in here when they want to truncate."""
+Sent by the client the moment it detects the user starting to speak over
+the assistant's audio, to tell the server what prefix was actually heard.
+Field names mirror OpenAI Realtime's `conversation.item.truncate` so the
+provider adapter can map straight through without re-encoding."""
     audio_played_ms: int
-    channel_id: str
     content_index: int
     item_id: str
+
+
+@dataclass
+class AudioFormatMismatchContext:
+    """Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`]."""
+    actual: RealtimeAudioFormat
+    expected: RealtimeAudioFormat
+
+
+@dataclass
+class ToolCallTimeoutContext:
+    """Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`]."""
+    call_id: str
+    elapsed_ms: int
+    timeout_ms: int
+
+
+@dataclass
+class RealtimeChannelOpenFrame:
+    """Payload for `channel.open`."""
+    open_token: str
+    protocol_version: RealtimeProtocolVersion
+    role: RealtimeChannelRole
+    turning_mode: RealtimeTurningMode
+
+
+@dataclass
+class RealtimeChannelInputFrame:
+    """Payload for `channel.input`."""
+    chunk: RealtimeInputChunk
+
+
+@dataclass
+class RealtimeChannelOpenedFrame:
+    """Payload for `channel.opened`."""
+    capabilities: RealtimeCapabilities
+    protocol_version: RealtimeProtocolVersion
+    role: RealtimeChannelRole
+    status: RealtimeChannelStatus
+
+
+@dataclass
+class RealtimeChannelStatusFrame:
+    """Payload for `channel.status`."""
+    status: RealtimeChannelStatus
+
+
+@dataclass
+class RealtimeChannelEventFrame:
+    """Payload for `channel.event`."""
+    event: RealtimeEvent
+
+
+@dataclass
+class RealtimeChannelErrorFrame:
+    """Payload for `channel.error`."""
+    code: RealtimeErrorCode
+    message: str
+    details: Optional[RealtimeErrorDetails] = None
+
+
+@dataclass
+class RealtimeChannelClosedFrame:
+    """Payload for `channel.closed`."""
+    reason: Optional[str] = None
 
 
 @dataclass
@@ -2253,16 +2316,86 @@ WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 # Public runtime state projection used by RPC surfaces.
 WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
 
-# Turning mode for a provider realtime session.
+# Public live attachment status projection used by runtime and mob surfaces.
+WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
+
+# Target for a public realtime channel.
+#
+# Two variants, one for each addressing mode:
+#
+# - `SessionTarget` — standalone sessions (no mob-member continuity). The
+#   session id is pinned for the channel's lifetime; when that session
+#   ends, the channel ends.
+#
+# - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
+#   canonical anchor, and the server resolves the current bridge session
+#   on every tick from the MobMachine's `member_session_bindings` map.
+#   Respawn atomically rotates the bridge session via the
+#   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
+#   channel survives without any SDK round-trip. A terminal
+#   `MemberSessionBindingChanged { old: Some, new: None }` closes the
+#   channel with `RealtimeErrorCode::BindingReleased`.
+class RealtimeChannelTargetSessionTarget(TypedDict, total=False):
+    session_id: Required[str]
+    type: Required[Literal['session_target']]
+
+class RealtimeChannelTargetMobMember(TypedDict, total=False):
+    agent_identity: Required[str]
+    mob_id: Required[str]
+    type: Required[Literal['mob_member']]
+
+RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | RealtimeChannelTargetMobMember
+
+# Opening role for a realtime channel.
+RealtimeChannelRole = Literal['primary', 'observer']
+
+# Turning mode for a realtime channel.
 RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
 
-# Input modality kind.
+# Canonical wire protocol version for realtime channels.
+#
+# The version is bumped every time the on-the-wire shape of
+# [`RealtimeAudioChunk`], frame enums, or other load-bearing realtime
+# contracts changes in an incompatible way. Clients and servers handshake on
+# the string form; this enum is the single typed owner of the set.
+RealtimeProtocolVersion = Literal['2']
+
+# Input modality kind supported by a realtime channel.
 RealtimeInputKind = Literal['text', 'audio', 'video']
 
-# Output modality kind.
+# Output modality kind supported by a realtime channel.
 RealtimeOutputKind = Literal['text', 'audio', 'video']
 
-# Modality-neutral provider input chunk.
+# Lifecycle state for a realtime channel.
+RealtimeChannelState = Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
+
+# Typed realtime channel error code. Replaces the prior freeform `String` on
+# [`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick
+# exactly one variant so downstream SDKs can match without string folklore.
+RealtimeErrorCode = Literal['invalid_frame', 'expected_channel_open', 'invalid_open_token', 'open_token_expired', 'role_mismatch', 'turning_mode_mismatch', 'unsupported_turning_mode', 'target_busy', 'unsupported_protocol_version', 'audio_format_mismatch', 'unauthorized_realm', 'tool_call_timeout', 'internal_error', 'reconnect_exhausted', 'invalid_target', 'channel_not_bound', 'runtime_internal', 'runtime_not_ready', 'provider_session_closed', 'provider_session_failed', 'provider_session_unavailable', 'unsupported_input_kind', 'no_pending_turn', 'observer_read_only', 'unexpected_channel_open', 'commit_turn_unavailable', 'channel_reconnecting', 'binding_released', 'authentication_failed', 'content_filtered', 'model_not_found', 'invalid_request']
+
+# Structured typed context carried on a channel error frame. Each variant
+# corresponds to a specific [`RealtimeErrorCode`] and lets clients match
+# the reason without parsing the message string.
+class RealtimeErrorDetailsAudioFormatMismatch(TypedDict, total=False):
+    actual: Required[RealtimeAudioFormat]
+    expected: Required[RealtimeAudioFormat]
+    kind: Required[Literal['audio_format_mismatch']]
+
+class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
+    call_id: Required[str]
+    elapsed_ms: Required[int]
+    timeout_ms: Required[int]
+    kind: Required[Literal['tool_call_timeout']]
+
+class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
+    kind: Required[Literal['unsupported_protocol_version']]
+    requested: Required[str]
+    supported: Required[list[RealtimeProtocolVersion]]
+
+RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion
+
+# Modality-neutral input chunk.
 class RealtimeInputChunkTextChunk(TypedDict, total=False):
     text: Required[str]
     kind: Required[Literal['text_chunk']]
@@ -2281,40 +2414,149 @@ class RealtimeInputChunkVideoChunk(TypedDict, total=False):
 
 RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk
 
-# Modality-tagged input chunk for `live/send_input`.
-#
-# Audio / image / video-frame payloads are base64 strings (`data`); the
-# modality-specific metadata (`sample_rate_hz` / `channels` for audio,
-# `mime` for image, `codec` / `timestamp_ms` for video frames) lets the
-# adapter validate against the negotiated provider format.
-#
-# T11: `Image` and `VideoFrame` mirror the typed variants on
-# [`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not
-# implement a variant must reject with a typed
-# `LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a
-# free-form provider error string.
-class LiveInputChunkWireAudio(TypedDict, total=False):
+# Modality-neutral output chunk.
+class RealtimeOutputChunkTextDelta(TypedDict, total=False):
+    delta: Required[str]
+    kind: Required[Literal['text_delta']]
+
+class RealtimeOutputChunkAudioChunk(TypedDict, total=False):
     channels: Required[int]
     data: Required[str]
-    kind: Required[Literal['audio']]
+    mime_type: Required[str]
     sample_rate_hz: Required[int]
+    kind: Required[Literal['audio_chunk']]
 
-class LiveInputChunkWireText(TypedDict, total=False):
-    kind: Required[Literal['text']]
+class RealtimeOutputChunkVideoChunk(TypedDict, total=False):
+    data: Required[str]
+    mime_type: Required[str]
+    kind: Required[Literal['video_chunk']]
+
+RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk
+
+# Normalized realtime event stream payload.
+class RealtimeEventInputTranscriptPartial(TypedDict, total=False):
     text: Required[str]
+    type: Required[Literal['input_transcript_partial']]
 
-class LiveInputChunkWireImage(TypedDict, total=False):
-    data: Required[str]
-    kind: Required[Literal['image']]
-    mime: Required[str]
+class RealtimeEventInputTranscriptFinal(TypedDict, total=False):
+    prosody_hint: NotRequired[str]
+    text: Required[str]
+    type: Required[Literal['input_transcript_final']]
 
-class LiveInputChunkWireVideoFrame(TypedDict, total=False):
-    codec: Required[str]
-    data: Required[str]
-    kind: Required[Literal['video_frame']]
-    timestamp_ms: Required[int]
+class RealtimeEventTurnStarted(TypedDict, total=False):
+    type: Required[Literal['turn_started']]
 
-LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText | LiveInputChunkWireImage | LiveInputChunkWireVideoFrame
+class RealtimeEventTurnCommitted(TypedDict, total=False):
+    type: Required[Literal['turn_committed']]
+
+class RealtimeEventTurnCompleted(TypedDict, total=False):
+    type: Required[Literal['turn_completed']]
+
+class RealtimeEventOutputTextDelta(TypedDict, total=False):
+    delta: Required[str]
+    type: Required[Literal['output_text_delta']]
+
+class RealtimeEventOutputAudioChunk(TypedDict, total=False):
+    chunk: Required[RealtimeAudioChunk]
+    type: Required[Literal['output_audio_chunk']]
+
+class RealtimeEventOutputVideoChunk(TypedDict, total=False):
+    chunk: Required[RealtimeVideoChunk]
+    type: Required[Literal['output_video_chunk']]
+
+class RealtimeEventInterrupted(TypedDict, total=False):
+    type: Required[Literal['interrupted']]
+
+class RealtimeEventToolCallRequested(TypedDict, total=False):
+    call_id: Required[str]
+    tool_name: Required[str]
+    type: Required[Literal['tool_call_requested']]
+
+class RealtimeEventToolCallCompleted(TypedDict, total=False):
+    call_id: Required[str]
+    type: Required[Literal['tool_call_completed']]
+
+class RealtimeEventToolCallFailed(TypedDict, total=False):
+    call_id: Required[str]
+    error: Required[str]
+    type: Required[Literal['tool_call_failed']]
+
+class RealtimeEventToolCallTimedOut(TypedDict, total=False):
+    call_id: Required[str]
+    elapsed_ms: Required[int]
+    type: Required[Literal['tool_call_timed_out']]
+
+class RealtimeEventAssistantTranscriptTruncated(TypedDict, total=False):
+    audio_played_ms: Required[int]
+    item_id: Required[str]
+    truncated_text: NotRequired[str]
+    type: Required[Literal['assistant_transcript_truncated']]
+
+class RealtimeEventStatusChanged(TypedDict, total=False):
+    status: Required[RealtimeChannelStatus]
+    type: Required[Literal['status_changed']]
+
+class RealtimeEventNeedsReattach(TypedDict, total=False):
+    type: Required[Literal['needs_reattach']]
+
+RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscriptFinal | RealtimeEventTurnStarted | RealtimeEventTurnCommitted | RealtimeEventTurnCompleted | RealtimeEventOutputTextDelta | RealtimeEventOutputAudioChunk | RealtimeEventOutputVideoChunk | RealtimeEventInterrupted | RealtimeEventToolCallRequested | RealtimeEventToolCallCompleted | RealtimeEventToolCallFailed | RealtimeEventToolCallTimedOut | RealtimeEventAssistantTranscriptTruncated | RealtimeEventStatusChanged | RealtimeEventNeedsReattach
+
+# Client-to-server realtime frame.
+class RealtimeClientFrameChannelOpen(TypedDict, total=False):
+    open_token: Required[str]
+    protocol_version: Required[RealtimeProtocolVersion]
+    role: Required[RealtimeChannelRole]
+    turning_mode: Required[RealtimeTurningMode]
+    type: Required[Literal['channel.open']]
+
+class RealtimeClientFrameChannelInput(TypedDict, total=False):
+    chunk: Required[RealtimeInputChunk]
+    type: Required[Literal['channel.input']]
+
+class RealtimeClientFrameChannelCommitTurn(TypedDict, total=False):
+    type: Required[Literal['channel.commit_turn']]
+
+class RealtimeClientFrameChannelInterrupt(TypedDict, total=False):
+    type: Required[Literal['channel.interrupt']]
+
+class RealtimeClientFrameChannelBargeInTruncate(TypedDict, total=False):
+    audio_played_ms: Required[int]
+    content_index: Required[int]
+    item_id: Required[str]
+    type: Required[Literal['channel.barge_in_truncate']]
+
+class RealtimeClientFrameChannelClose(TypedDict, total=False):
+    type: Required[Literal['channel.close']]
+
+RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChannelInput | RealtimeClientFrameChannelCommitTurn | RealtimeClientFrameChannelInterrupt | RealtimeClientFrameChannelBargeInTruncate | RealtimeClientFrameChannelClose
+
+# Server-to-client realtime frame.
+class RealtimeServerFrameChannelOpened(TypedDict, total=False):
+    capabilities: Required[RealtimeCapabilities]
+    protocol_version: Required[RealtimeProtocolVersion]
+    role: Required[RealtimeChannelRole]
+    status: Required[RealtimeChannelStatus]
+    type: Required[Literal['channel.opened']]
+
+class RealtimeServerFrameChannelStatus(TypedDict, total=False):
+    status: Required[RealtimeChannelStatus]
+    type: Required[Literal['channel.status']]
+
+class RealtimeServerFrameChannelEvent(TypedDict, total=False):
+    event: Required[RealtimeEvent]
+    type: Required[Literal['channel.event']]
+
+class RealtimeServerFrameChannelError(TypedDict, total=False):
+    code: Required[RealtimeErrorCode]
+    details: NotRequired[RealtimeErrorDetails]
+    message: Required[str]
+    type: Required[Literal['channel.error']]
+
+class RealtimeServerFrameChannelClosed(TypedDict, total=False):
+    reason: NotRequired[str]
+    type: Required[Literal['channel.closed']]
+
+RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
 
 # Discriminator for runtime-backed input submission responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
@@ -2338,10 +2580,6 @@ class WireAssistantBlockText(TypedDict, total=False):
     block_type: Required[Literal['text']]
     data: Required[dict[str, Any]]
 
-class WireAssistantBlockTranscript(TypedDict, total=False):
-    block_type: Required[Literal['transcript']]
-    data: Required[dict[str, Any]]
-
 class WireAssistantBlockReasoning(TypedDict, total=False):
     block_type: Required[Literal['reasoning']]
     data: Required[dict[str, Any]]
@@ -2361,7 +2599,7 @@ class WireAssistantBlockImage(TypedDict, total=False):
 class WireAssistantBlockUnknown(TypedDict, total=False):
     block_type: Required[Literal['unknown']]
 
-WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockTranscript | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
+WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
 
 # Machine-owned image operation phase.
 class WireImageOperationPhaseRequested(TypedDict, total=False):

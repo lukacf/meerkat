@@ -758,8 +758,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
         tokens_used: 3,
         is_final: false,
         current_session_id: 'session-1',
-        // J58: realtime_attachment_status field removed from mob_member_status
-        // wire shape as part of the live-adapter-mvp sweep.
+        realtime_attachment_status: 'attached',
         resolved_capabilities: {
           vision: false,
           image_input: false,
@@ -792,8 +791,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
 
   const snapshot = await deliveryMob.memberStatus('worker-1');
   assert.equal(snapshot.current_session_id, 'session-1');
-  // J58: realtime_attachment_status assertion removed; field gone from the
-  // wire shape with the live-adapter-mvp sweep.
+  assert.equal(snapshot.realtime_attachment_status, 'attached');
   assert.equal(snapshot.resolved_capabilities.realtime, true);
   assert.deepEqual(snapshot.external_member, { provider: 'external' });
 

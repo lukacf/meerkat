@@ -6,6 +6,7 @@ import {
   Session,
   DeferredSession,
   Mob,
+  RealtimeChannel,
 } from "../dist/index.js";
 
 describe("Phase 1 release parity targets", () => {
@@ -41,15 +42,9 @@ describe("Phase 1 release parity targets", () => {
       "callScheduleTool",
       "readMobEvents",
       "spawnMobMembers",
-      "liveOpen",
-      "liveStatus",
-      "liveClose",
-      "liveSendInput",
-      "liveSendInputImage",
-      "liveSendInputVideoFrame",
-      "liveCommitInput",
-      "liveInterrupt",
-      "liveTruncate",
+      "realtimeOpenInfo",
+      "realtimeStatus",
+      "realtimeCapabilities",
       "createMobProfile",
       "getMobProfile",
       "listMobProfiles",
@@ -78,5 +73,11 @@ describe("Phase 1 release parity targets", () => {
     for (const method of ["spawnMany", "readEvents"]) {
       assert.ok(mobMethods.includes(method), `missing Mob.${method}`);
     }
+  });
+
+  it("exports the RealtimeChannel scaffold", () => {
+    assert.equal(typeof RealtimeChannel, "function");
+    assert.equal(typeof RealtimeChannel.session, "function");
+    assert.equal(typeof RealtimeChannel.mobMember, "function");
   });
 });

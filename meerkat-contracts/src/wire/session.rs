@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource, VideoData,
+    TranscriptEditRunningBehavior, TranscriptReplacement, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -418,14 +418,6 @@ pub enum WireAssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
-    /// Spoken-transcript output (provider audio output → text). Distinct
-    /// from `Text` so callers can render or filter by lane provenance.
-    Transcript {
-        text: String,
-        source: WireTranscriptSource,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        meta: Option<WireProviderMeta>,
-    },
     Reasoning {
         #[serde(default)]
         text: String,
@@ -469,65 +461,11 @@ pub enum WireAssistantBlock {
     Unknown,
 }
 
-/// Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
-/// for spoken-transcript blocks. Single variant today; future-expandable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum WireTranscriptSource {
-    Spoken,
-}
-
-impl From<TranscriptSource> for WireTranscriptSource {
-    fn from(value: TranscriptSource) -> Self {
-        match value {
-            TranscriptSource::Spoken => Self::Spoken,
-            // CC10 (FIX-A): `TranscriptSource` is `non_exhaustive`, so the
-            // compiler requires this wildcard even though `Spoken` is the
-            // only variant today. Choice rationale: there is exactly one
-            // caller of this conversion (the `Transcript` arm in
-            // `From<AssistantBlock> for WireAssistantBlock` below), and
-            // `meerkat-contracts` does not depend on `tracing`. A
-            // `Result`-returning `TryFrom` would force every wire-projection
-            // call site to handle a variant we don't yet have. Per the
-            // no-panic-in-library-code rule we can't `unreachable!()`. The
-            // compromise: `debug_assert!(false, ...)` so debug builds (CI,
-            // dev) panic loudly when a new `TranscriptSource` variant lands
-            // without a matching arm here, while release builds fall back
-            // to `Spoken` rather than producing UB. **When a new variant is
-            // added, add an explicit arm above this comment.**
-            _ => {
-                debug_assert!(
-                    false,
-                    "WireTranscriptSource::from saw an unmapped \
-                     TranscriptSource variant; add an explicit arm in \
-                     meerkat-contracts/src/wire/session.rs."
-                );
-                Self::Spoken
-            }
-        }
-    }
-}
-
-impl From<WireTranscriptSource> for TranscriptSource {
-    fn from(value: WireTranscriptSource) -> Self {
-        match value {
-            WireTranscriptSource::Spoken => Self::Spoken,
-        }
-    }
-}
-
 impl From<AssistantBlock> for WireAssistantBlock {
     fn from(value: AssistantBlock) -> Self {
         match value {
             AssistantBlock::Text { text, meta } => Self::Text {
                 text,
-                meta: meta.map(|m| (*m).into()),
-            },
-            AssistantBlock::Transcript { text, source, meta } => Self::Transcript {
-                text,
-                source: source.into(),
                 meta: meta.map(|m| (*m).into()),
             },
             AssistantBlock::Reasoning { text, meta } => Self::Reasoning {
@@ -578,112 +516,6 @@ impl From<AssistantBlock> for WireAssistantBlock {
                 meta,
             },
             _ => Self::Unknown,
-        }
-    }
-}
-
-/// CC1 (FIX-A): inverse of `From<ProviderMeta> for WireProviderMeta`.
-///
-/// Returns `None` for `WireProviderMeta::Unknown` (the wire-side sink for
-/// future provider variants we don't yet recognize). Caller should drop
-/// the meta in that case rather than fabricate a typed shape. Returns
-/// `Some(...)` for every typed variant — the conversion is lossless for
-/// the four typed cases.
-fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
-    match value {
-        WireProviderMeta::Anthropic { signature } => Some(ProviderMeta::Anthropic { signature }),
-        WireProviderMeta::AnthropicRedacted { data } => {
-            Some(ProviderMeta::AnthropicRedacted { data })
-        }
-        WireProviderMeta::AnthropicCompaction { content } => {
-            Some(ProviderMeta::AnthropicCompaction { content })
-        }
-        WireProviderMeta::Gemini { thought_signature } => {
-            Some(ProviderMeta::Gemini { thought_signature })
-        }
-        WireProviderMeta::OpenAi {
-            id,
-            encrypted_content,
-            phase,
-        } => Some(ProviderMeta::OpenAi {
-            id,
-            encrypted_content,
-            phase,
-        }),
-        WireProviderMeta::Unknown => None,
-    }
-}
-
-/// CC1 (FIX-A): inverse of `From<AssistantBlock> for WireAssistantBlock`.
-///
-/// Mirrors the forward direction arm-for-arm. `WireAssistantBlock::Unknown`
-/// is the wire-side sink for future core variants we don't yet recognize;
-/// the inverse cannot fabricate a typed `AssistantBlock` from it, so it
-/// degrades to an empty `AssistantBlock::Text` with no meta. This is the
-/// symmetric counterpart of the forward direction's `_ => Self::Unknown`
-/// fallback. Pre-1.0 dogma: when a new `AssistantBlock` variant lands,
-/// add an explicit arm both here and in the forward direction.
-impl From<WireAssistantBlock> for AssistantBlock {
-    fn from(value: WireAssistantBlock) -> Self {
-        match value {
-            WireAssistantBlock::Text { text, meta } => Self::Text {
-                text,
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
-            WireAssistantBlock::Transcript { text, source, meta } => Self::Transcript {
-                text,
-                source: source.into(),
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
-            WireAssistantBlock::Reasoning { text, meta } => Self::Reasoning {
-                text,
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
-            WireAssistantBlock::ToolUse {
-                id,
-                name,
-                args,
-                meta,
-            } => Self::ToolUse {
-                id,
-                name,
-                // Pass-through: opaque from provider to dispatcher; mirrors
-                // the forward direction's preservation of `Box<RawValue>`.
-                args,
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
-            WireAssistantBlock::ServerToolContent {
-                id,
-                name,
-                content,
-                meta,
-            } => Self::ServerToolContent {
-                id,
-                name,
-                content,
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
-            WireAssistantBlock::Image {
-                image_id,
-                blob_ref,
-                media_type,
-                width,
-                height,
-                revised_prompt,
-                meta,
-            } => Self::Image {
-                image_id,
-                blob_ref,
-                media_type,
-                width,
-                height,
-                revised_prompt,
-                meta,
-            },
-            WireAssistantBlock::Unknown => Self::Text {
-                text: String::new(),
-                meta: None,
-            },
         }
     }
 }
@@ -1150,13 +982,6 @@ mod tests {
                             text: "done".to_string(),
                             meta: None,
                         },
-                        // T3-extension (FIX-A): pin spoken-transcript
-                        // round-trip alongside Text + Reasoning.
-                        WireAssistantBlock::Transcript {
-                            text: "spoken hi".to_string(),
-                            source: WireTranscriptSource::Spoken,
-                            meta: None,
-                        },
                     ],
                     stop_reason: WireStopReason::EndTurn,
                     created_at: "2026-04-27T00:00:03Z".to_string(),
@@ -1509,78 +1334,6 @@ mod tests {
                 );
             }
             _ => panic!("expected ToolResults message"),
-        }
-    }
-
-    /// CC1 (FIX-A): assert `From<AssistantBlock> for WireAssistantBlock`
-    /// is symmetric with `From<WireAssistantBlock> for AssistantBlock`
-    /// for every typed variant. Round-trip core → wire → core must
-    /// preserve `Text`, `Reasoning`, `Transcript` (with `meta`),
-    /// `ToolUse` (opaque args), `ServerToolContent`, and `Image`.
-    #[test]
-    fn test_assistant_block_core_wire_core_round_trip_symmetric() {
-        use meerkat_core::{
-            AssistantImageId, BlobId, BlobRef, MediaType, ProviderImageMetadata,
-            RevisedPromptDisposition,
-        };
-        use uuid::Uuid;
-
-        let cases: Vec<AssistantBlock> = vec![
-            AssistantBlock::Text {
-                text: "display lane".to_string(),
-                meta: Some(Box::new(ProviderMeta::Anthropic {
-                    signature: "sig-1".to_string(),
-                })),
-            },
-            AssistantBlock::Reasoning {
-                text: "thinking".to_string(),
-                meta: Some(Box::new(ProviderMeta::OpenAi {
-                    id: "rs_1".to_string(),
-                    encrypted_content: Some("enc".to_string()),
-                    phase: Some("draft".to_string()),
-                })),
-            },
-            AssistantBlock::Transcript {
-                text: "spoken".to_string(),
-                source: TranscriptSource::Spoken,
-                meta: Some(Box::new(ProviderMeta::Gemini {
-                    thought_signature: "ts-1".to_string(),
-                })),
-            },
-            AssistantBlock::ToolUse {
-                id: "call-1".to_string(),
-                name: "search".to_string(),
-                args: serde_json::value::RawValue::from_string(r#"{"q":"rust"}"#.to_string())
-                    .expect("fixture args literal is valid JSON"),
-                meta: None,
-            },
-            AssistantBlock::ServerToolContent {
-                id: Some("st-1".to_string()),
-                name: "web_search".to_string(),
-                content: serde_json::json!({"hits": 3}),
-                meta: None,
-            },
-            AssistantBlock::Image {
-                image_id: AssistantImageId::new(Uuid::nil()),
-                blob_ref: BlobRef {
-                    blob_id: BlobId::new("blob-fixture"),
-                    media_type: "image/png".to_string(),
-                },
-                media_type: MediaType::new("image/png"),
-                width: 64,
-                height: 64,
-                revised_prompt: RevisedPromptDisposition::NotRequested,
-                meta: ProviderImageMetadata::NotEmitted,
-            },
-        ];
-
-        for case in cases {
-            let snapshot = format!("{case:?}");
-            let wire: WireAssistantBlock = case.clone().into();
-            let back: AssistantBlock = wire.into();
-            // `AssistantBlock` is `PartialEq` (custom impl handles
-            // `ToolUse.args` via byte-equivalence on the underlying JSON).
-            assert_eq!(case, back, "round trip lost data for {snapshot}");
         }
     }
 }

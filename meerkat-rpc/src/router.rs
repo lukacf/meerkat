@@ -35,6 +35,17 @@ use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
+// W3-H: wire-level tags for RealtimeChannelTarget variants. Kept as
+// constants (not inline literals against target_type) so the
+// scripts/verify-rpc-surface-alignment.sh regex that scans router.rs for
+// method names does not misclassify these target-type tags as RPC methods.
+// Only referenced under `not(mini-surface)` where the realtime handlers
+// are compiled, hence the cfg gate on both constants.
+#[cfg(not(feature = "mini-surface"))]
+const REALTIME_TARGET_TYPE_SESSION: &str = "session_target";
+#[cfg(not(feature = "mini-surface"))]
+const REALTIME_TARGET_TYPE_MOB_MEMBER: &str = "mob_member";
+
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
@@ -575,6 +586,7 @@ pub struct MethodRouter {
     config_store: Arc<dyn ConfigStore>,
     notification_sink: NotificationSink,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
+    realtime_ws_host: Option<Arc<crate::realtime_ws::RealtimeWsHost>>,
     #[cfg(not(feature = "mini-surface"))]
     active_session_streams: Arc<Mutex<HashMap<Uuid, StreamForwarder>>>,
     /// Recently-closed stream IDs for idempotent close detection.
@@ -588,10 +600,6 @@ pub struct MethodRouter {
     #[cfg(feature = "mob")]
     closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
-    live_adapter_host: Arc<meerkat_live::LiveAdapterHost>,
-    live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
-    live_ws_base_url: Option<String>,
-    live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
 impl MethodRouter {
@@ -686,6 +694,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            realtime_ws_host: None,
             #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(not(feature = "mini-surface"))]
@@ -697,42 +706,7 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             runtime_adapter,
-            live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new()),
-            live_ws_state: None,
-            live_ws_base_url: None,
-            live_session_factory: None,
         }
-    }
-
-    /// Attach a live WebSocket transport state for `live/open` token minting.
-    ///
-    /// Also closes A4/A5: the runtime's callback-backed tool dispatcher is
-    /// built and installed on the live host via `set_tool_dispatcher`. By the
-    /// time this runs (after `RpcServer::new_*` has called
-    /// `runtime.set_callback_channel`), the dispatcher is ready; if it isn't,
-    /// the host stays at `ToolCallSkipped { NoDispatcher }` (audited skip).
-    pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
-        self.live_adapter_host = Arc::clone(state.host());
-        if let Some(dispatcher) = self.runtime.live_tool_dispatcher() {
-            self.live_adapter_host.set_tool_dispatcher(dispatcher);
-        }
-        // P1#5: hand the host to the runtime so `propagate_config_to_live_channels`
-        // can fan out `Refresh`/`Close` commands when an upstream config patch
-        // changes a session's resolved model/provider.
-        self.runtime
-            .set_live_adapter_host(Arc::clone(&self.live_adapter_host));
-        self.live_ws_state = Some(state);
-        self.live_ws_base_url = Some(base_url);
-        self
-    }
-
-    /// Attach a live session factory for creating provider adapters on `live/open`.
-    pub fn with_live_session_factory(
-        mut self,
-        factory: Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
-    ) -> Self {
-        self.live_session_factory = Some(factory);
-        self
     }
 
     /// Get a reference to the runtime adapter for session registration.
@@ -779,6 +753,161 @@ impl MethodRouter {
         };
         SessionId::parse(session_id)
             .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+    }
+
+    #[allow(clippy::result_large_err)]
+    #[cfg(not(feature = "mini-surface"))]
+    fn session_id_from_realtime_target_params(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<Option<SessionId>, RpcResponse> {
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let value: serde_json::Value = match serde_json::from_str(params.get()) {
+            Ok(value) => value,
+            Err(err) => {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    format!("invalid params: {err}"),
+                ));
+            }
+        };
+        let Some(target) = value.get("target") else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing target",
+            ));
+        };
+        let Some(target_type) = target.get("type").and_then(|value| value.as_str()) else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing target.type",
+            ));
+        };
+        // Target-type tags are compared via constants (defined at module
+        // scope) rather than inline match literals; keeps the router's
+        // method-inventory regex in scripts/verify-rpc-surface-alignment.sh
+        // from misclassifying these tags as RPC method names.
+        if target_type == REALTIME_TARGET_TYPE_SESSION {
+            let Some(session_id) = target.get("session_id").and_then(|value| value.as_str()) else {
+                return Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    "missing target.session_id",
+                ));
+            };
+            SessionId::parse(session_id)
+                .map(Some)
+                .map_err(|err| RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()))
+        } else if target_type == REALTIME_TARGET_TYPE_MOB_MEMBER {
+            // W3-H: `mob_member` targets are resolved by the async
+            // `resolve_realtime_target_session_id` path; the pre-dispatch
+            // sync helper returns Ok(None) so the async resolver runs.
+            Ok(None)
+        } else {
+            Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("unsupported target.type '{target_type}'"),
+            ))
+        }
+    }
+
+    /// W3-H: resolve realtime targets for the runtime pre-dispatch gate.
+    ///
+    /// On mob-enabled builds both `session_target` and `mob_member` route
+    /// through [`MobMcpState::resolve_realtime_target_session`]. That keeps
+    /// mob-owned bridge sessions from slipping through the old direct
+    /// `session_target` path before the method handler runs. On mob-disabled
+    /// builds `session_target` parses directly and `mob_member` is rejected.
+    ///
+    /// Without the `mob` feature `MobMember` targets are rejected with
+    /// `INVALID_PARAMS` — the same error the WS handler would emit downstream,
+    /// just lifted to the pre-dispatch gate.
+    #[allow(clippy::result_large_err)]
+    #[cfg(not(feature = "mini-surface"))]
+    async fn resolve_realtime_target_session_id(
+        &self,
+        id: Option<crate::protocol::RpcId>,
+        params: Option<&serde_json::value::RawValue>,
+    ) -> Result<Option<SessionId>, RpcResponse> {
+        // Keep the router-owned structural error contract (missing target,
+        // unsupported discriminator, invalid session id) before the typed
+        // serde parse below. We intentionally do not return the parsed
+        // SessionTarget here on mob-enabled builds; the MobMcpState resolver
+        // must still reject mob-owned bridge sessions.
+        let _ = self.session_id_from_realtime_target_params(id.clone(), params)?;
+        let Some(params) = params else {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "missing params",
+            ));
+        };
+        let request: meerkat_contracts::RealtimeOpenRequest =
+            match serde_json::from_str(params.get()) {
+                Ok(request) => request,
+                Err(_) => match serde_json::from_str::<meerkat_contracts::RealtimeStatusParams>(
+                    params.get(),
+                ) {
+                    Ok(status) => meerkat_contracts::RealtimeOpenRequest {
+                        target: status.target,
+                        role: meerkat_contracts::RealtimeChannelRole::Primary,
+                        turning_mode: meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                        reconnect_policy: None,
+                        channel_config: None,
+                    },
+                    Err(err) => {
+                        return Err(RpcResponse::error(
+                            id,
+                            error::INVALID_PARAMS,
+                            format!("invalid params: {err}"),
+                        ));
+                    }
+                },
+            };
+        #[cfg(feature = "mob")]
+        {
+            match self
+                .mob_state
+                .resolve_realtime_target_session(&request.target)
+                .await
+            {
+                Ok(session_id) => Ok(Some(session_id)),
+                Err(err) => Err(RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    err.to_string(),
+                )),
+            }
+        }
+        #[cfg(not(feature = "mob"))]
+        {
+            match request.target {
+                meerkat_contracts::RealtimeChannelTarget::SessionTarget { session_id } => {
+                    SessionId::parse(&session_id).map(Some).map_err(|err| {
+                        RpcResponse::error(id, error::INVALID_PARAMS, err.to_string())
+                    })
+                }
+                meerkat_contracts::RealtimeChannelTarget::MobMember { .. } => {
+                    Err(RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        "mob-member realtime targets require this host to be built with the `mob` feature"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
     }
 
     async fn ensure_runtime_session_registered(
@@ -1005,6 +1134,7 @@ impl MethodRouter {
             config_store,
             notification_sink,
             skill_runtime: None,
+            realtime_ws_host: None,
             #[cfg(not(feature = "mini-surface"))]
             active_session_streams: Arc::new(Mutex::new(HashMap::new())),
             #[cfg(not(feature = "mini-surface"))]
@@ -1013,10 +1143,6 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             runtime_adapter,
-            live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new()),
-            live_ws_state: None,
-            live_ws_base_url: None,
-            live_session_factory: None,
         }
     }
 
@@ -1033,6 +1159,12 @@ impl MethodRouter {
         runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
     ) -> Self {
         self.skill_runtime = runtime;
+        self
+    }
+
+    /// Attach the shared realtime websocket bootstrap host.
+    pub fn with_realtime_ws_host(mut self, host: Arc<crate::realtime_ws::RealtimeWsHost>) -> Self {
+        self.realtime_ws_host = Some(host);
         self
     }
 
@@ -1510,78 +1642,100 @@ impl MethodRouter {
                 )
                 .await
             }
-            // B16: live/* is only registered when `with_live_ws` was called.
-            // Without --live-ws, the router has no transport state and would
-            // hand out empty WS URLs/tokens — refuse the method instead of
-            // silently routing it through a broken handler.
             #[cfg(not(feature = "mini-surface"))]
-            "live/open" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_open(
+            "realtime/open_info" => {
+                let maybe_session_id = match self
+                    .resolve_realtime_target_session_id(id.clone(), params)
+                    .await
+                {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Some(session_id) = maybe_session_id
+                    && let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                {
+                    return Some(response.with_id(id));
+                }
+                handlers::realtime::handle_realtime_open_info(
                     id,
                     params,
-                    &self.live_adapter_host,
-                    self.live_ws_state.as_deref(),
-                    self.live_ws_base_url.as_deref(),
-                    &self.runtime,
-                    self.live_session_factory.as_ref().map(Arc::as_ref),
+                    self.runtime_adapter.as_ref(),
+                    self.realtime_ws_host.as_deref(),
+                    self.runtime.realm_id(),
+                    #[cfg(feature = "mob")]
+                    &self.mob_state,
                 )
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "live/status" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_status(id, params, &self.live_adapter_host).await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "live/close" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
-            }
-            // P1#5: push a fresh projection snapshot into an already-open
-            // live adapter (model switch via `config/patch`, snapshot drift
-            // after a session edit, etc.). Same gating as the other live/*
-            // arms — without `--live-ws` the router has no transport state.
-            #[cfg(not(feature = "mini-surface"))]
-            "live/refresh" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_refresh(
+            "realtime/capabilities" => {
+                let maybe_session_id = match self
+                    .resolve_realtime_target_session_id(id.clone(), params)
+                    .await
+                {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Some(session_id) = maybe_session_id
+                    && let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                {
+                    return Some(response.with_id(id));
+                }
+                handlers::realtime::handle_realtime_capabilities(
                     id,
                     params,
-                    &self.live_adapter_host,
-                    &self.runtime,
+                    self.runtime_adapter.as_ref(),
+                    self.realtime_ws_host.as_deref(),
+                    #[cfg(feature = "mob")]
+                    &self.mob_state,
                 )
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "live/send_input" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_send_input(id, params, &self.live_adapter_host).await
+            "realtime/status" => {
+                let maybe_session_id = match self
+                    .resolve_realtime_target_session_id(id.clone(), params)
+                    .await
+                {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Some(session_id) = maybe_session_id
+                    && let Err(response) = self.ensure_runtime_session_registered(&session_id).await
+                {
+                    return Some(response.with_id(id));
+                }
+                handlers::realtime::handle_realtime_status(
+                    id,
+                    params,
+                    self.runtime_adapter.as_ref(),
+                    #[cfg(feature = "mob")]
+                    &self.mob_state,
+                )
+                .await
             }
-            // I50: surface the buffered-input commit verb. Same gating as the
-            // other live/* arms — without --live-ws the router has no
-            // transport state and the method falls through to METHOD_NOT_FOUND.
-            #[cfg(not(feature = "mini-surface"))]
-            "live/commit_input" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_commit_input(id, params, &self.live_adapter_host).await
-            }
-            // A7: explicit barge-in surface. Without these arms callers can
-            // only rely on provider-native VAD; with them, a client can
-            // signal interrupt directly and truncate an assistant item at a
-            // specific playback cursor.
-            #[cfg(not(feature = "mini-surface"))]
-            "live/interrupt" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_interrupt(id, params, &self.live_adapter_host).await
-            }
-            #[cfg(not(feature = "mini-surface"))]
-            "live/truncate" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_truncate(id, params, &self.live_adapter_host).await
-            }
-            // A7: no `live/playback_cursor` arm — playback is a client-side
-            // fact (jitter buffers, end-of-stream silence trim). Clients
-            // track the cursor locally and pass `audio_played_ms` into
-            // `live/truncate`. See the doc-comment in `handlers/live.rs`.
             #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "mcp/remove" => handlers::mcp::handle_remove(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]
             "mcp/reload" => handlers::mcp::handle_reload(id, params, &self.runtime).await,
+            #[cfg(not(feature = "mini-surface"))]
+            "session/realtime_attachment_status" => {
+                let session_id = match self.session_id_from_runtime_params(id.clone(), params) {
+                    Ok(session_id) => session_id,
+                    Err(response) => return Some(response),
+                };
+                if let Err(response) = self.ensure_runtime_session_registered(&session_id).await {
+                    return Some(response.with_id(id));
+                }
+                handlers::runtime::handle_runtime_realtime_attachment_status(
+                    id,
+                    params,
+                    self.runtime_adapter.as_ref(),
+                )
+                .await
+            }
             _ => RpcResponse::error(
                 id,
                 error::METHOD_NOT_FOUND,
@@ -3595,6 +3749,15 @@ args = [{}]
         assert!(error_message(&response).contains("reserved"));
     }
 
+    async fn test_router_with_v9_runtime_and_realtime_ws_host()
+    -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let (router, notif_rx) = test_router().await;
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(
+            "ws://127.0.0.1:4900/realtime/ws",
+        ));
+        (router.with_realtime_ws_host(host), notif_rx)
+    }
+
     async fn test_router_with_llm(
         llm_client: Arc<dyn LlmClient>,
     ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -4223,7 +4386,7 @@ args = [{}]
         assert!(method_names.contains(&"session/external_event"));
         assert!(method_names.contains(&"session/peer_response_terminal"));
         assert!(method_names.contains(&"session/inject_context"));
-        // session/realtime_attachment_status removed in live-adapter MVP
+        assert!(method_names.contains(&"session/realtime_attachment_status"));
         assert!(method_names.contains(&"turn/start"));
         assert!(method_names.contains(&"approval/request"));
         assert!(method_names.contains(&"approval/list"));
@@ -6831,6 +6994,449 @@ args = [{}]
                 .await,
             "capacity-full turn/start must not register a runtime executor"
         );
+    }
+
+    #[tokio::test]
+    async fn realtime_status_projects_runtime_realtime_attachment_truth_for_session_targets() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime status",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
+            .await
+            .expect("session should register for realtime status setup");
+        router
+            .runtime_adapter()
+            .project_realtime_attachment_intent(&parsed_session_id, true)
+            .await
+            .expect("intent projection should succeed");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/status",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        assert_eq!(result["status"]["state"], "opening");
+    }
+
+    /// Reconnect lifecycle assertion: after the websocket shell advances the
+    /// machine-owned reconnect cycle, a `realtime/status` RPC response must
+    /// surface the DSL-owned `attempt_count` and retry deadline.
+    #[tokio::test]
+    async fn realtime_status_surfaces_real_reconnect_attempt_count_not_hard_coded_default() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime reconnect progress",
+                    "initial_turn": "deferred"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
+            .await
+            .expect("session should register for realtime status setup");
+
+        // Drive the session into a reconnecting state. `intent=true`
+        // plus `RequireRealtimeReattach` puts the DSL into
+        // `ReattachRequired`, which `project_realtime_attachment_status`
+        // projects to `RealtimeAttachmentStatus::ReattachRequired`
+        // (surface state = `Reconnecting`).
+        let adapter = router.runtime_adapter();
+        adapter
+            .project_realtime_attachment_intent(&parsed_session_id, true)
+            .await
+            .expect("intent projection should succeed");
+        adapter
+            .require_realtime_attachment_reattach(&parsed_session_id)
+            .await
+            .expect("RequireRealtimeReattach should succeed");
+
+        // Simulate the realtime-WS shell telling the machine to begin a
+        // reconnect cycle and schedule four more attempts. The RPC responder
+        // must read attempt/deadline truth from the machine-owned lifecycle.
+        adapter
+            .begin_realtime_reconnect_cycle(
+                &parsed_session_id,
+                Some(1_700_000_000_000),
+                Some(1_700_000_030_000),
+            )
+            .await
+            .expect("reconnect cycle begin should succeed");
+        for next_retry_at_ms in [
+            1_700_000_001_000,
+            1_700_000_002_000,
+            1_700_000_003_000,
+            1_700_000_004_000,
+        ] {
+            adapter
+                .schedule_realtime_reconnect_retry(&parsed_session_id, Some(next_retry_at_ms))
+                .await
+                .expect("reconnect retry scheduling should succeed");
+        }
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/status",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let status = &result_value(&response)["status"];
+        assert_eq!(status["state"], "reconnecting");
+        assert_eq!(
+            status["attempt_count"], 5,
+            "realtime/status must surface machine-owned attempt_count, got {status:?}"
+        );
+        assert!(
+            status["next_retry_at"].is_string(),
+            "realtime/status must surface next_retry_at from machine state, got {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_capabilities_returns_conservative_phase_one_metadata() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime caps",
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/capabilities",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        let capabilities = &result["capabilities"];
+        assert_eq!(
+            capabilities["turning_modes"],
+            serde_json::json!(["provider_managed"])
+        );
+        assert_eq!(capabilities["video_supported"], false);
+        assert_eq!(capabilities["interrupt_supported"], true);
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_reports_transport_unavailable_until_ws_host_lands() {
+        let (router, _notif_rx) = test_router().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info",
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_fails_closed_when_machine_bootstrap_eligibility_is_missing() {
+        let (router, _notif_rx) = test_router_with_v9_runtime().await;
+        let host = Arc::new(crate::realtime_ws::RealtimeWsHost::new(
+            "ws://127.0.0.1:4900/realtime/ws",
+        ));
+        let router = router.with_realtime_ws_host(host);
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info missing machine eligibility",
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert!(
+            response.result.is_none(),
+            "missing machine eligibility must not mint open_info: {response:?}"
+        );
+        assert!(
+            error_message(&response).contains("realtime bootstrap eligibility denied"),
+            "unexpected error message: {}",
+            error_message(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_rejects_attachment_status_availability_without_realtime_model() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info attachment status only",
+                    "model": "claude-sonnet-4-5",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+        let parsed_session_id =
+            meerkat_core::SessionId::parse(&session_id).expect("session id should parse");
+        router
+            .ensure_runtime_session_registered(&parsed_session_id)
+            .await
+            .expect("session should register before attachment-status projection");
+        router
+            .runtime_adapter()
+            .realtime_attachment_status(&parsed_session_id)
+            .await
+            .expect("attachment-status availability is not realtime eligibility");
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            error_code(&response),
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        );
+        assert!(
+            response.result.is_none(),
+            "attachment-status availability alone must not mint open_info: {response:?}"
+        );
+        assert!(
+            error_message(&response).contains("does not support realtime"),
+            "unexpected error message: {}",
+            error_message(&response)
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_rejects_retired_mob_member_target_discriminator() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "mob_member_target",
+                        "mob_id": "mob-1",
+                        "agent_identity": "agent-1",
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&response), error::INVALID_PARAMS);
+        let message = response
+            .error
+            .as_ref()
+            .expect("error response")
+            .message
+            .as_str();
+        assert!(
+            message.contains("unsupported target.type 'mob_member_target'"),
+            "unexpected error message: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_accepts_canonical_mob_member_discriminator() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "mob_member",
+                        "mob_id": "mob-1",
+                        "agent_identity": "agent-1",
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&response), error::INVALID_PARAMS);
+        let message = response
+            .error
+            .as_ref()
+            .expect("error response")
+            .message
+            .as_str();
+        assert!(
+            message.contains("mob not found: mob-1"),
+            "canonical discriminator should reach mob resolution, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn realtime_open_info_returns_bootstrap_when_ws_host_is_configured() {
+        let (router, _notif_rx) = test_router_with_v9_runtime_and_realtime_ws_host().await;
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "realtime open-info wired",
+                    "model": "gpt-realtime",
+                    "initial_turn": "run_immediately"
+                }),
+            ))
+            .await
+            .unwrap();
+        let created = result_value(&create_resp);
+        let session_id = created["session_id"]
+            .as_str()
+            .expect("session_id")
+            .to_string();
+
+        let response = router
+            .dispatch(make_request(
+                "realtime/open_info",
+                serde_json::json!({
+                    "target": {
+                        "type": "session_target",
+                        "session_id": session_id,
+                    },
+                    "role": "primary",
+                    "turning_mode": "provider_managed",
+                }),
+            ))
+            .await
+            .unwrap();
+        let result = result_value(&response);
+        assert_eq!(
+            result["ws_url"],
+            serde_json::json!("ws://127.0.0.1:4900/realtime/ws")
+        );
+        assert!(result["open_token"].as_str().is_some());
+        assert_eq!(
+            result["supported_protocol_versions"],
+            serde_json::json!(["2"])
+        );
+        assert_eq!(result["default_protocol_version"], serde_json::json!("2"));
     }
 
     /// 5. `session/list` returns the list of sessions after creating one.

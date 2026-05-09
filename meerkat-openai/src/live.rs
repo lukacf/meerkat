@@ -4,7 +4,6 @@
 //! invent attachment semantics or runtime lifecycle truth.
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use meerkat_contracts::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
@@ -25,14 +24,11 @@ use oai_rt_rs::protocol::models::{
     InputAudioTranscription, Item, Nullable, OutputAudioConfig, OutputModalities, ResponseConfig,
     Role, SessionUpdate, SessionUpdateConfig, Tool, TurnDetection, Voice,
 };
-use oai_rt_rs::{
-    ClientEvent, Error as OpenAiLiveError, RealtimeClient, RealtimeSender, ServerEvent,
-};
+use oai_rt_rs::{ClientEvent, Error as OpenAiLiveError, RealtimeClient, ServerEvent};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 pub use oai_rt_rs::ClientEvent as OpenAiLiveClientEvent;
 pub use oai_rt_rs::ServerEvent as OpenAiLiveServerEvent;
@@ -105,55 +101,9 @@ impl OpenAiLiveClient {
     }
 }
 
-/// Split-half wrapper around `RealtimeClient`.
-///
-/// The receive half is consumed into a stream that runs in a dedicated task
-/// pumping events into a `tokio::sync::mpsc` channel. This makes
-/// `next_event` cancel-safe: the underlying tungstenite WebSocket read is
-/// driven by a task that never gets cancelled, so dropping a
-/// `next_event().await` future (e.g. by `tokio::select!`) only discards
-/// the wake-up — events already in the channel remain available on the
-/// next poll.
-///
-/// This matters for the live-adapter pump in `meerkat-live`, which uses
-/// `tokio::select!` to multiplex commands and event polls. Without the
-/// split, cancelling a `RealtimeClient::next_event` future mid-frame can
-/// lose WebSocket frames and stall multi-turn conversations (notably
-/// barge-in scenarios where send and receive must overlap).
 struct RealtimeOpenAiLiveSession {
-    sender: RealtimeSender,
-    event_rx: mpsc::Receiver<Result<ServerEvent, OpenAiLiveError>>,
-    recv_task: Option<tokio::task::JoinHandle<()>>,
+    inner: RealtimeClient,
     pending_events: VecDeque<ServerEvent>,
-}
-
-impl RealtimeOpenAiLiveSession {
-    fn from_client(client: RealtimeClient) -> Self {
-        let (sender, receiver) = client.split();
-        let mut stream = receiver.try_into_stream();
-        let (event_tx, event_rx) = mpsc::channel(256);
-        let recv_task = tokio::spawn(async move {
-            while let Some(res) = stream.next().await {
-                if event_tx.send(res).await.is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            sender,
-            event_rx,
-            recv_task: Some(recv_task),
-            pending_events: VecDeque::new(),
-        }
-    }
-}
-
-impl Drop for RealtimeOpenAiLiveSession {
-    fn drop(&mut self) {
-        if let Some(handle) = self.recv_task.take() {
-            handle.abort();
-        }
-    }
 }
 
 fn trace_client_event_json(event: &ClientEvent) -> Option<String> {
@@ -189,20 +139,18 @@ impl OpenAiLiveSession for RealtimeOpenAiLiveSession {
             // the trace itself untrustworthy during smoke debugging.
             eprintln!("[openai-realtime-send] {serialized}");
         }
-        self.sender.send(event).await.map_err(map_openai_live_error)
+        self.inner.send(event).await.map_err(map_openai_live_error)
     }
 
     async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(Some(event));
         }
-        // `mpsc::Receiver::recv` is cancel-safe; the spawned recv task owns
-        // the underlying WS read and never sees this select! cancel.
-        let event = match self.event_rx.recv().await {
-            Some(Ok(event)) => Some(event),
-            Some(Err(err)) => return Err(map_openai_live_error(err)),
-            None => None,
-        };
+        let event = self
+            .inner
+            .next_event()
+            .await
+            .map_err(map_openai_live_error)?;
         if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_JSON").is_some()
             && let Some(event) = event.as_ref()
             && let Some(serialized) = trace_server_event_json(event)
@@ -220,14 +168,16 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
         &self,
         open_config: &RealtimeSessionOpenConfig,
     ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
-        let client = RealtimeClient::connect(
-            &self.api_key,
-            Some(&openai_realtime_connect_model(&open_config.llm_identity)),
-            None,
-        )
-        .await
-        .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+        let mut session = RealtimeOpenAiLiveSession {
+            inner: RealtimeClient::connect(
+                &self.api_key,
+                Some(&openai_realtime_connect_model(&open_config.llm_identity)),
+                None,
+            )
+            .await
+            .map_err(map_openai_live_error)?,
+            pending_events: VecDeque::new(),
+        };
         configure_openai_live_session(&mut session, open_config).await?;
         Ok(Box::new(session))
     }
@@ -236,10 +186,12 @@ impl OpenAiLiveSessionFactory for OpenAiLiveClient {
         &self,
         target: &OpenAiLiveCallTarget,
     ) -> Result<Box<dyn OpenAiLiveSession>, LlmError> {
-        let client = RealtimeClient::connect(&self.api_key, None, Some(target.call_id.as_str()))
-            .await
-            .map_err(map_openai_live_error)?;
-        let mut session = RealtimeOpenAiLiveSession::from_client(client);
+        let mut session = RealtimeOpenAiLiveSession {
+            inner: RealtimeClient::connect(&self.api_key, None, Some(target.call_id.as_str()))
+                .await
+                .map_err(map_openai_live_error)?,
+            pending_events: VecDeque::new(),
+        };
         wait_for_openai_session_created(&mut session).await?;
         Ok(Box::new(session))
     }
@@ -417,7 +369,6 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::User,
                         content: vec![ContentPart::InputText {
                             text: text.to_string(),
@@ -431,7 +382,6 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText {
                             text: text.to_string(),
@@ -450,7 +400,6 @@ fn openai_realtime_history_events(
                     ProjectionHistoryItem::Dialogue(Item::Message {
                         id: None,
                         status: None,
-                        phase: None,
                         role: Role::Assistant,
                         content: vec![ContentPart::OutputText { text }],
                     })
@@ -476,7 +425,6 @@ fn openai_realtime_history_events(
             ProjectionHistoryItem::RuntimeSystem(Item::Message {
                 id: None,
                 status: None,
-                phase: None,
                 role: Role::System,
                 content: vec![ContentPart::InputText {
                     text: text.to_string(),
@@ -597,7 +545,6 @@ fn openai_session_update(open_config: &RealtimeSessionOpenConfig) -> SessionUpda
                     format: Some(AudioFormat::pcm_24khz()),
                     voice: Some(openai_realtime_voice()),
                     speed: None,
-                    language: None,
                 }),
             }),
             instructions: openai_realtime_instructions(
@@ -620,118 +567,6 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
             tools: Some(openai_realtime_tools(&open_config.visible_tools)),
             ..SessionUpdateConfig::default()
         },
-    }
-}
-
-/// R1: build a `session.update` payload from a `LiveProjectionSnapshot`.
-///
-/// Routes the snapshot's mutable fields (`system_prompt`, `visible_tools`,
-/// `runtime_system_context`, `audio_config`) into the OpenAI Realtime
-/// `session.update` event. The OpenAI Realtime API does NOT accept a
-/// `model` field on `session.update` — model swaps require close + reopen
-/// — so the caller must guard against `snapshot.model_id` drift before
-/// invoking this helper. `provider_id` is similarly out of scope here.
-///
-/// Instructions: derived from `snapshot.system_prompt` plus the typed
-/// `runtime_system_context` projection. `system_prompt` is an explicit
-/// canonical-runtime fact, so when present it is used directly without
-/// re-walking the seed messages — those are replayed as
-/// `conversation.item.create` events by `seed_history_projection` after
-/// this update lands.
-///
-/// Tools: re-rendered through the same `openai_realtime_tools` helper the
-/// initial open path uses so the wire shape is identical.
-///
-/// Audio: when `audio_config` is `Some`, request matching input + output
-/// `pcm` formats at the snapshot's sample rate. When `None`, the audio
-/// field is omitted so the live session keeps whatever input/output
-/// audio config it was opened with.
-fn openai_refresh_session_update_from_snapshot(
-    snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
-) -> SessionUpdate {
-    let instructions = openai_refresh_instructions_from_snapshot(
-        snapshot.system_prompt.as_deref(),
-        &snapshot.runtime_system_context,
-    );
-
-    // OpenAI Realtime only supports `audio/pcm` at 24 kHz today
-    // (`AudioFormat::pcm_24khz`). When the snapshot carries an
-    // `audio_config` matching that, re-emit the audio block so the live
-    // session re-converges if the runtime previously degraded it. When
-    // the snapshot's sample rate does not match, leave audio out so we
-    // do not send a value the provider would reject — the caller's
-    // pre-flight validation in `execute_openai_live_command` is what
-    // surfaces the rate mismatch as a typed error.
-    let audio = snapshot.audio_config.as_ref().and_then(|cfg| {
-        if cfg.input_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
-            || cfg.output_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
-            || cfg.input_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
-            || cfg.output_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
-        {
-            return None;
-        }
-        Some(AudioConfig {
-            input: Some(InputAudioConfig {
-                format: Some(AudioFormat::pcm_24khz()),
-                // Refresh does not redefine turn detection / transcription /
-                // noise reduction — the open-time defaults stay live unless
-                // the runtime later issues another full reconfiguration.
-                turn_detection: None,
-                transcription: None,
-                noise_reduction: None,
-            }),
-            output: Some(OutputAudioConfig {
-                format: Some(AudioFormat::pcm_24khz()),
-                voice: None,
-                speed: None,
-                language: None,
-            }),
-        })
-    });
-
-    SessionUpdate {
-        config: SessionUpdateConfig {
-            instructions,
-            tools: Some(openai_realtime_tools(&snapshot.visible_tools)),
-            audio,
-            ..SessionUpdateConfig::default()
-        },
-    }
-}
-
-/// R1: instructions text for a snapshot-driven refresh.
-///
-/// Combines the language pin (when configured), the snapshot's explicit
-/// `system_prompt` (when present), and the typed `runtime_system_context`
-/// projection through `openai_realtime_authoritative_system_context`.
-/// Empty inputs collapse to `None` so the OpenAI session keeps whatever
-/// instructions are currently live rather than being cleared.
-fn openai_refresh_instructions_from_snapshot(
-    system_prompt: Option<&str>,
-    runtime_system_context: &[PendingSystemContextAppend],
-) -> Option<String> {
-    let language_pin = openai_realtime_output_language_instruction();
-    let authoritative_context =
-        openai_realtime_authoritative_system_context(runtime_system_context);
-    let trimmed_prompt = system_prompt
-        .map(str::trim)
-        .filter(|prompt| !prompt.is_empty())
-        .map(ToOwned::to_owned);
-
-    let mut blocks: Vec<String> = Vec::new();
-    if let Some(pin) = language_pin {
-        blocks.push(pin);
-    }
-    if let Some(ctx) = authoritative_context {
-        blocks.push(ctx);
-    }
-    if let Some(prompt) = trimmed_prompt {
-        blocks.push(prompt);
-    }
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks.join("\n\n"))
     }
 }
 
@@ -857,7 +692,6 @@ fn openai_audio_response_config() -> ResponseConfig {
                 format: Some(AudioFormat::pcm_24khz()),
                 voice: Some(openai_realtime_voice()),
                 speed: None,
-                language: None,
             }),
         }),
         // OpenAI accepts per-response voice selection under the nested audio
@@ -1134,20 +968,6 @@ pub struct OpenAiRealtimeSession {
     /// `conversation.item.truncated` with the playback cursor when emitting
     /// `AssistantTranscriptTruncated`.
     pending_truncations: BTreeMap<String, u64>,
-    /// R1: snapshot of the model id this OpenAI realtime session was opened
-    /// against. The OpenAI Realtime API does not expose a mutable `model`
-    /// field on `session.update`; the model is locked to whatever the
-    /// initial `?model=...` query string set. A `LiveAdapterCommand::Refresh`
-    /// snapshot whose `model_id` differs from this value must be rejected
-    /// with a typed error so the runtime can close + reopen the channel
-    /// instead of silently running on stale model state. `None` means the
-    /// factory did not stamp identity (test sessions); model swap detection
-    /// is a no-op in that mode.
-    current_model_id: Option<String>,
-    /// R1: see `current_model_id`. Same rejection semantics for
-    /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
-    /// done in place on a hosted realtime session either.
-    current_provider_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1186,8 +1006,6 @@ impl OpenAiRealtimeSession {
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
             pending_truncations: BTreeMap::new(),
-            current_model_id: None,
-            current_provider_id: None,
         }
     }
 
@@ -1196,22 +1014,6 @@ impl OpenAiRealtimeSession {
     pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
         self.response_nudge_timeout_ms = timeout_ms;
         self.response_nudge_max_attempts = max_attempts;
-    }
-
-    /// R1: stamp the model + provider identity this session was opened
-    /// against. Called from `OpenAiRealtimeSessionFactory` after the
-    /// underlying provider session is constructed; consumed by the
-    /// `Refresh { snapshot }` arm in `execute_openai_live_command` to
-    /// detect mid-session model/provider swaps and reject them with a
-    /// typed error (the OpenAI Realtime API has no mutable `model` field
-    /// on `session.update`, so a model swap requires close + reopen).
-    pub fn set_current_identity(
-        &mut self,
-        model_id: impl Into<String>,
-        provider_id: impl Into<String>,
-    ) {
-        self.current_model_id = Some(model_id.into());
-        self.current_provider_id = Some(provider_id.into());
     }
 
     fn effective_nudge_timeout_ms(&self) -> u64 {
@@ -1474,11 +1276,7 @@ impl OpenAiRealtimeSession {
             .entry(key)
             .or_default()
             .push_str(&delta);
-        // T9: route spoken-transcript deltas onto the dedicated lane so the
-        // runtime materializes `AssistantBlock::Transcript` rather than
-        // `AssistantBlock::Text`. Pre-T9 this collapsed onto
-        // `OutputTextDeltaForItem`, which is the bug T9/T10 closes.
-        RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem {
+        RealtimeSessionEvent::OutputTextDeltaForItem {
             response_id,
             delta_id: event_id,
             item_id: item_id.to_string(),
@@ -1525,8 +1323,7 @@ impl OpenAiRealtimeSession {
             return None;
         }
         if seen.is_empty() {
-            // T9: trailing-delta on the spoken-transcript lane.
-            return Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem {
+            return Some(RealtimeSessionEvent::OutputTextDeltaForItem {
                 response_id,
                 delta_id: event_id,
                 item_id: item_id.to_string(),
@@ -1536,8 +1333,7 @@ impl OpenAiRealtimeSession {
             });
         }
         transcript.strip_prefix(&seen).and_then(|suffix| {
-            // T9: suffix-of-staged trailing-delta on the spoken-transcript lane.
-            (!suffix.is_empty()).then(|| RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem {
+            (!suffix.is_empty()).then(|| RealtimeSessionEvent::OutputTextDeltaForItem {
                 response_id,
                 delta_id: event_id,
                 item_id: item_id.to_string(),
@@ -1854,43 +1650,13 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_provider_response_progressed();
-                // A13: capture identity + full transcript for the
-                // `AssistantTranscriptFinal` event before
-                // `note_output_audio_transcript_done` mutates per-item
-                // accumulator state. The trailing-delta (if any) is the
-                // "primary" return so the streaming projection sees the
-                // last suffix; the final is queued so the runtime
-                // projector also receives an authoritative item-level
-                // close. `stop_reason` and `usage` are not delivered
-                // atomically with this OpenAI event — the runtime layer
-                // reconciles them against the subsequent `response.done`
-                // (which surfaces as `RealtimeSessionEvent::TurnCompleted`
-                // carrying the authoritative values).
-                let final_event = RealtimeSessionEvent::AssistantTranscriptFinal {
-                    item_id: item_id.clone(),
-                    previous_item_id: self.previous_item_id_for(&item_id),
-                    content_index: Some(content_index),
-                    response_id: Some(response_id.clone()),
-                    text: transcript.clone(),
-                    stop_reason: StopReason::EndTurn,
-                    usage: Usage::default(),
-                };
-                let trailing_delta = self.note_output_audio_transcript_done(
+                self.note_output_audio_transcript_done(
                     response_id,
                     event_id,
                     &item_id,
                     content_index,
                     transcript,
-                );
-                // Queue the final after any trailing-delta primary so
-                // delta-stream consumers see the suffix before the close.
-                match trailing_delta {
-                    Some(delta_event) => {
-                        self.pending_events.push_back(final_event);
-                        Some(delta_event)
-                    }
-                    None => Some(final_event),
-                }
+                )
             }
             ServerEvent::ResponseOutputAudioDelta {
                 response_id,
@@ -1962,11 +1728,6 @@ impl OpenAiRealtimeSession {
                 Some(RealtimeSessionEvent::AssistantTranscriptTruncated {
                     response_id: self.response_id_for_item(&item_id),
                     item_id,
-                    // OpenAI's `conversation.item.truncated` server event echoes
-                    // the audio output content part by convention (index 0).
-                    // Surface that explicitly so downstream projectors can fold
-                    // by item_id + content_index without guessing.
-                    content_index: Some(0),
                     audio_played_ms,
                     truncated_text,
                 })
@@ -2035,40 +1796,6 @@ impl OpenAiRealtimeSession {
             })
             .await?;
 
-        self.await_session_updated_ack().await
-    }
-
-    /// R1: emit a `session.update` event derived from a
-    /// [`LiveProjectionSnapshot`] and wait for the matching ack.
-    ///
-    /// Used by the `LiveAdapterCommand::Refresh { snapshot }` arm in
-    /// `execute_openai_live_command` to reconfigure an already-open OpenAI
-    /// realtime session in place against the snapshot's mutable fields:
-    /// `system_prompt` (→ `instructions`), `visible_tools` (→ `tools`),
-    /// `runtime_system_context` (folded into `instructions`), and
-    /// `audio_config` (→ input/output `AudioFormat`). Model swaps are
-    /// rejected by the caller before we ever send the update; this
-    /// helper assumes the model/provider identity is unchanged.
-    async fn apply_refresh_session_update_from_snapshot(
-        &mut self,
-        snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
-    ) -> Result<(), LlmError> {
-        self.raw_mut()?
-            .send_raw(ClientEvent::SessionUpdate {
-                event_id: None,
-                session: Box::new(openai_refresh_session_update_from_snapshot(snapshot)),
-            })
-            .await?;
-
-        self.await_session_updated_ack().await
-    }
-
-    /// Drain server events until a `SessionUpdated` ack arrives. Any
-    /// non-ack event observed during the wait is mapped through
-    /// `map_server_event` and queued so the caller's next `next_event`
-    /// poll receives it — exactly the same shape the open-time
-    /// configure path uses.
-    async fn await_session_updated_ack(&mut self) -> Result<(), LlmError> {
         loop {
             let Some(event) = self.raw_mut()?.next_event().await? else {
                 return Err(LlmError::ConnectionReset);
@@ -2126,7 +1853,6 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         item: Box::new(Item::Message {
                             id: Some(synthetic_item_id.clone()),
                             status: None,
-                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText { text: text.clone() }],
                         }),
@@ -2537,14 +2263,6 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
             open_config.response_nudge_timeout_ms,
             open_config.response_nudge_max_attempts,
         );
-        // R1: stamp the open-time model + provider identity so the
-        // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
-        // mid-session model swap and reject it (the OpenAI Realtime API
-        // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider.as_str().to_string(),
-        );
         session
             .seed_history_projection(
                 &open_config.seed_messages,
@@ -2562,44 +2280,6 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         let target = OpenAiLiveCallTarget::new(target.provider_session_id.clone())?;
         let raw = self.raw_factory.attach_to_call(&target).await?;
         Ok(Box::new(OpenAiRealtimeSession::new(raw, turning_mode)))
-    }
-
-    /// E25: Open a provider-native `LiveAdapter` directly.
-    ///
-    /// This is the canonical entry point for the live-adapter seam.
-    /// Construct an `OpenAiRealtimeSession` (concrete, not boxed) and wrap
-    /// it in `OpenAiLiveAdapter` so the resulting adapter implements
-    /// `LiveAdapter` directly without going through `Box<dyn RealtimeSession>`.
-    async fn open_live_adapter(
-        &self,
-        open_config: &RealtimeSessionOpenConfig,
-    ) -> Result<Arc<dyn LiveAdapter>, LlmError> {
-        let raw = self.raw_factory.open_session(open_config).await?;
-        let mut session = OpenAiRealtimeSession::new(raw, open_config.turning_mode);
-        session.set_response_nudge_config(
-            open_config.response_nudge_timeout_ms,
-            open_config.response_nudge_max_attempts,
-        );
-        // R1: stamp the open-time model + provider identity so the
-        // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
-        // mid-session model swap and reject it (the OpenAI Realtime API
-        // does not accept a `model` field on `session.update`).
-        session.set_current_identity(
-            open_config.llm_identity.model.clone(),
-            open_config.llm_identity.provider.as_str().to_string(),
-        );
-        // E25 + A9: seed canonical history at session-open time. The
-        // `LiveAdapterCommand::Open { snapshot }` arm in
-        // `execute_openai_live_command` re-runs the same path against any
-        // future snapshot delivered post-open; the initial seed happens here
-        // so the very first observation sees a primed conversation.
-        session
-            .seed_history_projection(
-                &open_config.seed_messages,
-                &open_config.runtime_system_context,
-            )
-            .await?;
-        Ok(Arc::new(OpenAiLiveAdapter::new(session)) as Arc<dyn LiveAdapter>)
     }
 }
 
@@ -2633,7 +2313,6 @@ pub fn openai_live_function_call_success_events(
             previous_item_id: None,
             item: Box::new(Item::FunctionCallOutput {
                 id: None,
-                phase: None,
                 call_id: call_id.into(),
                 output: output.into(),
             }),
@@ -2655,7 +2334,6 @@ pub fn openai_live_function_call_error_result_event(
         previous_item_id: None,
         item: Box::new(Item::FunctionCallOutput {
             id: None,
-            phase: None,
             call_id: call_id.into(),
             output: output.into(),
         }),
@@ -2673,7 +2351,6 @@ pub fn openai_live_function_call_error_event(
         previous_item_id: None,
         item: Box::new(Item::FunctionCallOutput {
             id: None,
-            phase: None,
             call_id: call_id.into(),
             output,
         }),
@@ -2735,630 +2412,6 @@ fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
         },
         ApiErrorType::Unknown => LlmError::Unknown {
             message: error.message,
-        },
-    }
-}
-
-// ---------------------------------------------------------------------------
-// E25 — provider-native `LiveAdapter` impl
-// ---------------------------------------------------------------------------
-//
-// The OpenAI realtime provider implements `LiveAdapter` directly so the
-// live-adapter seam is the contract between Meerkat and the provider, not
-// `RealtimeSession` (which becomes a co-equal trait used by the build path
-// + mob/test harnesses but is no longer the seam the live host wraps).
-//
-// `OpenAiLiveAdapter` owns the same pump pattern that `ProviderSessionAdapter`
-// previously implemented in `meerkat-live`: a dedicated tokio task pumps
-// events from the underlying `OpenAiRealtimeSession` and translates them
-// into `LiveAdapterObservation`s; the adapter facade holds only the channel
-// ends so concurrent send/receive does not serialize on a single mutex.
-//
-// The translation from `RealtimeSessionEvent` → `LiveAdapterObservation`
-// (`translate_event` below) lives in this crate now — previously it lived
-// in `meerkat-live::adapter`. Per E25, the provider crate owns the seam.
-
-use meerkat_core::live_adapter::{
-    LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
-    LiveAdapterObservation, LiveAdapterStatus, LiveChannelCapabilities, LiveInputChunk,
-};
-use meerkat_core::types::ToolResult as CoreToolResult;
-use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-
-/// Provider-native `LiveAdapter` implementation backed by an
-/// `OpenAiRealtimeSession`.
-///
-/// The pump task owns the realtime session exclusively; the adapter facade
-/// holds only mpsc channel ends. Status mirroring + close-with-timeout
-/// semantics match the previous `ProviderSessionAdapter` shape exactly so
-/// existing host-level invariants (status reflects live phase; close aborts
-/// the pump on timeout instead of detaching it) are preserved.
-pub struct OpenAiLiveAdapter {
-    cmd_tx: mpsc::Sender<LiveAdapterCommand>,
-    obs_rx: tokio::sync::Mutex<mpsc::Receiver<LiveAdapterObservation>>,
-    closed: AtomicBool,
-    status: Arc<StdMutex<LiveAdapterStatus>>,
-    pump_handle: StdMutex<Option<tokio::task::JoinHandle<()>>>,
-}
-
-impl OpenAiLiveAdapter {
-    /// Wrap an OpenAI realtime session in a provider-native live adapter.
-    ///
-    /// The realtime session is moved into the pump task; the adapter facade
-    /// retains only channel ends. A background task is spawned that pumps
-    /// `RealtimeSessionEvent`s out of the session and translates them into
-    /// `LiveAdapterObservation`s for downstream `LiveAdapterHost` consumption.
-    #[must_use]
-    pub fn new(session: OpenAiRealtimeSession) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::channel(64);
-        let (obs_tx, obs_rx) = mpsc::channel(256);
-        let status = Arc::new(StdMutex::new(LiveAdapterStatus::Opening));
-        let pump_handle = tokio::spawn(openai_live_pump(
-            session,
-            cmd_rx,
-            obs_tx,
-            Arc::clone(&status),
-        ));
-        Self {
-            cmd_tx,
-            obs_rx: tokio::sync::Mutex::new(obs_rx),
-            closed: AtomicBool::new(false),
-            status,
-            pump_handle: StdMutex::new(Some(pump_handle)),
-        }
-    }
-}
-
-fn set_status(cell: &StdMutex<LiveAdapterStatus>, new_status: LiveAdapterStatus) {
-    match cell.lock() {
-        Ok(mut guard) => *guard = new_status,
-        Err(poisoned) => *poisoned.into_inner() = new_status,
-    }
-}
-
-#[async_trait]
-impl LiveAdapter for OpenAiLiveAdapter {
-    async fn send_command(&self, command: LiveAdapterCommand) -> Result<(), LiveAdapterError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(LiveAdapterError::Closed);
-        }
-        self.cmd_tx
-            .send(command)
-            .await
-            .map_err(|_| LiveAdapterError::Closed)
-    }
-
-    async fn next_observation(&self) -> Result<Option<LiveAdapterObservation>, LiveAdapterError> {
-        let mut rx = self.obs_rx.lock().await;
-        Ok(rx.recv().await)
-    }
-
-    fn status(&self) -> LiveAdapterStatus {
-        if self.closed.load(Ordering::Acquire) {
-            return LiveAdapterStatus::Closed;
-        }
-        match self.status.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
-    }
-
-    async fn close(&self) -> Result<(), LiveAdapterError> {
-        if self.closed.swap(true, Ordering::AcqRel) {
-            return Ok(());
-        }
-        set_status(&self.status, LiveAdapterStatus::Closing);
-        let _ = self.cmd_tx.send(LiveAdapterCommand::Close).await;
-        let pump = match self.pump_handle.lock() {
-            Ok(mut g) => g.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
-        if let Some(mut handle) = pump
-            && tokio::time::timeout(Duration::from_secs(2), &mut handle)
-                .await
-                .is_err()
-        {
-            handle.abort();
-        }
-        set_status(&self.status, LiveAdapterStatus::Closed);
-        Ok(())
-    }
-
-    /// P2#3 + T8: report what the OpenAI Realtime API actually supports
-    /// today.
-    ///
-    /// All audio/text in/out lanes, spoken-transcript output, and
-    /// user-initiated barge-in are GA on the OpenAI Realtime surface.
-    /// `image_in` / `video_in` are reserved for `gpt-realtime-2` (image)
-    /// and Gemini Live (video) — `false` here. Provider-native resume is
-    /// not exposed yet (transcript-only seam handles continuation across
-    /// reconnect, see `LiveContinuityMode::TranscriptOnly`).
-    fn capabilities(&self) -> LiveChannelCapabilities {
-        LiveChannelCapabilities {
-            audio_in: true,
-            audio_out: true,
-            text_in: true,
-            text_out: true,
-            image_in: false,
-            video_in: false,
-            transcript_supported: true,
-            barge_in_supported: true,
-            provider_native_resume: false,
-        }
-    }
-}
-
-/// Pump task. Owns the `OpenAiRealtimeSession` exclusively; biased select
-/// between commands and event polls.
-///
-/// Cancel-safety: `RealtimeSession::next_event` may be dropped when a
-/// command arrives. The OpenAI provider impl buffers events in
-/// `pending_events` so dropping a poll mid-await only discards the wake-up,
-/// not the event.
-async fn openai_live_pump(
-    mut session: OpenAiRealtimeSession,
-    mut cmd_rx: mpsc::Receiver<LiveAdapterCommand>,
-    obs_tx: mpsc::Sender<LiveAdapterObservation>,
-    status: Arc<StdMutex<LiveAdapterStatus>>,
-) {
-    if obs_tx.send(LiveAdapterObservation::Ready).await.is_err() {
-        return;
-    }
-    set_status(&status, LiveAdapterStatus::Ready);
-
-    loop {
-        tokio::select! {
-            biased;
-            cmd = cmd_rx.recv() => {
-                match cmd {
-                    Some(LiveAdapterCommand::Close) | None => break,
-                    Some(cmd) => {
-                        if let Err(err) = execute_openai_live_command(&mut session, cmd).await {
-                            // R12: distinguish local-guard rejections from
-                            // provider-side outages. Every
-                            // `LlmError::InvalidRequest` produced by the
-                            // command-execution path is a *local* guard
-                            // rejection — the provider never saw the
-                            // request — so we map it to the typed
-                            // `ConfigRejected { reason }` rather than
-                            // collapsing it onto `ProviderError` (which
-                            // would force clients to parse English to
-                            // distinguish "local config rejected" from
-                            // "provider failed"). Every other error
-                            // variant remains on the `ProviderError`
-                            // path.
-                            //
-                            // ConfigRejected is therefore a SUPERSET of
-                            // "needs close + reopen": clients keying off
-                            // `ConfigRejected` for swap-detection must
-                            // additionally inspect the `reason` field
-                            // (or the `LiveAdapterObservation::Error`
-                            // message) to distinguish the swap subcases
-                            // from input-shape rejections.
-                            //
-                            // Current `LlmError::InvalidRequest` call sites
-                            // reachable from `execute_openai_live_command`
-                            // (all paths where ConfigRejected fires).
-                            // Line numbers verified at the time of writing;
-                            // grep `InvalidRequest` within the function body
-                            // if the file shifts. The five reachable sites
-                            // are:
-                            //   * model swap on Refresh (close+reopen
-                            //     needed) — first guard in the Refresh arm.
-                            //   * provider swap on Refresh (close+reopen
-                            //     needed) — second guard in the Refresh arm.
-                            //   * audio-rate / channel mismatch on Refresh
-                            //     (close+reopen needed) — third guard in
-                            //     the Refresh arm.
-                            //   * `LiveInputChunk::Image` on SendInput
-                            //     (T11; caller error, NOT a reopen signal —
-                            //     reason: "image_input_not_implemented").
-                            //   * `LiveInputChunk::VideoFrame` on SendInput
-                            //     (T11; caller error, NOT a reopen signal —
-                            //     reason: "video_frame_input_not_implemented").
-                            //   * unsupported `LiveAdapterCommand` variant
-                            //     catch-all (caller error, NOT a reopen
-                            //     signal).
-                            //
-                            // TODO(future): if downstream consumers grow a
-                            // need to branch on swap-vs-input-shape
-                            // without inspecting the reason string, split
-                            // `ConfigRejected` into typed sub-variants
-                            // (e.g. `ConfigRejected::Swap` vs
-                            // `ConfigRejected::UnsupportedInput`). On this
-                            // pass we keep the single variant and document
-                            // the breadth.
-                            let code = match &err {
-                                LlmError::InvalidRequest { message } => {
-                                    LiveAdapterErrorCode::ConfigRejected {
-                                        reason: message.clone(),
-                                    }
-                                }
-                                _ => LiveAdapterErrorCode::ProviderError,
-                            };
-                            let _ = obs_tx
-                                .send(LiveAdapterObservation::Error {
-                                    code,
-                                    message: err.to_string(),
-                                })
-                                .await;
-                        }
-                    }
-                }
-            }
-            event_result = session.next_event() => {
-                match event_result {
-                    Ok(Some(event)) => {
-                        let obs = translate_realtime_event(event);
-                        if let LiveAdapterObservation::StatusChanged { status: ref s } = obs {
-                            set_status(&status, s.clone());
-                        }
-                        match obs_tx.try_send(obs) {
-                            Ok(()) => {}
-                            Err(mpsc::error::TrySendError::Full(dropped)) => {
-                                tracing::warn!(
-                                    target: "meerkat_openai::live_adapter",
-                                    ?dropped,
-                                    "live adapter observation channel full; dropping frame"
-                                );
-                            }
-                            Err(mpsc::error::TrySendError::Closed(_)) => break,
-                        }
-                    }
-                    Ok(None) => {
-                        set_status(&status, LiveAdapterStatus::Closed);
-                        let _ = obs_tx
-                            .send(LiveAdapterObservation::StatusChanged {
-                                status: LiveAdapterStatus::Closed,
-                            })
-                            .await;
-                        break;
-                    }
-                    Err(err) => {
-                        let _ = obs_tx
-                            .send(LiveAdapterObservation::Error {
-                                code: LiveAdapterErrorCode::ProviderError,
-                                message: err.to_string(),
-                            })
-                            .await;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    let _ = <OpenAiRealtimeSession as RealtimeSession>::close(&mut session).await;
-}
-
-/// Execute a `LiveAdapterCommand` against the inner realtime session.
-///
-/// A9: the `Open { snapshot }` arm seeds the OpenAI conversation with
-/// `snapshot.seed_messages` (and runtime system context) by invoking the
-/// session's `refresh_projection` method, which mints the same
-/// `conversation.item.create` events the factory uses at session-open time.
-/// The audio config and provider id from the snapshot are validated against
-/// the realtime session's static defaults; a mismatch emits a typed error
-/// observation rather than silently coercing the snapshot.
-async fn execute_openai_live_command(
-    session: &mut OpenAiRealtimeSession,
-    command: LiveAdapterCommand,
-) -> Result<(), LlmError> {
-    match command {
-        LiveAdapterCommand::Open { snapshot } => {
-            // A9 + R3: drive the canonical seed path directly from the
-            // projection snapshot — `seed_history_projection` is the same
-            // routine the factory uses at open-time. It mints
-            // `ConversationItemCreate` events on the sender side and waits
-            // for provider acknowledgements. The typed runtime system
-            // context carried alongside the seed history flows through
-            // the snapshot's `runtime_system_context` field (R3) and is
-            // forwarded into the seed-events helper so authoritative
-            // system instructions (peer terminal, ops_lifecycle, etc.)
-            // are emitted alongside seed history.
-            session
-                .seed_history_projection(&snapshot.seed_messages, &snapshot.runtime_system_context)
-                .await
-        }
-        LiveAdapterCommand::Refresh { snapshot } => {
-            // R1 + R9: a snapshot-driven refresh applies the mutable
-            // configuration fields (instructions / tools / audio) on
-            // the already-open hosted session, but it must NOT replay
-            // the canonical history — `live_open_config_for_session`
-            // builds `seed_messages` from the full session transcript,
-            // so re-running `seed_history_projection` on every refresh
-            // would duplicate every prior turn into the provider's
-            // hosted conversation as fresh `conversation.item.create`
-            // events. After N refreshes the provider would carry N+1
-            // copies of the same transcript.
-            //
-            // Order matters: validate model/provider identity first
-            // (model swaps require close + reopen — the OpenAI Realtime
-            // API has no mutable `model` field on `session.update`),
-            // then issue a `session.update` carrying the new
-            // instructions / tools / audio config. That's it.
-            //
-            // Note: the snapshot's `runtime_system_context` is folded
-            // into the `instructions` payload by
-            // `apply_refresh_session_update_from_snapshot` via
-            // `openai_refresh_session_update_from_snapshot`, so newly-
-            // authoritative system context still reaches the provider
-            // — just as part of the session config, not as a stream of
-            // synthetic system items. Anything that genuinely needs to
-            // appear as an in-conversation item belongs to the
-            // session/inject_context → next-turn boundary, not to a
-            // live-adapter refresh.
-            //
-            // The Open arm (separate variant) keeps its
-            // `seed_history_projection` call; that's the single
-            // authoritative seed point.
-            if let Some(current_model) = session.current_model_id.as_deref()
-                && current_model != snapshot.model_id
-            {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "live adapter refresh: model swap from `{current_model}` to `{}` requires close + reopen \
-                         (OpenAI Realtime does not accept a mutable `model` on session.update)",
-                        snapshot.model_id
-                    ),
-                });
-            }
-            if let Some(current_provider) = session.current_provider_id.as_deref()
-                && current_provider != snapshot.provider_id
-            {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "live adapter refresh: provider swap from `{current_provider}` to `{}` requires close + reopen",
-                        snapshot.provider_id
-                    ),
-                });
-            }
-            if let Some(audio_cfg) = snapshot.audio_config.as_ref()
-                && (audio_cfg.input_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
-                    || audio_cfg.output_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
-                    || audio_cfg.input_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
-                    || audio_cfg.output_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS))
-            {
-                return Err(LlmError::InvalidRequest {
-                    message: format!(
-                        "live adapter refresh: audio config rate={}/{} ch={}/{} cannot be applied in place \
-                         (OpenAI Realtime live session is fixed to pcm/{}Hz mono); close + reopen required",
-                        audio_cfg.input_sample_rate_hz,
-                        audio_cfg.output_sample_rate_hz,
-                        audio_cfg.input_channels,
-                        audio_cfg.output_channels,
-                        OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
-                    ),
-                });
-            }
-            session
-                .apply_refresh_session_update_from_snapshot(&snapshot)
-                .await
-        }
-        LiveAdapterCommand::SendInput { chunk } => {
-            let input = match chunk {
-                LiveInputChunk::Audio {
-                    data,
-                    sample_rate_hz,
-                    channels,
-                } => {
-                    use base64::Engine;
-                    RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
-                        mime_type: "audio/pcm".to_string(),
-                        data: base64::engine::general_purpose::STANDARD.encode(&data),
-                        sample_rate_hz,
-                        channels: channels as u8,
-                    })
-                }
-                LiveInputChunk::Text { text } => {
-                    use meerkat_contracts::RealtimeTextChunk;
-                    RealtimeInputChunk::TextChunk(RealtimeTextChunk { text })
-                }
-                // T11: image / video-frame variants are typed at the seam
-                // but not yet supported by OpenAI Realtime. Reject with the
-                // documented `reason` strings; the pump (above) maps
-                // `LlmError::InvalidRequest` → `LiveAdapterErrorCode::
-                // ConfigRejected { reason }` so clients can route on the
-                // typed code without parsing English.
-                LiveInputChunk::Image { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "image_input_not_implemented".to_string(),
-                    });
-                }
-                LiveInputChunk::VideoFrame { .. } => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "video_frame_input_not_implemented".to_string(),
-                    });
-                }
-                // `LiveInputChunk` is `#[non_exhaustive]`. Future variants
-                // are unsupported here until OpenAI Realtime grows the
-                // capability; mirror the typed-rejection pattern with a
-                // generic reason rather than panicking.
-                _ => {
-                    return Err(LlmError::InvalidRequest {
-                        message: "unsupported_input_chunk_variant".to_string(),
-                    });
-                }
-            };
-            session.send_input(input).await
-        }
-        LiveAdapterCommand::CommitInput => session.commit_turn().await,
-        LiveAdapterCommand::Interrupt => session.interrupt().await,
-        LiveAdapterCommand::TruncateAssistantOutput {
-            item_id,
-            content_index,
-            audio_played_ms,
-        } => {
-            session
-                .truncate_assistant_output(item_id, content_index, audio_played_ms)
-                .await
-        }
-        LiveAdapterCommand::SubmitToolResult { result } => {
-            let tool_result = CoreToolResult {
-                tool_use_id: result.call_id,
-                content: result.content,
-                is_error: result.is_error,
-            };
-            session.submit_tool_result(tool_result).await
-        }
-        LiveAdapterCommand::SubmitToolError { call_id, error } => {
-            session.submit_tool_error(call_id, error).await
-        }
-        LiveAdapterCommand::Close => Ok(()),
-        _unsupported => Err(LlmError::InvalidRequest {
-            message: "live adapter received unsupported LiveAdapterCommand variant".to_string(),
-        }),
-    }
-}
-
-/// Translate a provider-neutral `RealtimeSessionEvent` into the live-adapter
-/// observation shape consumed by `LiveAdapterHost`.
-///
-/// E25: this translation lives in the OpenAI crate (the provider's seam)
-/// rather than in `meerkat-live::adapter`. The adapter trait is the seam
-/// between Meerkat and the provider, and the provider owns the translation
-/// of its own events into adapter observations.
-fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservation {
-    match event {
-        RealtimeSessionEvent::InputTranscriptFinal { text } => {
-            LiveAdapterObservation::UserTranscriptFinal {
-                provider_item_id: None,
-                previous_item_id: None,
-                content_index: None,
-                text,
-            }
-        }
-        RealtimeSessionEvent::InputTranscriptFinalForItem {
-            item_id,
-            previous_item_id,
-            content_index,
-            text,
-        } => LiveAdapterObservation::UserTranscriptFinal {
-            provider_item_id: Some(item_id),
-            previous_item_id,
-            content_index: Some(content_index),
-            text,
-        },
-        RealtimeSessionEvent::OutputTextDelta { delta } => {
-            LiveAdapterObservation::AssistantTextDelta {
-                provider_item_id: None,
-                previous_item_id: None,
-                content_index: None,
-                response_id: None,
-                delta_id: None,
-                delta,
-            }
-        }
-        RealtimeSessionEvent::OutputTextDeltaForItem {
-            response_id,
-            delta_id,
-            item_id,
-            previous_item_id,
-            content_index,
-            delta,
-        } => LiveAdapterObservation::AssistantTextDelta {
-            provider_item_id: Some(item_id),
-            previous_item_id,
-            content_index: Some(content_index),
-            response_id: Some(response_id),
-            delta_id: Some(delta_id),
-            delta,
-        },
-        // T9: spoken-transcript lane. Distinct from
-        // `OutputTextDeltaForItem` so the runtime can flush
-        // `AssistantBlock::Transcript { source: Spoken }` instead of
-        // `AssistantBlock::Text`.
-        RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem {
-            response_id,
-            delta_id,
-            item_id,
-            previous_item_id,
-            content_index,
-            delta,
-        } => LiveAdapterObservation::AssistantTranscriptDelta {
-            provider_item_id: Some(item_id),
-            previous_item_id,
-            content_index: Some(content_index),
-            response_id: Some(response_id),
-            delta_id: Some(delta_id),
-            delta,
-        },
-        RealtimeSessionEvent::OutputAudioChunk { chunk } => {
-            use base64::Engine;
-            match base64::engine::general_purpose::STANDARD.decode(&chunk.data) {
-                Ok(data) => LiveAdapterObservation::AssistantAudioChunk {
-                    data,
-                    sample_rate_hz: chunk.sample_rate_hz,
-                    channels: u16::from(chunk.channels),
-                },
-                Err(err) => LiveAdapterObservation::Error {
-                    code: LiveAdapterErrorCode::ProviderError,
-                    message: format!("provider sent invalid base64 audio chunk: {err}"),
-                },
-            }
-        }
-        RealtimeSessionEvent::TurnCompleted {
-            response_id,
-            stop_reason,
-            usage,
-        } => LiveAdapterObservation::TurnCompleted {
-            // R6: plumb the provider's response_id through so the
-            // projection sink can buffer-key on (SessionId, response_id).
-            // Without this an interrupted, stale, or overlapping
-            // `response.done` flushes the wrong buffered transcript.
-            response_id: Some(response_id),
-            stop_reason,
-            usage,
-        },
-        RealtimeSessionEvent::Interrupted { .. } => LiveAdapterObservation::TurnInterrupted,
-        RealtimeSessionEvent::ToolCallRequested {
-            call_id,
-            tool_name,
-            arguments,
-        } => LiveAdapterObservation::ToolCallRequested {
-            provider_call_id: call_id,
-            tool_name,
-            arguments,
-        },
-        RealtimeSessionEvent::AssistantTranscriptTruncated {
-            response_id,
-            item_id,
-            content_index,
-            truncated_text,
-            ..
-        } => LiveAdapterObservation::AssistantTranscriptTruncated {
-            provider_item_id: Some(item_id),
-            previous_item_id: None,
-            content_index,
-            response_id,
-            text: truncated_text,
-        },
-        RealtimeSessionEvent::RealtimeTranscript { event } => {
-            LiveAdapterObservation::RealtimeTranscript { event }
-        }
-        RealtimeSessionEvent::AssistantTranscriptFinal {
-            item_id,
-            previous_item_id,
-            content_index,
-            response_id,
-            text,
-            stop_reason,
-            usage,
-        } => LiveAdapterObservation::AssistantTranscriptFinal {
-            provider_item_id: item_id,
-            previous_item_id,
-            content_index,
-            response_id,
-            text,
-            stop_reason,
-            usage,
-        },
-        RealtimeSessionEvent::InputTranscriptPartial { .. }
-        | RealtimeSessionEvent::TurnStarted
-        | RealtimeSessionEvent::TurnCommitted
-        | RealtimeSessionEvent::OutputVideoChunk { .. } => LiveAdapterObservation::StatusChanged {
-            status: LiveAdapterStatus::Ready,
         },
     }
 }
@@ -3464,7 +2517,6 @@ mod tests {
                 item: Item::Message {
                     id: Some(format!("msg_seed_{index}")),
                     status: None,
-                    phase: None,
                     role: Role::System,
                     content: vec![ContentPart::InputText {
                         text: format!("seed ack {index}"),
@@ -3509,7 +2561,6 @@ mod tests {
                                 format: Some(AudioFormat::Pcm { rate: 24_000 }),
                                 voice: Some(_),
                                 speed: None,
-                                language: _,
                             }),
                         })
                     ),
@@ -4676,7 +3727,6 @@ mod tests {
                         item: Item::FunctionCall {
                             id: Some("item_tool".to_string()),
                             status: None,
-                            phase: None,
                             name: "lookup".to_string(),
                             call_id: "call_tool".to_string(),
                             arguments: "{}".to_string(),
@@ -4726,7 +3776,6 @@ mod tests {
                         item: Item::Message {
                             id: Some("item_seed_user".to_string()),
                             status: None,
-                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText {
                                 text: "remember amber lantern".to_string(),
@@ -4739,7 +3788,6 @@ mod tests {
                         item: Item::Message {
                             id: Some("item_seed_user".to_string()),
                             status: None,
-                            phase: None,
                             role: Role::User,
                             content: vec![ContentPart::InputText {
                                 text: "remember amber lantern".to_string(),
@@ -5309,7 +4357,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn provider_neutral_session_projects_output_audio_transcripts_into_transcript_deltas() {
+    async fn provider_neutral_session_projects_output_audio_transcripts_into_text_deltas() {
         let mut session = OpenAiRealtimeSession::new(
             Box::new(FakeOpenAiLiveSession {
                 seen: Arc::new(Mutex::new(Vec::new())),
@@ -5344,42 +4392,17 @@ mod tests {
             RealtimeTurningMode::ProviderManaged,
         );
 
-        // Event ordering note (R4): the A13 flow at
-        // `ServerEvent::ResponseOutputAudioTranscriptDone` returns the
-        // trailing-delta as the primary observation and queues the
-        // matching `AssistantTranscriptFinal` for the next `next_event`
-        // call. So per item we expect: streaming delta(s) → the queued
-        // final → next item's events. The previous shape of this test
-        // skipped the queued finals, which masked production behavior;
-        // the BuildBuddy `cargo-all-features-clippy` / `test-unit`
-        // lanes correctly tripped on it.
-        // T9: audio-transcript deltas now route onto the spoken-transcript
-        // lane (`OutputAudioTranscriptDeltaForItem`) rather than collapsing
-        // onto the display-text lane.
         assert!(matches!(
             session.next_event().await.expect("first delta"),
-            Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem { delta, item_id, .. })
-                if delta == "birch " && item_id == "item_audio_1"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch "
         ));
         assert!(matches!(
             session.next_event().await.expect("suffix delta"),
-            Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem { delta, item_id, .. })
-                if delta == "seventeen" && item_id == "item_audio_1"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "seventeen"
         ));
         assert!(matches!(
-            session.next_event().await.expect("queued final for item_audio_1"),
-            Some(RealtimeSessionEvent::AssistantTranscriptFinal { item_id, text, .. })
-                if item_id == "item_audio_1" && text == "birch seventeen"
-        ));
-        assert!(matches!(
-            session.next_event().await.expect("done without prior delta still projects on transcript lane"),
-            Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem { delta, item_id, .. })
-                if delta == "silver harbor" && item_id == "item_audio_2"
-        ));
-        assert!(matches!(
-            session.next_event().await.expect("queued final for item_audio_2"),
-            Some(RealtimeSessionEvent::AssistantTranscriptFinal { item_id, text, .. })
-                if item_id == "item_audio_2" && text == "silver harbor"
+            session.next_event().await.expect("done without delta still projects text"),
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "silver harbor"
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }
@@ -5504,8 +4527,8 @@ mod tests {
         );
 
         assert!(matches!(
-            session.next_event().await.expect("transcript delta"),
-            Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem { delta, .. }) if delta == "Looping now"
+            session.next_event().await.expect("text delta"),
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "Looping now"
         ));
         assert!(matches!(
             session.next_event().await.expect("interrupted"),
@@ -5555,8 +4578,8 @@ mod tests {
         );
 
         assert!(matches!(
-            session.next_event().await.expect("transcript delta"),
-            Some(RealtimeSessionEvent::OutputAudioTranscriptDeltaForItem { delta, .. }) if delta == "Looping now"
+            session.next_event().await.expect("text delta"),
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "Looping now"
         ));
         assert!(matches!(
             session
@@ -5597,7 +4620,6 @@ mod tests {
                         item: Item::McpCall {
                             id: Some("item_mcp_1".to_string()),
                             status: None,
-                            phase: None,
                             call_id: "call_mcp_1".to_string(),
                             server_label: "meerkat".to_string(),
                             name: "send_request".into(),
@@ -5644,7 +4666,6 @@ mod tests {
                         item: Item::McpCall {
                             id: Some("item_mcp_2".to_string()),
                             status: None,
-                            phase: None,
                             call_id: "call_mcp_2".to_string(),
                             server_label: "meerkat".to_string(),
                             name: "send_request".into(),
@@ -6214,1056 +5235,6 @@ mod tests {
                 other => panic!("unexpected item: {other:?}"),
             },
             other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
-    // ----------------------------------------------------------------------
-    // E25 / A9 — `OpenAiLiveAdapter` direct LiveAdapter impl + Open seeding
-    // ----------------------------------------------------------------------
-
-    /// Test fake: emits scripted server events from a queue, then PARKS
-    /// indefinitely on `next_event` once the queue drains. The default
-    /// `FakeOpenAiLiveSession` returns `Ok(None)` on drain which signals
-    /// "session ended" — that races the pump task to terminate before
-    /// commands can be observed. Parking forever keeps the pump alive so
-    /// command-side assertions can succeed.
-    struct ParkingOpenAiLiveSession {
-        seen: Arc<Mutex<Vec<ClientEvent>>>,
-        next_events: FakeEventQueue,
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl OpenAiLiveSession for ParkingOpenAiLiveSession {
-        async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
-            self.seen.lock().await.push(event);
-            Ok(())
-        }
-
-        async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
-            let popped = { self.next_events.lock().await.pop_front() };
-            match popped {
-                Some(result) => result,
-                None => {
-                    std::future::pending::<()>().await;
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    /// R1 test helper: spin until the recorded outbound `seen` log has
-    /// at least `expected` entries, yielding between checks. Bounded
-    /// at 2s so a regression that genuinely never lands an outbound
-    /// event panics cleanly instead of hanging the test runner.
-    async fn wait_for_seen_count(seen: &Arc<Mutex<Vec<ClientEvent>>>, expected: usize) {
-        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                if seen.lock().await.len() >= expected {
-                    return;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await;
-        if result.is_err() {
-            let snap = seen.lock().await.clone();
-            panic!(
-                "wait_for_seen_count: timed out waiting for {expected} events; got {} ({snap:?})",
-                snap.len()
-            );
-        }
-    }
-
-    /// Test fake: like `ParkingOpenAiLiveSession` but reads server events
-    /// from a tokio mpsc receiver instead of a shared `VecDeque`. This
-    /// lets the test push events at exact moments during the run — in
-    /// particular, AFTER a command has been dispatched to the pump so
-    /// the pump's biased select cannot accidentally race-consume them
-    /// in its idle next_event branch before the command executes.
-    ///
-    /// Used by the R1 refresh tests where the pump must see
-    /// `SessionUpdate` first (sent by the Refresh arm) before reading
-    /// the matching `SessionUpdated` server-event ack — pre-queueing
-    /// the ack on a polled VecDeque would let the pump's idle next_event
-    /// poll silently drain the ack while waiting for the command to
-    /// arrive in cmd_rx.
-    struct ChannelOpenAiLiveSession {
-        seen: Arc<Mutex<Vec<ClientEvent>>>,
-        rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<Option<ServerEvent>, LlmError>>>,
-    }
-
-    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-    impl OpenAiLiveSession for ChannelOpenAiLiveSession {
-        async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
-            self.seen.lock().await.push(event);
-            Ok(())
-        }
-
-        async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
-            // Park forever once the channel closes (matches
-            // `ParkingOpenAiLiveSession`'s "session is held open by
-            // tests, do not signal EOF" semantics).
-            match self.rx.lock().await.recv().await {
-                Some(result) => result,
-                None => {
-                    std::future::pending::<()>().await;
-                    Ok(None)
-                }
-            }
-        }
-    }
-
-    /// E25: the new `OpenAiLiveAdapter` implements `LiveAdapter` directly
-    /// (no `meerkat-live::ProviderSessionAdapter` wrapper). Construct one,
-    /// drain the initial Ready observation, and assert basic command flow
-    /// works end-to-end without going through `Box<dyn RealtimeSession>`.
-    #[tokio::test(flavor = "current_thread")]
-    async fn openai_live_adapter_emits_initial_ready_observation() {
-        let next_events: FakeEventQueue = Arc::new(Mutex::new(VecDeque::new()));
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events,
-        });
-        let session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-        // Yield to let the pump update its status cell.
-        tokio::task::yield_now().await;
-        assert_eq!(adapter.status(), LiveAdapterStatus::Ready);
-        adapter.close().await.expect("close must succeed");
-        assert_eq!(adapter.status(), LiveAdapterStatus::Closed);
-    }
-
-    /// A9: `LiveAdapterCommand::Open { snapshot }` seeds the OpenAI
-    /// conversation with `snapshot.seed_messages` by minting
-    /// `ConversationItemCreate` events on the sender side. We pre-load the
-    /// fake server-event queue with `ConversationItemCreated` acks so the
-    /// adapter's `seed_history_projection` dance completes; then we inspect
-    /// the recorder's `seen` log to assert the matching client events were
-    /// actually emitted.
-    ///
-    /// What this test proves:
-    ///   - `LiveAdapterCommand::Open { snapshot }` is no longer a no-op.
-    ///   - Seed messages reach the provider as `ConversationItemCreate`.
-    ///   - The number of `ConversationItemCreate` events sent equals the
-    ///     number of seed history events derived from
-    ///     `openai_realtime_history_events` (so user/assistant/tool messages
-    ///     all flow, not just user turns).
-    #[tokio::test(flavor = "current_thread")]
-    async fn open_command_seeds_provider_with_snapshot_messages() {
-        use meerkat_core::live_adapter::LiveProjectionSnapshot;
-        use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
-
-        // Build seed messages: a user turn followed by an assistant turn.
-        // Use the same constructors the existing live.rs tests use so the
-        // seed event count matches what `openai_realtime_history_events`
-        // produces in production.
-        let seed_messages = vec![
-            Message::User(UserMessage::text("what's the weather")),
-            Message::Assistant(AssistantMessage {
-                content: "looks rainy".to_string(),
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
-                created_at: types::message_timestamp_now(),
-            }),
-        ];
-
-        // Pre-compute how many seed events `openai_realtime_history_events`
-        // will produce so we can pre-stage the matching ack count.
-        let seed_event_count = openai_realtime_history_events(&seed_messages, &[]).len();
-        assert!(
-            seed_event_count > 0,
-            "test setup: seed messages must produce at least one ConversationItemCreate"
-        );
-
-        // Pre-stage acks. The session reads ack events back as
-        // ConversationItemCreated; we shape one ack per seed event so
-        // `seed_history_projection` can complete without timing out.
-        let mut ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-        for index in 0..seed_event_count {
-            ack_queue.push_back(Ok(Some(ServerEvent::ConversationItemCreated {
-                event_id: format!("evt_open_seed_ack_{index}"),
-                previous_item_id: None,
-                item: Item::Message {
-                    id: Some(format!("msg_open_seed_{index}")),
-                    status: None,
-                    phase: None,
-                    role: Role::System,
-                    content: vec![ContentPart::InputText {
-                        text: format!("ack {index}"),
-                    }],
-                },
-            })));
-        }
-
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
-        });
-        let session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        // Drain the initial Ready so the pump is in its select! loop.
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        // Send `Open { snapshot }`. The pump dispatches into
-        // `execute_openai_live_command`, which calls
-        // `seed_history_projection` → emits ConversationItemCreate events.
-        let snapshot = LiveProjectionSnapshot {
-            session_id: SessionId::new(),
-            snapshot_version: 0,
-            seed_messages: seed_messages.clone(),
-            visible_tools: Vec::new(),
-            system_prompt: None,
-            model_id: "gpt-realtime".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
-            audio_config: None,
-            runtime_system_context: Vec::new(),
-        };
-        adapter
-            .send_command(LiveAdapterCommand::Open { snapshot })
-            .await
-            .expect("Open must dispatch");
-
-        // The pump processes the Open command on its biased branch;
-        // `seed_history_projection` is async and runs to completion before
-        // looping back. Give it a few async ticks (and the 5s seed
-        // timeout's worth of headroom) to drain the seed events into
-        // `seen`. We poll because `seen` is owned by the pump task.
-        let recorded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let len = seen.lock().await.len();
-                if len >= seed_event_count {
-                    return seen.lock().await.clone();
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("seed events must be recorded within 2s");
-
-        assert_eq!(
-            recorded.len(),
-            seed_event_count,
-            "OpenAiLiveAdapter must forward every seed event to the provider"
-        );
-
-        let mut create_count = 0_usize;
-        for event in &recorded {
-            if matches!(event, ClientEvent::ConversationItemCreate { .. }) {
-                create_count += 1;
-            }
-        }
-        assert_eq!(
-            create_count, seed_event_count,
-            "every recorded seed event must be a ConversationItemCreate"
-        );
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// R9: `LiveAdapterCommand::Refresh { snapshot }` MUST NOT replay
-    /// canonical history into the hosted OpenAI realtime conversation.
-    ///
-    /// Why this matters: `live_open_config_for_session` builds
-    /// `snapshot.seed_messages` from the *full* canonical session
-    /// transcript every time it's called. The original Refresh
-    /// implementation re-ran `seed_history_projection` after the
-    /// `session.update`, which minted a fresh
-    /// `conversation.item.create` event for every prior turn each time
-    /// `live/refresh` was invoked. After N refreshes the provider's
-    /// hosted conversation carried N+1 copies of the same transcript,
-    /// blowing up token bills, latency, and turn-detection state.
-    ///
-    /// The fix is to make Refresh config-only:
-    ///   - exactly one outbound `session.update` per refresh,
-    ///   - zero outbound `conversation.item.create` events,
-    ///   - regardless of how big `snapshot.seed_messages` /
-    ///     `snapshot.runtime_system_context` are.
-    ///
-    /// Re-seeding remains the responsibility of the `Open` arm (used
-    /// at adapter open time and for cross-session re-seed scenarios
-    /// per R2). Anything that genuinely needs to be injected as an
-    /// in-conversation item belongs to the
-    /// `session/inject_context` → next-turn boundary, NOT to a
-    /// live-adapter refresh.
-    ///
-    /// This test drives 3 consecutive Refreshes carrying non-empty
-    /// `seed_messages` AND `runtime_system_context` and asserts:
-    ///   - exactly 3 `SessionUpdate` events reached the provider,
-    ///   - exactly 0 `ConversationItemCreate` events reached the
-    ///     provider — even though every refresh's `seed_messages` is
-    ///     non-empty.
-    #[tokio::test(flavor = "current_thread")]
-    async fn refresh_command_does_not_replay_history() {
-        use meerkat_core::live_adapter::LiveProjectionSnapshot;
-        use meerkat_core::session::PendingSystemContextAppend;
-        use meerkat_core::types::SessionId;
-        use meerkat_core::{AssistantMessage, Provider, StopReason, UserMessage, types};
-        use std::time::SystemTime;
-
-        // Non-empty seed: if the Refresh arm regressed and re-seeded,
-        // each of these would mint at least one
-        // `ConversationItemCreate` per refresh, so the assertion below
-        // would catch the bug immediately.
-        let seed_messages = vec![
-            Message::User(UserMessage::text("first turn")),
-            Message::Assistant(AssistantMessage {
-                content: "second turn".to_string(),
-                tool_calls: Vec::new(),
-                stop_reason: StopReason::EndTurn,
-                usage: meerkat_core::Usage::default(),
-                created_at: types::message_timestamp_now(),
-            }),
-        ];
-        // Sanity check: this seed shape would produce > 0 mint events
-        // if the regression returned. Belt-and-braces against an empty
-        // seed accidentally passing the assertion below.
-        assert!(
-            !openai_realtime_history_events(&seed_messages, &[]).is_empty(),
-            "test setup: seed messages must produce at least one history event \
-             (otherwise the no-replay assertion below trivially holds)"
-        );
-
-        let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "peer terminal: pty=42".to_string(),
-            source: Some("peer_terminal".to_string()),
-            idempotency_key: Some("k1".to_string()),
-            accepted_at: SystemTime::UNIX_EPOCH,
-        }];
-
-        // We use a `ChannelOpenAiLiveSession` so we can push the
-        // matching `SessionUpdated` ack AFTER the pump has emitted its
-        // `SessionUpdate`. A pre-queued `ParkingOpenAiLiveSession`
-        // would let the pump's idle `next_event` poll silently drain
-        // the ack between commands, ruining synchronization.
-        let (server_tx, server_rx) =
-            mpsc::unbounded_channel::<Result<Option<ServerEvent>, LlmError>>();
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ChannelOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            rx: tokio::sync::Mutex::new(server_rx),
-        });
-        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        // Stamp identity so the model-swap guard sees a stable origin.
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        // Drain initial Ready so the pump is in its select! loop.
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        const REFRESH_COUNT: usize = 3;
-        for refresh_index in 0..REFRESH_COUNT {
-            let snapshot = LiveProjectionSnapshot {
-                session_id: SessionId::new(),
-                snapshot_version: 9 + refresh_index as u64,
-                seed_messages: seed_messages.clone(),
-                visible_tools: Vec::new(),
-                system_prompt: Some(format!("instructions revision {refresh_index}")),
-                model_id: "gpt-realtime".to_string(),
-                provider_id: Provider::OpenAI.as_str().to_string(),
-                audio_config: None,
-                runtime_system_context: runtime_system_context.clone(),
-            };
-            adapter
-                .send_command(LiveAdapterCommand::Refresh { snapshot })
-                .await
-                .expect("Refresh must dispatch");
-
-            // After dispatch, exactly ONE outbound event should land
-            // in `seen` per refresh: the `session.update`. If the
-            // regression returned, additional `conversation.item.create`
-            // events would land before / after the SessionUpdate; the
-            // final assertion below catches that. We push the matching
-            // ack AFTER the SessionUpdate is observed so the pump can
-            // return from `apply_refresh_session_update_from_snapshot`
-            // and accept the next Refresh.
-            wait_for_seen_count(&seen, refresh_index + 1).await;
-            server_tx
-                .send(Ok(Some(ServerEvent::SessionUpdated {
-                    event_id: format!("evt_refresh_session_updated_{refresh_index}"),
-                    session: sample_server_session("gpt-realtime"),
-                })))
-                .expect("server channel must accept SessionUpdated ack");
-        }
-
-        // Yield long enough for the pump to drain all three acks and
-        // return to its idle select. After that point the `seen` log
-        // is complete.
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
-        let recorded = seen.lock().await.clone();
-
-        let mut create_count = 0_usize;
-        let mut session_update_count = 0_usize;
-        for event in &recorded {
-            match event {
-                ClientEvent::ConversationItemCreate { .. } => create_count += 1,
-                ClientEvent::SessionUpdate { .. } => session_update_count += 1,
-                _ => {}
-            }
-        }
-        assert_eq!(
-            session_update_count, REFRESH_COUNT,
-            "Refresh must emit exactly one session.update per refresh; recorded {recorded:?}"
-        );
-        assert_eq!(
-            create_count, 0,
-            "Refresh must NOT replay canonical history — \
-             zero `conversation.item.create` events expected, recorded {recorded:?}"
-        );
-        assert_eq!(
-            recorded.len(),
-            REFRESH_COUNT,
-            "Refresh must forward exactly {REFRESH_COUNT} session.update events and nothing else"
-        );
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// R1: a `Refresh { snapshot }` whose `system_prompt` and
-    /// `visible_tools` differ from the open-time configuration must
-    /// reach the provider as exactly one `session.update` ClientEvent
-    /// carrying the snapshot's instructions text and tool list.
-    /// Pre-R1 the Refresh arm only re-ran `seed_history_projection`,
-    /// so a `config/patch` that flipped tools or instructions left the
-    /// hosted realtime session running on stale state while RPC
-    /// reported `refreshed: true`.
-    #[tokio::test(flavor = "current_thread")]
-    async fn refresh_command_emits_session_update_for_mutated_prompt_and_tools() {
-        use meerkat_core::live_adapter::LiveProjectionSnapshot;
-        use meerkat_core::types::SessionId;
-        use meerkat_core::{Provider, ToolDef};
-
-        // Empty seed messages so the test focuses on the SessionUpdate
-        // branch — the seed-history dance is exercised by the sibling
-        // `refresh_command_reseeds_provider_with_snapshot_messages`.
-        let seed_messages: Vec<Message> = Vec::new();
-
-        // Pre-stage just the SessionUpdated ack — there are no seed
-        // events to ack since the snapshot's seed_messages is empty.
-        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> =
-            VecDeque::from(vec![Ok(Some(ServerEvent::SessionUpdated {
-                event_id: "evt_refresh_session_updated".to_string(),
-                session: sample_server_session("gpt-realtime"),
-            }))]);
-
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
-        });
-        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        // Stamp identity so the model-swap guard sees a stable origin
-        // and proceeds (matching model + provider).
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        // Drain initial Ready so the pump is in its select! loop.
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        let mutated_tools = vec![ToolDef {
-            name: "fresh_tool".into(),
-            description: "Tool added by refresh.".to_string(),
-            input_schema: serde_json::json!({"type": "object"}),
-            provenance: None,
-        }];
-        let mutated_prompt = "fresh system prompt for refresh".to_string();
-
-        let snapshot = LiveProjectionSnapshot {
-            session_id: SessionId::new(),
-            snapshot_version: 17,
-            seed_messages: seed_messages.clone(),
-            visible_tools: mutated_tools.clone(),
-            system_prompt: Some(mutated_prompt.clone()),
-            model_id: "gpt-realtime".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
-            audio_config: None,
-            runtime_system_context: Vec::new(),
-        };
-        adapter
-            .send_command(LiveAdapterCommand::Refresh { snapshot })
-            .await
-            .expect("Refresh must dispatch");
-
-        // Wait for exactly one outbound SessionUpdate.
-        let recorded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let snapshot = seen.lock().await.clone();
-                if snapshot
-                    .iter()
-                    .any(|event| matches!(event, ClientEvent::SessionUpdate { .. }))
-                {
-                    return snapshot;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("Refresh must emit a session.update within 2s");
-
-        let session_updates: Vec<&SessionUpdate> = recorded
-            .iter()
-            .filter_map(|event| match event {
-                ClientEvent::SessionUpdate { session, .. } => Some(session.as_ref()),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            session_updates.len(),
-            1,
-            "Refresh must emit exactly one session.update; got {recorded:?}"
-        );
-        let update = session_updates[0];
-
-        // Instructions: the snapshot's `system_prompt` must appear
-        // verbatim in the rendered instructions block.
-        let instructions = update
-            .config
-            .instructions
-            .as_deref()
-            .expect("Refresh session.update must carry instructions");
-        assert!(
-            instructions.contains(&mutated_prompt),
-            "instructions must include the snapshot's system_prompt verbatim, got: {instructions}"
-        );
-
-        // Tools: the rendered tool list must equal the snapshot's
-        // `visible_tools` mapped through `openai_realtime_tools`.
-        let tools = update
-            .config
-            .tools
-            .as_ref()
-            .expect("Refresh session.update must carry tools");
-        assert_eq!(tools.len(), mutated_tools.len());
-        let has_fresh_tool = tools.iter().any(|tool| match tool {
-            Tool::Function { name, .. } => name.as_str() == "fresh_tool",
-            _ => false,
-        });
-        assert!(
-            has_fresh_tool,
-            "tools must include the snapshot's mutated `fresh_tool`, got {tools:?}"
-        );
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// R1: a `Refresh { snapshot }` whose `model_id` differs from the
-    /// open-time identity must be rejected with a typed
-    /// `LiveAdapterObservation::Error` — the OpenAI Realtime API does
-    /// not accept a mutable `model` field on `session.update`, so the
-    /// only correct thing is to ask the caller to close + reopen.
-    /// Critically: NO `session.update` ClientEvent must reach the
-    /// provider when the model swap is detected.
-    #[tokio::test(flavor = "current_thread")]
-    async fn refresh_command_rejects_model_swap_without_emitting_session_update() {
-        use meerkat_core::Provider;
-        use meerkat_core::live_adapter::LiveProjectionSnapshot;
-        use meerkat_core::types::SessionId;
-
-        // No staged server events — the refresh path must error out
-        // before it ever reads from the raw session.
-        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
-        });
-        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        // Drain Ready.
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        let snapshot = LiveProjectionSnapshot {
-            session_id: SessionId::new(),
-            snapshot_version: 22,
-            seed_messages: Vec::new(),
-            visible_tools: Vec::new(),
-            system_prompt: None,
-            // Mutated model — the swap target. Must be rejected.
-            model_id: "gpt-realtime-mini-v2".to_string(),
-            provider_id: Provider::OpenAI.as_str().to_string(),
-            audio_config: None,
-            runtime_system_context: Vec::new(),
-        };
-        adapter
-            .send_command(LiveAdapterCommand::Refresh { snapshot })
-            .await
-            .expect("Refresh must dispatch even though it'll fail downstream");
-
-        // R12: the pump now maps the typed `LlmError::InvalidRequest`
-        // raised by the model-swap guard into a typed
-        // `LiveAdapterObservation::Error { code: ConfigRejected, .. }`,
-        // not the previous `ProviderError`. The `reason` carried inside
-        // ConfigRejected mirrors the message text the guard produced so
-        // clients gating on the typed code still get a human-readable
-        // explanation of the close-and-reopen requirement.
-        let observation = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("error observation must arrive within 1s")
-        .expect("adapter must yield Ok");
-        match observation {
-            Some(LiveAdapterObservation::Error { code, message }) => {
-                match code {
-                    LiveAdapterErrorCode::ConfigRejected { reason } => {
-                        assert!(
-                            reason.contains("model swap")
-                                && reason.contains("gpt-realtime-mini-v2")
-                                && reason.contains("close + reopen"),
-                            "ConfigRejected reason must name the swap target and direct \
-                             the caller to close + reopen, got: {reason}"
-                        );
-                    }
-                    other => panic!(
-                        "model-swap rejection must surface as ConfigRejected, \
-                         got code {other:?} with message {message}"
-                    ),
-                }
-                assert!(
-                    message.contains("model swap"),
-                    "Error.message must still carry the human-readable swap text, got: {message}"
-                );
-            }
-            other => panic!("expected Error observation for model swap, got {other:?}"),
-        }
-
-        // Yield enough async ticks that any (incorrectly emitted)
-        // session.update would land in `seen`. Then assert it didn't.
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        let recorded = seen.lock().await.clone();
-        assert!(
-            recorded
-                .iter()
-                .all(|event| !matches!(event, ClientEvent::SessionUpdate { .. })),
-            "model-swap rejection must not have emitted any session.update events; got {recorded:?}"
-        );
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// T11: a `SendInput { LiveInputChunk::Image }` must be rejected with
-    /// the typed `LiveAdapterErrorCode::ConfigRejected` whose `reason` is
-    /// the documented `"image_input_not_implemented"` token. Routing this
-    /// onto the `ProviderError` path would force clients to parse English
-    /// to distinguish "OpenAI doesn't support image input on the realtime
-    /// surface" from a real provider outage.
-    #[tokio::test(flavor = "current_thread")]
-    async fn send_input_image_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
-        use meerkat_core::live_adapter::LiveInputChunk;
-
-        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
-        });
-        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        adapter
-            .send_command(LiveAdapterCommand::SendInput {
-                chunk: LiveInputChunk::Image {
-                    mime: "image/png".into(),
-                    data: vec![0x89, 0x50, 0x4E, 0x47],
-                },
-            })
-            .await
-            .expect("SendInput must dispatch to the pump");
-
-        let observation = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("error observation must arrive within 1s")
-        .expect("adapter must yield Ok");
-        match observation {
-            Some(LiveAdapterObservation::Error { code, message }) => match code {
-                LiveAdapterErrorCode::ConfigRejected { reason } => {
-                    assert_eq!(reason, "image_input_not_implemented");
-                    assert!(
-                        message.contains("image_input_not_implemented"),
-                        "Error.message must mirror the typed reason, got {message}"
-                    );
-                }
-                other => panic!(
-                    "image rejection must surface as ConfigRejected, got code {other:?} \
-                     with message {message}"
-                ),
-            },
-            other => panic!("expected Error observation for image input, got {other:?}"),
-        }
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// T11: same shape as the image rejection — `LiveInputChunk::VideoFrame`
-    /// must surface as a typed `ConfigRejected` with the documented
-    /// `"video_frame_input_not_implemented"` reason.
-    #[tokio::test(flavor = "current_thread")]
-    async fn send_input_video_frame_chunk_is_rejected_as_config_rejected() {
-        use meerkat_core::Provider;
-        use meerkat_core::live_adapter::LiveInputChunk;
-
-        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
-        });
-        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
-        let adapter = OpenAiLiveAdapter::new(session);
-
-        let first = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("Ready must arrive within 1s")
-        .expect("adapter must yield Ok");
-        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
-
-        adapter
-            .send_command(LiveAdapterCommand::SendInput {
-                chunk: LiveInputChunk::VideoFrame {
-                    codec: "vp8".into(),
-                    data: vec![0u8, 1, 2, 3, 4],
-                    timestamp_ms: 100,
-                },
-            })
-            .await
-            .expect("SendInput must dispatch to the pump");
-
-        let observation = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            adapter.next_observation(),
-        )
-        .await
-        .expect("error observation must arrive within 1s")
-        .expect("adapter must yield Ok");
-        match observation {
-            Some(LiveAdapterObservation::Error { code, message }) => match code {
-                LiveAdapterErrorCode::ConfigRejected { reason } => {
-                    assert_eq!(reason, "video_frame_input_not_implemented");
-                    assert!(
-                        message.contains("video_frame_input_not_implemented"),
-                        "Error.message must mirror the typed reason, got {message}"
-                    );
-                }
-                other => panic!(
-                    "video-frame rejection must surface as ConfigRejected, got code {other:?} \
-                     with message {message}"
-                ),
-            },
-            other => panic!("expected Error observation for video-frame input, got {other:?}"),
-        }
-
-        adapter.close().await.expect("close must succeed");
-    }
-
-    /// P2#3: OpenAiLiveAdapter must report a truthful capability set; the
-    /// previous behavior advertised every capability as `false` regardless
-    /// of provider support, which made client-side capability discovery
-    /// useless. Pin the values that match the OpenAI Realtime API's
-    /// observable shape today.
-    #[tokio::test(flavor = "current_thread")]
-    async fn openai_live_adapter_reports_truthful_capabilities() {
-        let raw = Box::new(ParkingOpenAiLiveSession {
-            seen: Arc::new(Mutex::new(Vec::new())),
-            next_events: Arc::new(Mutex::new(VecDeque::new())),
-        });
-        let session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
-        let adapter = OpenAiLiveAdapter::new(session);
-        let caps = LiveAdapter::capabilities(&adapter);
-        assert!(caps.audio_in);
-        assert!(caps.audio_out);
-        assert!(caps.text_in);
-        assert!(caps.text_out);
-        assert!(caps.barge_in_supported);
-        assert!(caps.transcript_supported);
-        assert!(
-            !caps.image_in,
-            "OpenAI Realtime does not yet accept image input (gpt-realtime-2 reserved)"
-        );
-        assert!(
-            !caps.video_in,
-            "OpenAI Realtime does not accept video frames"
-        );
-        assert!(
-            !caps.provider_native_resume,
-            "OpenAI Realtime does not yet expose provider-native resume"
-        );
-        adapter.close().await.expect("close must succeed");
-    }
-
-    // ------------------------------------------------------------------
-    // T9: OpenAI translator routes outputs to correct lanes.
-    //
-    // These regressions pin the server-event → realtime-event →
-    // `LiveAdapterObservation` mapping for the four output-event shapes
-    // OpenAI Realtime emits during a response (display text, audio
-    // transcript, audio chunks, and a mixed display+spoken response). The
-    // pre-T9 collapse of audio transcript onto the display-text lane is
-    // exactly what these tests catch.
-    // ------------------------------------------------------------------
-
-    fn empty_fake_session() -> OpenAiRealtimeSession {
-        OpenAiRealtimeSession::new(
-            Box::new(FakeOpenAiLiveSession {
-                seen: Arc::new(Mutex::new(Vec::new())),
-                next_events: Arc::new(Mutex::new(VecDeque::new())),
-            }),
-            RealtimeTurningMode::ProviderManaged,
-        )
-    }
-
-    #[test]
-    fn mapping_routes_response_output_text_delta_to_assistant_text_delta() {
-        let mut session = empty_fake_session();
-        let mapped = session
-            .map_server_event(ServerEvent::ResponseOutputTextDelta {
-                event_id: "evt_text_1".to_string(),
-                response_id: "resp_text".to_string(),
-                item_id: "item_text".to_string(),
-                output_index: 0,
-                content_index: 0,
-                delta: "hello".to_string(),
-            })
-            .expect("display-text delta must map cleanly")
-            .expect("display-text delta must produce a realtime event");
-        let obs = translate_realtime_event(mapped);
-        match obs {
-            LiveAdapterObservation::AssistantTextDelta { delta, .. } => {
-                assert_eq!(delta, "hello");
-            }
-            other => {
-                panic!("ResponseOutputTextDelta must map to AssistantTextDelta, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn mapping_routes_response_output_audio_transcript_delta_to_transcript_lane() {
-        let mut session = empty_fake_session();
-        let mapped = session
-            .map_server_event(ServerEvent::ResponseOutputAudioTranscriptDelta {
-                event_id: "evt_tx_1".to_string(),
-                response_id: "resp_tx".to_string(),
-                item_id: "item_tx".to_string(),
-                output_index: 0,
-                content_index: 0,
-                delta: "spoken".to_string(),
-            })
-            .expect("transcript delta must map cleanly")
-            .expect("transcript delta must produce a realtime event");
-        let obs = translate_realtime_event(mapped);
-        match obs {
-            LiveAdapterObservation::AssistantTranscriptDelta {
-                delta,
-                provider_item_id,
-                response_id,
-                ..
-            } => {
-                assert_eq!(delta, "spoken");
-                assert_eq!(provider_item_id.as_deref(), Some("item_tx"));
-                assert_eq!(response_id.as_deref(), Some("resp_tx"));
-            }
-            other => panic!(
-                "ResponseOutputAudioTranscriptDelta must map to AssistantTranscriptDelta, got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn mapping_routes_response_output_audio_transcript_done_to_assistant_transcript_final() {
-        // A13 ordering: when no staged delta precedes the Done event, the
-        // helper returns the trailing-delta (full transcript) as the
-        // primary observation and queues the `AssistantTranscriptFinal`
-        // for the next call. T9 lane fix means the trailing-delta now
-        // routes to `AssistantTranscriptDelta` instead of the display
-        // `AssistantTextDelta`.
-        let mut session = empty_fake_session();
-        let mapped = session
-            .map_server_event(ServerEvent::ResponseOutputAudioTranscriptDone {
-                event_id: "evt_done".to_string(),
-                response_id: "resp_done".to_string(),
-                item_id: "item_done".to_string(),
-                output_index: 0,
-                content_index: 0,
-                transcript: "spoken final".to_string(),
-            })
-            .expect("transcript done must map cleanly")
-            .expect("transcript done must produce a realtime event");
-        let obs = translate_realtime_event(mapped);
-        // Primary: trailing-delta on the spoken-transcript lane.
-        match obs {
-            LiveAdapterObservation::AssistantTranscriptDelta { delta, .. } => {
-                assert_eq!(delta, "spoken final");
-            }
-            other => panic!(
-                "ResponseOutputAudioTranscriptDone trailing-delta must map to AssistantTranscriptDelta, got {other:?}"
-            ),
-        }
-        // Queued: the AssistantTranscriptFinal close.
-        let queued = session
-            .pending_events
-            .pop_front()
-            .expect("done must queue the AssistantTranscriptFinal close");
-        let final_obs = translate_realtime_event(queued);
-        match final_obs {
-            LiveAdapterObservation::AssistantTranscriptFinal {
-                text,
-                provider_item_id,
-                response_id,
-                ..
-            } => {
-                assert_eq!(text, "spoken final");
-                assert_eq!(provider_item_id, "item_done");
-                assert_eq!(response_id.as_deref(), Some("resp_done"));
-            }
-            other => panic!(
-                "ResponseOutputAudioTranscriptDone queued close must map to AssistantTranscriptFinal, got {other:?}"
-            ),
-        }
-    }
-
-    #[test]
-    fn mapping_routes_response_output_audio_delta_to_audio_chunk() {
-        let mut session = empty_fake_session();
-        let mapped = session
-            .map_server_event(ServerEvent::ResponseOutputAudioDelta {
-                event_id: "evt_audio".to_string(),
-                response_id: "resp_audio".to_string(),
-                item_id: "item_audio".to_string(),
-                output_index: 0,
-                content_index: 0,
-                delta: "AAEC".to_string(),
-            })
-            .expect("audio delta must map cleanly")
-            .expect("audio delta must produce a realtime event");
-        let obs = translate_realtime_event(mapped);
-        match obs {
-            LiveAdapterObservation::AssistantAudioChunk {
-                sample_rate_hz,
-                channels,
-                ..
-            } => {
-                assert_eq!(sample_rate_hz, OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ);
-                assert_eq!(channels, u16::from(OPENAI_REALTIME_AUDIO_CHANNELS));
-            }
-            other => {
-                panic!("ResponseOutputAudioDelta must map to AssistantAudioChunk, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn mixed_response_emits_text_and_transcript_in_order() {
-        // T9 acceptance: a response that interleaves display text and
-        // spoken transcript must surface the two lanes as distinct
-        // observations in arrival order so the projection sink can flush
-        // them as separate `AssistantBlock::{Text,Transcript}` blocks.
-        let mut session = empty_fake_session();
-        let text_delta = session
-            .map_server_event(ServerEvent::ResponseOutputTextDelta {
-                event_id: "evt_t1".to_string(),
-                response_id: "resp_mixed".to_string(),
-                item_id: "item_text".to_string(),
-                output_index: 0,
-                content_index: 0,
-                delta: "I wrote".to_string(),
-            })
-            .expect("text delta maps cleanly")
-            .expect("text delta produces a realtime event");
-        let tx_delta = session
-            .map_server_event(ServerEvent::ResponseOutputAudioTranscriptDelta {
-                event_id: "evt_t2".to_string(),
-                response_id: "resp_mixed".to_string(),
-                item_id: "item_tx".to_string(),
-                output_index: 1,
-                content_index: 0,
-                delta: "I said".to_string(),
-            })
-            .expect("transcript delta maps cleanly")
-            .expect("transcript delta produces a realtime event");
-
-        let obs1 = translate_realtime_event(text_delta);
-        let obs2 = translate_realtime_event(tx_delta);
-        match (&obs1, &obs2) {
-            (
-                LiveAdapterObservation::AssistantTextDelta { delta: t, .. },
-                LiveAdapterObservation::AssistantTranscriptDelta { delta: x, .. },
-            ) => {
-                assert_eq!(t, "I wrote");
-                assert_eq!(x, "I said");
-            }
-            other => panic!(
-                "mixed response must emit text-delta then transcript-delta in order, got {other:?}"
-            ),
         }
     }
 }

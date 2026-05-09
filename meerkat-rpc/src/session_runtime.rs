@@ -201,17 +201,10 @@ pub(crate) use meerkat::session_runtime::admission::{
     take_staged_capacity_admission as admission_take_staged_capacity,
 };
 
-#[derive(Clone)]
-struct StagedAdmissionRestore {
-    admissions: StagedCapacityAdmissions,
-    session_id: SessionId,
-}
-
-pub(crate) struct RuntimePreAdmission {
-    admission: Option<ActiveCapacityGuard>,
-    staged_restore: Option<StagedAdmissionRestore>,
-}
-
+pub(crate) use meerkat::session_runtime::admission::{
+    RuntimePreAdmission, RuntimePreAdmissionEntry, RuntimePreAdmissionGuard,
+    RuntimeRegistrationLockLease, StagedAdmissionRestore, StagedArchiveRollbackGuard,
+};
 pub(crate) use meerkat::session_runtime::recovery::{
     RecoveredCreateRequest, RecoveryRuntimeBindingMode,
 };
@@ -474,32 +467,16 @@ fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness {
     }
 }
 
-struct RuntimePreAdmissionGuard {
-    admission: Option<RuntimePreAdmission>,
-}
-
-struct RuntimePreAdmissionEntry {
-    input_id: InputId,
-    admission: RuntimePreAdmission,
-}
-
+// W1-C deferred: `RuntimePreAdmissionRegistration` holds an
+// `Arc<SessionRuntime>` and dispatches a method on it from Drop, so it
+// can't move to `meerkat::session_runtime::admission` without either a
+// trait abstraction or pulling `SessionRuntime` itself upstream — out
+// of scope for Wave 1's pure-type-move charter. Tracked in W3.
 struct RuntimePreAdmissionRegistration {
     runtime: Arc<SessionRuntime>,
     session_id: SessionId,
     input_id: InputId,
     release_on_drop: bool,
-}
-
-struct RuntimeRegistrationLockLease {
-    locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
-    session_id: SessionId,
-    lock: Arc<Mutex<()>>,
-}
-
-struct StagedArchiveRollbackGuard {
-    staged_sessions: Arc<StagedSessionRegistry>,
-    session_id: SessionId,
-    restore_on_drop: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -514,18 +491,6 @@ struct PendingPromotionPreTurnHook {
     reached_flag: std::sync::atomic::AtomicBool,
     reached: Notify,
     release: Notify,
-}
-
-impl RuntimePreAdmissionGuard {
-    fn new(admission: impl Into<RuntimePreAdmission>) -> Self {
-        Self {
-            admission: Some(admission.into()),
-        }
-    }
-
-    fn take(&mut self) -> Option<RuntimePreAdmission> {
-        self.admission.take()
-    }
 }
 
 impl RuntimePreAdmissionRegistration {
@@ -543,113 +508,11 @@ impl RuntimePreAdmissionRegistration {
     }
 }
 
-impl RuntimeRegistrationLockLease {
-    fn mutex(&self) -> &Mutex<()> {
-        &self.lock
-    }
-}
-
 impl Drop for RuntimePreAdmissionRegistration {
     fn drop(&mut self) {
         if self.release_on_drop {
             self.runtime
                 .restore_or_release_runtime_pre_admission(&self.session_id, &self.input_id);
-        }
-    }
-}
-
-impl Drop for RuntimeRegistrationLockLease {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.lock) != 1 {
-            return;
-        }
-        let this_lock = Arc::downgrade(&self.lock);
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if locks
-            .get(&self.session_id)
-            .is_some_and(|registered| registered.ptr_eq(&this_lock))
-        {
-            locks.remove(&self.session_id);
-        }
-    }
-}
-
-impl StagedArchiveRollbackGuard {
-    fn new(staged_sessions: Arc<StagedSessionRegistry>, session_id: &SessionId) -> Self {
-        Self {
-            staged_sessions,
-            session_id: session_id.clone(),
-            restore_on_drop: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.restore_on_drop = false;
-    }
-}
-
-impl Drop for StagedArchiveRollbackGuard {
-    fn drop(&mut self) {
-        if !self.restore_on_drop {
-            return;
-        }
-        let staged_sessions = Arc::clone(&self.staged_sessions);
-        let session_id = self.session_id.clone();
-        tokio::spawn(async move {
-            let _ = staged_sessions.restore_archive(&session_id).await;
-        });
-    }
-}
-
-impl RuntimePreAdmission {
-    fn fresh(admission: ActiveCapacityGuard) -> Self {
-        Self {
-            admission: Some(admission),
-            staged_restore: None,
-        }
-    }
-
-    fn staged(
-        session_id: SessionId,
-        admissions: StagedCapacityAdmissions,
-        admission: ActiveCapacityGuard,
-    ) -> Self {
-        Self {
-            admission: Some(admission),
-            staged_restore: Some(StagedAdmissionRestore {
-                admissions,
-                session_id,
-            }),
-        }
-    }
-
-    #[allow(clippy::expect_used)]
-    fn into_admission(mut self) -> ActiveCapacityGuard {
-        self.staged_restore = None;
-        self.admission
-            .take()
-            .expect("runtime pre-admission should not be consumed twice")
-    }
-}
-
-impl From<ActiveCapacityGuard> for RuntimePreAdmission {
-    fn from(admission: ActiveCapacityGuard) -> Self {
-        Self::fresh(admission)
-    }
-}
-
-impl Drop for RuntimePreAdmission {
-    fn drop(&mut self) {
-        let Some(admission) = self.admission.take() else {
-            return;
-        };
-        if let Some(restore) = self.staged_restore.take() {
-            restore_staged_capacity_admission(&restore.admissions, restore.session_id, admission);
-        } else {
-            drop(admission);
         }
     }
 }

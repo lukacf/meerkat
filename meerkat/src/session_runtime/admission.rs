@@ -4,10 +4,14 @@
 //! and W1-C (`RuntimePreAdmission` family of RAII guards).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 
+use meerkat_core::InputId;
 use meerkat_core::types::SessionId;
 use meerkat_session::RuntimeContextAdmissionGuard;
+use tokio::sync::Mutex;
+
+use crate::StagedSessionRegistry;
 
 /// Type alias for a capacity guard issued by the session service for a
 /// staged or running session. The actual guard type lives in
@@ -96,4 +100,195 @@ pub fn discard_staged_capacity_admission(
     session_id: &SessionId,
 ) {
     drop(take_staged_capacity_admission(admissions, session_id));
+}
+
+/// Carries the metadata needed to restore an admission to the staged
+/// ledger when a `RuntimePreAdmission` originally taken from the
+/// staged-capacity bucket goes out of scope without being consumed.
+#[derive(Clone)]
+pub struct StagedAdmissionRestore {
+    /// The shared staged-capacity ledger to restore the admission to.
+    pub admissions: StagedCapacityAdmissions,
+    /// The session id whose slot the admission belongs in.
+    pub session_id: SessionId,
+}
+
+/// RAII admission carried through the runtime input pipeline.
+///
+/// `fresh` holds an admission that simply returns capacity to the pool
+/// when dropped. `staged` holds an admission whose Drop restores it to
+/// `StagedCapacityAdmissions` for later consumption by the staged
+/// session's promotion path.
+pub struct RuntimePreAdmission {
+    pub(crate) admission: Option<ActiveCapacityGuard>,
+    pub(crate) staged_restore: Option<StagedAdmissionRestore>,
+}
+
+impl RuntimePreAdmission {
+    /// Build a fresh admission whose Drop simply releases capacity.
+    pub fn fresh(admission: ActiveCapacityGuard) -> Self {
+        Self {
+            admission: Some(admission),
+            staged_restore: None,
+        }
+    }
+
+    /// Build a staged admission whose Drop restores the guard to the
+    /// staged ledger keyed on `session_id`.
+    pub fn staged(
+        session_id: SessionId,
+        admissions: StagedCapacityAdmissions,
+        admission: ActiveCapacityGuard,
+    ) -> Self {
+        Self {
+            admission: Some(admission),
+            staged_restore: Some(StagedAdmissionRestore {
+                admissions,
+                session_id,
+            }),
+        }
+    }
+
+    /// Consume `self` and return the wrapped guard, suppressing the
+    /// staged-restore Drop semantics.
+    #[allow(clippy::expect_used)]
+    pub fn into_admission(mut self) -> ActiveCapacityGuard {
+        self.staged_restore = None;
+        self.admission
+            .take()
+            .expect("runtime pre-admission should not be consumed twice")
+    }
+}
+
+impl From<ActiveCapacityGuard> for RuntimePreAdmission {
+    fn from(admission: ActiveCapacityGuard) -> Self {
+        Self::fresh(admission)
+    }
+}
+
+impl Drop for RuntimePreAdmission {
+    fn drop(&mut self) {
+        let Some(admission) = self.admission.take() else {
+            return;
+        };
+        if let Some(restore) = self.staged_restore.take() {
+            restore_staged_capacity_admission(&restore.admissions, restore.session_id, admission);
+        } else {
+            drop(admission);
+        }
+    }
+}
+
+/// One-shot guard around a [`RuntimePreAdmission`] that allows the
+/// caller to take ownership at the success path; if dropped without
+/// `take()`, the inner Drop semantics fire (releasing or restoring
+/// staged capacity).
+pub struct RuntimePreAdmissionGuard {
+    admission: Option<RuntimePreAdmission>,
+}
+
+impl RuntimePreAdmissionGuard {
+    /// Wrap a [`RuntimePreAdmission`] (or anything `Into<…>`) in the
+    /// guard.
+    pub fn new(admission: impl Into<RuntimePreAdmission>) -> Self {
+        Self {
+            admission: Some(admission.into()),
+        }
+    }
+
+    /// Take the inner admission, consuming the guard's Drop semantics.
+    pub fn take(&mut self) -> Option<RuntimePreAdmission> {
+        self.admission.take()
+    }
+}
+
+/// Pre-admission entry keyed on a runtime input id; tracked while the
+/// runtime is still mediating the admission to a session.
+pub struct RuntimePreAdmissionEntry {
+    /// The input id this admission is reserved for.
+    pub input_id: InputId,
+    /// The reserved admission.
+    pub admission: RuntimePreAdmission,
+}
+
+/// RAII lock-lease over the per-session registration mutex.
+///
+/// The lease holds an `Arc<Mutex<()>>` that callers `lock` to serialize
+/// entry into a session's registration critical section. When the
+/// lease is the last strong reference, Drop also evicts the entry from
+/// the locks map so the next caller can re-create it.
+pub struct RuntimeRegistrationLockLease {
+    /// The shared map of per-session registration locks.
+    pub locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
+    /// The session id this lease is bound to.
+    pub session_id: SessionId,
+    /// The mutex itself; callers `lock()` it to enter the critical
+    /// section.
+    pub lock: Arc<Mutex<()>>,
+}
+
+impl RuntimeRegistrationLockLease {
+    /// Borrow the underlying registration mutex.
+    pub fn mutex(&self) -> &Mutex<()> {
+        &self.lock
+    }
+}
+
+impl Drop for RuntimeRegistrationLockLease {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.lock) != 1 {
+            return;
+        }
+        let this_lock = Arc::downgrade(&self.lock);
+        let mut locks = self
+            .locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if locks
+            .get(&self.session_id)
+            .is_some_and(|registered| registered.ptr_eq(&this_lock))
+        {
+            locks.remove(&self.session_id);
+        }
+    }
+}
+
+/// RAII rollback guard around the staged session registry's archive
+/// path. While armed, Drop schedules a `restore_archive` task on the
+/// tokio runtime so a partial archive failure leaves the staged
+/// session intact. Calling `disarm` after a successful archive
+/// suppresses the restore.
+pub struct StagedArchiveRollbackGuard {
+    staged_sessions: Arc<StagedSessionRegistry>,
+    session_id: SessionId,
+    restore_on_drop: bool,
+}
+
+impl StagedArchiveRollbackGuard {
+    /// Arm a rollback guard for `session_id`.
+    pub fn new(staged_sessions: Arc<StagedSessionRegistry>, session_id: &SessionId) -> Self {
+        Self {
+            staged_sessions,
+            session_id: session_id.clone(),
+            restore_on_drop: true,
+        }
+    }
+
+    /// Suppress the Drop-time restore (call after a successful archive).
+    pub fn disarm(&mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl Drop for StagedArchiveRollbackGuard {
+    fn drop(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        let staged_sessions = Arc::clone(&self.staged_sessions);
+        let session_id = self.session_id.clone();
+        tokio::spawn(async move {
+            let _ = staged_sessions.restore_archive(&session_id).await;
+        });
+    }
 }

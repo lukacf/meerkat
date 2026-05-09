@@ -220,13 +220,22 @@ self-verify.
   a tokio task — verify it still compiles in the new crate (tokio
   dep is already on `meerkat` facade).
 
-- [ ] fix · [ ] verify · **W1-C.** Move `RuntimePreAdmission`,
+- [x] fix · [ ] verify · **W1-C.** Move `RuntimePreAdmission`,
   `RuntimePreAdmissionGuard`, `RuntimePreAdmissionEntry`,
   `RuntimePreAdmissionRegistration`, `RuntimeRegistrationLockLease`,
   `StagedArchiveRollbackGuard`, `StagedAdmissionRestore` from
   `meerkat-rpc/src/session_runtime.rs:491-680` to
   `meerkat::session_runtime::admission`. These are RAII guards with
   `Drop` impls — confirm Drop runs in the new crate's tokio runtime.
+  *Deviation:* `RuntimePreAdmissionRegistration` deferred to W3-A. It
+  holds an `Arc<SessionRuntime>` and dispatches a method on it from
+  Drop, so it can't move without either a trait abstraction over the
+  runtime or pulling `SessionRuntime` itself upstream — both broader
+  than Wave 1's pure-type-move charter. The other six types
+  (`StagedAdmissionRestore`, `RuntimePreAdmission`,
+  `RuntimePreAdmissionGuard`, `RuntimePreAdmissionEntry`,
+  `RuntimeRegistrationLockLease`, `StagedArchiveRollbackGuard`)
+  moved cleanly with their Drop semantics intact.
 
 - [x] fix · [ ] verify · **W1-D.** Move `RecoveredCreateRequest` and
   `RecoveryRuntimeBindingMode` from `session_runtime.rs:210,216` to

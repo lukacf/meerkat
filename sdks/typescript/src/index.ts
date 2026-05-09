@@ -203,6 +203,16 @@ export type {
   LiveSendInputParams,
   LiveStatusResult,
   LiveTruncateParams,
+  // CC5/CC6: typed wire mirrors for `LiveOpenResult.capabilities` /
+  // `.continuity`. Re-exported from the SDK root so TS consumers can do
+  // typed-narrow on `result.continuity.mode` and read capability booleans
+  // (`image_in`, `video_in`, etc.) without dipping into `./generated/types`.
+  WireLiveChannelCapabilities,
+  WireLiveContinuityMode,
+  WireLiveContinuityModeFresh,
+  WireLiveContinuityModeTranscriptOnly,
+  WireLiveContinuityModeDegraded,
+  WireLiveContinuityModeProviderNativeResume,
   ProviderCatalog,
   RealtimeAudioChunk,
   RealtimeCapabilities,

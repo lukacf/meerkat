@@ -78,7 +78,7 @@ pub use image_generation::{
 };
 pub use live::{
     LiveChannelParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult, LiveSendInputParams,
-    LiveStatusResult, LiveTruncateParams,
+    LiveStatusResult, LiveTruncateParams, WireLiveChannelCapabilities, WireLiveContinuityMode,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,

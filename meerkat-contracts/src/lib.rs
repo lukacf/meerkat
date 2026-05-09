@@ -315,6 +315,8 @@ pub use wire::{
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
+    WireLiveChannelCapabilities,
+    WireLiveContinuityMode,
     WireLoginReady,
     WireLoginStart,
     WireMemberRef,

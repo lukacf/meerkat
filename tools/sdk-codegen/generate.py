@@ -316,6 +316,11 @@ def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
         "WireTrustedPeerIdentity",
         "McpServerConfig",
+        # CC5/CC6: promote the live-adapter wire mirrors so SDK codegen
+        # references them by name from `LiveOpenResult` instead of inlining
+        # the schema-local `$defs` as anonymous `dict[str, Any]` / `unknown`.
+        "WireLiveChannelCapabilities",
+        "WireLiveContinuityMode",
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
@@ -853,6 +858,19 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_dataclass("RealtimeAudioChunk", wire_schema, "Opaque provider-realtime audio chunk.")
     append_python_dataclass("RealtimeVideoChunk", wire_schema, "Opaque provider-realtime video chunk.")
     append_python_dataclass("LiveOpenParams", wire_schema, "Request payload for live/open.")
+    # CC5/CC6: emit the typed wire mirrors **before** `LiveOpenResult` so the
+    # generated dataclass references them by name (typed) rather than as
+    # forward-referenced `Any` blobs.
+    append_python_dataclass(
+        "WireLiveChannelCapabilities",
+        wire_schema,
+        "Wire projection of LiveChannelCapabilities (typed-boolean matrix).",
+    )
+    append_python_alias(
+        "WireLiveContinuityMode",
+        wire_schema,
+        "Wire projection of LiveContinuityMode (internally-tagged on `mode`).",
+    )
     append_python_dataclass("LiveOpenResult", wire_schema, "Response payload for live/open.")
     append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,commit_input,interrupt}.")
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
@@ -1202,6 +1220,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("RealtimeAudioChunk", wire_schema)
     append_typescript_interface("RealtimeVideoChunk", wire_schema)
     append_typescript_interface("LiveOpenParams", wire_schema)
+    # CC5/CC6: typed wire mirrors emitted before `LiveOpenResult` so the
+    # generated interface references them as named typed shapes (interface
+    # for the bool matrix, discriminated union on `mode` for continuity).
+    append_typescript_interface("WireLiveChannelCapabilities", wire_schema)
+    append_typescript_alias("WireLiveContinuityMode", wire_schema)
     append_typescript_interface("LiveOpenResult", wire_schema)
     append_typescript_interface("LiveChannelParams", wire_schema)
     append_typescript_interface("LiveStatusResult", wire_schema)

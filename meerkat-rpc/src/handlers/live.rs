@@ -1,7 +1,10 @@
 //! Handlers for `live/*` RPC methods.
 //!
 //! These expose the live adapter MVP surface: open/status/close/send_input.
-//! The transport bootstrap is tagged (websocket/webrtc), not a bare ws_url.
+//! The transport bootstrap is tagged (currently `websocket` only); see
+//! [`meerkat_core::live_adapter::LiveTransportBootstrap`] for the
+//! reintroduction note covering the planned future `webrtc` variant
+//! (deferred to a follow-up PR with real signaling shape).
 
 use std::sync::Arc;
 
@@ -376,11 +379,15 @@ pub async fn handle_live_open(
     // seeded text history, and `Provider` once provider-native resume is
     // wired. The previous unconditional `Degraded` claim was a falsehood —
     // we never even built the snapshot.
+    // CC5/CC6: project core typed shapes into the wire mirrors at the
+    // boundary so SDK codegen sees real structured types instead of opaque
+    // JSON. The wire ↔ core `From` impls are byte-compatible, so the
+    // serialized payload is identical.
     let result = LiveOpenResult {
         channel_id: channel_id.to_string(),
         transport,
-        capabilities,
-        continuity,
+        capabilities: capabilities.into(),
+        continuity: continuity.into(),
     };
 
     // N75: `LiveOpenResult` is a fixed-shape struct of `Serialize`-clean
@@ -899,13 +906,17 @@ mod tests {
 
     #[test]
     fn live_open_result_roundtrip() {
+        // CC5/CC6: capabilities + continuity are typed wire mirrors now.
+        // Construct directly from the wire types so SDK codegen sees the
+        // typed shape (booleans / discriminated continuity-mode union) and
+        // not an opaque JSON blob.
         let v = LiveOpenResult {
             channel_id: "live_42".into(),
             transport: LiveTransportBootstrap::Websocket {
                 url: "ws://x/y?token=t&format=pcm_24k_mono".into(),
                 token: "t".into(),
             },
-            capabilities: LiveChannelCapabilities {
+            capabilities: meerkat_contracts::WireLiveChannelCapabilities {
                 audio_in: true,
                 audio_out: true,
                 text_in: true,
@@ -916,7 +927,7 @@ mod tests {
                 transcript_supported: true,
                 provider_native_resume: false,
             },
-            continuity: LiveContinuityMode::Degraded,
+            continuity: meerkat_contracts::WireLiveContinuityMode::Degraded,
         };
         assert_eq!(round_trip(&v), v);
     }

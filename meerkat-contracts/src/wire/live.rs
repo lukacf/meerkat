@@ -28,24 +28,205 @@ pub struct LiveOpenParams {
 
 /// Response payload for `live/open`.
 ///
-/// `transport`, `capabilities`, `continuity` are typed in Rust as
-/// `meerkat_core::live_adapter::*` shapes; for schema codegen they are
-/// projected as opaque JSON objects (the core crate is not `schemars`-aware
-/// today and adding `JsonSchema` derives to it would propagate a heavy
-/// optional-feature surface across the entire workspace; the wire-side
-/// schema therefore documents the field names and types via the
-/// `Live{TransportBootstrap,ChannelCapabilities,ContinuityMode}` Rust types
-/// the SDK codegen sees through the `meerkat-core` re-exports).
+/// `capabilities` and `continuity` are typed wire-side mirrors of the core
+/// `LiveChannelCapabilities` / `LiveContinuityMode` so SDK codegen sees the
+/// real shape (typed booleans, internally-tagged variant payloads) instead
+/// of an opaque JSON blob. CC5/CC6 (PR #650 verifier follow-up).
+///
+/// `transport` remains an opaque `serde_json::Value` schema projection: the
+/// transport-bootstrap shape is provider-pluggable and the typed wire mirror
+/// is tracked separately (Round-4 follow-up T4 reintroduces WebRTC with a
+/// real signaling shape).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveOpenResult {
     pub channel_id: String,
     #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
     pub transport: LiveTransportBootstrap,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub capabilities: LiveChannelCapabilities,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub continuity: LiveContinuityMode,
+    pub capabilities: WireLiveChannelCapabilities,
+    pub continuity: WireLiveContinuityMode,
+}
+
+/// Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
+///
+/// Typed-boolean matrix advertised when a live channel opens. SDK consumers
+/// (Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to
+/// `image_in` / `video_in` / `transcript_supported` etc. without needing to
+/// hand-decode an opaque JSON object. CC5: closes the typed-surface gap that
+/// hid T8's "anticipate `gpt-realtime-2`" goal at the SDK boundary.
+///
+/// Field shape mirrors the core type 1:1 — adding a new capability requires
+/// extending both the core type and this mirror; the `From` impls below
+/// fail-closed if a field is dropped (compile error: missing field). New
+/// modalities appear here as additional typed booleans, never as
+/// stringly-typed lists or provider-specific enums.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireLiveChannelCapabilities {
+    /// Adapter accepts audio chunks via `live/send_input`.
+    pub audio_in: bool,
+    /// Adapter emits audio chunks via `AssistantAudioChunk` observations.
+    pub audio_out: bool,
+    /// Adapter accepts text chunks via `live/send_input`.
+    pub text_in: bool,
+    /// Adapter emits display text via `AssistantTextDelta` observations.
+    pub text_out: bool,
+    /// Adapter accepts image input via `live/send_input` (e.g. future
+    /// `gpt-realtime-2` image support). Today: `false` for OpenAI realtime.
+    pub image_in: bool,
+    /// Adapter accepts video-frame input via `live/send_input` (e.g.
+    /// Gemini Live). Today: `false` for OpenAI realtime.
+    pub video_in: bool,
+    /// Adapter emits spoken-audio transcripts via
+    /// `AssistantTranscriptDelta` / `AssistantTranscriptFinal`.
+    pub transcript_supported: bool,
+    /// Adapter supports user-initiated barge-in (turn truncation) via
+    /// `live/interrupt` and the `TurnInterrupted` observation.
+    pub barge_in_supported: bool,
+    /// Adapter can resume a prior provider-side session by id (transcript-
+    /// only resume does not count). `false` until a provider exposes a real
+    /// continuation handle.
+    pub provider_native_resume: bool,
+}
+
+impl From<LiveChannelCapabilities> for WireLiveChannelCapabilities {
+    fn from(value: LiveChannelCapabilities) -> Self {
+        let LiveChannelCapabilities {
+            audio_in,
+            audio_out,
+            text_in,
+            text_out,
+            image_in,
+            video_in,
+            transcript_supported,
+            barge_in_supported,
+            provider_native_resume,
+        } = value;
+        Self {
+            audio_in,
+            audio_out,
+            text_in,
+            text_out,
+            image_in,
+            video_in,
+            transcript_supported,
+            barge_in_supported,
+            provider_native_resume,
+        }
+    }
+}
+
+impl From<WireLiveChannelCapabilities> for LiveChannelCapabilities {
+    fn from(value: WireLiveChannelCapabilities) -> Self {
+        let WireLiveChannelCapabilities {
+            audio_in,
+            audio_out,
+            text_in,
+            text_out,
+            image_in,
+            video_in,
+            transcript_supported,
+            barge_in_supported,
+            provider_native_resume,
+        } = value;
+        Self {
+            audio_in,
+            audio_out,
+            text_in,
+            text_out,
+            image_in,
+            video_in,
+            transcript_supported,
+            barge_in_supported,
+            provider_native_resume,
+        }
+    }
+}
+
+/// Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].
+///
+/// Internally-tagged on `mode` (snake_case) — matches the core enum's serde
+/// shape exactly so the wire payload is byte-identical. CC6: closes the
+/// typed-surface gap. SDK consumers get a discriminated union (TS) or
+/// tagged-variant (Python) instead of a raw JSON blob, and the
+/// `ProviderNativeResume { provider_session_id }` payload field is visible
+/// to schema codegen.
+///
+/// **Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the
+/// core enum from a bare-string serde shape (`"transcript_only"`) to the
+/// internally-tagged form (`{"mode":"transcript_only"}`). This wire mirror
+/// makes that shape change visible to schema codegen and SDK clients.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireLiveContinuityMode {
+    /// Brand-new live channel; no prior session history.
+    Fresh,
+    /// History seeded from canonical transcript only. Honest about loss of
+    /// AEC / playback-cursor / pronunciation / provider-native state.
+    TranscriptOnly,
+    /// History seeded but with known gaps.
+    Degraded,
+    /// Provider surfaced a session id we can attach back to. Only mode that
+    /// preserves provider-native state across reconnects. No provider
+    /// Meerkat ships today returns a usable resume id.
+    ProviderNativeResume { provider_session_id: String },
+}
+
+impl From<LiveContinuityMode> for WireLiveContinuityMode {
+    fn from(value: LiveContinuityMode) -> Self {
+        match value {
+            LiveContinuityMode::Fresh => Self::Fresh,
+            LiveContinuityMode::TranscriptOnly => Self::TranscriptOnly,
+            LiveContinuityMode::Degraded => Self::Degraded,
+            LiveContinuityMode::ProviderNativeResume {
+                provider_session_id,
+            } => Self::ProviderNativeResume {
+                provider_session_id,
+            },
+            // CC6: `LiveContinuityMode` is `non_exhaustive`, so the
+            // compiler requires a wildcard. Same compromise as
+            // `WireTranscriptSource::from` (`wire/session.rs`):
+            // `meerkat-contracts` does not depend on `tracing`, the no-panic
+            // rule forbids `unreachable!()`, and a `TryFrom` would force
+            // every call site to handle a variant we don't yet have. Use
+            // `debug_assert!(false, ...)` so debug/CI builds fail loudly
+            // when a new variant lands without an explicit arm; release
+            // builds fall back to `Fresh` (the lowest-fidelity variant)
+            // rather than producing UB. **When a new variant is added, add
+            // an explicit arm above this comment.**
+            _ => {
+                debug_assert!(
+                    false,
+                    "WireLiveContinuityMode::from saw an unmapped \
+                     LiveContinuityMode variant; add an explicit arm in \
+                     meerkat-contracts/src/wire/live.rs."
+                );
+                Self::Fresh
+            }
+        }
+    }
+}
+
+impl From<WireLiveContinuityMode> for LiveContinuityMode {
+    fn from(value: WireLiveContinuityMode) -> Self {
+        // No wildcard arm: `WireLiveContinuityMode` is owned by this crate
+        // so even with `#[non_exhaustive]` (which only constrains matches
+        // outside the defining crate) the compiler enforces exhaustive
+        // coverage here. Adding a new wire variant therefore forces a new
+        // arm in this match — no silent fallthrough.
+        match value {
+            WireLiveContinuityMode::Fresh => Self::Fresh,
+            WireLiveContinuityMode::TranscriptOnly => Self::TranscriptOnly,
+            WireLiveContinuityMode::Degraded => Self::Degraded,
+            WireLiveContinuityMode::ProviderNativeResume {
+                provider_session_id,
+            } => Self::ProviderNativeResume {
+                provider_session_id,
+            },
+        }
+    }
 }
 
 /// Request payload for `live/status`, `live/close`, `live/commit_input`, and
@@ -224,6 +405,196 @@ mod tests {
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         let back: LiveTruncateParams =
             serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    // CC5 — typed capabilities mirror.
+
+    #[test]
+    fn wire_live_channel_capabilities_round_trip_serde() {
+        // Full typed-boolean matrix survives wire round-trip with field
+        // names visible (no opaque `serde_json::Value` shroud).
+        let v = WireLiveChannelCapabilities {
+            audio_in: true,
+            audio_out: true,
+            text_in: true,
+            text_out: true,
+            image_in: false,
+            video_in: false,
+            transcript_supported: true,
+            barge_in_supported: true,
+            provider_native_resume: false,
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        // Each typed boolean is reachable on the wire object — closes the
+        // CC5 finding that SDK clients had to handcraft access.
+        assert_eq!(j["audio_in"], true);
+        assert_eq!(j["audio_out"], true);
+        assert_eq!(j["text_in"], true);
+        assert_eq!(j["text_out"], true);
+        assert_eq!(j["image_in"], false);
+        assert_eq!(j["video_in"], false);
+        assert_eq!(j["transcript_supported"], true);
+        assert_eq!(j["barge_in_supported"], true);
+        assert_eq!(j["provider_native_resume"], false);
+        let back: WireLiveChannelCapabilities =
+            serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn wire_live_channel_capabilities_round_trip_through_core() {
+        // Core ↔ wire conversion is a value-preserving bijection.
+        let core = LiveChannelCapabilities {
+            audio_in: true,
+            audio_out: true,
+            text_in: true,
+            text_out: true,
+            image_in: true, // `gpt-realtime-2` shape.
+            video_in: true, // Gemini Live shape.
+            transcript_supported: true,
+            barge_in_supported: true,
+            provider_native_resume: true,
+        };
+        let wire: WireLiveChannelCapabilities = core.clone().into();
+        let back: LiveChannelCapabilities = wire.into();
+        assert_eq!(core, back);
+    }
+
+    #[test]
+    fn wire_live_channel_capabilities_anticipates_future_modalities() {
+        // T8 + CC5 acceptance: the typed matrix represents `gpt-realtime-2`
+        // (image_in) and Gemini Live (video_in) without provider-specific
+        // fields.
+        let gpt_realtime_2 = WireLiveChannelCapabilities {
+            audio_in: true,
+            audio_out: true,
+            text_in: true,
+            text_out: true,
+            image_in: true,
+            video_in: false,
+            transcript_supported: true,
+            barge_in_supported: true,
+            provider_native_resume: false,
+        };
+        let gemini_live = WireLiveChannelCapabilities {
+            audio_in: true,
+            audio_out: true,
+            text_in: true,
+            text_out: true,
+            image_in: false,
+            video_in: true,
+            transcript_supported: true,
+            barge_in_supported: true,
+            provider_native_resume: false,
+        };
+        let g1 = serde_json::to_value(&gpt_realtime_2).expect("round-trip should succeed");
+        let g2 = serde_json::to_value(&gemini_live).expect("round-trip should succeed");
+        assert_eq!(g1["image_in"], true);
+        assert_eq!(g1["video_in"], false);
+        assert_eq!(g2["image_in"], false);
+        assert_eq!(g2["video_in"], true);
+    }
+
+    // CC6 — typed continuity-mode mirror.
+
+    #[test]
+    fn wire_live_continuity_mode_payload_less_variants_round_trip() {
+        for v in [
+            WireLiveContinuityMode::Fresh,
+            WireLiveContinuityMode::TranscriptOnly,
+            WireLiveContinuityMode::Degraded,
+        ] {
+            let j = serde_json::to_value(&v).expect("round-trip should succeed");
+            // Internally-tagged on `mode` (snake_case) — matches the core
+            // enum's serde shape exactly.
+            assert!(j.get("mode").is_some(), "missing `mode` discriminator");
+            let back: WireLiveContinuityMode =
+                serde_json::from_value(j).expect("round-trip should succeed");
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn wire_live_continuity_mode_provider_native_resume_round_trip() {
+        let v = WireLiveContinuityMode::ProviderNativeResume {
+            provider_session_id: "rtsess_abc123".into(),
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        // Tagged as `mode: "provider_native_resume"`, payload field
+        // `provider_session_id` flat alongside the discriminator.
+        assert_eq!(j["mode"], "provider_native_resume");
+        assert_eq!(j["provider_session_id"], "rtsess_abc123");
+        let back: WireLiveContinuityMode =
+            serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn wire_live_continuity_mode_byte_compatible_with_core() {
+        // The wire mirror serializes byte-identical to the core enum so
+        // existing clients keep working across the typed-shape transition.
+        let core_resume = LiveContinuityMode::ProviderNativeResume {
+            provider_session_id: "sess_xyz".into(),
+        };
+        let wire_resume: WireLiveContinuityMode = core_resume.clone().into();
+        let core_json = serde_json::to_value(&core_resume).expect("round-trip should succeed");
+        let wire_json = serde_json::to_value(&wire_resume).expect("round-trip should succeed");
+        assert_eq!(core_json, wire_json);
+
+        let core_transcript = LiveContinuityMode::TranscriptOnly;
+        let wire_transcript: WireLiveContinuityMode = core_transcript.clone().into();
+        assert_eq!(
+            serde_json::to_value(&core_transcript).expect("round-trip should succeed"),
+            serde_json::to_value(&wire_transcript).expect("round-trip should succeed"),
+        );
+    }
+
+    #[test]
+    fn wire_live_continuity_mode_round_trips_through_core() {
+        for v in [
+            WireLiveContinuityMode::Fresh,
+            WireLiveContinuityMode::TranscriptOnly,
+            WireLiveContinuityMode::Degraded,
+            WireLiveContinuityMode::ProviderNativeResume {
+                provider_session_id: "sess_back".into(),
+            },
+        ] {
+            let core: LiveContinuityMode = v.clone().into();
+            let back: WireLiveContinuityMode = core.into();
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn live_open_result_typed_capabilities_and_continuity_round_trip() {
+        // The `LiveOpenResult` fields are now typed at the wire boundary —
+        // SDK codegen sees real shapes, not `serde_json::Value`.
+        let v = LiveOpenResult {
+            channel_id: "live_1".into(),
+            transport: LiveTransportBootstrap::Websocket {
+                url: "wss://example/live".into(),
+                token: "tok".into(),
+            },
+            capabilities: WireLiveChannelCapabilities {
+                audio_in: true,
+                audio_out: true,
+                text_in: true,
+                text_out: true,
+                image_in: false,
+                video_in: false,
+                transcript_supported: true,
+                barge_in_supported: true,
+                provider_native_resume: false,
+            },
+            continuity: WireLiveContinuityMode::TranscriptOnly,
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        // Typed access at the JSON layer too.
+        assert_eq!(j["capabilities"]["audio_in"], true);
+        assert_eq!(j["capabilities"]["image_in"], false);
+        assert_eq!(j["continuity"]["mode"], "transcript_only");
+        let back: LiveOpenResult = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }
 }

@@ -1109,6 +1109,52 @@ impl Session {
         outcome
     }
 
+    /// Return every distinct provider `response_id` currently staged in the
+    /// realtime-transcript metadata that has at least one **unmaterialized**
+    /// assistant item and is **not already discarded**.
+    ///
+    /// CC4 (Round-4 architectural reconciliation): when the live boundary
+    /// signals a barge-in (`TurnInterrupted`), the projection sink does not
+    /// know which provider response_ids have streaming deltas staged in
+    /// session metadata. This accessor lets the sink fan
+    /// [`RealtimeTranscriptEvent::AssistantTurnInterrupted`] events out to
+    /// each in-flight response so staged-but-not-yet-materialized transcript
+    /// fragments are discarded — preventing them from silently committing
+    /// when the *next* turn's `AssistantTurnCompleted` (synthesized by the
+    /// CC2 fix in `signal_turn_completed`) sweeps the materializer.
+    ///
+    /// Order is the [`SessionRealtimeTranscriptState::first_seen_order`]
+    /// projection so callers see deterministic iteration. Items already
+    /// materialized or skipped are excluded — only response_ids with at
+    /// least one live unmaterialized assistant item are returned.
+    #[must_use]
+    pub fn in_flight_realtime_assistant_response_ids(&self) -> Vec<String> {
+        let state = self.realtime_transcript_state();
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for item_id in &state.first_seen_order {
+            let Some(item) = state.items.get(item_id) else {
+                continue;
+            };
+            if item.role != RealtimeTranscriptRole::Assistant {
+                continue;
+            }
+            if item.materialized || item.skipped {
+                continue;
+            }
+            let Some(response_id) = item.response_id.as_ref() else {
+                continue;
+            };
+            if state.discarded_assistant_response_ids.contains(response_id) {
+                continue;
+            }
+            if seen.insert(response_id.clone()) {
+                out.push(response_id.clone());
+            }
+        }
+        out
+    }
+
     fn realtime_transcript_state(&self) -> SessionRealtimeTranscriptState {
         self.metadata
             .get(SESSION_REALTIME_TRANSCRIPT_STATE_KEY)
@@ -2289,7 +2335,7 @@ impl From<&Session> for SessionMeta {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use crate::types::{
@@ -3483,13 +3529,137 @@ mod tests {
                         assert_eq!(text, "I said hi");
                         assert_eq!(*source, crate::types::TranscriptSource::Spoken);
                     }
-                    other => panic!(
+                    other => unreachable!(
                         "AssistantTranscriptDelta must materialize as AssistantBlock::Transcript, got {other:?}"
                     ),
                 }
             }
-            other => panic!("expected BlockAssistant message, got {other:?}"),
+            other => unreachable!("expected BlockAssistant message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn round4_cc4_in_flight_response_ids_lists_distinct_unmaterialized_responses() {
+        // CC4 (Round-4 architectural reconciliation): the helper that
+        // powers `signal_turn_interrupt`'s cross-layer fan-out must
+        // return every distinct provider response_id that has at least
+        // one unmaterialized assistant item, EXCLUDING already-discarded
+        // responses and EXCLUDING the user role.
+        let mut session = Session::new();
+
+        // Two transcript-delta items on resp_a (different content_index
+        // ranges), one on resp_b. resp_c gets a delta and is then
+        // discarded explicitly via AssistantTurnInterrupted.
+        for (i, response_id) in [
+            ("resp_a", "resp_a"),
+            ("resp_a_extra", "resp_a"),
+            ("resp_b", "resp_b"),
+            ("resp_c", "resp_c"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let event = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+                response_id: response_id.1.to_string(),
+                delta_id: format!("delta_{i}"),
+                item_id: response_id.0.to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                delta: "x".to_string(),
+            };
+            let _ = session.append_realtime_transcript_event(event);
+        }
+
+        // Discard resp_c — it should not appear in the in-flight list.
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_c".to_string(),
+            },
+        );
+
+        // User-role item should never appear (CC4 only fans interrupts
+        // to assistant responses).
+        let _ = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::UserTranscriptFinal {
+                item_id: "u_item".to_string(),
+                previous_item_id: None,
+                content_index: 0,
+                text: "hi".to_string(),
+            },
+        );
+
+        let in_flight = session.in_flight_realtime_assistant_response_ids();
+        assert!(in_flight.contains(&"resp_a".to_string()), "{in_flight:?}");
+        assert!(in_flight.contains(&"resp_b".to_string()), "{in_flight:?}");
+        assert!(
+            !in_flight.contains(&"resp_c".to_string()),
+            "discarded response must not appear in in_flight: {in_flight:?}"
+        );
+        // resp_a appears exactly once even though two items reference it.
+        assert_eq!(
+            in_flight.iter().filter(|r| *r == "resp_a").count(),
+            1,
+            "distinct response_ids only: {in_flight:?}"
+        );
+    }
+
+    #[test]
+    fn round4_cc2_assistant_turn_completed_after_transcript_deltas_materializes_transcript() {
+        // CC2 (Round-4 architectural reconciliation): once
+        // `signal_turn_completed` synthesizes
+        // `RealtimeTranscriptEvent::AssistantTurnCompleted`, the staging
+        // materializer commits every staged transcript-delta item for
+        // that response_id as `AssistantBlock::Transcript { Spoken }`.
+        // This pins the production end-to-end shape the sink relies on.
+        let mut session = Session::new();
+
+        let delta = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_cc2".to_string(),
+            delta_id: "delta_cc2_1".to_string(),
+            item_id: "item_cc2".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "hello world".to_string(),
+        };
+        assert!(session.append_realtime_transcript_event(delta).is_inert());
+
+        // Pre-completion: in-flight list reports resp_cc2.
+        assert_eq!(
+            session.in_flight_realtime_assistant_response_ids(),
+            vec!["resp_cc2".to_string()]
+        );
+
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_cc2".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        );
+        assert_eq!(outcome.materialized_messages.len(), 1);
+
+        // Post-completion: in-flight list is empty (item is materialized).
+        assert!(
+            session
+                .in_flight_realtime_assistant_response_ids()
+                .is_empty(),
+            "materialized items must not appear in in_flight_realtime_assistant_response_ids"
+        );
+
+        let messages = session.messages();
+        let assistant = messages.iter().find_map(|m| match m {
+            Message::BlockAssistant(a) => Some(a),
+            _ => None,
+        });
+        let assistant = assistant.expect("assistant block message expected");
+        assert_eq!(assistant.blocks.len(), 1);
+        assert!(matches!(
+            &assistant.blocks[0],
+            AssistantBlock::Transcript {
+                source: crate::types::TranscriptSource::Spoken,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3521,11 +3691,11 @@ mod tests {
         match &messages[0] {
             Message::BlockAssistant(assistant) => match &assistant.blocks[0] {
                 AssistantBlock::Text { text, .. } => assert_eq!(text, "I wrote"),
-                other => panic!(
+                other => unreachable!(
                     "AssistantTextDelta must keep materializing AssistantBlock::Text, got {other:?}"
                 ),
             },
-            other => panic!("expected BlockAssistant message, got {other:?}"),
+            other => unreachable!("expected BlockAssistant message, got {other:?}"),
         }
     }
 }

@@ -48,14 +48,14 @@ worktree's WIP. Never drop, pop, or apply it.
   `Debug`, `PartialEq`, `Eq` if present, `Serialize`, `Deserialize`,
   `JsonSchema` if behind a feature gate).
 
-  **Fix:** `meerkat-core/src/types.rs:474-484` adds
+  **Fix:** `meerkat-core/src/types.rs:474-480` adds
   `pub enum TranscriptSource { Spoken }` (non_exhaustive,
   rename_all = "snake_case", derives Clone+Copy+Debug+Eq+Hash+
-  Serialize+Deserialize). `meerkat-core/src/types.rs:497-510` adds
+  Serialize+Deserialize). `meerkat-core/src/types.rs:500-512` adds
   `AssistantBlock::Transcript { text, source, meta }` with the same
   derives as the rest of the enum (non_exhaustive Debug+Clone+
   Serialize+Deserialize; PartialEq via the existing hand-written impl
-  extended at types.rs:558-572). `AssistantBlock` does not derive
+  extended at types.rs:574-585). `AssistantBlock` does not derive
   `JsonSchema` in core; the wire mirror in T3 carries the schema. New
   unit tests in `meerkat-core/src/types/tests.rs:898-1003`:
   `test_assistant_block_transcript_spoken_roundtrip`,
@@ -63,6 +63,12 @@ worktree's WIP. Never drop, pop, or apply it.
   `test_message_block_assistant_mixed_text_transcript_roundtrip`,
   `test_transcript_source_roundtrip_snake_case`. `TranscriptSource`
   re-exported from `meerkat-core/src/lib.rs:302`.
+
+  **FIX-A pass (CC8):** updated drifted ranges — `474-484`→`474-480`
+  (`TranscriptSource` enum), `497-510`→`500-512` (`AssistantBlock::
+  Transcript` variant), and `558-572`→`574-585` (PartialEq Transcript
+  arm). Source rearrangement after T1 shifted the blocks slightly;
+  no behavioral change.
 
 - [x] fix · [ ] verify · **T2.** Projection / compaction must render
   transcript blocks correctly. `[R]` Find every consumer of
@@ -76,8 +82,8 @@ worktree's WIP. Never drop, pop, or apply it.
   - History replay: `Transcript` survives full session round-trip.
 
   **Fix:** Text-projection sites updated to include `Transcript`:
-  `meerkat-core/src/types.rs:1207-1219` (`BlockAssistantMessage::
-  text_blocks`), `meerkat-core/src/types.rs:1225-1240`
+  `meerkat-core/src/types.rs:1246-1253` (`BlockAssistantMessage::
+  text_blocks`), `meerkat-core/src/types.rs:1261-1273`
   (`Display for BlockAssistantMessage`),
   `meerkat-core/src/session.rs:1331-1356`
   (`Session::last_assistant_text`),
@@ -102,6 +108,13 @@ worktree's WIP. Never drop, pop, or apply it.
   touched site's existing `meerkat-session` / `meerkat-core` test
   modules (1272 nextest pass).
 
+  **FIX-A pass (CC8):** updated drifted line ranges in this Fix note —
+  `text_blocks` is now `meerkat-core/src/types.rs:1246-1253` (was
+  cited as `1207-1219`) and `Display for BlockAssistantMessage` is now
+  `meerkat-core/src/types.rs:1261-1273` (was cited as `1225-1240`).
+  Source rearrangement during T1 doc-comment expansion shifted the
+  blocks; no behavioral change.
+
 - [x] fix · [ ] verify · **T3.** Wire format + schema regen. `[R]`
   Update `meerkat-contracts/src/wire/session.rs` so the new variant
   serializes distinctly. Run `make regen-schemas`. SDK generated types
@@ -109,13 +122,13 @@ worktree's WIP. Never drop, pop, or apply it.
   SDK's projection helpers know how to extract `text` from a
   `Transcript` block.
 
-  **Fix:** `meerkat-contracts/src/wire/session.rs:421-429` adds
+  **Fix:** `meerkat-contracts/src/wire/session.rs:421-428` adds
   `WireAssistantBlock::Transcript { text, source, meta }` (with
   `JsonSchema` derive via `feature = "schema"`).
-  `meerkat-contracts/src/wire/session.rs:481-507` adds
+  `meerkat-contracts/src/wire/session.rs:472-497` adds
   `WireTranscriptSource::Spoken` with `From` conversions in both
   directions. `WireAssistantBlock::From<AssistantBlock>` extended at
-  `meerkat-contracts/src/wire/session.rs:519-523` to project the
+  `meerkat-contracts/src/wire/session.rs:506-510` to project the
   `Transcript` arm. `make regen-schemas` produces the new
   `WireAssistantBlockTranscript` types in
   `sdks/typescript/src/generated/types.ts:2081-2084` and
@@ -135,6 +148,38 @@ worktree's WIP. Never drop, pop, or apply it.
   `WireAssistantBlockTranscript` + `WireTranscriptSource` additions
   (plus pre-existing `live/refresh` RPC catalog drift from a prior
   commit).
+
+  **FIX-A pass (CC1 + CC8 + CC10):**
+  - **CC8 line-drift:** updated `421-429`→`421-428` (Transcript variant),
+    `481-507`→`472-497` (`WireTranscriptSource` block + bidirectional
+    `From` impls), and `519-523`→`506-510` (forward `Transcript` arm)
+    in this Fix note. Source movement during T3+T10 work shifted the
+    blocks; no behavioral change.
+  - **CC1:** added the inverse `From<WireAssistantBlock> for AssistantBlock`
+    in `meerkat-contracts/src/wire/session.rs` (immediately after the
+    forward impl), with a private helper
+    `wire_provider_meta_to_core(WireProviderMeta) -> Option<ProviderMeta>`
+    that returns `None` for `WireProviderMeta::Unknown` (lossy floor
+    for future provider variants). Wire-side `Unknown` decays to an
+    empty `AssistantBlock::Text { text: "", meta: None }` — the
+    symmetric counterpart of the forward direction's `_ => Self::Unknown`
+    fallback. Round-trip test
+    `test_assistant_block_core_wire_core_round_trip_symmetric` covers
+    Text + Reasoning + Transcript (with provider meta on each), ToolUse
+    (opaque `Box<RawValue>` args), ServerToolContent, and Image.
+  - **CC10:** the `From<TranscriptSource> for WireTranscriptSource`
+    wildcard arm previously silently coerced unknown variants to
+    `Spoken`. Replaced with `debug_assert!(false, ...)` (so debug/CI
+    builds panic loudly when a new `TranscriptSource` variant lands
+    without an explicit arm) plus a documented release-build fall-back
+    to `Spoken`. `meerkat-contracts` does not depend on `tracing`, so
+    a `tracing::error!` log was rejected; `unreachable!()` was
+    rejected by the no-panic-in-library-code rule.
+  - **T3-extension:** the round-trip fixture
+    `test_wire_session_history_roundtrip_mixed_messages` now also
+    exercises `WireAssistantBlock::Transcript { source: Spoken }`
+    alongside the existing `Reasoning`+`Text` blocks, pinning the
+    spoken-transcript variant through the JSON round-trip.
 
 - [x] fix · [ ] verify · **T4.** Delete
   `LiveTransportBootstrap::Webrtc`. `[U]` Remove the variant from
@@ -166,6 +211,12 @@ worktree's WIP. Never drop, pop, or apply it.
   regen via `make regen-schemas` drops the `Webrtc` variant from the
   generated types automatically; no hand-written SDK code referenced
   it (grep was clean).
+
+  **FIX-A pass (CC9):** the `meerkat-rpc/src/handlers/live.rs`
+  module-doc comment still claimed the transport bootstrap was tagged
+  `(websocket/webrtc)`, which referenced the deleted `Webrtc`
+  variant. Updated to read "currently `websocket` only" with a link
+  to `LiveTransportBootstrap` for the reintroduction note.
 
 ---
 
@@ -576,6 +627,289 @@ worktree's WIP. Never drop, pop, or apply it.
 
 ---
 
+## Round-4 follow-ups (post-verifier)
+
+The adversarial verification pass (T-VERIFY) surfaced three architectural
+concerns CC2/CC3/CC4 about the **assistant-transcript commit path**:
+two parallel commit paths existed (realtime-staging vs.
+buffered-final-on-pending_turns) and the production OpenAI translator
+emits `LiveAdapterObservation::TurnCompleted` directly — bypassing
+`RealtimeTranscript { event: AssistantTurnCompleted }` — so the
+realtime-staging materializer was never invoked in production.
+Net effect: staged transcript items leaked in
+`SessionRealtimeTranscriptState` metadata forever; only the
+buffered-final path committed; barge-in did not coordinate the two
+layers.
+
+**Architectural decision (Option A): the realtime-staging path is
+canonical for spoken transcript.** The buffered-final path is
+restricted to **display text only** (the spoken-transcript lane is
+removed from the buffer). `signal_turn_completed` synthesizes
+`RealtimeTranscriptEvent::AssistantTurnCompleted` BEFORE flushing the
+buffered display-text drain so the materializer commits staged
+deltas as `AssistantBlock::Transcript { source: Spoken }`. Barge-in
+fans `RealtimeTranscriptEvent::AssistantTurnInterrupted` to every
+in-flight provider response_id (discovered via a new
+`Session::in_flight_realtime_assistant_response_ids`).
+
+- [x] fix · [ ] verify · **CC2.** Production transcript commit path
+  is canonical via realtime-staging materializer. `[R]`
+  - `meerkat-rpc/src/live_projection_sink.rs::SessionServiceProjectionSink::signal_turn_completed`
+    now synthesizes `RealtimeTranscriptEvent::AssistantTurnCompleted`
+    via `runtime.append_realtime_transcript_event` BEFORE the
+    buffered drain. Outcome's `is_inert()` decides usage accounting
+    on the drain (skip empty drain or zero usage to prevent
+    double-count).
+  - `meerkat-rpc/src/live_projection_sink.rs::PendingAssistantContent`
+    reduced to `Text(String)` only. The `Transcript` variant deleted;
+    `collapse_pending_blocks` simplified to a single text concatenation;
+    `pending_to_block` deleted.
+  - `meerkat-rpc/src/live_projection_sink.rs::SessionServiceProjectionSink::append_assistant_transcript_final`
+    converted to a documented no-op — the spoken text is already
+    flowing through the staging path; double-buffering would
+    double-commit. Doc comment explains the architectural reconciliation.
+  - **Note:** `meerkat-openai/src/live.rs` (Phase-3 owned, out of
+    scope for FIX-B) was left untouched. The fix lives at the host's
+    sink layer rather than the translator. A future provider whose
+    realtime translator routes `TurnCompleted` through
+    `RealtimeTranscript { event: AssistantTurnCompleted }` will
+    dedup at the staging layer (the second event for the same
+    response_id is no-op'd by
+    `state.assistant_completions.entry(...).or_insert(...)`).
+  - Tests:
+    `round4_cc2_signal_turn_completed_synthesizes_assistant_turn_completed_first`,
+    `round4_cc2_realtime_materialized_skips_empty_buffered_drain`,
+    `round4_cc2_realtime_materialized_with_text_drains_zero_usage`
+    (`meerkat-rpc/src/live_projection_sink.rs`); session-layer
+    end-to-end pin
+    `round4_cc2_assistant_turn_completed_after_transcript_deltas_materializes_transcript`
+    (`meerkat-core/src/session.rs`).
+
+- [x] fix · [ ] verify · **CC3.** `pending_turns` is text-only;
+  `AssistantTextFinal` does not exist as a `LiveAdapterObservation`
+  variant in this PR. `[R]` Per the architectural reconciliation in
+  CC2, the buffered-final path is reserved for the display-text lane.
+  No production observation currently emits a "display text final"
+  event (production providers stream display-text deltas only); the
+  buffer is exercised by tests today. The CC3 doc comment on
+  `PendingAssistantContent` makes the rationale explicit so a future
+  display-text-final-bearing provider knows where to wire its
+  observation arm. The deleted T7 test
+  (`t7_barge_in_drops_only_transcript_lane_keeps_display_text`) and
+  the deleted T10 buffered-final test
+  (`t10_signal_turn_completed_flushes_transcript_block_after_transcript_final_buffered`)
+  are documented in-place where they used to live.
+
+- [x] fix · [ ] verify · **CC4.** Barge-in coordinates the two
+  layers. `[R]`
+  - `meerkat-core/src/session.rs::Session::in_flight_realtime_assistant_response_ids`
+    enumerates distinct provider `response_id`s with at least one
+    unmaterialized assistant item that is not already discarded.
+  - `meerkat-rpc/src/session_runtime.rs::SessionRuntime::in_flight_realtime_assistant_response_ids`
+    wraps the session-level helper so the sink can call it.
+  - `meerkat-rpc/src/live_projection_sink.rs::SessionServiceProjectionSink::signal_turn_interrupt`
+    now: (1) discovers in-flight response_ids via the runtime helper,
+    (2) synthesizes `RealtimeTranscriptEvent::AssistantTurnInterrupted`
+    for each so the staging layer's
+    `discard_realtime_assistant_response` clears them, (3) calls the
+    existing machine-authority interrupt. The display-text buffer is
+    untouched (the user is not "speaking over" written output).
+  - The previous `drop_transcript_lane_for_session` helper was
+    deleted (the transcript lane no longer exists in the buffer).
+  - Tests:
+    `round4_cc4_barge_in_fans_assistant_turn_interrupted_to_in_flight_responses`
+    (`meerkat-rpc/src/live_projection_sink.rs`);
+    `round4_cc4_in_flight_response_ids_lists_distinct_unmaterialized_responses`
+    (`meerkat-core/src/session.rs`).
+
+**Files touched (FIX-B scope):**
+- `meerkat-core/src/session.rs` — `Session::in_flight_realtime_assistant_response_ids`
+  accessor + 2 new tests.
+- `meerkat-rpc/src/session_runtime.rs` —
+  `SessionRuntime::in_flight_realtime_assistant_response_ids` wrapper
+  (single new method, no other edits).
+- `meerkat-rpc/src/live_projection_sink.rs` —
+  `PendingAssistantContent::Transcript` removed; `collapse_pending_blocks`
+  simplified; `append_assistant_transcript_final` now no-op;
+  `signal_turn_completed` synthesizes `AssistantTurnCompleted` first;
+  `signal_turn_interrupt` fans `AssistantTurnInterrupted` to every
+  in-flight response_id; legacy T7/T10 buffered-transcript tests
+  replaced with round4 equivalents; existing P1#1/R6 tests adapted
+  to the new "synthesis + drain" call shape (filter to the
+  `ExternalAssistantOutput` rather than expecting a single-call shape).
+- `LIVE_ADAPTER_ROUND4_TODO.md` — this section.
+
+**Out of scope (preserved for FIX-A / FIX-C / future):**
+- `meerkat-openai/src/live.rs` translator's `TurnCompleted` mapping is
+  unchanged. The reconciliation lives at the sink layer; a future
+  provider that wraps `TurnCompleted` in `RealtimeTranscript { event }`
+  will dedup at the staging layer.
+- `meerkat-live/src/host.rs` `apply_observation` routing is unchanged.
+  The sink alone owns the architectural reconciliation.
+- The host trait `LiveProjectionSink::append_assistant_transcript_final`
+  remains in place for source-level test fixture compatibility (the
+  production sink no-ops it; the `RecordingSink` test fixture still
+  records it for host-level routing assertions).
+
+**Verification commands run by FIX-B:**
+- `./scripts/repo-cargo check -p meerkat-core -p meerkat-rpc -p meerkat-live -p meerkat-openai` → clean.
+- `./scripts/repo-cargo nextest run -p meerkat-rpc --lib` → 481 passed, 2 skipped.
+- `./scripts/repo-cargo nextest run -p meerkat-core --lib session::tests` → 41 passed (incl. 2 new round4 tests).
+- `git stash list | head -3` → `stash@{0}` (`codex-cloudbuild-bb-migration-wip-before-main-rebase`) preserved.
+
+---
+
+## Round-4 follow-ups (FIX-C, post-verifier) — typed SDK wire surfaces
+
+The CC5/CC6 verifier findings concerned the **wire-side projection of
+`LiveChannelCapabilities` and `LiveContinuityMode`** in
+`meerkat-contracts/src/wire/live.rs`: both fields were declared as the
+core enum/struct but with `#[cfg_attr(feature = "schema", schemars(with =
+serde_json::Value))]`, so SDK codegen produced opaque `Any` / `unknown`
+typed shapes for them on `LiveOpenResult`. Net effect: SDK consumers had
+to handcraft access to capability booleans (`image_in`, `video_in`,
+`barge_in_supported`, …) and to the `LiveContinuityMode` discriminator.
+T8's "anticipate `gpt-realtime-2`" goal and T12's bare-string-→-tagged
+serde shape change were both invisible at the SDK boundary.
+
+- [x] fix · [ ] verify · **CC5.** Type the wire shape for
+  `LiveChannelCapabilities`. `[R]` Replace the opaque
+  `serde_json::Value` projection on `LiveOpenResult.capabilities` with
+  the typed `WireLiveChannelCapabilities` mirror (struct of typed
+  booleans). Add `From<LiveChannelCapabilities> for
+  WireLiveChannelCapabilities` and the inverse so production handlers
+  (`meerkat-rpc/src/handlers/live.rs::handle_live_open`) convert at the
+  boundary. Round-trip tests on the wire mirror, on the wire ↔ core
+  conversion, and on the new `LiveOpenResult` shape.
+
+  **Fix:** `meerkat-contracts/src/wire/live.rs:55-130` adds
+  `WireLiveChannelCapabilities` (typed bools: `audio_in`, `audio_out`,
+  `text_in`, `text_out`, `image_in`, `video_in`,
+  `transcript_supported`, `barge_in_supported`,
+  `provider_native_resume`) with `JsonSchema` derive (feature-gated),
+  symmetric `From` impls (lines 84-130), and the `LiveOpenResult.
+  capabilities` field type swapped from `LiveChannelCapabilities` to
+  `WireLiveChannelCapabilities` (lines 39-51). Handler
+  `meerkat-rpc/src/handlers/live.rs:386-396` updated to call
+  `capabilities.into()` at the boundary; the unit test at
+  `live_open_result_roundtrip` (handlers/live.rs:909-933) constructs
+  the typed wire mirror directly. Schema emit list extended at
+  `meerkat-contracts/src/emit.rs:130-135`. Codegen
+  `tools/sdk-codegen/generate.py:315-330, 855-870, 1217-1224` emits the
+  typed shape in Python (`@dataclass`) and TypeScript
+  (`interface`); `_promote_nested_schema_def` allow-list extended so
+  `LiveOpenResult.capabilities` references `WireLiveChannelCapabilities`
+  by name instead of inlining the schema-local `$defs` as
+  `dict[str, Any]` / `unknown`. Hand-written SDK helpers updated:
+  Python `sdks/python/meerkat/types.py:69-79` re-exports the wire
+  mirror types; `sdks/python/meerkat/client.py:2429-2469` documents
+  the typed-access contract on `live_open`. TypeScript
+  `sdks/typescript/src/index.ts:199-217` re-exports the typed shapes
+  (already returned typed from `liveOpen` since the `LiveOpenResult`
+  interface now references the typed mirror by name). Tests:
+  `wire_live_channel_capabilities_round_trip_serde`,
+  `wire_live_channel_capabilities_round_trip_through_core`,
+  `wire_live_channel_capabilities_anticipates_future_modalities`,
+  `live_open_result_typed_capabilities_and_continuity_round_trip`
+  (`meerkat-contracts/src/wire/live.rs::tests`); Python
+  `test_generated_wire_live_channel_capabilities_exposes_typed_booleans`,
+  `test_generated_wire_live_channel_capabilities_constructs_for_gpt_realtime_2`,
+  `test_generated_live_open_result_references_typed_capabilities_and_continuity`
+  (`sdks/python/tests/test_types.py`).
+
+- [x] fix · [ ] verify · **CC6.** Type the wire shape for
+  `LiveContinuityMode`. `[R]` Same pattern as CC5: typed
+  `WireLiveContinuityMode` mirror (internally tagged on `mode`) on
+  `LiveOpenResult.continuity`, with both-direction `From` conversions
+  and round-trip tests. Wire shape stays byte-identical to the core
+  enum (T12's `#[serde(tag = "mode", rename_all = "snake_case")]`
+  shape); the wire mirror exposes that shape to schema codegen so SDKs
+  see a discriminated union, not an opaque blob.
+
+  **Fix:** `meerkat-contracts/src/wire/live.rs:132-205` adds
+  `WireLiveContinuityMode` (internally-tagged on `mode`,
+  `#[non_exhaustive]`, `JsonSchema` derive) with all four core variants
+  (`Fresh`, `TranscriptOnly`, `Degraded`, `ProviderNativeResume {
+  provider_session_id }`). Forward `From<LiveContinuityMode>` carries a
+  `debug_assert!(false, ...)` wildcard fallback (matching the
+  established `WireTranscriptSource` pattern at
+  `meerkat-contracts/src/wire/session.rs:482-510` — the crate doesn't
+  depend on `tracing` and the no-panic-in-library-code rule forbids
+  `unreachable!()`); reverse `From<WireLiveContinuityMode>` is
+  exhaustive without a wildcard (the wire mirror is owned by this
+  crate, so `#[non_exhaustive]` only constrains downstream callers).
+  Handler `meerkat-rpc/src/handlers/live.rs:386-396` converts
+  `continuity.into()` at the boundary. Tests:
+  `wire_live_continuity_mode_payload_less_variants_round_trip`,
+  `wire_live_continuity_mode_provider_native_resume_round_trip`,
+  `wire_live_continuity_mode_byte_compatible_with_core`,
+  `wire_live_continuity_mode_round_trips_through_core`
+  (`meerkat-contracts/src/wire/live.rs::tests`). The
+  `byte_compatible_with_core` test specifically asserts `serde_json::
+  to_value(core) == serde_json::to_value(wire)` for both the
+  payload-less and `provider_native_resume` variants — closing the
+  verifier's "T12 breaking serde shape change is invisible at the
+  schema layer" finding by making the wire mirror the canonical typed
+  shape that SDK codegen sees. Python tests
+  (`test_generated_wire_live_continuity_mode_is_tagged_union`,
+  `test_generated_live_open_result_references_typed_capabilities_and_continuity`)
+  assert each variant is a `TypedDict` with `mode: Required[Literal
+  [...]]` so mypy/pyright can narrow on the discriminator, and the
+  `provider_native_resume` payload field is typed `str` not `Any`.
+  TypeScript codegen produces a discriminated union on `mode`
+  (`WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly
+  | WireLiveContinuityModeDegraded |
+  WireLiveContinuityModeProviderNativeResume`) — TS narrowing on
+  `result.continuity.mode === "provider_native_resume"` exposes
+  `provider_session_id: string` automatically.
+
+**Files touched (FIX-C scope):**
+- `meerkat-contracts/src/wire/live.rs` — typed wire mirrors for
+  capabilities + continuity; 7 new round-trip tests.
+- `meerkat-contracts/src/wire/mod.rs`, `meerkat-contracts/src/lib.rs` —
+  re-export the new types.
+- `meerkat-contracts/src/emit.rs` — schema emit list.
+- `meerkat-rpc/src/handlers/live.rs` — handler converts core ↔ wire at
+  the boundary; existing test rebuilt to construct the wire types.
+- `tools/sdk-codegen/generate.py` — Python + TypeScript codegen
+  registrations and `_promote_nested_schema_def` allow-list.
+- `sdks/python/meerkat/types.py`,
+  `sdks/python/meerkat/client.py` — re-export new types; document
+  typed-access contract on `live_open`.
+- `sdks/typescript/src/index.ts` — re-export new types.
+- `sdks/python/meerkat/generated/types.py`,
+  `sdks/typescript/src/generated/types.ts`,
+  `sdks/web/src/generated/*` — regenerated.
+- `artifacts/schemas/wire-types.json`,
+  `artifacts/schemas/rest-openapi.json` — regenerated.
+- `sdks/python/tests/test_types.py` — 4 new typed-access tests.
+- `LIVE_ADAPTER_ROUND4_TODO.md` — this section.
+
+**Out of scope (preserved for future):**
+- `LiveOpenResult.transport` — the `LiveTransportBootstrap` projection
+  is still `serde_json::Value` because T4 reintroduces WebRTC with a
+  real signaling shape; the typed mirror is tracked separately.
+- `LiveStatusResult.status` — `LiveAdapterStatus` is a typed core enum
+  but still projected as opaque JSON; if the verifier flags it as a
+  CC7 follow-up the same wire-mirror pattern applies.
+
+**Verification commands run by FIX-C:**
+- `./scripts/repo-cargo check -p meerkat-contracts` → clean.
+- `./scripts/repo-cargo nextest run -p meerkat-contracts -E
+  'test(round_trip)'` → 47/47 passed (including 7 new wire/live tests).
+- `./scripts/repo-cargo nextest run -p meerkat-contracts wire::live` →
+  14/14 passed.
+- `make regen-schemas` → succeeds; diffs in
+  `artifacts/schemas/wire-types.json`,
+  `sdks/python/meerkat/generated/types.py`,
+  `sdks/typescript/src/generated/types.ts` show the typed shapes
+  replacing the opaque `Any` / `unknown` projections.
+- `cd sdks/python && python -m pytest tests/test_types.py -k "wire_live
+  or live_open_result_references"` → 4/4 passed.
+- `git stash list | head -3` → `stash@{0}` preserved.
+
+---
+
 ## Counts
 
 - **Phase 1 (foundation):** 4 items (T1-T4)
@@ -583,4 +917,5 @@ worktree's WIP. Never drop, pop, or apply it.
 - **Phase 3 (OpenAI mapping):** 2 items (T9-T10)
 - **Phase 4 (multimodal + continuity):** 2 items (T11-T12)
 - **Phase 5 (verification):** 1 item (T-VERIFY)
-- **Total actionable:** 13
+- **Round-4 follow-ups (post-verifier):** 5 items (CC2, CC3, CC4, CC5, CC6)
+- **Total actionable:** 18

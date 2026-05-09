@@ -1425,20 +1425,75 @@ class LiveOpenParams:
 
 
 @dataclass
+class WireLiveChannelCapabilities:
+    """Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
+
+Typed-boolean matrix advertised when a live channel opens. SDK consumers
+(Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to
+`image_in` / `video_in` / `transcript_supported` etc. without needing to
+hand-decode an opaque JSON object. CC5: closes the typed-surface gap that
+hid T8's "anticipate `gpt-realtime-2`" goal at the SDK boundary.
+
+Field shape mirrors the core type 1:1 — adding a new capability requires
+extending both the core type and this mirror; the `From` impls below
+fail-closed if a field is dropped (compile error: missing field). New
+modalities appear here as additional typed booleans, never as
+stringly-typed lists or provider-specific enums."""
+    audio_in: bool
+    audio_out: bool
+    barge_in_supported: bool
+    image_in: bool
+    provider_native_resume: bool
+    text_in: bool
+    text_out: bool
+    transcript_supported: bool
+    video_in: bool
+
+
+# Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].
+#
+# Internally-tagged on `mode` (snake_case) — matches the core enum's serde
+# shape exactly so the wire payload is byte-identical. CC6: closes the
+# typed-surface gap. SDK consumers get a discriminated union (TS) or
+# tagged-variant (Python) instead of a raw JSON blob, and the
+# `ProviderNativeResume { provider_session_id }` payload field is visible
+# to schema codegen.
+#
+# **Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the
+# core enum from a bare-string serde shape (`"transcript_only"`) to the
+# internally-tagged form (`{"mode":"transcript_only"}`). This wire mirror
+# makes that shape change visible to schema codegen and SDK clients.
+class WireLiveContinuityModeFresh(TypedDict, total=False):
+    mode: Required[Literal['fresh']]
+
+class WireLiveContinuityModeTranscriptOnly(TypedDict, total=False):
+    mode: Required[Literal['transcript_only']]
+
+class WireLiveContinuityModeDegraded(TypedDict, total=False):
+    mode: Required[Literal['degraded']]
+
+class WireLiveContinuityModeProviderNativeResume(TypedDict, total=False):
+    mode: Required[Literal['provider_native_resume']]
+    provider_session_id: Required[str]
+
+WireLiveContinuityMode = WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly | WireLiveContinuityModeDegraded | WireLiveContinuityModeProviderNativeResume
+
+@dataclass
 class LiveOpenResult:
     """Response payload for `live/open`.
 
-`transport`, `capabilities`, `continuity` are typed in Rust as
-`meerkat_core::live_adapter::*` shapes; for schema codegen they are
-projected as opaque JSON objects (the core crate is not `schemars`-aware
-today and adding `JsonSchema` derives to it would propagate a heavy
-optional-feature surface across the entire workspace; the wire-side
-schema therefore documents the field names and types via the
-`Live{TransportBootstrap,ChannelCapabilities,ContinuityMode}` Rust types
-the SDK codegen sees through the `meerkat-core` re-exports)."""
-    capabilities: Any
+`capabilities` and `continuity` are typed wire-side mirrors of the core
+`LiveChannelCapabilities` / `LiveContinuityMode` so SDK codegen sees the
+real shape (typed booleans, internally-tagged variant payloads) instead
+of an opaque JSON blob. CC5/CC6 (PR #650 verifier follow-up).
+
+`transport` remains an opaque `serde_json::Value` schema projection: the
+transport-bootstrap shape is provider-pluggable and the typed wire mirror
+is tracked separately (Round-4 follow-up T4 reintroduces WebRTC with a
+real signaling shape)."""
+    capabilities: WireLiveChannelCapabilities
     channel_id: str
-    continuity: Any
+    continuity: WireLiveContinuityMode
     transport: Any
 
 
@@ -2228,9 +2283,16 @@ RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk 
 
 # Modality-tagged input chunk for `live/send_input`.
 #
-# Audio payloads are base64 strings (`data`) plus stamped sample-rate /
-# channel metadata so the adapter layer can validate against the negotiated
-# provider format.
+# Audio / image / video-frame payloads are base64 strings (`data`); the
+# modality-specific metadata (`sample_rate_hz` / `channels` for audio,
+# `mime` for image, `codec` / `timestamp_ms` for video frames) lets the
+# adapter validate against the negotiated provider format.
+#
+# T11: `Image` and `VideoFrame` mirror the typed variants on
+# [`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not
+# implement a variant must reject with a typed
+# `LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a
+# free-form provider error string.
 class LiveInputChunkWireAudio(TypedDict, total=False):
     channels: Required[int]
     data: Required[str]
@@ -2241,7 +2303,18 @@ class LiveInputChunkWireText(TypedDict, total=False):
     kind: Required[Literal['text']]
     text: Required[str]
 
-LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText
+class LiveInputChunkWireImage(TypedDict, total=False):
+    data: Required[str]
+    kind: Required[Literal['image']]
+    mime: Required[str]
+
+class LiveInputChunkWireVideoFrame(TypedDict, total=False):
+    codec: Required[str]
+    data: Required[str]
+    kind: Required[Literal['video_frame']]
+    timestamp_ms: Required[int]
+
+LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText | LiveInputChunkWireImage | LiveInputChunkWireVideoFrame
 
 # Discriminator for runtime-backed input submission responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']

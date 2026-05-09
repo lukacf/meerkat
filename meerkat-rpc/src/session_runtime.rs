@@ -5073,6 +5073,21 @@ impl SessionRuntime {
             .await
     }
 
+    /// Return distinct in-flight provider `response_id`s for the realtime
+    /// transcript state of `session_id`. CC4: lets the live projection sink
+    /// fan `AssistantTurnInterrupted` events to every staged response on
+    /// barge-in so deltas-in-flight do not survive into the next turn's
+    /// `AssistantTurnCompleted` materializer sweep.
+    pub async fn in_flight_realtime_assistant_response_ids(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<String>, SessionError> {
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(session.in_flight_realtime_assistant_response_ids())
+    }
+
     #[cfg(feature = "mob")]
     pub fn session_service(&self) -> Arc<dyn meerkat_mob::MobSessionService> {
         Arc::new(RpcMobSessionService::new(

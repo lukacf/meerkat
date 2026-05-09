@@ -2711,3 +2711,128 @@ async def test_send_mob_member_content_rejects_malformed_receipt() -> None:
 
     with pytest.raises(MeerkatError, match="missing member_ref"):
         await client.send_mob_member_content("mob-1", "agent-a", "hello reviewer")
+
+
+# ---------------------------------------------------------------------------
+# CC5/CC6: typed live-adapter capability + continuity wire mirrors.
+# ---------------------------------------------------------------------------
+
+
+def test_generated_wire_live_channel_capabilities_exposes_typed_booleans():
+    """CC5: SDK consumers must see typed access to every capability boolean.
+
+    Closes the verifier finding that `LiveChannelCapabilities` was projected
+    as `serde_json::Value` and SDKs got raw JSON. The regenerated dataclass
+    must expose every field as a typed `bool` with snake_case names so
+    static type checkers (pyright/mypy) catch typos at field access.
+    """
+    from dataclasses import fields
+
+    from meerkat.types import WireLiveChannelCapabilities
+
+    field_names = {f.name for f in fields(WireLiveChannelCapabilities)}
+    assert field_names == {
+        "audio_in",
+        "audio_out",
+        "text_in",
+        "text_out",
+        "image_in",
+        "video_in",
+        "transcript_supported",
+        "barge_in_supported",
+        "provider_native_resume",
+    }
+    for f in fields(WireLiveChannelCapabilities):
+        assert f.type in {"bool", bool}, (
+            f"WireLiveChannelCapabilities.{f.name} must be typed `bool`, "
+            f"got {f.type!r}"
+        )
+
+
+def test_generated_wire_live_channel_capabilities_constructs_for_gpt_realtime_2():
+    """T8 + CC5: typed booleans represent `gpt-realtime-2` (image_in) and
+    Gemini Live (video_in) without provider-specific fields."""
+    from meerkat.types import WireLiveChannelCapabilities
+
+    gpt_realtime_2 = WireLiveChannelCapabilities(
+        audio_in=True,
+        audio_out=True,
+        text_in=True,
+        text_out=True,
+        image_in=True,
+        video_in=False,
+        transcript_supported=True,
+        barge_in_supported=True,
+        provider_native_resume=False,
+    )
+    gemini_live = WireLiveChannelCapabilities(
+        audio_in=True,
+        audio_out=True,
+        text_in=True,
+        text_out=True,
+        image_in=False,
+        video_in=True,
+        transcript_supported=True,
+        barge_in_supported=True,
+        provider_native_resume=False,
+    )
+    # Typed access at the Python attribute level — closes the SDK boundary
+    # for CC5.
+    assert gpt_realtime_2.image_in is True
+    assert gpt_realtime_2.video_in is False
+    assert gemini_live.image_in is False
+    assert gemini_live.video_in is True
+
+
+def test_generated_wire_live_continuity_mode_is_tagged_union():
+    """CC6: SDK consumers must see a tagged-union shape on `mode`.
+
+    Each variant is a TypedDict with `mode: Literal[...]` so mypy/pyright
+    can narrow on the discriminator. The `provider_native_resume` variant
+    additionally carries `provider_session_id: str`.
+    """
+    from typing import Literal, get_args, get_type_hints
+
+    from meerkat.types import (
+        WireLiveContinuityModeDegraded,
+        WireLiveContinuityModeFresh,
+        WireLiveContinuityModeProviderNativeResume,
+        WireLiveContinuityModeTranscriptOnly,
+    )
+
+    fresh_hints = get_type_hints(WireLiveContinuityModeFresh)
+    assert get_args(fresh_hints["mode"]) == ("fresh",)
+
+    transcript_hints = get_type_hints(WireLiveContinuityModeTranscriptOnly)
+    assert get_args(transcript_hints["mode"]) == ("transcript_only",)
+
+    degraded_hints = get_type_hints(WireLiveContinuityModeDegraded)
+    assert get_args(degraded_hints["mode"]) == ("degraded",)
+
+    resume_hints = get_type_hints(WireLiveContinuityModeProviderNativeResume)
+    assert get_args(resume_hints["mode"]) == ("provider_native_resume",)
+    # Payload field is typed `str`, not `Any` — closes the CC6 finding.
+    assert resume_hints["provider_session_id"] is str
+
+
+def test_generated_live_open_result_references_typed_capabilities_and_continuity():
+    """CC5/CC6: `LiveOpenResult.capabilities` / `.continuity` are typed at
+    the dataclass level — not erased to `Any` / `dict[str, Any]`.
+
+    This is the verifier-facing acceptance test: SDK clients see typed
+    access to image_in / video_in (via `WireLiveChannelCapabilities`) and
+    can route on `result.continuity["mode"]` without parsing raw JSON.
+    """
+    from typing import get_type_hints
+
+    from meerkat.types import (
+        LiveOpenResult,
+        WireLiveChannelCapabilities,
+        WireLiveContinuityMode,
+    )
+
+    hints = get_type_hints(LiveOpenResult)
+    assert hints["capabilities"] is WireLiveChannelCapabilities
+    # `WireLiveContinuityMode` is a `Union[...]` alias; the dataclass field
+    # type must be exactly this alias, not `Any`.
+    assert hints["continuity"] == WireLiveContinuityMode

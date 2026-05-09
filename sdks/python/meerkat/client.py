@@ -2432,12 +2432,37 @@ class MeerkatClient:
     # `rkat-rpc --live-ws`). Result shapes come from `meerkat-contracts`
     # (regenerated into `meerkat/generated/types.py` as `LiveOpenResult`,
     # `LiveStatusResult`, etc.). I52 + I53.
+    #
+    # CC5/CC6: `capabilities` and `continuity` on `LiveOpenResult` are now
+    # typed wire mirrors:
+    #   * `result["capabilities"]` is shaped like
+    #     `meerkat.types.WireLiveChannelCapabilities` — a dict with typed
+    #     boolean fields (`image_in`, `video_in`, `transcript_supported`,
+    #     `barge_in_supported`, `provider_native_resume`, `audio_in`,
+    #     `audio_out`, `text_in`, `text_out`).
+    #   * `result["continuity"]` is shaped like
+    #     `meerkat.types.WireLiveContinuityMode` — a tagged dict with
+    #     `mode: "fresh" | "transcript_only" | "degraded" | "provider_native_resume"`.
+    #     The `provider_native_resume` variant additionally carries
+    #     `provider_session_id: str`.
+    # Consumers route on `result["continuity"]["mode"]` and read
+    # capability booleans by name. Static type checkers (mypy / pyright)
+    # validate field access via the regenerated types in
+    # `meerkat.generated.types`.
 
     async def live_open(self, session_id: str) -> dict[str, Any]:
         """Open a live audio/text channel for a session. Wraps `live/open`.
 
-        Returns the `LiveOpenResult` shape: `channel_id`, `transport`,
-        `capabilities`, `continuity`.
+        Returns a dict shaped like `meerkat.types.LiveOpenResult` with keys
+        `channel_id`, `transport`, `capabilities`, and `continuity`. The
+        `capabilities` value is shaped like
+        `meerkat.types.WireLiveChannelCapabilities` (typed booleans:
+        `audio_in`, `audio_out`, `text_in`, `text_out`, `image_in`,
+        `video_in`, `transcript_supported`, `barge_in_supported`,
+        `provider_native_resume`). The `continuity` value is shaped like
+        `meerkat.types.WireLiveContinuityMode` (tagged on `mode`; the
+        `provider_native_resume` variant additionally carries
+        `provider_session_id`). CC5/CC6.
         """
         return await self._request("live/open", {"session_id": session_id})
 

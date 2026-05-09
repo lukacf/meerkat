@@ -545,6 +545,73 @@ rust_test(
 )
 
 rust_test(
+    name = "smoke_mob_generated_image_comms_test",
+    aliases = aliases(
+        package_name = "meerkat-mob",
+        normal = True,
+        normal_dev = True,
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    crate_name = "smoke_mob_generated_image_comms",
+    crate_root = "tests/smoke_mob_generated_image_comms.rs",
+    crate_features = [
+        "integration-real-tests",
+        "runtime-adapter",
+    ],
+    edition = "2024",
+    compile_data = [
+        "Cargo.toml",
+        "src/runtime/actor.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/flow_frame_engine.rs",
+        "src/runtime/recovery.rs",
+    ],
+    srcs = [
+        "tests/smoke_mob_generated_image_comms.rs",
+    ],
+    visibility = ["//visibility:public"],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.6.4",
+        "CARGO_BIN_NAME": "smoke_mob_generated_image_comms",
+        "CARGO_MANIFEST_DIR": "./meerkat-mob",
+    },
+    tags = [
+        "integration",
+        "required-feature",
+    ],
+    data = [],
+    env = {
+        "RUST_MIN_STACK": "16777216",
+    },
+    proc_macro_deps = [
+        "//meerkat-machine-derive:meerkat_machine_derive",
+        "//meerkat-machine-dsl:meerkat_machine_dsl",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob",
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [
+        "//meerkat-mob:meerkat_mob",
+        "//meerkat:meerkat",
+        "//meerkat:meerkat_client_agent_factory_build",
+        "//meerkat:meerkat_comms_agent_factory_build",
+        "//meerkat:meerkat_contracts_agent_factory_build",
+        "//meerkat:meerkat_core_agent_factory_build",
+        "//meerkat:meerkat_machine_kernels_agent_factory_build",
+        "//meerkat:meerkat_machine_schema_agent_factory_build",
+        "//meerkat:meerkat_runtime_agent_factory_build",
+        "//meerkat:meerkat_session_agent_factory_build",
+        "//meerkat:meerkat_store_agent_factory_build",
+    ] + all_crate_deps(
+        package_name = "meerkat-mob",
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "smoke_mob_pictionary_test",
     aliases = aliases(
         package_name = "meerkat-mob",

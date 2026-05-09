@@ -36,7 +36,7 @@ fn staged_admission_restore_holds_session_id() {
     let ledger = empty_ledger();
     let session = SessionId::new();
     let restore = StagedAdmissionRestore {
-        admissions: ledger.clone(),
+        admissions: Arc::clone(&ledger),
         session_id: session.clone(),
     };
     assert_eq!(restore.session_id, session);

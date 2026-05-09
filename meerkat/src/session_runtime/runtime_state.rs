@@ -134,7 +134,7 @@ mod ops {
         pub runtime_adapter: &'a Arc<MeerkatMachine>,
     }
 
-    impl<'a> RuntimeStateOps<'a> {
+    impl RuntimeStateOps<'_> {
         /// Discard a live session. If the session is not currently
         /// staged, the staged-capacity admission is released back to
         /// the pool.

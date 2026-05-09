@@ -3,6 +3,8 @@
 //! receiver-side handle is dropped, the runtime must observe a
 //! single-shot notification.
 
+#![allow(clippy::expect_used)]
+
 use std::sync::Arc;
 
 use meerkat::session_runtime::runtime_state::{

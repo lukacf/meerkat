@@ -117,7 +117,7 @@ mod context {
         pub config_runtime: Option<Arc<ConfigRuntime>>,
     }
 
-    impl<'a> RecoveryContext<'a> {
+    impl RecoveryContext<'_> {
         /// Load the persisted authoritative snapshot for `session_id`,
         /// honouring the durable archive flag (an archived session
         /// resolves to `None`).

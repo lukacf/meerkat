@@ -223,6 +223,11 @@ pub use staged_sessions::{
     StagedSlot,
 };
 
+// Surface-agnostic session runtime. Empty during F2 — populated by
+// the W1/W2/W3 moves out of `meerkat-rpc::session_runtime`. See
+// `SESSION_RUNTIME_SPLIT_TODO.md`.
+pub mod session_runtime;
+
 // Session service
 pub use meerkat_core::service::InitialTurnPolicy;
 pub use meerkat_core::service::StartTurnRuntimeSemantics;

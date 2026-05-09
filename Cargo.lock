@@ -2388,6 +2388,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-hooks",
+ "meerkat-live",
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-memory",

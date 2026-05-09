@@ -148,6 +148,7 @@ meerkat = { version = "0.6.4", path = "meerkat", default-features = false }
 meerkat-comms = { version = "0.6.4", path = "meerkat-comms" }
 meerkat-hooks = { version = "0.6.4", path = "meerkat-hooks" }
 meerkat-rpc = { version = "0.6.4", path = "meerkat-rpc" }
+meerkat-live = { version = "0.6.4", path = "meerkat-live" }
 meerkat-runtime = { version = "0.6.4", path = "meerkat-runtime", default-features = false }
 meerkat-session = { version = "0.6.4", path = "meerkat-session", default-features = false }
 meerkat-memory = { version = "0.6.4", path = "meerkat-memory", default-features = false }

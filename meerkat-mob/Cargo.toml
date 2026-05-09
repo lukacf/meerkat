@@ -114,6 +114,11 @@ name = "smoke_mob_pictionary"
 path = "tests/smoke_mob_pictionary.rs"
 required-features = ["integration-real-tests"]
 
+[[test]]
+name = "smoke_mob_generated_image_comms"
+path = "tests/smoke_mob_generated_image_comms.rs"
+required-features = ["integration-real-tests"]
+
 [[example]]
 name = "017-mob-coding-swarm"
 path = "../examples/017-mob-coding-swarm-rs/main.rs"

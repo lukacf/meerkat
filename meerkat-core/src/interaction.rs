@@ -96,6 +96,8 @@ pub enum InteractionContent {
         in_reply_to: InteractionId,
         status: ResponseStatus,
         result: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
     },
 }
 
@@ -1110,6 +1112,7 @@ mod tests {
             in_reply_to: id,
             status: ResponseStatus::Completed,
             result: serde_json::json!({"ok": true}),
+            blocks: None,
         };
         let json = serde_json::to_value(&content).unwrap();
         assert_eq!(json["type"], "response");

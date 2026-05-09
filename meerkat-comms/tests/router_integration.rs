@@ -590,6 +590,7 @@ async fn integration_real_router_transport_only_send_response_frame() {
                 in_reply_to: request_id,
                 status: Status::Completed,
                 result: serde_json::json!({"approved": true}),
+                blocks: None,
                 handling_mode: None,
             },
         )
@@ -640,6 +641,7 @@ async fn integration_real_router_transport_only_send_response_frame_no_ack_wait(
                 in_reply_to: Uuid::new_v4(),
                 status: Status::Completed,
                 result: serde_json::json!({}),
+                blocks: None,
                 handling_mode: None,
             },
         )

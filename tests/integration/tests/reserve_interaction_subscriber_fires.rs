@@ -116,6 +116,7 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
             in_reply_to: InteractionId(envelope_id),
             status: ResponseStatus::Completed,
             result: serde_json::json!({"probe_reply": true}),
+            blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         },
     )

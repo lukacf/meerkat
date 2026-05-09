@@ -567,6 +567,8 @@ pub enum CommsCommandRequest {
         #[serde(default)]
         result: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
 }
@@ -650,6 +652,7 @@ impl CommsCommandRequest {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 handling_mode,
             } => {
                 if status == ResponseStatus::Accepted && handling_mode.is_some() {
@@ -660,6 +663,7 @@ impl CommsCommandRequest {
                     in_reply_to,
                     status,
                     result,
+                    blocks,
                     handling_mode,
                 }
             }
@@ -765,6 +769,7 @@ pub enum CommsCommand {
         in_reply_to: InteractionId,
         status: ResponseStatus,
         result: serde_json::Value,
+        blocks: Option<Vec<ContentBlock>>,
         handling_mode: Option<HandlingMode>,
     },
 }

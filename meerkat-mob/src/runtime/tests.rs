@@ -4042,6 +4042,7 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 in_reply_to: candidate.interaction.id,
                                 status: meerkat_core::interaction::ResponseStatus::Completed,
                                 result: response,
+                                blocks: None,
                                 handling_mode: None,
                             })
                             .await
@@ -24591,6 +24592,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
             result: serde_json::json!({"interpretation":"lighthouse"}),
+            blocks: None,
             handling_mode: None,
         },
     )
@@ -24903,6 +24905,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
             result: serde_json::json!({"message":"pong"}),
+            blocks: None,
             handling_mode: None,
         },
     )

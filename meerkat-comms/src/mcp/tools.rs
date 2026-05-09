@@ -21,6 +21,7 @@ use meerkat_contracts::{
     CommsPeerRequestIntent, CommsPeerRequestParams, CommsPeerResponseResult, CommsPeersResult,
     CommsSendResult,
 };
+use meerkat_core::BlobId;
 use meerkat_core::ToolDispatchContext;
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
@@ -30,9 +31,15 @@ use meerkat_core::comms::{
 };
 use meerkat_core::interaction::{InteractionId, ResponseStatus};
 use meerkat_core::tool_catalog::ToolUnavailableReason;
-use meerkat_core::types::{ContentBlock, HandlingMode};
+use meerkat_core::types::{ContentBlock, HandlingMode, ImageData};
 
 const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
+
+const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"current_turn\",\"index\":0} refers only to an image attached to the current admitted user input turn.\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- Do not use source=current_turn for generated images; generated images must be sent with source=blob, blob_id, and media_type.";
+
+const SEND_REQUEST_CONTRACTS_DESCRIPTION: &str = "\n\nSupported request contracts:\n- checksum_token: Use for a simple correlated check/ack/review. params must be {\"subject\":\"<subject>\"}. The responder should send_response with status completed and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject>\",\"token\":\"<token or checksum>\"}.\n- supervisor.bridge: Use for supervisor bridge control. params include the bridge command payload, for example command observe_member with supervisor, epoch, and protocol_version fields.";
+
+const SEND_RESPONSE_CONTRACTS_DESCRIPTION: &str = "\n\nResponse result contracts:\n- For checksum_token requests, completed responses must use result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject from request params.subject>\",\"token\":\"<token or checksum>\"}.\n- For supervisor.bridge requests, completed acknowledgements use result {\"result\":\"ack\",\"ok\":true}; failed responses use result {\"result\":\"rejected\",\"cause\":\"unsupported\",\"reason\":\"<reason>\"}.";
 
 fn schema_for<T: JsonSchema>() -> Value {
     let schema = schemars::schema_for!(T);
@@ -68,7 +75,9 @@ pub struct SendMessageInput {
     pub body: String,
     /// Optional multimodal blocks. Use image_ref entries such as
     /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current turn without inlining bytes in the tool call.
+    /// images from the current admitted user turn, or
+    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
+    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
@@ -93,7 +102,9 @@ pub struct SendRequestInput {
     pub params: CommsPeerRequestParams,
     /// Optional multimodal blocks. Use image_ref entries such as
     /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current turn without inlining bytes in the tool call.
+    /// images from the current admitted user turn, or
+    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
+    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
 }
@@ -108,8 +119,18 @@ pub enum CommsToolContentBlock {
     ImageRef {
         /// Source collection for the image reference.
         source: CommsToolImageReferenceSource,
-        /// Zero-based image index within the current admitted turn.
-        index: usize,
+        /// Zero-based image index within the current admitted turn. Required for
+        /// source=current_turn; forbidden for source=blob.
+        #[serde(default)]
+        index: Option<usize>,
+        /// Blob ID for a generated or otherwise blob-backed image. Required for
+        /// source=blob; forbidden for source=current_turn.
+        #[serde(default)]
+        blob_id: Option<BlobId>,
+        /// MIME type for a blob-backed image. Required for source=blob; forbidden
+        /// for source=current_turn.
+        #[serde(default)]
+        media_type: Option<String>,
     },
 }
 
@@ -117,6 +138,7 @@ pub enum CommsToolContentBlock {
 #[serde(rename_all = "snake_case")]
 pub enum CommsToolImageReferenceSource {
     CurrentTurn,
+    Blob,
 }
 
 /// Send a response to a previous peer request.
@@ -136,6 +158,13 @@ pub struct SendResponseInput {
     /// Response result data (optional)
     #[serde(default)]
     pub result: Option<CommsPeerResponseResult>,
+    /// Optional multimodal blocks. Use image_ref entries such as
+    /// {"type":"image_ref","source":"current_turn","index":0} to forward
+    /// images from the current admitted user turn, or
+    /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
+    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    #[serde(default)]
+    pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// Handling mode override for terminal responses: "steer" or "queue" (optional)
     #[serde(default)]
     pub handling_mode: Option<HandlingMode>,
@@ -190,17 +219,17 @@ pub fn tools_list() -> Vec<Value> {
     vec![
         json!({
             "name": "send_message",
-            "description": "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration — status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use for urgent or time-sensitive collaboration.\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for non-urgent follow-ups where you do not want to interrupt the peer's current task.\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"steer\"}\n2. Queued follow-up (non-urgent):\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"reporter\", \"body\": \"When you finish, include the error counts from section 3.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.",
+            "description": format!("{}{}{}", "Send a fire-and-forget message to a peer. No response is expected.\n\nWhen to use: Use send_message for one-way collaboration — status updates, notifications, sharing results, or any case where you do not need the peer to reply with structured data. If you need a correlated reply, use send_request instead.\n\nhandling_mode:\n- \"steer\": The peer processes your message immediately, interrupting its current work. Use for urgent or time-sensitive collaboration.\n- \"queue\": The message is delivered at the peer's next turn boundary. Use for non-urgent follow-ups where you do not want to interrupt the peer's current task.", COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Fire-and-forget collaboration:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"FYI: the database migration completed successfully.\", \"handling_mode\": \"steer\"}\n2. Send a generated image without expecting a reply:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"body\": \"Here is the generated mockup.\", \"blocks\": [{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}], \"handling_mode\": \"steer\"}\n3. Queued follow-up (non-urgent):\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"reporter\", \"body\": \"When you finish, include the error counts from section 3.\", \"handling_mode\": \"queue\"}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user."),
             "inputSchema": schema_for::<SendMessageInput>()
         }),
         json!({
             "name": "send_request",
-            "description": "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for generated comms request contracts such as supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.\n\nExample — supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"steer\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message.",
+            "description": format!("{}{}{}{}", "Send a typed structured request to a peer and expect a correlated response. The peer will reply using send_response with the same request ID.\n\nWhen to use: Use send_request for typed comms request contracts such as checksum_token or supervisor.bridge. The response will arrive as an incoming message with the original request ID in its in_reply_to field, so you can match it. If you just need to share information without expecting a reply, use send_message instead.\n\nhandling_mode:\n- \"steer\": The peer processes your request immediately, interrupting its current work. Use for requests that block your own progress.\n- \"queue\": The request is delivered at the peer's next turn boundary. Use when the peer can handle it after finishing its current task.", SEND_REQUEST_CONTRACTS_DESCRIPTION, COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. checksum_token image review request:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"reviewer\",\"intent\":\"checksum_token\",\"params\":{\"subject\":\"image_receipt_check\"},\"blocks\":[{\"type\":\"text\",\"text\":\"Please inspect this generated image and return a receipt token with an image receipt.\"},{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:generated-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"steer\"}\n2. supervisor bridge request/reply:\n  {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"member\", \"intent\": \"supervisor.bridge\", \"params\": {\"command\": \"observe_member\", \"supervisor\": {\"name\": \"supervisor\", \"peer_id\": \"<supervisor-peer-id>\", \"address\": \"inproc://supervisor\", \"pubkey\": [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}, \"epoch\": 1, \"protocol_version\": 2}, \"handling_mode\": \"steer\"}\n  The peer receives this and sends back with your peer_id:\n  {\"peer_id\": \"<your-peer-id>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n\nFailure handling:\n- peer_not_found_or_not_trusted: The peer_id does not match a trusted peer. Call peers first to pick a peer_id.\n- peer_unreachable: The peer exists but is offline or the transport failed. Retry after a delay or inform the user.\n- Missing response: There is no built-in timeout. If the peer does not respond, it may have failed or dropped the request. Re-send or check with the peer via send_message."),
             "inputSchema": schema_for::<SendRequestInput>()
         }),
         json!({
             "name": "send_response",
-            "description": "Send a typed response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a generated comms request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later.\n- \"completed\": The request succeeded. Include a typed result when the request contract requires one.\n- \"failed\": The request could not be fulfilled. Include a typed rejection result when the request contract requires one.\n\nhandling_mode (optional): Override how the requester processes this response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.\n\nExamples:\n1. Completed response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"display_name\": \"requester\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"result\": \"rejected\", \"cause\": \"unsupported\", \"reason\": \"unsupported command\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error.",
+            "description": format!("{}{}{}{}", "Send a typed response to a previous peer request. The in_reply_to field must match the request ID from the original send_request message you received.\n\nWhen to use: Use send_response after receiving a typed comms request from a peer. The requester is waiting for a correlated reply.\n\nstatus values:\n- \"accepted\": Acknowledge receipt; you will send a \"completed\" or \"failed\" response later. Do not include handling_mode on accepted progress responses.\n- \"completed\": The request succeeded. Include a typed result when the request contract requires one.\n- \"failed\": The request could not be fulfilled. Include a typed rejection result when the request contract requires one.\n\nhandling_mode (optional): Override how the requester processes this terminal response. Defaults to the original request's mode. Use \"steer\" to interrupt the requester immediately with your result, or \"queue\" to deliver at their next turn boundary.", SEND_RESPONSE_CONTRACTS_DESCRIPTION, COMMS_BLOCKS_DESCRIPTION, "\n\nExamples:\n1. Completed checksum_token response with a generated image receipt:\n   {\"peer_id\":\"<peer-id-from-peers>\",\"display_name\":\"requester\",\"in_reply_to\":\"<request-id>\",\"status\":\"completed\",\"result\":{\"request_intent\":\"checksum_token\",\"request_subject\":\"image_receipt_check\",\"token\":\"generated-image-response-ok\"},\"blocks\":[{\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:receipt-image\",\"media_type\":\"image/png\"}],\"handling_mode\":\"steer\"}\n2. Acceptance then later completion:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"accepted\"}\n   ...later...\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"completed\", \"result\": {\"result\": \"ack\", \"ok\": true}}\n3. Failure response:\n   {\"peer_id\": \"<peer-id-from-peers>\", \"in_reply_to\": \"<request-id>\", \"status\": \"failed\", \"result\": {\"result\": \"rejected\", \"cause\": \"unsupported\", \"reason\": \"unsupported command\"}}\n\nFailure handling:\n- peer_not_found_or_not_trusted / peer_unreachable: Same as send_message. The requester will not receive your response — they may re-send the request.\n- Invalid in_reply_to: If the ID is not a valid UUID or does not match a known request, the call fails with a validation error."),
             "inputSchema": schema_for::<SendResponseInput>()
         }),
         json!({
@@ -273,11 +302,13 @@ pub async fn handle_tools_call_with_context(
             if matches!(input.status, ResponseStatus::Accepted) && input.handling_mode.is_some() {
                 return Err("handling_mode is forbidden on accepted peer responses".to_string());
             }
+            let blocks = resolve_tool_blocks(input.blocks, dispatch_context)?;
             let typed_request = meerkat_contracts::CommsCommandRequest::PeerResponse {
                 to: input.peer_id,
                 in_reply_to: InteractionId(in_reply_to_uuid),
                 status: input.status,
                 result: input.result,
+                blocks,
                 handling_mode: input.handling_mode,
             };
             let command = project_peer_response_command(typed_request, to)?;
@@ -352,16 +383,52 @@ fn resolve_tool_block(
     match block {
         CommsToolContentBlock::Text { text } => Ok(ContentBlock::Text { text }),
         CommsToolContentBlock::ImageRef {
-            source: CommsToolImageReferenceSource::CurrentTurn,
+            source,
             index,
-        } => dispatch_context
-            .current_turn_image(index)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "image_ref_unavailable: current_turn image {index} did not resolve to a current-turn image"
-                )
-            }),
+            blob_id,
+            media_type,
+        } => resolve_image_ref(source, index, blob_id, media_type, dispatch_context),
+    }
+}
+
+fn resolve_image_ref(
+    source: CommsToolImageReferenceSource,
+    index: Option<usize>,
+    blob_id: Option<BlobId>,
+    media_type: Option<String>,
+    dispatch_context: &ToolDispatchContext,
+) -> Result<ContentBlock, String> {
+    match source {
+        CommsToolImageReferenceSource::CurrentTurn => {
+            if blob_id.is_some() || media_type.is_some() {
+                return Err("invalid image_ref: source current_turn only accepts index".to_string());
+            }
+            let index = index.ok_or_else(|| {
+                "invalid image_ref: source current_turn requires index".to_string()
+            })?;
+            dispatch_context
+                .current_turn_image(index)
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "image_ref_unavailable: current_turn image {index} did not resolve to a current-turn image"
+                    )
+                })
+        }
+        CommsToolImageReferenceSource::Blob => {
+            if index.is_some() {
+                return Err("invalid image_ref: source blob does not accept index".to_string());
+            }
+            let blob_id = blob_id
+                .ok_or_else(|| "invalid image_ref: source blob requires blob_id".to_string())?;
+            let media_type = media_type
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| "invalid image_ref: source blob requires media_type".to_string())?;
+            Ok(ContentBlock::Image {
+                media_type,
+                data: ImageData::Blob { blob_id },
+            })
+        }
     }
 }
 
@@ -408,6 +475,7 @@ fn project_peer_response_command(
         in_reply_to,
         status,
         result,
+        blocks,
         handling_mode,
         ..
     } = core_request
@@ -419,6 +487,7 @@ fn project_peer_response_command(
         in_reply_to,
         status,
         result,
+        blocks,
         handling_mode,
     })
 }
@@ -903,6 +972,43 @@ mod tests {
     }
 
     #[test]
+    fn test_tool_descriptions_document_image_refs_and_checksum_contracts() {
+        let tools = tools_list();
+        let description = |name: &str| -> String {
+            tools
+                .iter()
+                .find(|tool| tool["name"].as_str() == Some(name))
+                .and_then(|tool| tool["description"].as_str())
+                .expect("tool description")
+                .to_string()
+        };
+
+        for name in ["send_message", "send_request", "send_response"] {
+            let text = description(name);
+            assert!(
+                text.contains("\"source\":\"blob\""),
+                "{name} should document blob-backed generated image refs"
+            );
+            assert!(
+                text.contains("\"source\":\"current_turn\""),
+                "{name} should document current-turn user image refs"
+            );
+            assert!(
+                text.contains("generated images must be sent with source=blob"),
+                "{name} should distinguish generated images from current-turn input"
+            );
+        }
+
+        let request = description("send_request");
+        assert!(request.contains("checksum_token"));
+        assert!(request.contains("\"params\":{\"subject\""));
+
+        let response = description("send_response");
+        assert!(response.contains("\"request_intent\":\"checksum_token\""));
+        assert!(response.contains("\"request_subject\""));
+    }
+
+    #[test]
     fn test_send_message_schema_requires_handling_mode() {
         let schema = schema_for::<SendMessageInput>();
         let required = schema["required"].as_array().unwrap();
@@ -1062,6 +1168,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_message_resolves_blob_image_ref_to_peer_message_blocks() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "Please review the generated image.",
+                "blocks": [
+                    {"type": "image_ref", "source": "blob", "blob_id": "sha256:generated-image", "media_type": "image/png"}
+                ],
+                "handling_mode": "steer"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_message should resolve blob-backed image refs");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerMessage {
+                body,
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer message with blocks, got {sent:?}");
+        };
+        assert_eq!(body, "Please review the generated image.");
+        assert_eq!(
+            blocks.first(),
+            Some(&meerkat_core::ContentBlock::Text {
+                text: "Please review the generated image.".into()
+            })
+        );
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Blob { blob_id }
+            } if media_type == "image/png" && blob_id.as_str() == "sha256:generated-image"
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_request_resolves_blob_image_ref_to_peer_request_blocks() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_request",
+            &json!({
+                "peer_id": peer_id,
+                "intent": "checksum_token",
+                "params": {"subject": "describe-generated-image"},
+                "blocks": [
+                    {"type": "text", "text": "Please describe the generated image."},
+                    {"type": "image_ref", "source": "blob", "blob_id": "sha256:generated-request-image", "media_type": "image/png"}
+                ],
+                "handling_mode": "steer"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_request should resolve blob-backed image refs");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerRequest {
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer request with blocks, got {sent:?}");
+        };
+        assert!(matches!(
+            &blocks[0],
+            meerkat_core::ContentBlock::Text { text }
+                if text == "Please describe the generated image."
+        ));
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Blob { blob_id }
+            } if media_type == "image/png" && blob_id.as_str() == "sha256:generated-request-image"
+        ));
+    }
+
+    #[tokio::test]
+    async fn blob_image_ref_rejects_current_turn_index() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime));
+
+        let err = handle_tools_call_with_context(
+            &ctx,
+            "send_message",
+            &json!({
+                "peer_id": peer_id,
+                "body": "bad mixed image ref",
+                "blocks": [
+                    {"type": "image_ref", "source": "blob", "index": 0, "blob_id": "sha256:generated-image", "media_type": "image/png"}
+                ],
+                "handling_mode": "steer"
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect_err("mixed blob/current_turn fields should be rejected");
+
+        assert_eq!(err, "invalid image_ref: source blob does not accept index");
+    }
+
+    #[tokio::test]
     async fn send_message_synthesizes_body_text_when_blocks_only_reference_image() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
@@ -1178,6 +1409,13 @@ mod tests {
         );
         assert!(required_names.contains(&meerkat_core::SendResponseCallProjection::STATUS_FIELD));
         assert!(!schema["properties"].as_object().unwrap().contains_key("to"));
+        assert!(!required_names.contains(&"blocks"));
+        assert!(
+            schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("blocks")
+        );
     }
 
     #[test]
@@ -1813,6 +2051,55 @@ mod tests {
             panic!("expected one peer response command, got {sent:?}");
         };
         assert_eq!(result, &bridge_reply_json());
+    }
+
+    #[tokio::test]
+    async fn send_response_resolves_blob_image_ref_to_peer_response_blocks() {
+        let peer_keypair = Keypair::generate();
+        let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
+        let runtime = Arc::new(RecordingRuntime::new());
+        ctx.runtime = Some(RuntimeCommsCommandHandle::new(runtime.clone()));
+        let request_id = uuid::Uuid::from_u128(44);
+
+        handle_tools_call_with_context(
+            &ctx,
+            "send_response",
+            &json!({
+                "peer_id": peer_id,
+                "in_reply_to": request_id.to_string(),
+                "status": "completed",
+                "result": bridge_reply_json(),
+                "blocks": [
+                    {"type": "text", "text": "Generated image attached."},
+                    {"type": "image_ref", "source": "blob", "blob_id": "sha256:response-image", "media_type": "image/png"}
+                ]
+            }),
+            &ToolDispatchContext::default(),
+        )
+        .await
+        .expect("send_response should resolve blob-backed image refs");
+
+        let sent = runtime.sent.lock();
+        let [
+            CommsCommand::PeerResponse {
+                blocks: Some(blocks),
+                ..
+            },
+        ] = sent.as_slice()
+        else {
+            panic!("expected one peer response command with blocks, got {sent:?}");
+        };
+        assert!(matches!(
+            &blocks[0],
+            meerkat_core::ContentBlock::Text { text } if text == "Generated image attached."
+        ));
+        assert!(matches!(
+            &blocks[1],
+            meerkat_core::ContentBlock::Image {
+                media_type,
+                data: meerkat_core::ImageData::Blob { blob_id }
+            } if media_type == "image/png" && blob_id.as_str() == "sha256:response-image"
+        ));
     }
 
     #[tokio::test]

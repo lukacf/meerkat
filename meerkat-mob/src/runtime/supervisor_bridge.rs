@@ -328,6 +328,7 @@ impl MobSupervisorBridge {
             in_reply_to,
             status: _,
             result,
+            blocks: _,
         } = &candidate.interaction.content
         else {
             return Ok(None);
@@ -395,6 +396,7 @@ mod tests {
                     in_reply_to: InteractionId(request_envelope_id),
                     status,
                     result,
+                    blocks: None,
                 },
                 rendered_text: "[worker-rt]: response".to_string(),
                 handling_mode: HandlingMode::Queue,

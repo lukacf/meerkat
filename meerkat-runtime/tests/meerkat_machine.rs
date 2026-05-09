@@ -1636,6 +1636,7 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
             in_reply_to: InteractionId(request_id),
             status: ResponseStatus::Completed,
             result: serde_json::json!({"probe_reply": true}),
+            blocks: None,
             handling_mode: Some(HandlingMode::Steer),
         },
     )

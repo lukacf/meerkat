@@ -223,6 +223,8 @@ pub enum CommsCommandRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<CommsPeerResponseResult>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<meerkat_core::ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
 }
@@ -311,6 +313,7 @@ impl CommsCommandRequest {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 handling_mode,
             } => meerkat_core::comms::CommsCommandRequest::PeerResponse {
                 to,
@@ -325,6 +328,7 @@ impl CommsCommandRequest {
                     })?,
                     None => serde_json::Value::Null,
                 },
+                blocks,
                 handling_mode,
             },
         })
@@ -391,6 +395,8 @@ pub enum CommsSendParams {
         status: ResponseStatus,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<CommsPeerResponseResult>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<meerkat_core::ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
@@ -479,6 +485,7 @@ impl CommsSendParams {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 handling_mode,
                 ..
             } => CommsCommandRequest::PeerResponse {
@@ -486,6 +493,7 @@ impl CommsSendParams {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 handling_mode,
             },
         }

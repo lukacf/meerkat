@@ -248,7 +248,7 @@ fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types
     match &interaction.content {
         InteractionContent::Message { blocks, .. } => blocks.clone(),
         InteractionContent::Request { blocks, .. } => blocks.clone(),
-        _ => None,
+        InteractionContent::Response { blocks, .. } => blocks.clone(),
     }
 }
 
@@ -270,10 +270,12 @@ fn external_event_payload(interaction: &InboxInteraction) -> serde_json::Value {
             in_reply_to,
             status,
             result,
+            blocks,
         } => serde_json::json!({
             "in_reply_to": in_reply_to,
             "status": status,
             "result": result,
+            "blocks": blocks,
         }),
     }
 }
@@ -959,6 +961,7 @@ mod tests {
                 status: ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
                 in_reply_to,
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
@@ -1022,6 +1025,7 @@ mod tests {
                     status: ResponseStatus::Completed,
                     result: serde_json::json!({"ok": true}),
                     in_reply_to,
+                    blocks: None,
                 },
                 id,
                 rendered_text: String::new(),
@@ -1074,6 +1078,7 @@ mod tests {
                     status: ResponseStatus::Completed,
                     result: serde_json::json!({"ok": true}),
                     in_reply_to,
+                    blocks: None,
                 },
                 id,
                 rendered_text: String::new(),
@@ -1122,6 +1127,7 @@ mod tests {
                     status: ResponseStatus::Completed,
                     result: serde_json::json!({"ok": true}),
                     in_reply_to,
+                    blocks: None,
                 },
                 id: interaction_id,
                 rendered_text: String::new(),
@@ -1165,6 +1171,7 @@ mod tests {
                 status: ResponseStatus::Failed,
                 result: serde_json::json!({"error": "timeout"}),
                 in_reply_to,
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
@@ -1195,6 +1202,7 @@ mod tests {
                 status: ResponseStatus::Accepted,
                 result: serde_json::json!(null),
                 in_reply_to,
+                blocks: None,
             },
             id: make_interaction_id(),
             rendered_text: String::new(),
@@ -1228,6 +1236,7 @@ mod tests {
                     status: ResponseStatus::Completed,
                     result: serde_json::json!({"ok": true}),
                     in_reply_to,
+                    blocks: None,
                 },
                 id,
                 rendered_text: String::new(),
@@ -1342,6 +1351,7 @@ mod tests {
                     status: ResponseStatus::Completed,
                     result: serde_json::json!(null),
                     in_reply_to,
+                    blocks: None,
                 },
                 id: make_interaction_id(),
                 rendered_text: String::new(),

@@ -206,6 +206,8 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s80_typescript_sdk_persisted_generated_image_resume, 80);
             scenario(e2e_smoke_s81_typescript_sdk_parallel_image_storm, 81);
             scenario(e2e_smoke_s82_typescript_sdk_blob_image_roundtrip, 82);
+            scenario(e2e_smoke_s83_comms_multimodal_mcp_roundtrip, 83);
+            scenario(e2e_smoke_s84_mob_generated_image_comms_roundtrip, 84);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -4364,6 +4366,47 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             command: CommandSpec::NodeTest {
                 test_file: "tests/e2e_smoke.test.mjs",
                 test_name: "Scenario 82",
+            },
+        }),
+        83 => Some(&Spec {
+            id: Some(83),
+            lane: Lane::Smoke,
+            title: "Comms multimodal MCP roundtrip",
+            timeout_secs: 300,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-comms",
+                test_target: "e2e",
+                test_name: "e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
+        84 => Some(&Spec {
+            id: Some(84),
+            lane: Lane::Smoke,
+            title: "Mob generated-image comms roundtrip",
+            timeout_secs: 900,
+            required_env: &[
+                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+                &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            ],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_generated_image_comms",
+                test_name: "e2e_smoke_mob_generated_image_comms_blob_request_response",
+                features: &["integration-real-tests"],
+                all_features: false,
             },
         }),
         _ => None,

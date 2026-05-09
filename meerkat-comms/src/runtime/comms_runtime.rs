@@ -640,6 +640,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 handling_mode,
             } => {
                 let (peer_handle, _stream_authority) =
@@ -677,6 +678,7 @@ impl CoreCommsRuntime for CommsRuntime {
                             in_reply_to: in_reply_to.0,
                             status,
                             result,
+                            blocks,
                             handling_mode: effective_handling_mode,
                         },
                     )
@@ -1010,6 +1012,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 in_reply_to,
                                 status,
                                 result,
+                                blocks,
                                 handling_mode: _,
                             } => {
                                 let core_status = match status {
@@ -1027,6 +1030,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                     in_reply_to: meerkat_core::InteractionId(in_reply_to),
                                     status: core_status,
                                     result,
+                                    blocks,
                                 }
                             }
                             MessageKind::Ack { .. } => {
@@ -1888,6 +1892,23 @@ impl CommsRuntime {
                 Ok(crate::types::MessageKind::Request {
                     intent,
                     params,
+                    blocks: Some(blocks),
+                    handling_mode,
+                })
+            }
+            crate::types::MessageKind::Response {
+                in_reply_to,
+                status,
+                result,
+                blocks: Some(mut blocks),
+                handling_mode,
+            } => {
+                self.hydrate_blocks_for_transport(&mut blocks, "comms response")
+                    .await?;
+                Ok(crate::types::MessageKind::Response {
+                    in_reply_to,
+                    status,
+                    result,
                     blocks: Some(blocks),
                     handling_mode,
                 })
@@ -3517,6 +3538,7 @@ mod tests {
                 in_reply_to: reply_to,
                 status: Status::Completed,
                 result: serde_json::json!({"ok": true}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -3559,7 +3581,12 @@ mod tests {
         assert!(interactions.iter().any(|i| {
             matches!(
                 &i.content,
-                meerkat_core::InteractionContent::Response { in_reply_to, status, result }
+                meerkat_core::InteractionContent::Response {
+                    in_reply_to,
+                    status,
+                    result,
+                    ..
+                }
                     if in_reply_to.0 == reply_to
                         && *status == meerkat_core::ResponseStatus::Completed
                         && result["ok"] == true
@@ -3904,6 +3931,7 @@ mod tests {
                 in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )
@@ -3942,6 +3970,7 @@ mod tests {
                 in_reply_to: InteractionId(interaction_id),
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )
@@ -4113,6 +4142,7 @@ mod tests {
                 in_reply_to: InteractionId(interaction_id),
                 status: meerkat_core::ResponseStatus::Completed,
                 result: serde_json::json!({"ok": true}),
+                blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
         )
@@ -5307,6 +5337,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_core_send_hydrates_blob_refs_on_peer_response_before_transport() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("sender-response-blob-{suffix}");
+        let receiver_name = format!("receiver-response-blob-{suffix}");
+        let mut sender_runtime = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let blob_store: Arc<dyn BlobStore> = Arc::new(TestBlobStore::default());
+        let blob_ref = blob_store
+            .put_image("image/png", "aGVsbG8=")
+            .await
+            .expect("blob stored");
+        sender_runtime.set_blob_store(blob_store);
+        let sender = Arc::new(sender_runtime);
+        let peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        sender.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        CoreCommsRuntime::add_trusted_peer(
+            sender.as_ref(),
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        CoreCommsRuntime::add_trusted_peer(
+            &receiver,
+            trusted_descriptor(
+                &sender_name,
+                sender.public_key(),
+                &format!("inproc://{sender_name}"),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let interaction_id = Uuid::new_v4();
+        let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            peer_handle.as_ref(),
+            corr_id,
+        )
+        .expect("seed inbound request state");
+
+        let cmd = CommsCommand::PeerResponse {
+            blocks: Some(vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: blob_ref.blob_id,
+                },
+            }]),
+            to: peer_route(&receiver_name, receiver.public_key()),
+            in_reply_to: InteractionId(interaction_id),
+            status: meerkat_core::ResponseStatus::Completed,
+            result: serde_json::json!({"ok": true}),
+            handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
+        };
+
+        let receipt = CoreCommsRuntime::send(sender.as_ref(), cmd).await;
+        assert!(matches!(receipt, Ok(SendReceipt::PeerResponseSent { .. })));
+
+        let interactions = CoreCommsRuntime::drain_inbox_interactions(&receiver).await;
+        assert_eq!(interactions.len(), 1);
+        match &interactions[0].content {
+            meerkat_core::InteractionContent::Response { blocks, .. } => {
+                let blocks = blocks.as_ref().expect("received blocks");
+                assert!(matches!(
+                    &blocks[0],
+                    ContentBlock::Image {
+                        data: ImageData::Inline { data },
+                        ..
+                    } if data == "aGVsbG8="
+                ));
+            }
+            other => panic!("expected response interaction, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn test_core_send_fails_without_trusted_entry() {
         let suffix = Uuid::new_v4().simple().to_string();
         let sender_name = format!("sender-ipc-{suffix}");
@@ -6269,6 +6383,7 @@ mod tests {
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                         status: meerkat_core::ResponseStatus::Completed,
                         result: serde_json::json!({}),
+                        blocks: None,
                         handling_mode: None,
                     },
                 };

@@ -684,6 +684,14 @@ pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
 
 /// Optional block prefix for peer message inputs.
 pub(crate) fn peer_block_prefix_text(peer: &PeerInput) -> Option<String> {
+    if matches!(
+        peer.convention,
+        Some(PeerConvention::ResponseTerminal { .. })
+    ) && let Ok(Some(fact)) = peer_response_terminal_fact(peer)
+    {
+        return Some(fact.prompt_text());
+    }
+
     if matches!(peer.convention, Some(PeerConvention::Message))
         && let Some(prefix) = rendered_message_prefix(&peer.body)
     {
@@ -781,6 +789,7 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         input,
         Input::Peer(PeerInput {
             convention: Some(PeerConvention::ResponseTerminal { .. }),
+            blocks: None,
             ..
         })
     ) {
@@ -1031,6 +1040,53 @@ mod tests {
         };
         assert!(text.contains("from display-agent"));
         assert!(!text.contains(route_id));
+    }
+
+    #[test]
+    fn peer_response_terminal_with_blocks_projects_append_and_context() {
+        let route_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f2";
+        let request_id = "018f6f79-7a82-7c4e-a552-a3b86f9630f1";
+        let mut header = make_header();
+        header.source = InputOrigin::Peer {
+            peer_id: route_id.into(),
+            display_identity: Some("display-agent".into()),
+            runtime_id: None,
+        };
+        let input = Input::Peer(PeerInput {
+            header,
+            convention: Some(PeerConvention::ResponseTerminal {
+                request_id: request_id.into(),
+                status: ResponseTerminalStatus::Completed,
+            }),
+            body: String::new(),
+            payload: Some(serde_json::json!({"answer":"ok"})),
+            blocks: Some(vec![meerkat_core::types::ContentBlock::Image {
+                media_type: "image/jpeg".into(),
+                data: "abc".into(),
+            }]),
+            handling_mode: None,
+        });
+
+        let projection = runtime_input_projection_for_machine_batch(&input);
+        let append = projection.append.expect("conversation append");
+        let CoreRenderable::Blocks { blocks } = append.content else {
+            panic!("expected multimodal append");
+        };
+        assert!(matches!(
+            blocks.first(),
+            Some(meerkat_core::types::ContentBlock::Text { text })
+                if text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                    && text.contains("from display-agent")
+        ));
+        assert!(matches!(
+            blocks.get(1),
+            Some(meerkat_core::types::ContentBlock::Image { media_type, .. })
+                if media_type == "image/jpeg"
+        ));
+        assert!(
+            projection.context_append.is_some(),
+            "terminal response must still apply runtime-owned context"
+        );
     }
 
     #[test]

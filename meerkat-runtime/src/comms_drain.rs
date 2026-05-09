@@ -884,6 +884,7 @@ async fn send_bridge_response(
             in_reply_to: candidate.interaction.id,
             status,
             result,
+            blocks: None,
             handling_mode: None,
         })
         .await

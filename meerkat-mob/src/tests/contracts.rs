@@ -175,6 +175,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         in_reply_to: request_id,
         status: meerkat_core::ResponseStatus::Completed,
         result: serde_json::json!({"pong": true}),
+        blocks: None,
         handling_mode: None,
     };
     let resp_receipt = CoreCommsRuntime::send(receiver.as_ref(), response_cmd)
@@ -197,6 +198,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
             in_reply_to,
             status,
             result,
+            blocks: _,
         } => {
             assert_eq!(*in_reply_to, request_id);
             assert_eq!(*status, meerkat_core::ResponseStatus::Completed);
@@ -540,6 +542,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
             in_reply_to,
             status: meerkat_core::ResponseStatus::Accepted,
             result: serde_json::json!({"progress": true}),
+            blocks: None,
             handling_mode: None,
         },
     )
@@ -559,6 +562,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
             in_reply_to,
             status: meerkat_core::ResponseStatus::Completed,
             result: serde_json::json!({"done": true}),
+            blocks: None,
             handling_mode: None,
         },
     )

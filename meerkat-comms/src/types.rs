@@ -73,6 +73,8 @@ pub enum MessageKind {
         status: Status,
         result: JsonValue,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         handling_mode: Option<HandlingMode>,
     },
     /// Acknowledgment of message receipt.
@@ -259,6 +261,7 @@ mod tests {
             in_reply_to: id,
             status: Status::Completed,
             result: serde_json::json!({"approved": true}),
+            blocks: None,
             handling_mode: None,
         };
         if let MessageKind::Response {
@@ -333,6 +336,7 @@ mod tests {
                 in_reply_to: Uuid::new_v4(),
                 status: Status::Completed,
                 result: serde_json::json!(null),
+                blocks: None,
                 handling_mode: None,
             },
             MessageKind::Ack {

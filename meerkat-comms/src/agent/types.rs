@@ -199,6 +199,9 @@ pub enum CommsContent {
         status: CommsStatus,
         /// The result data.
         result: JsonValue,
+        /// Optional multimodal content blocks.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocks: Option<Vec<ContentBlock>>,
     },
 }
 
@@ -273,11 +276,13 @@ impl CommsMessage {
                 in_reply_to,
                 status,
                 result,
+                blocks,
                 ..
             } => CommsContent::Response {
                 in_reply_to: *in_reply_to,
                 status: (*status).into(),
                 result: result.clone(),
+                blocks: blocks.clone(),
             },
             MessageKind::Ack { .. } => return None,
         };
@@ -378,16 +383,23 @@ impl CommsMessage {
                 in_reply_to,
                 status,
                 result,
-            } => meerkat_core::format_peer_response_projection(
-                &self.from_peer,
-                in_reply_to,
-                match status {
-                    CommsStatus::Accepted => meerkat_core::ResponseStatus::Accepted,
-                    CommsStatus::Completed => meerkat_core::ResponseStatus::Completed,
-                    CommsStatus::Failed => meerkat_core::ResponseStatus::Failed,
-                },
-                result,
-            ),
+                blocks,
+            } => {
+                meerkat_core::format_peer_response_projection(
+                    &self.from_peer,
+                    in_reply_to,
+                    match status {
+                        CommsStatus::Accepted => meerkat_core::ResponseStatus::Accepted,
+                        CommsStatus::Completed => meerkat_core::ResponseStatus::Completed,
+                        CommsStatus::Failed => meerkat_core::ResponseStatus::Failed,
+                    },
+                    result,
+                ) + &blocks
+                    .as_ref()
+                    .filter(|blocks| !blocks.is_empty())
+                    .map(|blocks| format!("\n{}", meerkat_core::types::text_content(blocks)))
+                    .unwrap_or_default()
+            }
         }
     }
 }
@@ -482,6 +494,7 @@ mod tests {
             in_reply_to: Uuid::new_v4(),
             status: CommsStatus::Completed,
             result: serde_json::json!({"approved": true}),
+            blocks: None,
         };
     }
 
@@ -598,6 +611,7 @@ mod tests {
                 in_reply_to: orig_request_id,
                 status: crate::Status::Completed,
                 result: serde_json::json!({"approved": true}),
+                blocks: None,
                 handling_mode: None,
             },
         );
@@ -610,6 +624,7 @@ mod tests {
                 in_reply_to,
                 status,
                 result,
+                blocks: _,
             } => {
                 assert_eq!(in_reply_to, orig_request_id);
                 assert_eq!(status, CommsStatus::Completed);
@@ -760,6 +775,7 @@ mod tests {
                 in_reply_to,
                 status: CommsStatus::Completed,
                 result: serde_json::json!({"approved": true}),
+                blocks: None,
             },
         };
 

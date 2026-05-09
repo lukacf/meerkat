@@ -881,6 +881,7 @@ mod tests {
             in_reply_to,
             status: crate::types::Status::Completed,
             result: serde_json::json!({"ok": true}),
+            blocks: None,
             handling_mode: None,
         };
         envelope
@@ -1226,6 +1227,7 @@ mod tests {
             in_reply_to: Uuid::new_v4(),
             status: crate::types::Status::Completed,
             result: serde_json::json!({}),
+            blocks: None,
             handling_mode: None,
         };
 

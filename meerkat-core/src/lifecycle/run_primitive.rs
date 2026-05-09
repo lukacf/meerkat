@@ -1760,10 +1760,8 @@ impl RunPrimitive {
         if staged.boundary != RunApplyBoundary::RunStart {
             return Some("terminal peer-response apply intent requires RunStart boundary");
         }
-        if !staged.appends.is_empty() || staged.context_appends.is_empty() {
-            return Some(
-                "terminal peer-response apply intent requires context-only staged appends",
-            );
+        if staged.context_appends.is_empty() {
+            return Some("terminal peer-response apply intent requires a staged context append");
         }
         if staged
             .turn_metadata
@@ -1985,6 +1983,39 @@ mod tests {
         let p = RunPrimitive::StagedInput(StagedRunInput {
             boundary: RunApplyBoundary::RunStart,
             appends: vec![],
+            context_appends: vec![ConversationContextAppend {
+                key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
+                content: CoreRenderable::Text {
+                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                },
+            }],
+            contributing_input_ids: vec![InputId::new()],
+            turn_metadata: Some(RuntimeTurnMetadata {
+                execution_kind: Some(RuntimeExecutionKind::ContentTurn),
+                peer_response_terminal_apply_intent: Some(
+                    PeerResponseTerminalApplyIntent::AppendContextAndRun,
+                ),
+                ..Default::default()
+            }),
+        });
+
+        assert!(p.is_peer_response_terminal_context_and_run());
+        assert_eq!(p.peer_response_terminal_apply_intent_violation(), None);
+        assert!(!p.is_context_only_apply_without_turn());
+    }
+
+    #[test]
+    fn terminal_peer_response_with_conversation_append_keeps_context_and_run_intent() {
+        let p = RunPrimitive::StagedInput(StagedRunInput {
+            boundary: RunApplyBoundary::RunStart,
+            appends: vec![ConversationAppend {
+                role: ConversationAppendRole::User,
+                content: CoreRenderable::Blocks {
+                    blocks: vec![crate::types::ContentBlock::Text {
+                        text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                    }],
+                },
+            }],
             context_appends: vec![ConversationContextAppend {
                 key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
                 content: CoreRenderable::Text {

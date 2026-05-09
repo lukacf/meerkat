@@ -81,14 +81,11 @@ second surface-local execution loop.
 | `meerkat_mob_event_stream_close` | Close a previously opened mob event stream (mob feature) |
 | `meerkat_comms_send` | Send a canonical comms command to a session (comms feature) |
 | `meerkat_comms_peers` | List peers visible to a session (comms feature) |
-| `meerkat_realtime_open_info` | Issue a single-use bootstrap token for opening a realtime channel (realtime feature) |
-| `meerkat_realtime_status` | Read product-layer realtime channel status for a session or mob member (realtime feature) |
 
 <Note>
 Default `rkat-mcp` builds are driven by the crate feature set. The base/default
-tool surface includes core session/config/history/blob/skills tools, schedule
-tools, and `meerkat_realtime_open_info`. Mob tools and
-`meerkat_realtime_status` appear when the `mob` feature is compiled in.
+tool surface includes core session/config/history/blob/skills tools and
+schedule tools. Mob tools appear when the `mob` feature is compiled in.
 </Note>
 
 <Note>
@@ -97,19 +94,6 @@ When the `mob` feature is enabled, the public MCP host surface uses typed
 still agent-side and comes from composing a mob tools factory into
 `SessionBuildOptions.mob_tools`, which provides `mob_*` tools to the
 model. Public host MCP surfaces should not re-export that raw dispatcher.
-</Note>
-
-<Note>
-**Realtime attachment over MCP.** Realtime transport is driven by
-`ModelCapabilities.realtime` on the session's model; it attaches
-automatically when the session runs a realtime-capable model (e.g.
-`gpt-realtime-1.5`). The public MCP tool set exposes only the product-layer
-bootstrap and status surfaces (`meerkat_realtime_open_info` and
-`meerkat_realtime_status`) — there is no MCP attach/detach tool and no
-MCP realtime capabilities tool. Use RPC `realtime/capabilities` when an app
-needs the detailed product-layer capability projection. See the [Realtime
-guide](/guides/realtime) for the capability-driven model and the full
-attachment state machine.
 </Note>
 
 ## Use MCP servers as tools (client)

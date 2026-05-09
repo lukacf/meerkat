@@ -3,9 +3,8 @@
 use serde_json::value::RawValue;
 
 use meerkat_contracts::{
-    RuntimeAcceptOutcomeType, RuntimeAcceptResult, RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult, WireInputLifecycleState, WireInputState,
-    WireInputStateHistoryEntry, WireRealtimeAttachmentStatus, wire::runtime::WireInputPolicy,
+    RuntimeAcceptOutcomeType, RuntimeAcceptResult, WireInputLifecycleState, WireInputState,
+    WireInputStateHistoryEntry, wire::runtime::WireInputPolicy,
 };
 use meerkat_core::SessionId;
 use meerkat_runtime::service_ext::SessionServiceRuntimeExt;

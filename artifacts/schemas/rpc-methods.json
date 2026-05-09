@@ -337,28 +337,46 @@
       "name": "skills/list"
     },
     {
-      "description": "Get bootstrap metadata for opening a realtime channel",
-      "name": "realtime/open_info",
-      "params_type": "RealtimeOpenRequest",
-      "result_type": "RealtimeOpenInfo"
+      "description": "Open a live audio/text channel for a session",
+      "name": "live/open",
+      "params_type": "LiveOpenParams",
+      "result_type": "LiveOpenResult"
     },
     {
-      "description": "Get product-layer realtime channel status for a target",
-      "name": "realtime/status",
-      "params_type": "RealtimeStatusParams",
-      "result_type": "RealtimeStatusResult"
+      "description": "Get the status of a live channel",
+      "name": "live/status",
+      "params_type": "LiveChannelParams",
+      "result_type": "LiveStatusResult"
     },
     {
-      "description": "Get product-layer realtime capabilities for a target",
-      "name": "realtime/capabilities",
-      "params_type": "RealtimeCapabilitiesParams",
-      "result_type": "RealtimeCapabilitiesResult"
+      "description": "Close a live channel",
+      "name": "live/close",
+      "params_type": "LiveChannelParams",
+      "result_type": "Value"
     },
     {
-      "description": "Get a session's realtime attachment status",
-      "name": "session/realtime_attachment_status",
-      "params_type": "RuntimeRealtimeAttachmentStatusParams",
-      "result_type": "RuntimeRealtimeAttachmentStatusResult"
+      "description": "Send an input chunk (audio/text) to a live channel",
+      "name": "live/send_input",
+      "params_type": "LiveSendInputParams",
+      "result_type": "Value"
+    },
+    {
+      "description": "Commit any buffered input on a live channel",
+      "name": "live/commit_input",
+      "params_type": "LiveChannelParams",
+      "result_type": "Value"
+    },
+    {
+      "description": "Interrupt the in-progress assistant turn on a live channel",
+      "name": "live/interrupt",
+      "params_type": "LiveChannelParams",
+      "result_type": "Value"
+    },
+    {
+      "description": "Truncate the assistant output on a live channel at the client-tracked playback cursor",
+      "name": "live/truncate",
+      "params_type": "LiveTruncateParams",
+      "result_type": "Value"
     },
     {
       "description": "Create a mob from a definition",

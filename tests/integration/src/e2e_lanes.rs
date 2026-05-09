@@ -187,7 +187,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s54_shared_realm_mob_visibility, 54);
             scenario(e2e_smoke_s55_rpc_rest_callback_peer_storm_resume, 55);
             scenario(e2e_smoke_s71_live_adapter_channel_lifecycle_rpc_ws, 71);
-            scenario(e2e_smoke_s72_live_adapter_duplicate_session_rejection, 72);
+            scenario(e2e_smoke_s72_live_adapter_model_switch_continuity, 72);
             scenario(e2e_smoke_s73_cli_generate_image_openai_default, 73);
             scenario(e2e_smoke_s74_python_sdk_gemini_image_provider_params, 74);
             scenario(e2e_smoke_s75_typescript_sdk_openai_image_provider_params, 75);
@@ -3583,7 +3583,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
                 test_target: "smoke_shared_realm",
-                test_name: "e2e_scenario_72_live_adapter_duplicate_session_rejection",
+                test_name: "e2e_scenario_72_live_adapter_model_switch_continuity",
                 features: &[],
                 all_features: false,
             },

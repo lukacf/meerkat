@@ -43,13 +43,14 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
-  type RealtimeCapabilitiesResult,
-  type RealtimeOpenInfo,
-  type RealtimeOpenRequest,
-  type RealtimeStatusResult,
+  type LiveChannelParams,
+  type LiveOpenParams,
+  type LiveOpenResult,
+  type LiveSendInputParams,
+  type LiveStatusResult,
+  type LiveTruncateParams,
   type MobTurnStartParams,
   type MobRotateSupervisorResult,
-  type RuntimeRealtimeAttachmentStatusResult,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -1376,24 +1377,13 @@ export class MeerkatClient {
     error?: string;
     tokensUsed: number;
     isFinal: boolean;
-    liveAttachmentStatus?:
-      | "unattached"
-      | "intent_present_unbound"
-      | "binding_not_ready"
-      | "binding_ready"
-      | "replacement_pending"
-      | "reattach_required";
     peerConnectivity?: {
       reachablePeerCount: number;
       unknownPeerCount: number;
       unreachablePeers: Array<{ peer: string; reason?: string }>;
     };
     resolvedCapabilities?: ResolvedModelCapabilities;
-    /**
-     * Diagnostic bridge-session id for status/continuity only. Realtime
-     * callers open `RealtimeChannel.mobMember(...)`; the server resolves the
-     * current binding behind the stable mob-member target.
-     */
+    /** Diagnostic bridge-session id for status/continuity only. */
     currentSessionId?: string;
   }> {
     const result = await this.request("mob/member_status", {
@@ -1410,16 +1400,6 @@ export class MeerkatClient {
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       isFinal: Boolean(result.is_final),
-      liveAttachmentStatus:
-        typeof result.realtime_attachment_status === "string"
-          ? (result.realtime_attachment_status as
-              | "unattached"
-              | "intent_present_unbound"
-              | "binding_not_ready"
-              | "binding_ready"
-              | "replacement_pending"
-              | "reattach_required")
-          : undefined,
       peerConnectivity: rawConnectivity
         ? {
             reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -2253,21 +2233,6 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeRealtimeAttachmentStatus(
-    sessionId: string,
-  ): Promise<RuntimeRealtimeAttachmentStatusResult> {
-    const result = await this.request("session/realtime_attachment_status", {
-      session_id: sessionId,
-    });
-    if (typeof result.status !== "string" || result.status.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/realtime_attachment_status response: missing status",
-      );
-    }
-    return result as unknown as RuntimeRealtimeAttachmentStatusResult;
-  }
-
   /** Idempotent spawn: spawns or returns the existing member entry. */
   async mobEnsureMember(
     mobId: string,
@@ -2301,28 +2266,43 @@ export class MeerkatClient {
     });
   }
 
-  async liveOpen(
-    params: { session_id: string },
-  ): Promise<Record<string, unknown>> {
-    return await this.request("live/open", params);
+  // -- Live audio/text adapter (`live/*`) ---------------------------------
+  //
+  // Typed wrappers over the `live/*` JSON-RPC surface (gated by
+  // `rkat-rpc --live-ws`). Result types come from `meerkat-contracts`
+  // schemas regenerated into `./generated/types.ts`. See I52/I53.
+
+  async liveOpen(params: LiveOpenParams): Promise<LiveOpenResult> {
+    const result = await this.request("live/open", params as unknown as Record<string, unknown>);
+    return result as unknown as LiveOpenResult;
   }
 
-  async liveStatus(
-    params: { channel_id: string },
-  ): Promise<Record<string, unknown>> {
-    return await this.request("live/status", params);
+  async liveStatus(params: LiveChannelParams): Promise<LiveStatusResult> {
+    const result = await this.request(
+      "live/status",
+      params as unknown as Record<string, unknown>,
+    );
+    return result as unknown as LiveStatusResult;
   }
 
-  async liveClose(
-    params: { channel_id: string },
-  ): Promise<Record<string, unknown>> {
-    return await this.request("live/close", params);
+  async liveClose(params: LiveChannelParams): Promise<void> {
+    await this.request("live/close", params as unknown as Record<string, unknown>);
   }
 
-  async liveSendInput(
-    params: { channel_id: string; kind: string; [key: string]: unknown },
-  ): Promise<Record<string, unknown>> {
-    return await this.request("live/send_input", params);
+  async liveSendInput(params: LiveSendInputParams): Promise<void> {
+    await this.request("live/send_input", params as unknown as Record<string, unknown>);
+  }
+
+  async liveCommitInput(params: LiveChannelParams): Promise<void> {
+    await this.request("live/commit_input", params as unknown as Record<string, unknown>);
+  }
+
+  async liveInterrupt(params: LiveChannelParams): Promise<void> {
+    await this.request("live/interrupt", params as unknown as Record<string, unknown>);
+  }
+
+  async liveTruncate(params: LiveTruncateParams): Promise<void> {
+    await this.request("live/truncate", params as unknown as Record<string, unknown>);
   }
 
   // -- Auth + realm (Phase 4d) --------------------------------------------
@@ -3499,7 +3479,7 @@ export class MeerkatClient {
 
   private static buildArgs(legacy: boolean, options?: ConnectOptions): string[] {
     if (legacy) return ["rpc"];
-    const args: string[] = ["--realtime-ws", "127.0.0.1:0"];
+    const args: string[] = ["--live-ws", "127.0.0.1:0"];
     if (!options) return args;
     if (options.isolated) args.push("--isolated");
     if (options.realmId) args.push("--realm", options.realmId);

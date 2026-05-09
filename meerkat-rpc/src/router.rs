@@ -705,8 +705,17 @@ impl MethodRouter {
     }
 
     /// Attach a live WebSocket transport state for `live/open` token minting.
+    ///
+    /// Also closes A4/A5: the runtime's callback-backed tool dispatcher is
+    /// built and installed on the live host via `set_tool_dispatcher`. By the
+    /// time this runs (after `RpcServer::new_*` has called
+    /// `runtime.set_callback_channel`), the dispatcher is ready; if it isn't,
+    /// the host stays at `ToolCallSkipped { NoDispatcher }` (audited skip).
     pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
         self.live_adapter_host = Arc::clone(state.host());
+        if let Some(dispatcher) = self.runtime.live_tool_dispatcher() {
+            self.live_adapter_host.set_tool_dispatcher(dispatcher);
+        }
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
         self
@@ -1496,8 +1505,12 @@ impl MethodRouter {
                 )
                 .await
             }
+            // B16: live/* is only registered when `with_live_ws` was called.
+            // Without --live-ws, the router has no transport state and would
+            // hand out empty WS URLs/tokens — refuse the method instead of
+            // silently routing it through a broken handler.
             #[cfg(not(feature = "mini-surface"))]
-            "live/open" => {
+            "live/open" if self.live_ws_state.is_some() => {
                 handlers::live::handle_live_open(
                     id,
                     params,
@@ -1510,17 +1523,40 @@ impl MethodRouter {
                 .await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "live/status" => {
+            "live/status" if self.live_ws_state.is_some() => {
                 handlers::live::handle_live_status(id, params, &self.live_adapter_host).await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "live/close" => {
+            "live/close" if self.live_ws_state.is_some() => {
                 handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
             }
             #[cfg(not(feature = "mini-surface"))]
-            "live/send_input" => {
+            "live/send_input" if self.live_ws_state.is_some() => {
                 handlers::live::handle_live_send_input(id, params, &self.live_adapter_host).await
             }
+            // I50: surface the buffered-input commit verb. Same gating as the
+            // other live/* arms — without --live-ws the router has no
+            // transport state and the method falls through to METHOD_NOT_FOUND.
+            #[cfg(not(feature = "mini-surface"))]
+            "live/commit_input" if self.live_ws_state.is_some() => {
+                handlers::live::handle_live_commit_input(id, params, &self.live_adapter_host).await
+            }
+            // A7: explicit barge-in surface. Without these arms callers can
+            // only rely on provider-native VAD; with them, a client can
+            // signal interrupt directly and truncate an assistant item at a
+            // specific playback cursor.
+            #[cfg(not(feature = "mini-surface"))]
+            "live/interrupt" if self.live_ws_state.is_some() => {
+                handlers::live::handle_live_interrupt(id, params, &self.live_adapter_host).await
+            }
+            #[cfg(not(feature = "mini-surface"))]
+            "live/truncate" if self.live_ws_state.is_some() => {
+                handlers::live::handle_live_truncate(id, params, &self.live_adapter_host).await
+            }
+            // A7: no `live/playback_cursor` arm — playback is a client-side
+            // fact (jitter buffers, end-of-stream silence trim). Clients
+            // track the cursor locally and pass `audio_played_ms` into
+            // `live/truncate`. See the doc-comment in `handlers/live.rs`.
             #[cfg(not(feature = "mini-surface"))]
             "mcp/add" => handlers::mcp::handle_add(id, params, &self.runtime).await,
             #[cfg(not(feature = "mini-surface"))]

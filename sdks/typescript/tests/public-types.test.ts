@@ -8,9 +8,6 @@ import type {
   MobRotateSupervisorResult,
   MobTurnStartOptions,
   PeerCorrelationId,
-  RealtimeChannelOpenFrame,
-  RealtimeOpenInfo,
-  RealtimeProtocolVersion,
   PeerId,
   RunFailedEvent,
   SpawnManySpec,
@@ -255,43 +252,6 @@ type MobTurnStartNoUncoveredWireOptionKeys =
   AssertNever<MobTurnStartUncoveredWireOptionKeys>;
 const generatedMobTurnStartOptionCoverage: MobTurnStartNoUncoveredWireOptionKeys =
   null as never;
-
-const realtimeProtocolVersion: RealtimeProtocolVersion = "2";
-const realtimeOpenFrame: RealtimeChannelOpenFrame = {
-  open_token: "token-typed",
-  protocol_version: realtimeProtocolVersion,
-  role: "primary",
-  turning_mode: "provider_managed",
-};
-void realtimeOpenFrame;
-
-const realtimeOpenFrameWithUnknownProtocol: RealtimeChannelOpenFrame = {
-  open_token: "token-unknown",
-  // @ts-expect-error realtime protocol version truth is generated and typed.
-  protocol_version: "999",
-  role: "primary",
-  turning_mode: "provider_managed",
-};
-void realtimeOpenFrameWithUnknownProtocol;
-
-const realtimeOpenInfo: RealtimeOpenInfo = {
-  ws_url: "ws://127.0.0.1:4900/realtime/ws",
-  open_token: "token-info",
-  expires_at: "2026-04-15T12:00:00Z",
-  target: { type: "session_target", session_id: "session-typed" },
-  supported_protocol_versions: [realtimeProtocolVersion],
-  default_protocol_version: realtimeProtocolVersion,
-  capabilities: {
-    input_kinds: ["text"],
-    output_kinds: ["text"],
-    turning_modes: ["provider_managed"],
-    interrupt_supported: true,
-    transcript_supported: true,
-    tool_lifecycle_events_supported: false,
-    video_supported: false,
-  },
-};
-void realtimeOpenInfo;
 
 const publicMobTurnStartClient = new MeerkatClient();
 void publicMobTurnStartClient.mobTurnStart(

@@ -3413,21 +3413,6 @@ impl MobActor {
                 } => {
                     let _ = reply_tx.send(self.machine_projection_for_identity(&agent_identity));
                 }
-                MobCommand::CurrentRealtimeBinding {
-                    agent_identity,
-                    reply_tx,
-                } => {
-                    let dsl_identity = mob_dsl::AgentIdentity::from_domain(&agent_identity);
-                    let binding = self
-                        .dsl_authority
-                        .state
-                        .member_session_bindings
-                        .get(&dsl_identity)
-                        .and_then(|dsl_session_id| {
-                            meerkat_core::types::SessionId::parse(&dsl_session_id.0).ok()
-                        });
-                    let _ = reply_tx.send(binding);
-                }
                 MobCommand::Stop { reply_tx } => {
                     let result = match self.probe_command_admission(
                         mob_dsl::MobMachineInput::Stop,

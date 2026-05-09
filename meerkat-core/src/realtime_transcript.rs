@@ -12,6 +12,7 @@ use crate::types::{StopReason, Usage};
 pub const SESSION_REALTIME_TRANSCRIPT_STATE_KEY: &str = "realtime_transcript_state";
 
 /// Provider-neutral role for a realtime transcript item.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RealtimeTranscriptRole {
@@ -20,6 +21,7 @@ pub enum RealtimeTranscriptRole {
 }
 
 /// A typed, identity-bearing realtime transcript event consumed by the session.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RealtimeTranscriptEvent {

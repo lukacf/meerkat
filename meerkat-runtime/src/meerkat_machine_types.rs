@@ -612,7 +612,7 @@ pub enum MeerkatMachineRuntimeInternalReason {
     RunExecutionLifecycle,
     CancellationLifecycle,
     LiveTopologyReconfiguration,
-    RealtimeBindingLifecycle,
+    InteractionStreamLifecycle,
     CommsIngressLifecycle,
     SupervisorTrustLifecycle,
     PeerRequestLifecycle,
@@ -699,7 +699,7 @@ meerkat_machine_runtime_internal_inputs!(
     LiveTopologyReconfiguration => [
         CompleteUntilChangedSwitchTurnReconfigure,
     ],
-    RealtimeBindingLifecycle => [
+    InteractionStreamLifecycle => [
         InteractionStreamAttached,
         InteractionStreamClosedEarly,
         InteractionStreamCompleted,

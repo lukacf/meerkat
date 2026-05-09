@@ -17,6 +17,7 @@
 pub mod callback_dispatcher;
 pub mod error;
 pub mod handlers;
+pub mod live_projection_sink;
 pub mod protocol;
 pub mod router;
 pub mod secure_rpc;

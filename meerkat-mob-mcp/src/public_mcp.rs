@@ -2,10 +2,8 @@
 
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
-    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams,
-    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelTarget, RealtimeOpenRequest, RealtimeStatusParams, RealtimeStatusResult,
-    WireContentInput, WireMemberRef, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
+    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams, WireContentInput,
+    WireMemberRef, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
     WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
@@ -249,28 +247,8 @@ const fn default_limit() -> usize {
     100
 }
 
-/// W3-H: resolve a `RealtimeChannelTarget` to the concrete session id the
-/// RPC query should operate on. `SessionTarget` is valid only for standalone
-async fn realtime_status_payload(
-    _state: &Arc<MobMcpState>,
-    _params: RealtimeStatusParams,
-) -> Result<RealtimeStatusResult, McpToolError> {
-    // Realtime status is no longer DSL-owned (live-adapter MVP).
-    // Return a default closed status.
-    Ok(RealtimeStatusResult {
-        status: meerkat_contracts::RealtimeChannelStatus {
-            state: meerkat_contracts::RealtimeChannelState::Closed,
-            attempt_count: 0,
-            next_retry_at: None,
-            deadline_at: None,
-            reason: Some("realtime status is not available in this version".to_string()),
-        },
-    })
-}
-
 pub fn public_tool_names() -> &'static [&'static str] {
     &[
-        "meerkat_realtime_status",
         "meerkat_mob_create",
         "meerkat_mob_list",
         "meerkat_mob_status",
@@ -300,11 +278,6 @@ pub fn public_tool_names() -> &'static [&'static str] {
 
 pub fn public_tools_list() -> Vec<Value> {
     vec![
-        tool(
-            "meerkat_realtime_status",
-            "Get product-layer realtime channel status for a target.",
-            schema_for!(RealtimeStatusParams),
-        ),
         tool(
             "meerkat_mob_create",
             "Create a mob from a typed public definition.",
@@ -477,10 +450,6 @@ pub async fn handle_public_tools_call(
     arguments: &Value,
 ) -> Result<Value, McpToolError> {
     match name {
-        "meerkat_realtime_status" => {
-            let input: RealtimeStatusParams = parse_args(arguments)?;
-            Ok(json!(realtime_status_payload(state, input).await?))
-        }
         "meerkat_mob_create" => {
             let input: MobCreateParams = parse_args(arguments)?;
             let definition = decode_public_mob_definition(input.definition).map_err(|error| {

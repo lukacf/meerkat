@@ -462,12 +462,47 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
 
     if options.runtime_available {
         methods.extend([
-            RpcMethodDescriptor::basic("live/open", "Open a live audio/text channel for a session"),
-            RpcMethodDescriptor::basic("live/status", "Get the status of a live channel"),
-            RpcMethodDescriptor::basic("live/close", "Close a live channel"),
-            RpcMethodDescriptor::basic(
+            RpcMethodDescriptor::typed(
+                "live/open",
+                "Open a live audio/text channel for a session",
+                "LiveOpenParams",
+                "LiveOpenResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/status",
+                "Get the status of a live channel",
+                "LiveChannelParams",
+                "LiveStatusResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/close",
+                "Close a live channel",
+                "LiveChannelParams",
+                "Value",
+            ),
+            RpcMethodDescriptor::typed(
                 "live/send_input",
                 "Send an input chunk (audio/text) to a live channel",
+                "LiveSendInputParams",
+                "Value",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/commit_input",
+                "Commit any buffered input on a live channel",
+                "LiveChannelParams",
+                "Value",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/interrupt",
+                "Interrupt the in-progress assistant turn on a live channel",
+                "LiveChannelParams",
+                "Value",
+            ),
+            RpcMethodDescriptor::typed(
+                "live/truncate",
+                "Truncate the assistant output on a live channel at the client-tracked playback cursor",
+                "LiveTruncateParams",
+                "Value",
             ),
         ]);
     }

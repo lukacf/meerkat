@@ -1582,62 +1582,6 @@ impl MobMcpState {
             .ok_or_else(|| MobError::Internal(format!("mob not found: {mob_id}")))
     }
 
-    async fn resolve_standalone_realtime_session_target(
-        &self,
-        session_id: &str,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
-        let session_id = meerkat_core::types::SessionId::parse(session_id)
-            .map_err(|err| MobError::Internal(format!("invalid session target: {err}")))?;
-        if self.owns_live_bridge_session(&session_id).await
-            || self.owns_service_reported_bridge_session(&session_id).await
-            || self.owns_persisted_bridge_session(&session_id).await
-        {
-            return Err(MobError::Internal(format!(
-                "session target {session_id} is a mob-owned bridge session; use realtime target type 'mob_member' with mob_id and agent_identity"
-            )));
-        }
-        Ok(session_id)
-    }
-
-    /// W3-H: resolve a realtime channel target to the concrete session id.
-    /// `SessionTarget` is accepted only for standalone sessions; mob-owned
-    /// bridge sessions fail closed and must be addressed as `MobMember`.
-    /// `MobMember` resolves `(mob_id, agent_identity)` against the
-    /// MobMachine's canonical `member_session_bindings` map via the mob
-    /// handle — a single read through the authoritative source (dogma #1).
-    ///
-    /// Surfaces that receive a `RealtimeChannelTarget` from a caller route
-    /// through this resolver to get the concrete session id they need for
-    /// downstream runtime-adapter queries. Keeps each surface's MobMember
-    /// handling uniform.
-    pub async fn resolve_realtime_target_session(
-        &self,
-        target: &meerkat_contracts::RealtimeChannelTarget,
-    ) -> Result<meerkat_core::types::SessionId, MobError> {
-        match target {
-            meerkat_contracts::RealtimeChannelTarget::SessionTarget { session_id } => {
-                self.resolve_standalone_realtime_session_target(session_id)
-                    .await
-            }
-            meerkat_contracts::RealtimeChannelTarget::MobMember {
-                mob_id,
-                agent_identity,
-            } => {
-                let mob_id = MobId::from(mob_id.as_str());
-                let handle = self.handle_for(&mob_id).await?;
-                let identity = AgentIdentity::from(agent_identity.as_str());
-                handle
-                    .current_realtime_binding(identity.clone())
-                    .await?
-                    .ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "mob {mob_id} has no realtime binding for identity {identity}"
-                        ))
-                    })
-            }
-        }
-    }
-
     // ─── Realm profile CRUD ──────────────────────────────────────────
 
     fn require_realm_profile_store(
@@ -5578,56 +5522,6 @@ mod tests {
         let mobs = restored.mob_list().await;
         assert_eq!(mobs.len(), 1);
         assert_eq!(mobs[0].0, mob_id);
-    }
-
-    #[tokio::test]
-    async fn test_realtime_session_target_rejects_mob_bridge_session() {
-        let svc = Arc::new(MockSessionSvc::new());
-        let state = Arc::new(MobMcpState::new(svc));
-        let mob_id = state
-            .mob_create_definition(explicit_definition("realtime-target-guard"))
-            .await
-            .expect("create explicit mob");
-        state
-            .mob_spawn(
-                &mob_id,
-                ProfileName::from("worker"),
-                AgentIdentity::from("worker-1"),
-                Some(MobRuntimeMode::TurnDriven),
-                None,
-            )
-            .await
-            .expect("spawn worker");
-        let status = state
-            .mob_member_status(&mob_id, &AgentIdentity::from("worker-1"))
-            .await
-            .expect("member status");
-        let bridge_session_id = status
-            .current_session_id
-            .expect("member should expose diagnostic bridge session id");
-
-        let err = state
-            .resolve_realtime_target_session(
-                &meerkat_contracts::RealtimeChannelTarget::SessionTarget {
-                    session_id: bridge_session_id.to_string(),
-                },
-            )
-            .await
-            .expect_err("mob bridge sessions must not be routable through SessionTarget");
-        let message = err.to_string();
-        assert!(
-            message.contains("mob-owned bridge session") && message.contains("mob_member"),
-            "unexpected rejection: {message}"
-        );
-
-        let resolved = state
-            .resolve_realtime_target_session(&meerkat_contracts::RealtimeChannelTarget::MobMember {
-                mob_id: mob_id.to_string(),
-                agent_identity: "worker-1".to_string(),
-            })
-            .await
-            .expect("stable mob-member target should resolve through machine binding");
-        assert_eq!(resolved, bridge_session_id);
     }
 
     #[tokio::test]

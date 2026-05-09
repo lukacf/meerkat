@@ -56,6 +56,28 @@ struct Cli {
     /// Example: --live-ws 127.0.0.1:4900
     #[arg(long)]
     live_ws: Option<String>,
+    /// Scheme advertised in the `live/open` bootstrap URL: `ws` or `wss`.
+    ///
+    /// Defaults to `ws`. Use `wss` when the live listener is fronted by a
+    /// TLS-terminating proxy. The scheme is purely advertisement; the
+    /// actual `--live-ws` listener accepts plain WebSocket bytes.
+    #[arg(long, value_enum, default_value_t = LiveWsScheme::Ws)]
+    live_ws_scheme: LiveWsScheme,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LiveWsScheme {
+    Ws,
+    Wss,
+}
+
+impl LiveWsScheme {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ws => "ws",
+            Self::Wss => "wss",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -254,16 +276,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
+    // N74: only build the OpenAI realtime factory when --live-ws is configured;
+    // otherwise live/* is not exposed at all and the factory work is wasted.
+    // B15: when --live-ws IS set, factory build failure must fail at startup
+    // rather than leaving live/open exposed with no provider wired.
     let live_session_factory: Option<
         Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
-    > = match factory.build_openai_realtime_session_factory(&config).await {
-        Ok(f) => Some(f),
-        Err(err) => {
-            eprintln!(
-                "OpenAI realtime session factory unavailable; live channels will not connect to providers: {err}"
-            );
-            None
+    > = if cli.live_ws.is_some() {
+        match factory.build_openai_realtime_session_factory(&config).await {
+            Ok(f) => Some(f),
+            Err(err) => {
+                return Err(format!(
+                    "--live-ws is configured but the OpenAI realtime session factory \
+                     could not be built: {err}"
+                )
+                .into());
+            }
         }
+    } else {
+        None
     };
 
     let config_runtime = Arc::new(ConfigRuntime::new(
@@ -310,8 +341,26 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let live_ws = if let Some(ref live_ws_addr) = cli.live_ws {
         let listener = tokio::net::TcpListener::bind(live_ws_addr).await?;
         let actual_addr = listener.local_addr()?;
-        eprintln!("rkat-rpc live-ws listening on ws://{actual_addr}/live/ws");
-        let host = std::sync::Arc::new(meerkat_runtime::live_adapter_host::LiveAdapterHost::new());
+        eprintln!(
+            "rkat-rpc live-ws listening on ws://{actual_addr}{path} (advertised scheme: {scheme})",
+            path = meerkat_live::LIVE_WS_PATH,
+            scheme = cli.live_ws_scheme.as_str(),
+        );
+        // Wave-3: install the surface projection sink so adapter observations
+        // become canonical Meerkat semantic facts (A1-A6, A14). Without the
+        // sink, `apply_observation` only updates host status and projection
+        // becomes a silent no-op.
+        let projection_sink: std::sync::Arc<
+            dyn meerkat_runtime::live_adapter_host::LiveProjectionSink,
+        > = std::sync::Arc::new(
+            meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                &runtime,
+            )),
+        );
+        let host = std::sync::Arc::new(
+            meerkat_runtime::live_adapter_host::LiveAdapterHost::new()
+                .with_projection_sink(projection_sink),
+        );
         let ws_state = std::sync::Arc::new(meerkat_live::LiveWsState::new(host));
         let ws_state_clone = std::sync::Arc::clone(&ws_state);
         let handle = tokio::spawn(async move {
@@ -322,11 +371,15 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // N82: scheme is configurable via --live-ws-scheme (default `ws`).
+    // The actual listener is plaintext WebSocket; `wss` is for advertisement
+    // when a TLS-terminating proxy fronts the live listener.
+    let live_ws_scheme = cli.live_ws_scheme.as_str();
     let live_ws_config = live_ws
         .as_ref()
         .map(|(state, addr, _)| meerkat_rpc::LiveWsConfig {
             state: std::sync::Arc::clone(state),
-            base_url: format!("ws://{addr}"),
+            base_url: format!("{live_ws_scheme}://{addr}"),
             session_factory: live_session_factory.clone(),
         });
 

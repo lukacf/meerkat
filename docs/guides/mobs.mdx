@@ -328,13 +328,8 @@ Wildcard `"*"` matches any role.
 
 ---
 
-## Realtime attachment
-
-Each mob member runs in its own session, so realtime is enabled per-member by pointing a profile at a realtime-capable model (for example `gpt-realtime-1.5`). The runtime attaches and detaches the OpenAI Realtime transport automatically based on `ModelCapabilities.realtime` — there is no per-member attach/detach RPC. Use `session/realtime_attachment_status` with a member session ID to observe attachment state. See the [Realtime guide](/guides/realtime) for the capability-driven model, state machine, and live-topology reconfigure flow.
-
 ## See also
 
-- [Realtime guide](/guides/realtime) — per-member realtime audio attachment
 - [Examples: Mobs](/examples/mobs) — code examples across all surfaces
 - [Examples: Mobpack](/examples/mobpack) — portable deployment
 - [Examples: WASM](/examples/wasm) — browser deployment

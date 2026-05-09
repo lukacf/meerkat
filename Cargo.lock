@@ -2559,6 +2559,7 @@ name = "meerkat-core"
 version = "0.6.4"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "dirs",
  "futures",
@@ -2673,6 +2674,7 @@ dependencies = [
  "meerkat-runtime",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tracing",

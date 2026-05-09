@@ -114,6 +114,75 @@ fn pending_system_context_appends(
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
 
+/// Errors returned by [`SessionRuntime::precheck_live_open`].
+///
+/// These map onto well-known RPC error codes:
+///
+/// * `SessionLookup` — `INTERNAL_ERROR` if the session lookup fails for an
+///   unrelated reason; `INVALID_PARAMS` when the session is genuinely missing.
+/// * `ModelNotRealtime` — `INVALID_PARAMS`; the resolved model has no
+///   realtime capability and live transport must be refused.
+/// * `ProviderHasNoLiveAdapter` — `INTERNAL_ERROR`; we recognize the provider
+///   but no realtime factory is wired for it in this build (Wave 1 = OpenAI
+///   only). Distinguished from a missing realtime capability so the operator
+///   can tell "model unsupported by us" from "provider not yet wired".
+#[derive(Debug, thiserror::Error)]
+pub enum LiveOpenPrecheckError {
+    #[error("failed to resolve live session {session_id}: {source}")]
+    SessionLookup {
+        session_id: SessionId,
+        #[source]
+        source: SessionError,
+    },
+    #[error("model {model} (provider {provider}) does not support realtime")]
+    ModelNotRealtime {
+        model: String,
+        provider: &'static str,
+    },
+    #[error("provider {provider} has no live adapter wired in this build")]
+    ProviderHasNoLiveAdapter { provider: &'static str },
+}
+
+/// Apply the B19 (realtime-capability) and B18 (provider-supported) gates to
+/// a resolved LLM identity. Shared between the staged-session and live-session
+/// branches of `precheck_live_open` so both paths enforce identical contracts.
+fn precheck_identity(identity: &SessionLlmIdentity) -> Result<(), LiveOpenPrecheckError> {
+    let realtime_capable = meerkat_core::model_profile::capabilities::capabilities_for(
+        identity.provider,
+        &identity.model,
+    )
+    .map(|caps| caps.realtime)
+    .unwrap_or(false);
+    apply_precheck_gates(identity.provider, &identity.model, realtime_capable)
+}
+
+/// Pure gate-ordering helper: B19 (realtime capability) fires before B18
+/// (provider has live adapter). Split out from `precheck_identity` so unit
+/// tests can pin the B18 branch — the catalog cannot naturally produce a
+/// realtime-capable non-OpenAI row, so e2e never reaches `ProviderHasNoLiveAdapter`
+/// and a synthetic `realtime_capable: true` is the only way to assert the
+/// non-OpenAI rejection contract. Also documents the gate ordering as
+/// intentional: a non-realtime non-OpenAI session reports `ModelNotRealtime`
+/// (the more specific failure), not `ProviderHasNoLiveAdapter`.
+fn apply_precheck_gates(
+    provider: meerkat_core::Provider,
+    model: &str,
+    realtime_capable: bool,
+) -> Result<(), LiveOpenPrecheckError> {
+    if !realtime_capable {
+        return Err(LiveOpenPrecheckError::ModelNotRealtime {
+            model: model.to_string(),
+            provider: provider.as_str(),
+        });
+    }
+    if !matches!(provider, meerkat_core::Provider::OpenAI) {
+        return Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter {
+            provider: provider.as_str(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
     tokio::sync::oneshot::Receiver<Result<RunResult, SessionError>>;
@@ -3954,6 +4023,21 @@ impl SessionRuntime {
             return Ok(());
         }
 
+        // Wave-3 retry: deferred sessions live in `staged_sessions` until the
+        // first turn promotes them into the live service map. They are
+        // **not** in the persistent store yet, so jumping straight to
+        // `load_persisted_session` returns `None` and surfaces a spurious
+        // `NotFound` to the precheck path. Treat a staged session as
+        // "already in memory" — no recovery needed; the live service will
+        // materialize it when the first turn or `live/open` admits it.
+        // Without this short-circuit, the production `SqliteSessionStore`
+        // path that rkat-rpc uses would always reject deferred sessions
+        // even though `MemoryStore`-backed unit tests happily accept them
+        // (the unit-vs-prod divergence team-lead caught after Wave 3).
+        if self.staged_sessions.contains(session_id).await {
+            return Ok(());
+        }
+
         let session = self
             .load_persisted_session(session_id)
             .await
@@ -4027,44 +4111,80 @@ impl SessionRuntime {
     }
 
     /// Build a live open config for a session that may be deferred (no turns yet).
-    /// Falls back to reading the session from the store if the live path fails.
+    ///
+    /// B20: previously this method silently fell back to a degraded config with
+    /// empty history and empty visible tools when the rich session-projection
+    /// path failed. That fallback shape is invariant-violating — a live session
+    /// without its resolved tool set or system context would silently route
+    /// through providers as a clean-room session — so the open is now refused
+    /// rather than served with a degraded config. Callers receive the typed
+    /// projection error from `realtime_session_open_config`.
     pub async fn live_open_config_for_session(
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
     ) -> Result<RealtimeSessionOpenConfig, SessionError> {
-        match self
-            .realtime_session_open_config(session_id, turning_mode)
+        self.realtime_session_open_config(session_id, turning_mode)
             .await
-        {
-            Ok(config) => Ok(config),
-            Err(live_err) => {
-                tracing::warn!(
-                    session_id = %session_id,
-                    error = %live_err,
-                    "live open config from runtime failed; falling back to service read"
-                );
-                let session_info = self.read_session_rich(session_id).await.ok_or_else(|| {
-                    SessionError::NotFound {
-                        id: session_id.clone(),
-                    }
-                })?;
-                let provider = meerkat_core::Provider::from_name(&session_info.provider);
-                let identity = meerkat_core::SessionLlmIdentity {
-                    model: session_info.model,
-                    provider,
-                    self_hosted_server_id: None,
-                    provider_params: None,
-                    auth_binding: None,
-                };
-                Ok(RealtimeSessionOpenConfig::new(
-                    turning_mode,
-                    identity,
-                    vec![],
-                    vec![],
-                ))
-            }
+    }
+
+    /// Pre-flight checks for `live/open` before any infra is minted.
+    ///
+    /// B18: live/open must dispatch to a provider-specific realtime factory.
+    /// Wave 1 only ships the OpenAI factory; sessions resolved to any other
+    /// provider must be rejected with `NoLiveAdapter` rather than silently
+    /// routed through the OpenAI factory.
+    ///
+    /// B19: live/open must reject sessions whose resolved model has no
+    /// `realtime` capability in `meerkat_core::model_profile::capabilities`.
+    /// Without this, a non-realtime model would silently bind to a realtime
+    /// transport and the provider would reject the WebSocket handshake at
+    /// connect time, surfacing as an opaque adapter error.
+    ///
+    /// Wave-3 deferred-session bug: `live_session_llm_identity` only consults
+    /// the live-sessions map. Sessions created with `initial_turn: deferred`
+    /// live in `staged_sessions` until first turn or until
+    /// `recover_live_session_for_realtime_open` materializes them. Without the
+    /// recovery dance below, every deferred-session `live/open` precheck
+    /// returned `SessionLookup` (`INTERNAL_ERROR "session not found"`) before
+    /// the B18/B19 gates ever fired, breaking e2e scenarios 71/72. The
+    /// recover-then-`NotFound`-fallback pattern mirrors
+    /// `realtime_session_open_config` (lines 4030-4046) so deferred and live
+    /// sessions traverse the same materialization path.
+    pub async fn precheck_live_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), LiveOpenPrecheckError> {
+        let map_lookup_err = |err: SessionError| LiveOpenPrecheckError::SessionLookup {
+            session_id: session_id.clone(),
+            source: err,
+        };
+        // Wave-3 retry: deferred sessions live in `staged_sessions` until the
+        // first turn promotes them into the live service map. Reading from
+        // staged here lets the precheck gate fire on the resolved model and
+        // provider before any infra is minted, even though
+        // `live_session_llm_identity` would still return `NotFound` for the
+        // session.
+        if let Some(info) = self.staged_sessions.info(session_id).await {
+            return precheck_identity(&info.effective_llm_identity);
         }
+        self.recover_live_session_for_realtime_open(session_id)
+            .await
+            .map_err(map_lookup_err)?;
+        let identity = match self.service.live_session_llm_identity(session_id).await {
+            Ok(identity) => identity,
+            Err(SessionError::NotFound { .. }) => {
+                self.recover_live_session_for_realtime_open(session_id)
+                    .await
+                    .map_err(map_lookup_err)?;
+                self.service
+                    .live_session_llm_identity(session_id)
+                    .await
+                    .map_err(map_lookup_err)?
+            }
+            Err(other) => return Err(map_lookup_err(other)),
+        };
+        precheck_identity(&identity)
     }
 
     fn recovery_overrides_from_turn(
@@ -4117,6 +4237,17 @@ impl SessionRuntime {
                 vec![],
             )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
         )
+    }
+
+    /// Build a callback-backed tool dispatcher for the live-adapter host.
+    ///
+    /// Returns `None` until `set_callback_channel` has been called (which the
+    /// `RpcServer` constructor does). Callers (`MethodRouter::with_live_ws`)
+    /// invoke this after server construction and pass the dispatcher to
+    /// `LiveAdapterHost::set_tool_dispatcher` so live provider tool calls
+    /// route through Meerkat's callback-tool authority (A4/A5).
+    pub fn live_tool_dispatcher(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        self.recovery_external_tools()
     }
 
     fn recovery_error_to_rpc(error: SurfaceSessionRecoveryError) -> RpcError {
@@ -8631,6 +8762,118 @@ mod tests {
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
         );
+    }
+
+    /// B19 helper sanity: realtime capability lookup must round-trip the
+    /// catalogued `gpt-realtime*` rows as `realtime: true` and report any
+    /// non-realtime catalog entry as `realtime: false`. This guards the
+    /// `precheck_live_open` gate against silent catalog drift.
+    #[test]
+    fn realtime_capability_lookup_table() {
+        use meerkat_core::Provider;
+        use meerkat_core::model_profile::capabilities::capabilities_for;
+
+        let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime")
+            .expect("gpt-realtime should be present in the catalog");
+        assert!(
+            realtime.realtime,
+            "gpt-realtime is the canonical realtime alias; capability row must mark it realtime"
+        );
+
+        let realtime_15 = capabilities_for(Provider::OpenAI, "gpt-realtime-1.5")
+            .expect("gpt-realtime-1.5 should be present in the catalog");
+        assert!(realtime_15.realtime);
+
+        // Pick an arbitrary non-realtime OpenAI model from the catalog to
+        // confirm the negative path: Codex/standard chat models are not
+        // realtime-capable and must fail the precheck.
+        let codex = capabilities_for(Provider::OpenAI, "gpt-5.3-codex")
+            .expect("gpt-5.3-codex should be present in the catalog");
+        assert!(
+            !codex.realtime,
+            "non-realtime catalog entries must report realtime=false"
+        );
+
+        // Unknown model must return None — callers must treat None as
+        // "not realtime-capable" (precheck_live_open does this via
+        // `unwrap_or(false)`).
+        assert!(capabilities_for(Provider::OpenAI, "no-such-model").is_none());
+    }
+
+    /// B18 contract pin (non-OpenAI rejection).
+    ///
+    /// The B18 branch in `apply_precheck_gates` rejects realtime-capable
+    /// sessions whose provider is not OpenAI (the only realtime factory
+    /// wired in Wave 1). The catalog cannot naturally produce a
+    /// realtime-capable non-OpenAI capability row — every Gemini and
+    /// Anthropic row in `meerkat_core::model_profile::capabilities` has
+    /// `realtime: false` — so e2e tests never reach this branch and M73
+    /// surfaces `ModelNotRealtime` instead of `ProviderHasNoLiveAdapter`
+    /// even when the test exercises a Gemini provider.
+    ///
+    /// This unit test pins the contract directly: with a synthesized
+    /// `realtime_capable: true` for Gemini, the gate must fire B18 and
+    /// return `ProviderHasNoLiveAdapter`. If a future Wave wires a Gemini
+    /// realtime factory and flips this expectation, this test forces the
+    /// owner to update the gate explicitly rather than have the change slip
+    /// through silently.
+    #[test]
+    fn apply_precheck_gates_rejects_non_openai_realtime() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-live-hypothetical",
+            // Synthesized: the catalog cannot produce this combination, so
+            // we set the bool directly to reach the B18 branch.
+            true,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter { provider }) => {
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "expected ProviderHasNoLiveAdapter for realtime-capable Gemini, got {other:?}"
+            ),
+        }
+    }
+
+    /// B19-before-B18 gate ordering pin.
+    ///
+    /// When both gates would reject (non-realtime AND non-OpenAI), B19
+    /// (the more specific "model lacks realtime capability" failure) must
+    /// fire first. Documenting the ordering here prevents a future refactor
+    /// from silently swapping the branches and changing the public error
+    /// code surface from `INVALID_PARAMS` to `INTERNAL_ERROR` on the same
+    /// inputs.
+    #[test]
+    fn apply_precheck_gates_b19_fires_before_b18() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-flash-preview",
+            // Synthesized: matches the catalog reality (Gemini chat models
+            // are realtime: false). Without the explicit ordering check,
+            // a refactor could plausibly choose to reject on provider
+            // first; this test pins the contract.
+            false,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ModelNotRealtime { model, provider }) => {
+                assert_eq!(model, "gemini-3-flash-preview");
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "B19 must fire before B18 — expected ModelNotRealtime for non-realtime Gemini, \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    /// Positive control for the gate helper: realtime-capable OpenAI must
+    /// pass both gates. Catches a regression where the helper accidentally
+    /// rejects all inputs after a refactor.
+    #[test]
+    fn apply_precheck_gates_accepts_realtime_openai() {
+        apply_precheck_gates(meerkat_core::Provider::OpenAI, "gpt-realtime", true)
+            .expect("realtime-capable OpenAI must pass both gates");
     }
 
     #[test]
@@ -19199,6 +19442,94 @@ mod tests {
         assert!(!capabilities.image_input);
         assert!(!capabilities.image_tool_results);
         assert!(!capabilities.web_search);
+    }
+
+    /// Wave-3 regression: a deferred session created with no first turn lives
+    /// in `staged_sessions` and is **not** in the live service map, **not** in
+    /// the persistent store. `precheck_live_open` must read identity directly
+    /// from staging in that case; otherwise the live-map miss surfaces as
+    /// `SessionLookup` (`INTERNAL_ERROR "session not found"`) before the B18
+    /// (provider) and B19 (realtime-capability) gates can fire — the
+    /// production-shape failure mode that the original Wave-3 fix didn't
+    /// catch (the early `recover_live_session_for_realtime_open` dance only
+    /// helped when the session was already persisted).
+    ///
+    /// To make sure this regression test exercises the production-shaped seam
+    /// rather than a `MemoryStore` happy path, we assert before the precheck
+    /// that the session is in `staged_sessions` and **not** yet in the live
+    /// service map. That mirrors how `rkat-rpc` lands a deferred session:
+    /// staged-only until the first turn promotes it.
+    #[tokio::test]
+    async fn precheck_live_open_recovers_deferred_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let mut build = AgentBuildConfig::new("gpt-realtime");
+        build.provider = Some(meerkat_core::Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session for deferred OpenAI realtime build");
+
+        // Production-shape pre-assertion: deferred session must be staged-only.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet — \
+             otherwise the precheck staged-branch is not exercised"
+        );
+
+        runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect("deferred realtime session must pass precheck via staged branch");
+    }
+
+    #[tokio::test]
+    async fn precheck_live_open_rejects_deferred_non_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        // claude-sonnet-4-5 is catalogued with `realtime: false`. The
+        // staged branch of `precheck_live_open` must read the identity from
+        // staging and the B19 model-capability gate must reject it with a
+        // typed `ModelNotRealtime` — not `SessionLookup`. Asserting on the
+        // typed variant guards against a regression where the staged read
+        // silently swallows the gate error.
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session for deferred non-realtime build");
+
+        // Production-shape pre-assertion: deferred non-realtime session must
+        // also be staged-only, so the gate test exercises the staged branch.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet"
+        );
+
+        let err = runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect_err("non-realtime model must be rejected by precheck");
+        assert!(
+            matches!(err, LiveOpenPrecheckError::ModelNotRealtime { .. }),
+            "expected ModelNotRealtime, got {err:?}"
+        );
     }
 
     #[tokio::test]

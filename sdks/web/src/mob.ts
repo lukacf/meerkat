@@ -591,11 +591,6 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
     'current_session_id',
     'Invalid mob member_status response: current_session_id must be string',
   );
-  const realtimeAttachmentStatus = optionalStringField(
-    snapshot,
-    'realtime_attachment_status',
-    'Invalid mob member_status response: realtime_attachment_status must be string',
-  );
   const result: MobMemberSnapshot = {
     status: parseWireMobMemberStatus(
       snapshot.status,
@@ -635,9 +630,6 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
   };
   if (currentSessionId !== undefined) {
     result.current_session_id = currentSessionId;
-  }
-  if (realtimeAttachmentStatus !== undefined) {
-    result.realtime_attachment_status = realtimeAttachmentStatus;
   }
   const resolvedCapabilities = parseResolvedModelCapabilities(
     snapshot.resolved_capabilities,

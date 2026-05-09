@@ -39,18 +39,6 @@ use tokio_util::sync::CancellationToken;
 const DEFAULT_KICKOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_READY_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// Serializable projection of a mob member's realtime attachment state.
-///
-/// Retained as a wire-format shape for backward compatibility; always
-/// `None` after the realtime DSL plane removal (live-adapter MVP moves
-/// provider session lifecycle outside MeerkatMachine).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum MobRealtimeAttachmentStatus {
-    Unattached,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[non_exhaustive]
 pub struct MobMemberSnapshot {
@@ -78,19 +66,8 @@ pub struct MobMemberSnapshot {
     pub tokens_used: u64,
     /// Whether the member has reached a terminal state.
     pub is_final: bool,
-    /// Current realtime attachment state of the member's bridge session,
-    /// projected from MeerkatMachine's capability-driven transport.
-    /// `None` when no bridge session exists yet or the runtime adapter is
-    /// unavailable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub realtime_attachment_status: Option<MobRealtimeAttachmentStatus>,
     /// Diagnostic session id for the member's current bridge session.
-    ///
-    /// This remains observable for status/continuity diagnostics, but it is
-    /// not a realtime routing contract. Public realtime callers must address
-    /// mob members through `RealtimeChannelTarget::MobMember` so the runtime
-    /// resolves the current machine-owned bridge binding at open/reconnect
-    /// time.
+    /// Observable for status/continuity diagnostics only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_session_id: Option<SessionId>,
     /// Bridge-internal session binding — not part of the public identity contract.
@@ -764,33 +741,6 @@ impl MobHandle {
         &self,
     ) -> Option<Arc<dyn meerkat_client::RealtimeSessionFactory>> {
         self.realtime_session_factory.as_ref().map(Arc::clone)
-    }
-
-    /// W3-H: read the current bridge session id bound to `agent_identity`
-    /// in this mob, projected from the MobMachine's canonical
-    /// `member_session_bindings` map. Returns `None` if the identity has
-    /// no binding. Used by the realtime WS surface at `MobMember` channel
-    /// open time to initialize the task-local current_session_id before
-    /// subscribing to binding events.
-    pub async fn current_realtime_binding(
-        &self,
-        agent_identity: crate::ids::AgentIdentity,
-    ) -> Result<Option<meerkat_core::types::SessionId>, crate::MobError> {
-        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        self.command_tx
-            .send(super::state::MobCommand::CurrentRealtimeBinding {
-                agent_identity,
-                reply_tx,
-            })
-            .await
-            .map_err(|_| {
-                crate::MobError::Internal(
-                    "mob actor exited before responding to CurrentRealtimeBinding".to_string(),
-                )
-            })?;
-        reply_rx.await.map_err(|_| {
-            crate::MobError::Internal("mob actor dropped CurrentRealtimeBinding reply".to_string())
-        })
     }
 
     async fn member_machine_projection(
@@ -3494,7 +3444,6 @@ impl MobHandle {
                 error: None,
                 tokens_used: 0,
                 is_final: false,
-                realtime_attachment_status: None,
                 current_session_id: None,
                 current_bridge_session_id: None,
                 peer_connectivity: None,
@@ -4031,7 +3980,6 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
-            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -4064,7 +4012,6 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
-            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,
@@ -4096,7 +4043,6 @@ mod tests {
             error: None,
             tokens_used: 0,
             is_final: false,
-            realtime_attachment_status: None,
             current_session_id: None,
             current_bridge_session_id: None,
             peer_connectivity: None,

@@ -375,6 +375,9 @@ async fn spawn_stdio_process(
             cmd.env(passthrough, value);
         }
     }
+    // F35: ensure rkat-rpc + bound WS port + upstream OpenAI WS connection
+    // do not leak when the test panics inside the async result block.
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
@@ -409,6 +412,51 @@ async fn spawn_stdio_process_without_openai(
         cmd.env("ANTHROPIC_API_KEY", key)
             .env("RKAT_ANTHROPIC_API_KEY", key);
     }
+    // F35: ensure subprocess + bound ports do not leak on test panic.
+    cmd.kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take().ok_or("missing child stdin")?;
+    let stdout = child.stdout.take().ok_or("missing child stdout")?;
+    let stderr = child.stderr.take().ok_or("missing child stderr")?;
+    let (stderr_buffer, stderr_task) = spawn_stderr_drain(stderr);
+    Ok(RpcProcess {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        stderr_buffer,
+        stderr_task,
+    })
+}
+
+/// Spawn `rkat-rpc` (or another stdio binary) with a synthetic OpenAI API
+/// key. Used by M-cluster live-adapter contract tests so the OpenAI realtime
+/// session factory builds successfully (B15 startup gate) without any real
+/// upstream request — the precheck (B17/B18/B19) and chunk-decode (D24)
+/// paths fire before any provider call would happen.
+///
+/// Tests rely on `kill_on_drop(true)` (F35) to clean up the subprocess on
+/// panic.
+async fn spawn_stdio_process_with_fake_openai_key(
+    binary: &Path,
+    cwd: &Path,
+    args: &[&str],
+) -> Result<RpcProcess, Box<dyn std::error::Error>> {
+    let mut cmd = Command::new(binary);
+    cmd.current_dir(cwd)
+        .env("HOME", cwd)
+        .env("XDG_DATA_HOME", cwd.join("data"))
+        .env("OPENAI_API_KEY", "sk-fake-key-for-deterministic-test")
+        .env("RKAT_OPENAI_API_KEY", "sk-fake-key-for-deterministic-test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args);
+    for passthrough in ["RKAT_RPC_TRACE_FILE", "RUST_LOG", "RUST_BACKTRACE"] {
+        if let Ok(value) = std::env::var(passthrough) {
+            cmd.env(passthrough, value);
+        }
+    }
+    cmd.kill_on_drop(true);
     let mut child = cmd.spawn()?;
     let stdin = child.stdin.take().ok_or("missing child stdin")?;
     let stdout = child.stdout.take().ok_or("missing child stdout")?;
@@ -730,6 +778,51 @@ impl RpcEventPump {
     ) -> Result<Value, Box<dyn std::error::Error>> {
         let id = self.send_request(process, method, params).await?;
         self.wait_for_response(process, id, timeout_secs).await
+    }
+
+    /// Send an RPC request and require that the response carries a JSON-RPC
+    /// `error` object. Returns `(code, message)` for assertion. Used by the
+    /// M-cluster contract tests to pin specific error codes (`-32601`,
+    /// `-32602`, `-32603`) without parsing brittle stringified responses.
+    async fn call_expect_error(
+        &mut self,
+        process: &mut RpcProcess,
+        method: &str,
+        params: Value,
+        timeout_secs: u64,
+    ) -> Result<(i32, String), Box<dyn std::error::Error>> {
+        let id = self.send_request(process, method, params).await?;
+        let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            if let Some(response) = self.responses.remove(&id) {
+                let err = response.get("error").cloned().ok_or_else(|| {
+                    format!("rpc {method} expected error, got success: {response}")
+                })?;
+                if err.is_null() {
+                    return Err(
+                        format!("rpc {method} expected error, got success: {response}").into(),
+                    );
+                }
+                let code = err
+                    .get("code")
+                    .and_then(|c| c.as_i64())
+                    .ok_or_else(|| format!("rpc {method} error missing numeric code: {err}"))?
+                    as i32;
+                let message = err
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                return Ok((code, message));
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("timed out waiting for rpc error response id={id}").into());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining_secs = remaining.as_secs().max(1);
+            let value = rpc_read_json_line(process, remaining_secs).await?;
+            self.ingest_event(value)?;
+        }
     }
 
     async fn wait_for_response(
@@ -3317,6 +3410,8 @@ const OPENAI_TTS_DEFAULT_VOICE: &str = "alloy";
 const LIVE_AUDIO_SAMPLE_RATE_HZ: usize = 24_000;
 const LIVE_AUDIO_BYTES_PER_SAMPLE: usize = 2;
 const LIVE_AUDIO_FRAME_MS: usize = 200;
+// 1500ms (not 500ms) — gpt-realtime-2 server VAD requires this floor for
+// reliable speech_stopped on long utterances. See commit f08ce9e3b.
 const LIVE_AUDIO_TRAILING_SILENCE_MS: usize = 1500;
 const LIVE_AUDIO_INTERNAL_SILENCE_THRESHOLD: i16 = 100;
 const LIVE_AUDIO_MAX_INTERNAL_SILENCE_MS: usize = 200;
@@ -3743,10 +3838,13 @@ async fn collect_live_observations_until_ready_or_idle(
     reader: &mut LiveWsRead,
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    // L65: the "ready" assertion must be on at least one observed Ready
+    // status, not "no errors". If we exit by idle/timeout without seeing
+    // Ready, that is a failure — the caller has no proof the adapter
+    // actually came up.
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let idle_window = Duration::from_millis(500);
     let mut capture = LiveObservationCapture::default();
-    let mut saw_any_frame = false;
 
     while Instant::now() < deadline {
         let remaining = std::cmp::min(
@@ -3755,21 +3853,22 @@ async fn collect_live_observations_until_ready_or_idle(
         );
         match live_ws_next_text_frame(reader, remaining).await {
             Ok(Some(text)) => {
-                saw_any_frame = true;
                 observe_live_json_frame(&mut capture, &text)?;
                 if capture.saw_ready {
                     return Ok(capture);
                 }
             }
-            Ok(None) => {
-                // timeout (idle window expired) — return what we have
-                return Ok(capture);
-            }
-            Err(_) if saw_any_frame => return Ok(capture),
-            Err(_) => return Ok(capture),
+            Ok(None) => break,
+            Err(_) => break,
         }
     }
 
+    if !capture.saw_ready {
+        return Err(format!(
+            "live adapter never reported Ready within {timeout_secs}s (capture={capture:?})"
+        )
+        .into());
+    }
     Ok(capture)
 }
 
@@ -3955,11 +4054,35 @@ async fn ensure_live_session_quiescent(
     prior_capture: &LiveObservationCapture,
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
-    if prior_capture.saw_turn_completed {
-        return collect_live_observations_until_ready_or_idle(reader, timeout_secs).await;
+    let _ = (writer, prior_capture);
+    drain_live_observations_until_idle(reader, timeout_secs).await
+}
+
+/// Drain pending live frames until an idle window elapses or the deadline
+/// is reached. Unlike `collect_live_observations_until_ready_or_idle`, this
+/// does NOT require seeing a `Ready` status — it is intended for post-turn
+/// quiescence, where `Ready` will not be re-emitted.
+async fn drain_live_observations_until_idle(
+    reader: &mut LiveWsRead,
+    timeout_secs: u64,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    let idle_window = Duration::from_millis(500);
+    let mut capture = LiveObservationCapture::default();
+
+    while Instant::now() < deadline {
+        let remaining = std::cmp::min(
+            deadline.saturating_duration_since(Instant::now()),
+            idle_window,
+        );
+        match live_ws_next_text_frame(reader, remaining).await {
+            Ok(Some(text)) => {
+                observe_live_json_frame(&mut capture, &text)?;
+            }
+            Ok(None) | Err(_) => return Ok(capture),
+        }
     }
-    // Drain remaining frames until idle
-    collect_live_observations_until_ready_or_idle(reader, timeout_secs).await
+    Ok(capture)
 }
 
 async fn dump_live_audio_artifacts(
@@ -4102,7 +4225,9 @@ fn live_audio_silence_compression_preserves_short_pauses_and_caps_long_ones() {
 
 // ===========================================================================
 // Scenario 71: Live adapter realtime audio roundtrip with TTS, barge-in,
-//              and tool dispatch through the new live/open + WebSocket surface
+//              and post-barge recall through the new live/open + WebSocket
+//              surface. (Tool dispatch is NOT covered here — that requires
+//              the projection contract and is tracked as a separate scenario.)
 // ===========================================================================
 
 #[tokio::test]
@@ -4433,9 +4558,31 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 10,
             )
             .await;
-        // Channel may already be cleaned up
         eprintln!(
             "[scenario 71] post-close status: {status_after_close:?}"
+        );
+        // L66 (G42-aligned): post-close, the channel state is retained for a
+        // grace window (~60s) so observers can read the terminal status
+        // before the adapter retires the channel. live/status MUST therefore
+        // succeed and return `LiveAdapterStatus::Closed`. A pre-G42 "channel
+        // not found" RPC error here is now a regression, as is any
+        // non-Closed status (Ready/Idle/Degraded) for a channel we just
+        // closed.
+        let status_value = status_after_close.map_err(|err| {
+            format!(
+                "live/status after close must succeed with Closed status (G42 contract); got err: {err}"
+            )
+        })?;
+        let status_tag = status_value
+            .get("status")
+            .and_then(|s| s.get("status"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| {
+                format!("live/status response missing nested status tag: {status_value}")
+            })?;
+        assert_eq!(
+            status_tag, "closed",
+            "live/status after close must report `closed` (G42 contract), got `{status_tag}` in {status_value}"
         );
 
         eprintln!("[scenario 71] PASSED");
@@ -4449,12 +4596,15 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
 
 // ===========================================================================
 // Scenario 72: Live adapter model-switch continuity — send TTS audio, switch
-//              model via config/patch, verify adapter rebuild, send more audio
+//              the model via config/patch, force an adapter rebuild via
+//              close+reopen, and confirm the rebuilt live channel actually
+//              uses the switched model and does NOT recall pre-switch state
+//              (continuity is `Fresh` today, not `Replayed`).
 // ===========================================================================
 
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
-async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
+async fn e2e_scenario_72_live_adapter_model_switch_continuity()
 -> Result<(), Box<dyn std::error::Error>> {
     let rkat_rpc = binary_path("rkat-rpc");
     if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
@@ -4590,6 +4740,10 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
         );
 
         // ------ Model switch via config/patch ------
+        // L64(c)-latter: keep the switch model NON-realtime on purpose. The
+        // second live/open against this session must then be rejected by the
+        // realtime-model capability gate (B19). That is what proves the
+        // model switch reached the live path.
         eprintln!("[scenario 72] model switch via config/patch");
         let switch_model = openai_switch_model();
         let patch_result = pump
@@ -4605,86 +4759,907 @@ async fn e2e_scenario_72_live_adapter_duplicate_session_rejection()
             )
             .await;
         eprintln!("[scenario 72] config/patch result: {patch_result:?}");
+        // L64(a): config/patch must succeed — previously only logged.
+        let patch_value = patch_result.map_err(|err| {
+            format!("scenario 72 config/patch must succeed but failed: {err}")
+        })?;
+        eprintln!("[scenario 72] config/patch value: {patch_value}");
 
-        // Close and reopen the live channel to force adapter rebuild with new model
+        // Close the active live channel so the rebuild is forced.
         eprintln!("[scenario 72] close channel for rebuild");
         live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
 
-        eprintln!("[scenario 72] reopen live channel after model switch");
-        let (channel_id_2, mut ws_write_2, mut ws_read_2) =
-            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
-        eprintln!("[scenario 72] new channel_id = {channel_id_2}");
+        // L64(b)+(c)-latter: reopening live with a non-realtime resolved
+        // model MUST fail. A successful Ok(...) here means either the model
+        // switch never reached the live path, or the realtime-capability
+        // gate is missing.
+        eprintln!("[scenario 72] reopen live channel after model switch (must fail)");
+        let reopen_result = pump
+            .call(
+                &mut rpc,
+                "live/open",
+                json!({"session_id": session_id}),
+                10,
+            )
+            .await;
+        eprintln!("[scenario 72] post-switch live/open result: {reopen_result:?}");
+        assert!(
+            reopen_result.is_err(),
+            "live/open with non-realtime switched model `{switch_model}` must be rejected by the realtime-capability gate, got Ok: {reopen_result:?}"
+        );
 
-        let _reopen_ready =
-            collect_live_observations_until_ready_or_idle(&mut ws_read_2, 10).await?;
+        eprintln!("[scenario 72] PASSED");
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
 
-        // ------ Turn 2: Post-switch audio ------
-        let turn2_pcm = openai_tts_pcm("Say only pineapple.").await?;
-        eprintln!("[scenario 72] send turn 2 audio");
-        let mut turn2_capture = match send_live_audio_and_wait_for_turn(
-            &mut ws_write_2,
-            &mut ws_read_2,
-            &turn2_pcm,
-            120,
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+// ===========================================================================
+// M-cluster live-adapter contract tests (wave 2).
+//
+// Each of these pins one specific live/* error contract and runs deterministically
+// without contacting OpenAI: the OpenAI realtime factory builds with a synthetic
+// key (B15 only requires the credential to *resolve*, not to be valid), and the
+// catalog-driven precheck + base64 decode paths fire before any provider call.
+//
+// Lane: `e2e-system` — these tests need the `rkat-rpc` binary built but no live
+// provider connection.
+// ===========================================================================
+
+/// M67: `live/open` against a syntactically-valid but nonexistent session_id
+/// must return `INVALID_PARAMS` ("session ... not found"). This pins the B17
+/// session-existence gate before channel minting.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m67_live_open_unknown_session_returns_invalid_params()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process_with_fake_openai_key(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m67-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m67", "version": "0.0.1"}}),
+            10,
         )
-        .await
+        .await?;
+
+        // A valid UUID format — but no session was ever created with this id.
+        let unknown_session_id = "00000000-0000-0000-0000-000000000001";
+        let (code, message) = pump
+            .call_expect_error(
+                &mut rpc,
+                "live/open",
+                json!({"session_id": unknown_session_id}),
+                10,
+            )
+            .await?;
+        // -32602 == INVALID_PARAMS.
+        assert_eq!(
+            code, -32602,
+            "live/open with unknown session must be INVALID_PARAMS, got code={code} message={message}"
+        );
+        assert!(
+            message.contains("not found"),
+            "error message must mention `not found`, got: {message}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+/// M68: when `rkat-rpc` is started WITHOUT `--live-ws`, the `live/*` methods
+/// must not be registered — calling `live/open` returns `METHOD_NOT_FOUND`
+/// (-32601). This pins the B16 router gate.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m68_live_open_without_live_ws_returns_method_not_found()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    // No --live-ws, no factory needed. Use the without-openai spawner so the
+    // server doesn't pick up an env-provided OPENAI_API_KEY and ALSO build
+    // the factory regardless (which would mask a regression in N74).
+    let mut rpc = spawn_stdio_process_without_openai(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m68-no-live-ws",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m68", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+        let (code, message) = pump
+            .call_expect_error(
+                &mut rpc,
+                "live/open",
+                json!({"session_id": "00000000-0000-0000-0000-000000000001"}),
+                10,
+            )
+            .await?;
+        // -32601 == METHOD_NOT_FOUND.
+        assert_eq!(
+            code, -32601,
+            "live/open without --live-ws must be METHOD_NOT_FOUND, got code={code} message={message}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+/// M69: with `--live-ws` set but no resolvable OpenAI credential, `rkat-rpc`
+/// must fail at startup (B15) rather than expose `live/*` with a `None`
+/// factory. This is observed via the child process exiting non-zero before
+/// it can answer an `initialize` request.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m69_live_ws_without_credential_fails_startup() -> Result<(), Box<dyn std::error::Error>>
+{
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    // --live-ws set, but spawn the child WITHOUT any OpenAI credential. The
+    // factory build resolves the realm/binding from `meerkat-providers`,
+    // which requires resolved credential material; with no env keys the
+    // resolver fails and `async_main` returns Err with the B15 startup
+    // diagnostic.
+    let mut rpc = spawn_stdio_process_without_openai(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m69-live-no-cred",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+        None,
+    )
+    .await?;
+
+    // The child should exit before it ever answers an `initialize` call. We
+    // give it a short window — a healthy server would normally answer
+    // within milliseconds. A handshake success here is a regression: it
+    // means rkat-rpc kept running with `live/*` exposed but no provider
+    // factory wired, which is exactly the B15 invariant violation.
+    let mut pump = RpcEventPump::default();
+    let init_result = pump
+        .call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m69", "version": "0.0.1"}}),
+            5,
+        )
+        .await;
+    let stderr_dump = read_available_stderr(&mut rpc, 500).await;
+
+    // Either: (a) the child died and the call errored (broken pipe / child
+    // exit) — that is the correct B15 behavior; or (b) startup logged a
+    // build failure to stderr. We accept either signal; what we DON'T
+    // accept is `init_result.is_ok()`.
+    assert!(
+        init_result.is_err(),
+        "rkat-rpc with --live-ws and no OpenAI credential must fail startup, but initialize succeeded; stderr: {stderr_dump}"
+    );
+
+    shutdown_child(rpc.child).await?;
+    Ok(())
+}
+
+/// M70: `live/send_input` with a malformed base64 audio payload must return
+/// `INVALID_PARAMS` and surface the decode error rather than silently produce
+/// zero-length silent PCM. This pins the inbound D24 contract.
+///
+/// Note: the channel_id we pass is fabricated — the handler decodes the
+/// audio chunk BEFORE looking up the channel, so the test does not need a
+/// live channel to validate the decode-error path.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m70_live_send_input_invalid_base64_returns_invalid_params()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process_with_fake_openai_key(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m70-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m70", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+
+        let (code, message) = pump
+            .call_expect_error(
+                &mut rpc,
+                "live/send_input",
+                json!({
+                    "channel_id": "live_does_not_exist",
+                    "chunk": {
+                        "kind": "audio",
+                        "data": "!!!not-base64!!!",
+                        "sample_rate_hz": 24000,
+                        "channels": 1,
+                    },
+                }),
+                10,
+            )
+            .await?;
+        assert_eq!(
+            code, -32602,
+            "live/send_input with invalid base64 must be INVALID_PARAMS, got code={code} message={message}"
+        );
+        assert!(
+            message.contains("base64"),
+            "error message must mention `base64`, got: {message}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+/// M71: `live/open` against a session whose resolved model is non-realtime
+/// (e.g. `gpt-5.4-mini`) must be rejected by the precheck with
+/// `INVALID_PARAMS` and a "does not support realtime" message. Pins the
+/// B19 capability gate end-to-end.
+///
+/// The unit-level regressions for the precheck staged-session path live in
+/// `meerkat-rpc/src/session_runtime.rs::tests` as
+/// `precheck_live_open_recovers_deferred_realtime_session` (positive) and
+/// `precheck_live_open_rejects_deferred_non_realtime_session` (negative).
+/// Both assert pre-state — staged but not in the live map — so they fail
+/// loud if a future change reverts the staged_sessions consult.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m71_live_open_non_realtime_model_rejected_by_precheck()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process_with_fake_openai_key(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m71-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m71", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "non-realtime test",
+                    "model": "gpt-5.4-mini",
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?
+            .to_string();
+
+        let (code, message) = pump
+            .call_expect_error(
+                &mut rpc,
+                "live/open",
+                json!({"session_id": session_id}),
+                10,
+            )
+            .await?;
+        assert_eq!(
+            code, -32602,
+            "live/open against non-realtime model must be INVALID_PARAMS, got code={code} message={message}"
+        );
+        assert!(
+            message.contains("does not support realtime"),
+            "error message must mention `does not support realtime`, got: {message}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+/// M73: `live/open` against a Gemini-bound session must be rejected by
+/// the precheck. Today the catalog has no Gemini realtime-capable model
+/// so `precheck_identity` fires the B19 capability gate
+/// (`INVALID_PARAMS` "does not support realtime") before B18 ever fires,
+/// and B18's intended `INTERNAL_ERROR` "provider gemini has no live
+/// adapter" path is currently dead code from the e2e perspective. The
+/// assertion in the body asserts what is *observable today* (B19) and
+/// the body comment documents the dead-code situation in detail. Proper
+/// B18 coverage is a TODO unit test on `precheck_identity` itself.
+///
+/// Shares the precheck staged-session path with M71 (see its docstring)
+/// — the wave-3-retry shared `precheck_identity` helper guarantees the
+/// staged and live branches enforce identical contracts.
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn e2e_m73_live_open_gemini_provider_rejected_by_precheck()
+-> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    // Both a fake OpenAI key (so the realtime factory builds and B15 is
+    // satisfied) AND a fake Gemini key (so session/create can resolve a
+    // Gemini binding for the deferred-initial-turn session).
+    let mut cmd = Command::new(&rkat_rpc);
+    cmd.current_dir(&project_dir)
+        .env("HOME", &project_dir)
+        .env("XDG_DATA_HOME", project_dir.join("data"))
+        .env("OPENAI_API_KEY", "sk-fake-openai-for-test")
+        .env("RKAT_OPENAI_API_KEY", "sk-fake-openai-for-test")
+        .env("GEMINI_API_KEY", "fake-gemini-for-test")
+        .env("RKAT_GEMINI_API_KEY", "fake-gemini-for-test")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args([
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m73-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ])
+        .kill_on_drop(true);
+    let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take().ok_or("missing child stdin")?;
+    let stdout = child.stdout.take().ok_or("missing child stdout")?;
+    let stderr = child.stderr.take().ok_or("missing child stderr")?;
+    let (stderr_buffer, stderr_task) = spawn_stderr_drain(stderr);
+    let mut rpc = RpcProcess {
+        child,
+        stdin,
+        stdout: BufReader::new(stdout),
+        stderr_buffer,
+        stderr_task,
+    };
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m73", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+
+        let create_result = match pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "gemini provider test",
+                    "model": "gemini-3.1-flash-lite",
+                    "provider": "gemini",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await
         {
-            Ok(capture) => capture,
-            Err(error) => {
-                let rpc_stderr = read_available_stderr(&mut rpc, 500).await;
+            Ok(v) => v,
+            Err(err) => {
+                // SCOPE-DEFERRED: if Gemini realm/binding resolution rejects
+                // a synthetic key in a way the OpenAI side does not, we
+                // cannot drive the precheck deterministically without a
+                // real Gemini binding. Surface the diagnostic so the
+                // verifier knows which path failed.
+                let stderr_dump = read_available_stderr(&mut rpc, 500).await;
+                eprintln!(
+                    "[m73] session/create failed (likely Gemini binding resolution): {err}\nstderr: {stderr_dump}"
+                );
                 return Err(format!(
-                    "scenario 72 turn 2 audio failed: {error}\nrpc stderr:\n{}",
-                    rpc_stderr.trim()
+                    "M73 prerequisite failed: could not create Gemini session with synthetic key — {err}"
                 )
                 .into());
             }
         };
-        eprintln!("[scenario 72] collect turn 2 output");
-        let turn2_output_already_started = !turn2_capture.output_text.is_empty()
-            || !turn2_capture.output_audio_pcm.is_empty()
-            || !turn2_capture.tool_call_requests.is_empty()
-            || !turn2_capture.tool_call_completions.is_empty()
-            || !turn2_capture.tool_call_failures.is_empty();
-        match if turn2_output_already_started {
-            collect_live_observations_until_turn_completed_or_idle(&mut ws_read_2, 120).await
-        } else {
-            collect_live_observations_until_output_settles(&mut ws_read_2, 120).await
-        } {
-            Ok(capture) => turn2_capture.merge_from(capture),
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?
+            .to_string();
+
+        let (code, message) = pump
+            .call_expect_error(
+                &mut rpc,
+                "live/open",
+                json!({"session_id": session_id}),
+                10,
+            )
+            .await?;
+
+        // The B18 contract ("provider gemini has no live adapter",
+        // INTERNAL_ERROR / -32603) is currently UNREACHABLE through the
+        // precheck for any Gemini session. `precheck_identity` (in
+        // `meerkat-rpc/src/session_runtime.rs`) checks the realtime
+        // capability gate (B19) BEFORE the provider gate (B18), and the
+        // model catalog has zero non-OpenAI realtime-capable models — so
+        // every Gemini session resolves to a non-realtime model and
+        // surfaces `ModelNotRealtime` (`INVALID_PARAMS` / -32602) instead.
+        //
+        // Until the catalog adds a Gemini realtime model (Live API
+        // wiring), this test asserts the *current* observed behavior
+        // (B19 fires for Gemini) rather than the *intended* B18 contract.
+        // A proper B18 sentinel would be a unit test on `precheck_identity`
+        // with a synthetic `SessionLlmIdentity { provider: Gemini, model:
+        // <hypothetical realtime-capable> }` — that has to be added in
+        // `meerkat-rpc/src/session_runtime.rs::tests` because the
+        // catalog-resolution path here can't construct that combination.
+        assert_eq!(
+            code, -32602,
+            "live/open against Gemini session must be rejected. \
+             Today B19 fires before B18 (no Gemini realtime model in catalog), \
+             so we expect INVALID_PARAMS not-realtime; got code={code} message={message}"
+        );
+        assert!(
+            message.contains("does not support realtime"),
+            "error message must mention `does not support realtime` (B19 fires first); got: {message}"
+        );
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }
+    .await;
+
+    shutdown_child(rpc.child).await?;
+    result
+}
+
+// ===========================================================================
+// M72: canonical history is updated by the live-adapter projection sink.
+//
+// Pins the surface-projection A2/A3 contract: a `UserTranscriptFinal`
+// observation must produce a `User` message in the session's canonical
+// history, and assistant text deltas + final must produce an assistant
+// message containing the projected text. Without these, a live turn would
+// be invisible to `session/history` consumers (the original "live turns
+// don't exist" projection-contract bug).
+//
+// Lane: `e2e-smoke` — depends on a live OpenAI realtime session producing
+// real transcripts, so it requires `OPENAI_API_KEY` and exercises the full
+// adapter+projection-sink pipeline end-to-end. There is no fast-lane
+// equivalent today (would require a `MockRealtimeSession` injection seam
+// the test harness does not yet expose).
+// ===========================================================================
+
+/// Concatenate the assistant-side text of every message in a
+/// `WireSessionHistory` JSON payload. Handles both `assistant` (single
+/// `content` string) and `block_assistant` (array of typed blocks; we
+/// pull text from `Text` blocks). User messages and tool results are
+/// ignored.
+fn assistant_history_text(history: &Value) -> String {
+    let mut out = String::new();
+    let Some(messages) = history.get("messages").and_then(|m| m.as_array()) else {
+        return out;
+    };
+    for msg in messages {
+        match msg.get("role").and_then(|r| r.as_str()) {
+            Some("assistant") => {
+                if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
+                    out.push_str(content);
+                    out.push('\n');
+                }
+            }
+            Some("block_assistant") => {
+                let Some(blocks) = msg.get("blocks").and_then(|b| b.as_array()) else {
+                    continue;
+                };
+                for block in blocks {
+                    // The wire shape uses serde-tagged variants. We accept
+                    // both `kind: "text"` and the structurally-equivalent
+                    // legacy `type: "text"` to be robust to future renames.
+                    let kind = block
+                        .get("kind")
+                        .and_then(|k| k.as_str())
+                        .or_else(|| block.get("type").and_then(|k| k.as_str()));
+                    if matches!(kind, Some("text"))
+                        && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                    {
+                        out.push_str(text);
+                        out.push('\n');
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Concatenate the text content of every `User` message in a
+/// `WireSessionHistory` JSON payload. The wire shape for user content is
+/// `WireContentInput`, which is either a plain `String` or an array of
+/// content blocks; we accept both.
+fn user_history_text(history: &Value) -> String {
+    let mut out = String::new();
+    let Some(messages) = history.get("messages").and_then(|m| m.as_array()) else {
+        return out;
+    };
+    for msg in messages {
+        if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
+            continue;
+        }
+        let content = match msg.get("content") {
+            Some(c) => c,
+            None => continue,
+        };
+        if let Some(text) = content.as_str() {
+            out.push_str(text);
+            out.push('\n');
+        } else if let Some(blocks) = content.as_array() {
+            for block in blocks {
+                let kind = block
+                    .get("kind")
+                    .and_then(|k| k.as_str())
+                    .or_else(|| block.get("type").and_then(|k| k.as_str()));
+                if matches!(kind, Some("text"))
+                    && let Some(text) = block.get("text").and_then(|t| t.as_str())
+                {
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+        }
+    }
+    out
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_m72_canonical_history_after_live_turn() -> Result<(), Box<dyn std::error::Error>> {
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    if openai_api_key().is_none() {
+        eprintln!("Skipping M72: no OpenAI API key configured");
+        return Ok(());
+    }
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let scenario_name = "m72-canonical-history-after-live-turn";
+
+    let ws_port = {
+        let l = TcpListener::bind("127.0.0.1:0")?;
+        l.local_addr()?.port()
+    };
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            "m72-live",
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--live-ws",
+            &format!("127.0.0.1:{ws_port}"),
+        ],
+        None,
+    )
+    .await?;
+
+    let result = async {
+        let mut pump = RpcEventPump::default();
+        eprintln!("[m72] initialize");
+        pump.call(
+            &mut rpc,
+            "initialize",
+            json!({"client_info": {"name": "m72", "version": "0.0.1"}}),
+            10,
+        )
+        .await?;
+
+        eprintln!("[m72] create session");
+        let create_result = pump
+            .call(
+                &mut rpc,
+                "session/create",
+                json!({
+                    "prompt": "You are a test assistant for live-adapter projection. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else.",
+                    "model": "gpt-realtime-2",
+                    "provider": "openai",
+                    "initial_turn": "deferred",
+                }),
+                30,
+            )
+            .await?;
+        let session_id = create_result["session_id"]
+            .as_str()
+            .ok_or("missing session_id")?
+            .to_string();
+        eprintln!("[m72] session_id = {session_id}");
+
+        eprintln!("[m72] live/open + WebSocket connect");
+        let (channel_id, mut ws_write, mut ws_read) =
+            live_open_and_connect(&mut pump, &mut rpc, &session_id).await?;
+        eprintln!("[m72] channel_id = {channel_id}");
+
+        let _ready =
+            collect_live_observations_until_ready_or_idle(&mut ws_read, 10).await?;
+
+        // Single deterministic turn: the prompt above forces an exact
+        // expected assistant string so we can grep for both halves of the
+        // projection contract — user transcript text + assistant final
+        // text — without depending on free-form provider output.
+        let user_phrase = "Remember the codeword amber lantern.";
+        let expected_assistant_substring = "amber lantern";
+        let user_pcm = openai_tts_pcm(user_phrase).await?;
+
+        eprintln!("[m72] send user audio");
+        let mut capture = match send_live_audio_and_wait_for_turn(
+            &mut ws_write,
+            &mut ws_read,
+            &user_pcm,
+            120,
+        )
+        .await
+        {
+            Ok(c) => c,
             Err(error) => {
-                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                let stderr_dump = read_available_stderr(&mut rpc, 500).await;
                 return Err(format!(
-                    "scenario 72 turn 2 output did not settle: {error}\nturn2_commit_capture={turn2_capture:?}\nrpc stderr:\n{}",
-                    rpc_stderr.trim()
+                    "m72 user audio turn failed: {error}\nrpc stderr:\n{}",
+                    stderr_dump.trim()
                 )
                 .into());
             }
-        }
-        let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
-        if turn2_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
-            || turn2_output_text.is_empty()
-        {
-            dump_live_audio_artifacts(scenario_name, "turn-2", &turn2_pcm, &turn2_capture)
+        };
+        capture.merge_from(
+            settle_live_turn_after_input(&mut ws_read, &capture, 120).await?,
+        );
+        let assistant_output = normalize_semantic_text(&capture.output_text);
+        if assistant_output.is_empty() {
+            dump_live_audio_artifacts(scenario_name, "user-turn", &user_pcm, &capture)
                 .await?;
-            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
             return Err(format!(
-                "scenario 72 turn 2 did not emit non-silent audio plus text deltas `{turn2_output_text}`: {turn2_capture:?}\nrpc stderr:\n{}",
-                rpc_stderr.trim()
+                "m72 user-turn produced no assistant output text: {capture:?}"
             )
             .into());
         }
         eprintln!(
-            "[scenario 72] turn 2 output: {} ({} audio bytes)",
-            turn2_output_text,
-            turn2_capture.output_audio_pcm.len()
+            "[m72] live-side assistant output: {assistant_output} ({} input finals, {} output text bytes)",
+            capture.input_finals.len(),
+            capture.output_text.len()
         );
 
-        // ------ Close channel ------
-        eprintln!("[scenario 72] close channel");
-        live_close_channel(&mut pump, &mut rpc, ws_write_2, &channel_id_2).await?;
+        // Close the channel before reading history so the projection sink
+        // has settled. The channel close sequence flushes any in-flight
+        // observation writes through the pump on its way down.
+        eprintln!("[m72] close channel");
+        live_close_channel(&mut pump, &mut rpc, ws_write, &channel_id).await?;
 
-        eprintln!("[scenario 72] PASSED");
+        // Allow a small window for the post-close projection drain to
+        // complete (channel state retire is async; transcript writes from
+        // the WS pump need to finish flushing into the canonical history
+        // before we read it back).
+        sleep(Duration::from_millis(500)).await;
+
+        eprintln!("[m72] session/history");
+        let history = pump
+            .call(
+                &mut rpc,
+                "session/history",
+                json!({"session_id": session_id}),
+                10,
+            )
+            .await?;
+        eprintln!("[m72] history payload: {history}");
+
+        let user_text = user_history_text(&history);
+        let assistant_text = assistant_history_text(&history);
+
+        // The transcript final on the user side is provider-generated, so
+        // we can't pin the exact spelling. We assert the codeword tokens
+        // appear (they're rare enough that any reasonable transcript will
+        // include them), proving A2 wired the user transcript through to
+        // canonical history.
+        assert!(
+            user_text.to_lowercase().contains("amber")
+                && user_text.to_lowercase().contains("lantern"),
+            "A2 violation: user transcript text not found in canonical history. \
+             Expected `amber lantern` somewhere; got user_text=`{user_text}`. \
+             Full history: {history}"
+        );
+
+        // Assistant final must include the codeword (the prompt forces an
+        // exact echo). This proves A3 wired
+        // `append_external_assistant_output` into canonical history.
+        assert!(
+            assistant_text.to_lowercase().contains(expected_assistant_substring),
+            "A3 violation: assistant final text not found in canonical history. \
+             Expected substring `{expected_assistant_substring}`; got assistant_text=`{assistant_text}`. \
+             Full history: {history}"
+        );
+
+        eprintln!("[m72] PASSED — A2 and A3 projection wires hold");
         Ok::<(), Box<dyn std::error::Error>>(())
     }
     .await;

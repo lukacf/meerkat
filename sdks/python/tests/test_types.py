@@ -33,7 +33,6 @@ from meerkat import (
     McpAddParams,
     McpLiveOpResponse,
     MeerkatClient,
-    RealtimeChannel,
     RunResult,
     SchemaWarning,
     SessionAssistantBlock,
@@ -88,14 +87,8 @@ from meerkat.events import (
     parse_event,
 )
 from meerkat.generated.types import (
-    RealtimeCapabilities as GeneratedRealtimeCapabilities,
-    RealtimeChannelOpenFrame as GeneratedRealtimeChannelOpenFrame,
-    RealtimeOpenInfo as GeneratedRealtimeOpenInfo,
-    RealtimeProtocolVersion as GeneratedRealtimeProtocolVersion,
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
-
-REALTIME_PROTOCOL_VERSION: GeneratedRealtimeProtocolVersion = "2"
 
 
 def test_contract_version():
@@ -122,42 +115,6 @@ def test_model_profile_type_uses_wire_web_search_key():
 
     resolved_fields = set(ResolvedModelCapabilities.__annotations__)
     assert "web_search" in resolved_fields
-
-
-def test_generated_realtime_types_include_open_info_shape():
-    info = GeneratedRealtimeOpenInfo(
-        ws_url="ws://localhost:9999/realtime/ws",
-        open_token="token-1",
-        expires_at="2026-04-15T12:00:00Z",
-        target={"type": "session_target", "session_id": "session-1"},
-        supported_protocol_versions=[REALTIME_PROTOCOL_VERSION],
-        default_protocol_version=REALTIME_PROTOCOL_VERSION,
-        capabilities=GeneratedRealtimeCapabilities(
-            input_kinds=["text", "audio"],
-            output_kinds=["text", "audio"],
-            turning_modes=["provider_managed", "explicit_commit"],
-            interrupt_supported=True,
-            transcript_supported=True,
-            tool_lifecycle_events_supported=True,
-            video_supported=False,
-        ),
-    )
-
-    assert info.ws_url.endswith("/realtime/ws")
-    assert info.default_protocol_version == REALTIME_PROTOCOL_VERSION
-    assert info.supported_protocol_versions == [REALTIME_PROTOCOL_VERSION]
-    assert info.capabilities.turning_modes == [
-        "provider_managed",
-        "explicit_commit",
-    ]
-
-    frame = GeneratedRealtimeChannelOpenFrame(
-        protocol_version=REALTIME_PROTOCOL_VERSION,
-        open_token="token-1",
-        role="primary",
-        turning_mode="provider_managed",
-    )
-    assert frame.protocol_version == REALTIME_PROTOCOL_VERSION
 
 
 def test_generated_runtime_state_result_carries_state():
@@ -2385,7 +2342,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
                 "is_final": False,
                 "agent_runtime_id": {"identity": "agent-a", "generation": 1},
                 "fence_token": 7,
-                "realtime_attachment_status": "binding_ready",
                 "resolved_capabilities": {
                     "vision": False,
                     "image_input": False,
@@ -2438,8 +2394,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
             }
         if method == "mob/append_system_context":
             return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "staged"}
-        if method == "session/realtime_attachment_status":
-            return {"status": "binding_ready"}
         return {}
 
     client._request = fake_request  # type: ignore[method-assign]
@@ -2489,11 +2443,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     status = await client.mob_member_status("mob-1", "agent-a")
     assert "agent_runtime_id" not in status
     assert "fence_token" not in status
-    assert status["realtime_attachment_status"] == "binding_ready"
     assert status["resolved_capabilities"]["realtime"] is True
-
-    runtime_status = await client.runtime_realtime_attachment_status("session-1")
-    assert runtime_status.status == "binding_ready"
 
     client._request = fake_request  # type: ignore[method-assign]
     await client.respawn_mob_member("mob-1", "agent-a", "hello")
@@ -2554,7 +2504,6 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         "mob/spawn",
         "mob/retire",
         "mob/member_status",
-        "session/realtime_attachment_status",
         "mob/respawn",
         "mob/wire",
         "mob/unwire",

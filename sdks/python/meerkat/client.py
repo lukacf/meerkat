@@ -46,12 +46,6 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobRotateSupervisorResult,
     MobTurnStartParams,
-    RealtimeCapabilitiesResult,
-    RealtimeChannelStatus,
-    RealtimeOpenInfo,
-    RealtimeOpenRequest,
-    RealtimeStatusResult,
-    RuntimeRealtimeAttachmentStatusResult,
     WireBudgetSplitPolicy,
     WireAuthBindingRef,
     WireContentInput,
@@ -1685,11 +1679,6 @@ class MeerkatClient:
                 "Invalid mob/member_status response",
             ),
             **(
-                {"realtime_attachment_status": str(result["realtime_attachment_status"])}
-                if result.get("realtime_attachment_status") is not None
-                else {}
-            ),
-            **(
                 {"resolved_capabilities": resolved_capabilities}
                 if resolved_capabilities is not None
                 else {}
@@ -1704,9 +1693,7 @@ class MeerkatClient:
                 if isinstance(result.get("kickoff"), dict)
                 else {}
             ),
-            # Preserve `current_session_id` as diagnostic status/continuity
-            # data only. Realtime callers use the stable `mob_member` target
-            # and let the server resolve the current bridge binding.
+            # Preserve `current_session_id` as diagnostic status/continuity data only.
             **(
                 {"current_session_id": str(result["current_session_id"])}
                 if isinstance(result.get("current_session_id"), str)
@@ -2439,24 +2426,108 @@ class MeerkatClient:
         self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
+    # ---- Live audio/text adapter (`live/*`) ---------------------------
+    #
+    # Typed wrappers over the `live/*` JSON-RPC surface (gated by
+    # `rkat-rpc --live-ws`). Result shapes come from `meerkat-contracts`
+    # (regenerated into `meerkat/generated/types.py` as `LiveOpenResult`,
+    # `LiveStatusResult`, etc.). I52 + I53.
+
     async def live_open(self, session_id: str) -> dict[str, Any]:
-        """Open a live audio/text channel for a session. Wraps `live/open`."""
+        """Open a live audio/text channel for a session. Wraps `live/open`.
+
+        Returns the `LiveOpenResult` shape: `channel_id`, `transport`,
+        `capabilities`, `continuity`.
+        """
         return await self._request("live/open", {"session_id": session_id})
 
     async def live_status(self, channel_id: str) -> dict[str, Any]:
-        """Get the status of a live channel. Wraps `live/status`."""
+        """Get the status of a live channel. Wraps `live/status`.
+
+        Returns the `LiveStatusResult` shape: `channel_id`, `status`.
+        """
         return await self._request("live/status", {"channel_id": channel_id})
 
     async def live_close(self, channel_id: str) -> dict[str, Any]:
         """Close a live channel. Wraps `live/close`."""
         return await self._request("live/close", {"channel_id": channel_id})
 
-    async def live_send_input(
-        self, channel_id: str, kind: str, **kwargs: Any
+    async def live_send_input_text(
+        self, channel_id: str, text: str
     ) -> dict[str, Any]:
-        """Send an input chunk to a live channel. Wraps `live/send_input`."""
-        params: dict[str, Any] = {"channel_id": channel_id, "kind": kind, **kwargs}
-        return await self._request("live/send_input", params)
+        """Send a text input chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::Text { text } }` (the nested-shape form
+        per `BREAKING_LIVE_WIRE_FORMAT_V1`).
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {"kind": "text", "text": text},
+            },
+        )
+
+    async def live_send_input_audio(
+        self,
+        channel_id: str,
+        data_base64: str,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> dict[str, Any]:
+        """Send a base64-encoded audio chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::Audio { data, sample_rate_hz, channels } }`.
+        Caller is responsible for encoding the PCM payload as base64; mismatched
+        sample rates or channel counts will be rejected by the adapter.
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {
+                    "kind": "audio",
+                    "data": data_base64,
+                    "sample_rate_hz": sample_rate_hz,
+                    "channels": channels,
+                },
+            },
+        )
+
+    async def live_commit_input(self, channel_id: str) -> dict[str, Any]:
+        """Commit any buffered input on a live channel. Wraps `live/commit_input`."""
+        return await self._request(
+            "live/commit_input", {"channel_id": channel_id}
+        )
+
+    async def live_interrupt(self, channel_id: str) -> dict[str, Any]:
+        """Interrupt the in-progress assistant turn on a live channel.
+
+        Wraps `live/interrupt`.
+        """
+        return await self._request("live/interrupt", {"channel_id": channel_id})
+
+    async def live_truncate(
+        self,
+        channel_id: str,
+        item_id: str,
+        content_index: int,
+        audio_played_ms: int,
+    ) -> dict[str, Any]:
+        """Truncate the assistant output on a live channel at the
+        client-tracked playback cursor. Wraps `live/truncate`.
+        """
+        return await self._request(
+            "live/truncate",
+            {
+                "channel_id": channel_id,
+                "item_id": item_id,
+                "content_index": content_index,
+                "audio_played_ms": audio_played_ms,
+            },
+        )
 
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]
@@ -2651,7 +2722,7 @@ class MeerkatClient:
     ) -> list[str]:
         if legacy:
             return ["rpc"]
-        args: list[str] = ["--realtime-ws", "127.0.0.1:0"]
+        args: list[str] = ["--live-ws", "127.0.0.1:0"]
         if isolated:
             args.append("--isolated")
         if realm_id:

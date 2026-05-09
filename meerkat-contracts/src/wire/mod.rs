@@ -9,6 +9,7 @@ mod event;
 mod help;
 mod host;
 mod image_generation;
+mod live;
 mod mcp_live;
 mod mob;
 mod models;
@@ -75,6 +76,10 @@ pub use image_generation::{
     WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionModelRoutingStatus,
     WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
 };
+pub use live::{
+    LiveChannelParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult, LiveSendInputParams,
+    LiveStatusResult, LiveTruncateParams,
+};
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
     McpRemoveParams,
@@ -121,26 +126,15 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioChunk, RealtimeAudioFormat,
-    RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelConfig,
-    RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,
-    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelRole,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeChannelTarget,
-    RealtimeClientFrame, RealtimeErrorCode, RealtimeErrorDetails, RealtimeEvent,
-    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk,
-    RealtimeTextDelta, RealtimeToolTimeoutPolicy, RealtimeTurningMode, RealtimeVideoChunk,
-    ToolCallTimeoutContext,
+    RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
+    RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
+    RealtimeVideoChunk,
 };
 pub use result::WireRunResult;
 pub use runtime::{
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,
     RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult,
     RuntimeStateResult,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,
@@ -150,7 +144,6 @@ pub use runtime::{
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
-    WireRealtimeAttachmentStatus,
     WireRuntimeState,
 };
 pub use schedule::{

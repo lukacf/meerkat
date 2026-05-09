@@ -1704,13 +1704,43 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_provider_response_progressed();
-                self.note_output_audio_transcript_done(
+                // A13: capture identity + full transcript for the
+                // `AssistantTranscriptFinal` event before
+                // `note_output_audio_transcript_done` mutates per-item
+                // accumulator state. The trailing-delta (if any) is the
+                // "primary" return so the streaming projection sees the
+                // last suffix; the final is queued so the runtime
+                // projector also receives an authoritative item-level
+                // close. `stop_reason` and `usage` are not delivered
+                // atomically with this OpenAI event — the runtime layer
+                // reconciles them against the subsequent `response.done`
+                // (which surfaces as `RealtimeSessionEvent::TurnCompleted`
+                // carrying the authoritative values).
+                let final_event = RealtimeSessionEvent::AssistantTranscriptFinal {
+                    item_id: item_id.clone(),
+                    previous_item_id: self.previous_item_id_for(&item_id),
+                    content_index: Some(content_index),
+                    response_id: Some(response_id.clone()),
+                    text: transcript.clone(),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                };
+                let trailing_delta = self.note_output_audio_transcript_done(
                     response_id,
                     event_id,
                     &item_id,
                     content_index,
                     transcript,
-                )
+                );
+                // Queue the final after any trailing-delta primary so
+                // delta-stream consumers see the suffix before the close.
+                match trailing_delta {
+                    Some(delta_event) => {
+                        self.pending_events.push_back(final_event);
+                        Some(delta_event)
+                    }
+                    None => Some(final_event),
+                }
             }
             ServerEvent::ResponseOutputAudioDelta {
                 response_id,

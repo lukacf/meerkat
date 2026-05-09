@@ -307,9 +307,14 @@ impl Drop for PendingSessionEventStreamDrop {
 /// Mirror of `build_live_projection_snapshot` in
 /// `handlers/live.rs`; we duplicate here so `propagate_config_to_live_channels`
 /// can run from the runtime layer without depending on handler-private
-/// helpers. `snapshot_version = 0` because the host owns version
-/// monotonicity; the value is opaque to the adapter and only used for
-/// staleness detection across rebuilds.
+/// helpers.
+///
+/// R8: this builder stamps `snapshot_version: 0` as a placeholder. The
+/// caller (`propagate_config_to_live_channels`) overwrites it with
+/// `host.next_snapshot_version(channel_id)` before dispatch so adapters
+/// gating on `snapshot_version` for stale-refresh detection see strictly
+/// increasing generations. Do not treat the field returned here as the
+/// final stamp.
 fn build_live_projection_snapshot_for_runtime(
     session_id: &SessionId,
     open_config: &RealtimeSessionOpenConfig,
@@ -323,6 +328,13 @@ fn build_live_projection_snapshot_for_runtime(
         model_id: open_config.llm_identity.model.clone(),
         provider_id: open_config.llm_identity.provider.as_str().to_string(),
         audio_config: None,
+        // R3: forward typed runtime system-context so refresh snapshots
+        // carry the same authoritative system instructions the open path
+        // emitted (peer terminal, ops_lifecycle, etc.). Pre-fix this field
+        // was dropped here too — `propagate_config_to_live_channels`
+        // shipped a thinner snapshot than `live/open` even though the
+        // doc-comment claimed they were equivalent.
+        runtime_system_context: open_config.runtime_system_context.clone(),
     }
 }
 
@@ -5289,7 +5301,28 @@ impl SessionRuntime {
                     continue;
                 }
             };
-            let snapshot = build_live_projection_snapshot_for_runtime(&session_id, &open_config);
+            let mut snapshot =
+                build_live_projection_snapshot_for_runtime(&session_id, &open_config);
+            // R8: stamp via the host's monotonic counter so adapters that
+            // gate on `snapshot_version` for stale-refresh detection see
+            // strictly increasing generations across config propagations.
+            // Pre-fix every refresh shipped `snapshot_version: 0`. A
+            // ChannelNotFound here is benign — another task closed the
+            // channel between `active_channels()` and this point — so we
+            // log and skip rather than aborting the whole sweep.
+            match host.next_snapshot_version(&channel_id).await {
+                Ok(v) => snapshot.snapshot_version = v,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "skipping live channel: snapshot version stamp failed"
+                    );
+                    continue;
+                }
+            }
             if let Err(err) = host
                 .send_command(
                     &channel_id,

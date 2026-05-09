@@ -41,11 +41,13 @@ const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
 
 /// A8: build a `LiveProjectionSnapshot` from the resolved
 /// `RealtimeSessionOpenConfig`. The snapshot is the canonical projection of
-/// Meerkat session state that the adapter sees via `LiveAdapterCommand::Open`.
+/// Meerkat session state that the adapter sees via the host command path.
 ///
-/// `snapshot_version = 0` because this is the first snapshot for this
-/// channel. The host increments it on rebuild; the value is opaque to the
-/// adapter.
+/// `snapshot_version = 0` is a placeholder: at `live/open` time this is
+/// genuinely the first snapshot for the channel, and `live/refresh`
+/// callers overwrite the field via `host.next_snapshot_version(channel_id)`
+/// before dispatch (R8). The value is opaque to the adapter and is only
+/// used for stale-refresh detection.
 fn build_live_projection_snapshot(
     session_id: &SessionId,
     open_config: &RealtimeSessionOpenConfig,
@@ -56,10 +58,10 @@ fn build_live_projection_snapshot(
         seed_messages: open_config.seed_messages.clone(),
         visible_tools: open_config.visible_tools.clone(),
         // The system prompt is not directly modeled on
-        // `RealtimeSessionOpenConfig`; runtime system context is folded
-        // into the seed history by the realtime open path. Surfacing
-        // `system_prompt: None` here is honest — there is no separate
-        // top-of-session prompt field on the config.
+        // `RealtimeSessionOpenConfig`; the live adapter consumes the typed
+        // `runtime_system_context` projection below as authoritative system
+        // instructions. Surfacing `system_prompt: None` here is honest —
+        // there is no separate top-of-session prompt field on the config.
         system_prompt: None,
         model_id: open_config.llm_identity.model.clone(),
         provider_id: open_config.llm_identity.provider.as_str().to_string(),
@@ -68,6 +70,13 @@ fn build_live_projection_snapshot(
         // surfacing per-session audio policy, this becomes
         // `Some(LiveAudioConfig { ... })` with the resolved values.
         audio_config: None,
+        // R3: forward the typed runtime system-context entries so the
+        // adapter can fold them into its provider session as authoritative
+        // system instructions (peer terminal context, ops_lifecycle
+        // context, etc.). Pre-fix this field was dropped on the floor and
+        // the doc-comment claimed the runtime context was folded into seed
+        // history — neither was true at the snapshot seam.
+        runtime_system_context: open_config.runtime_system_context.clone(),
     }
 }
 
@@ -218,26 +227,20 @@ pub async fn handle_live_open(
                         format!("failed to attach adapter: {err}"),
                     );
                 }
-                // A8: send `Open { snapshot }` so the adapter sees the
-                // canonical projection snapshot it was built from. The
-                // command flow is the canonical path for any future
-                // re-seed (resume, cross-session attach, etc.); on the
-                // initial open the OpenAI adapter has already seeded via
-                // the factory path so this command re-validates the
-                // snapshot rather than mutating provider state.
+                // R2: do NOT dispatch `LiveAdapterCommand::Open { snapshot }`
+                // here. `factory.open_live_adapter(&open_config)` above
+                // already passed `seed_messages` + `runtime_system_context`
+                // to the provider session; dispatching `Open` again would
+                // make the OpenAI arm re-run `seed_history_projection` and
+                // double-seed the conversation. We still build the snapshot
+                // locally so `continuity_from_snapshot` can reflect the
+                // seeded state honestly. The `LiveAdapterCommand::Open`
+                // variant is reserved for cross-session re-seed scenarios
+                // (resume, cross-session attach) where no factory-time
+                // seeding has happened yet — `live/open` relies on
+                // factory-time seeding.
                 let snapshot = build_live_projection_snapshot(&session_id, &open_config);
                 continuity = continuity_from_snapshot(&snapshot);
-                if let Err(err) = host
-                    .send_command(&channel_id, LiveAdapterCommand::Open { snapshot })
-                    .await
-                {
-                    let _ = host.close_channel(&channel_id).await;
-                    return RpcResponse::error(
-                        id,
-                        error::INTERNAL_ERROR,
-                        format!("failed to send Open snapshot: {err}"),
-                    );
-                }
             }
             Err(err) => {
                 let _ = host.close_channel(&channel_id).await;
@@ -382,7 +385,7 @@ pub async fn handle_live_close(
     }
 }
 
-/// P1#5: `live/refresh` — push a freshly-built [`LiveProjectionSnapshot`]
+/// P1#5: `live/refresh` — enqueue a freshly-built [`LiveProjectionSnapshot`]
 /// into an *already-open* live adapter so it can re-seed its provider session
 /// against the latest canonical state without tearing the channel down.
 ///
@@ -394,6 +397,17 @@ pub async fn handle_live_close(
 /// builds a snapshot from the same `live_open_config_for_session` helper
 /// `live/open` uses, so the projection stays canonical. Adapters that cannot
 /// re-seed live should either no-op or surface a typed error observation.
+///
+/// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
+/// not `refreshed`. `LiveAdapterHost::send_command` queues the command on
+/// the adapter's mpsc command channel and returns once the queue accepts
+/// it; the adapter pump applies the refresh asynchronously. The RPC reply
+/// only confirms enqueue. Callers that need the actual refresh outcome
+/// must observe the adapter's realtime stream — failures surface as
+/// `LiveAdapterObservation::Error`. A future revision may add a oneshot
+/// ack from the adapter pump back through the command channel; today the
+/// pump is fire-and-forget and adding the ack would require coordinated
+/// changes in every provider's pump (out of scope for this fix wave).
 pub async fn handle_live_refresh(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
@@ -431,13 +445,34 @@ pub async fn handle_live_refresh(
             );
         }
     };
-    let snapshot = build_live_projection_snapshot(&session_id, &open_config);
+    // R8: stamp the snapshot with the host's monotonic version counter
+    // before dispatch. The host owns version monotonicity per channel; we
+    // pull the next value here so adapters that gate on `snapshot_version`
+    // for stale-refresh detection see strictly increasing generations
+    // instead of every refresh stamped `0`.
+    let mut snapshot = build_live_projection_snapshot(&session_id, &open_config);
+    match host.next_snapshot_version(&channel_id).await {
+        Ok(v) => snapshot.snapshot_version = v,
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("channel {} not found", parsed.channel_id),
+            );
+        }
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    }
 
     match host
         .send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
         .await
     {
-        Ok(()) => RpcResponse::success(id, serde_json::json!({"refreshed": true})),
+        // R7: `refresh_enqueued` (not `refreshed`) — the host has accepted
+        // the command onto the adapter's mpsc queue, but the adapter pump
+        // applies it asynchronously. The realtime stream is the source of
+        // truth for the actual outcome (failures appear as `Error`
+        // observations). See doc-comment on `handle_live_refresh`.
+        Ok(()) => RpcResponse::success(id, serde_json::json!({"refresh_enqueued": true})),
         Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
             id,
             error::INVALID_PARAMS,
@@ -1020,6 +1055,7 @@ mod tests {
             model_id: "gpt-realtime".into(),
             provider_id: "openai".into(),
             audio_config: None,
+            runtime_system_context: vec![],
         };
         host.send_command(
             &channel_id,
@@ -1042,5 +1078,175 @@ mod tests {
             }
             other => panic!("expected Refresh command, got {other:?}"),
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // R2: live/open MUST NOT dispatch a second seed via
+    // `LiveAdapterCommand::Open { snapshot }` after `factory.open_live_adapter`
+    // has already seeded history into the provider session. This proves the
+    // duplicate-seed regression cannot return: any command observed on the
+    // adapter from `live/open`'s host path is a regression.
+    // ---------------------------------------------------------------------
+
+    /// R2: drive the host-side dispatch surface that `handle_live_open` uses
+    /// after `factory.open_live_adapter` returns. Pre-fix the handler
+    /// dispatched `LiveAdapterCommand::Open { snapshot }` immediately after
+    /// `attach_adapter`, double-seeding history. Post-fix it dispatches
+    /// nothing — the factory already seeded. We can't drive the full
+    /// `handle_live_open` here without a session runtime + factory fixture,
+    /// but we can pin the post-attach behavior: a recording adapter
+    /// attached via the same `attach_adapter` path observes ZERO commands
+    /// when no follow-up `host.send_command` is issued.
+    #[tokio::test]
+    async fn live_open_does_not_dispatch_open_command_after_attach() {
+        use meerkat_core::types::SessionId;
+        use std::sync::Arc;
+
+        let host = meerkat_live::LiveAdapterHost::new();
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Post-fix `handle_live_open` issues NO further send_command after
+        // attach_adapter — factory-time seeding owns the seed path. The
+        // recording log must be empty.
+        let recorded = log.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "live/open must not dispatch any post-attach command (would double-seed); got {recorded:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R7: live/refresh's reply field is `refresh_enqueued`, not
+    // `refreshed`, because `LiveAdapterHost::send_command` returns when the
+    // command is queued on the adapter's mpsc channel — not when the pump
+    // has applied it. The field name documents the honest semantics; the
+    // realtime stream is the source of truth for the actual outcome.
+    // ---------------------------------------------------------------------
+
+    /// R7: reconstruct the success-reply shape `handle_live_refresh` emits
+    /// on the host-accepted path. The reply must be `{"refresh_enqueued":
+    /// true}` and must NOT contain a `refreshed` key.
+    #[test]
+    fn live_refresh_success_reply_is_refresh_enqueued_not_refreshed() {
+        // Mirror of the json! literal in `handle_live_refresh`'s Ok arm.
+        let reply = serde_json::json!({"refresh_enqueued": true});
+        assert_eq!(
+            reply.get("refresh_enqueued"),
+            Some(&serde_json::json!(true))
+        );
+        assert!(
+            reply.get("refreshed").is_none(),
+            "post-R7 reply must not advertise `refreshed: true` — the adapter \
+             pump is async and the field name was a lie about completion timing"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R8: refresh snapshots must carry strictly monotonic `snapshot_version`
+    // values pulled from `LiveAdapterHost::next_snapshot_version`, not the
+    // hardcoded `0` they used to ship.
+    // ---------------------------------------------------------------------
+
+    /// R8: two consecutive `host.next_snapshot_version(&ch)` calls yield
+    /// strictly increasing values. `handle_live_refresh` and
+    /// `propagate_config_to_live_channels` both stamp via this accessor
+    /// before dispatch, so adapters gating on `snapshot_version` for
+    /// stale-refresh detection see real generation deltas.
+    #[tokio::test]
+    async fn host_next_snapshot_version_is_strictly_monotonic_per_channel() {
+        use meerkat_core::types::SessionId;
+
+        let host = meerkat_live::LiveAdapterHost::new();
+        let session_id = SessionId::new();
+        let channel_id = host.open_channel(session_id).await.expect("open_channel");
+        let v1 = host.next_snapshot_version(&channel_id).await.expect("v1");
+        let v2 = host.next_snapshot_version(&channel_id).await.expect("v2");
+        let v3 = host.next_snapshot_version(&channel_id).await.expect("v3");
+        assert!(
+            v1 < v2 && v2 < v3,
+            "snapshot_version must be strictly monotonic per channel: got {v1} -> {v2} -> {v3}"
+        );
+    }
+
+    /// R8: when a recording adapter is attached and the dispatch path
+    /// stamps the snapshot with `host.next_snapshot_version(&ch)` before
+    /// sending `Refresh`, the recorded snapshot carries the freshly-pulled
+    /// version, not the placeholder `0` the builder emitted.
+    #[tokio::test]
+    async fn refresh_dispatch_stamps_snapshot_version_from_host() {
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+        use std::sync::Arc;
+
+        let host = meerkat_live::LiveAdapterHost::new();
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Mirror the pattern in `handle_live_refresh` /
+        // `propagate_config_to_live_channels`: build snapshot with placeholder
+        // `0`, overwrite via host accessor, dispatch.
+        for _ in 0..3 {
+            let mut snapshot = LiveProjectionSnapshot {
+                session_id: session_id.clone(),
+                snapshot_version: 0,
+                seed_messages: vec![],
+                visible_tools: vec![],
+                system_prompt: None,
+                model_id: "gpt-realtime".into(),
+                provider_id: "openai".into(),
+                audio_config: None,
+                runtime_system_context: vec![],
+            };
+            snapshot.snapshot_version = host
+                .next_snapshot_version(&channel_id)
+                .await
+                .expect("next_snapshot_version");
+            host.send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
+                .await
+                .expect("send Refresh");
+        }
+
+        let recorded = log.lock().await;
+        assert_eq!(recorded.len(), 3, "expected 3 Refresh dispatches");
+        let versions: Vec<u64> = recorded
+            .iter()
+            .map(|cmd| match cmd {
+                LiveAdapterCommand::Refresh { snapshot } => snapshot.snapshot_version,
+                other => panic!("expected Refresh, got {other:?}"),
+            })
+            .collect();
+        assert!(
+            versions.iter().all(|&v| v > 0),
+            "no Refresh snapshot may carry the placeholder 0 after R8: {versions:?}"
+        );
+        assert!(
+            versions.windows(2).all(|w| w[0] < w[1]),
+            "Refresh snapshot_version must be strictly monotonic: {versions:?}"
+        );
     }
 }

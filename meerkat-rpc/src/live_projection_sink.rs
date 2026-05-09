@@ -64,12 +64,22 @@ struct PendingTurn {
 }
 
 /// Bridges [`LiveProjectionSink`] callbacks into [`SessionRuntime`].
+///
+/// R6: the per-turn buffer is keyed by `(SessionId, Option<String>)` where
+/// the second element is the provider's `response_id`. Pre-fix the buffer
+/// keyed only on `SessionId`, so an interrupted, stale, or overlapping
+/// `response.done` carrying the next turn's `stop_reason`/`usage` would
+/// flush the wrong buffered transcript. Keying on the full pair lets the
+/// sink isolate per-response buffers; orphan completions (no
+/// `response_id` from the provider) still bucket under the same `None`
+/// slot, which preserves the legacy behaviour for adapters that do not
+/// surface response identity.
 pub struct SessionServiceProjectionSink {
     runtime: Arc<SessionRuntime>,
-    /// Per-session buffer of assistant finals awaiting an authoritative
-    /// `TurnCompleted`. The lock is held only for short, sync sections —
-    /// never across `.await`.
-    pending_turns: StdMutex<HashMap<SessionId, PendingTurn>>,
+    /// Per-(session, response_id) buffer of assistant finals awaiting an
+    /// authoritative `TurnCompleted`. The lock is held only for short,
+    /// sync sections — never across `.await`.
+    pending_turns: StdMutex<HashMap<(SessionId, Option<String>), PendingTurn>>,
 }
 
 impl SessionServiceProjectionSink {
@@ -80,8 +90,14 @@ impl SessionServiceProjectionSink {
         }
     }
 
-    /// Push an assistant final onto the per-session buffer (P1#1).
-    fn buffer_assistant_final(&self, session_id: &SessionId, text: String) {
+    /// Push an assistant final onto the per-(session, response_id) buffer
+    /// (P1#1 + R6).
+    fn buffer_assistant_final(
+        &self,
+        session_id: &SessionId,
+        response_id: Option<&str>,
+        text: String,
+    ) {
         let Ok(mut pending) = self.pending_turns.lock() else {
             // Lock poisoning here would mean a previous panic in this struct;
             // the only operations that hold the guard are short sync writes/
@@ -90,18 +106,38 @@ impl SessionServiceProjectionSink {
             return;
         };
         pending
-            .entry(session_id.clone())
+            .entry((session_id.clone(), response_id.map(|s| s.to_string())))
             .or_default()
             .blocks
             .push(PendingAssistantBlock { text });
     }
 
-    /// Drain the per-session buffer at turn-completed time.
-    fn drain_pending_turn(&self, session_id: &SessionId) -> PendingTurn {
+    /// Drain the per-(session, response_id) buffer at turn-completed time.
+    ///
+    /// R6: callers must pass the same `response_id` they buffered under so
+    /// the matching slot drains; mismatched ids leave the buffer alone, which
+    /// is the behaviour the external review demanded — a stale/overlapping
+    /// `response.done` cannot flush a different turn's transcript.
+    fn drain_pending_turn(&self, session_id: &SessionId, response_id: Option<&str>) -> PendingTurn {
         let Ok(mut pending) = self.pending_turns.lock() else {
             return PendingTurn::default();
         };
-        pending.remove(session_id).unwrap_or_default()
+        pending
+            .remove(&(session_id.clone(), response_id.map(|s| s.to_string())))
+            .unwrap_or_default()
+    }
+
+    /// Drain every buffered slot for `session_id` regardless of `response_id`.
+    ///
+    /// Used on interrupt / terminal error: when the channel is torn down or
+    /// the in-flight turn is invalidated, every buffered final becomes
+    /// non-canonical, so the per-response keying does not need to be honoured
+    /// for cleanup.
+    fn drain_all_pending_turns(&self, session_id: &SessionId) {
+        let Ok(mut pending) = self.pending_turns.lock() else {
+            return;
+        };
+        pending.retain(|(sid, _resp), _| sid != session_id);
     }
 }
 
@@ -189,6 +225,7 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         _identity: LiveTranscriptIdentity<'_>,
         _stop_reason: StopReason,
         _usage: Usage,
+        response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError> {
         // P1#1: do NOT commit canonical assistant output here. The provider
         // stamps `AssistantTranscriptFinal` with sentinel `stop_reason` /
@@ -198,7 +235,11 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // values. Multi-content-part finals push multiple blocks; one
         // `append_external_assistant_output` flushes them as one assistant
         // message at turn boundary.
-        self.buffer_assistant_final(session_id, text.to_string());
+        //
+        // R6: bucket by `(SessionId, response_id)` so that two
+        // simultaneously-active responses do not pool into the same slot.
+        // `signal_turn_completed` drains the matching slot.
+        self.buffer_assistant_final(session_id, response_id, text.to_string());
         Ok(())
     }
 
@@ -248,9 +289,10 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // path the user-facing `live/interrupt` RPC uses. Tolerate
         // `NotRunning` (typical when no turn is currently in flight) so that a
         // late provider-side interrupt does not poison the channel.
-        // Drop any buffered finals from the interrupted turn — they are no
-        // longer canonical.
-        let _ = self.drain_pending_turn(session_id);
+        // R6: drop ALL buffered finals across every response_id slot for the
+        // session — interrupt invalidates the in-flight turn regardless of
+        // which response was active.
+        self.drain_all_pending_turns(session_id);
         match self
             .runtime
             .interrupt_live_with_machine_authority(session_id)
@@ -267,6 +309,7 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         session_id: &SessionId,
         stop_reason: StopReason,
         usage: Usage,
+        response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError> {
         // P1#1: flush the per-turn assistant final buffer with the
         // authoritative `stop_reason` / `usage` from `TurnCompleted`. This is
@@ -274,7 +317,10 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // buffer operation. Orphan completions (no buffered final) still
         // commit an empty assistant block, which is correct because no
         // transcript was produced for the turn.
-        let pending = self.drain_pending_turn(session_id);
+        //
+        // R6: drain by `(session_id, response_id)` so a stale or overlapping
+        // `response.done` cannot flush the wrong buffered transcript.
+        let pending = self.drain_pending_turn(session_id, response_id);
         let blocks: Vec<AssistantBlock> = pending
             .blocks
             .into_iter()
@@ -300,8 +346,9 @@ impl LiveProjectionSink for SessionServiceProjectionSink {
         // session-level lifecycle remains in caller hands. A future enhancement
         // could route this to the runtime's session-event stream once a
         // canonical terminal-error seam exists on `SessionService`.
-        // Drop any buffered finals — terminal error invalidates the turn.
-        let _ = self.drain_pending_turn(session_id);
+        // R6: drop ALL buffered finals across every response_id slot —
+        // terminal error invalidates every in-flight response.
+        self.drain_all_pending_turns(session_id);
         tracing::warn!(
             target: "meerkat_rpc::live_projection",
             session_id = %session_id,
@@ -448,6 +495,7 @@ mod tests {
             identity: LiveTranscriptIdentity<'_>,
             _stop_reason: StopReason,
             _usage: Usage,
+            _response_id: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
             self.assistant_finals.lock().unwrap().push((
                 session_id.clone(),
@@ -487,6 +535,7 @@ mod tests {
             session_id: &SessionId,
             _stop_reason: StopReason,
             _usage: Usage,
+            _response_id: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
             self.completed.lock().unwrap().push(session_id.clone());
             Ok(())
@@ -730,11 +779,15 @@ mod tests {
 
     /// Test sink that mimics `SessionServiceProjectionSink`'s buffering
     /// strategy and records every "would-be" runtime call. Asserting on
-    /// `calls` lets us pin the seam contract (P1#1 / P2#1 / P1#3) without
-    /// the SessionRuntime/SessionService overhead.
+    /// `calls` lets us pin the seam contract (P1#1 / P2#1 / P1#3 / R6)
+    /// without the SessionRuntime/SessionService overhead.
+    ///
+    /// R6: keys the pending buffer on `(SessionId, Option<String>)` to
+    /// match the production sink's per-response_id bucketing.
+    #[allow(clippy::type_complexity)]
     struct BufferingTestSink {
         calls: StdMutex<Vec<CapturedRuntimeCall>>,
-        pending: StdMutex<HashMap<SessionId, Vec<String>>>,
+        pending: StdMutex<HashMap<(SessionId, Option<String>), Vec<String>>>,
     }
 
     impl BufferingTestSink {
@@ -776,11 +829,16 @@ mod tests {
             }
         }
 
-        fn append_assistant_final(&self, session_id: &SessionId, text: &str) {
+        fn append_assistant_final(
+            &self,
+            session_id: &SessionId,
+            text: &str,
+            response_id: Option<&str>,
+        ) {
             self.pending
                 .lock()
                 .unwrap()
-                .entry(session_id.clone())
+                .entry((session_id.clone(), response_id.map(|s| s.to_string())))
                 .or_default()
                 .push(text.to_string());
         }
@@ -790,12 +848,13 @@ mod tests {
             session_id: &SessionId,
             stop_reason: StopReason,
             usage: Usage,
+            response_id: Option<&str>,
         ) {
             let drained = self
                 .pending
                 .lock()
                 .unwrap()
-                .remove(session_id)
+                .remove(&(session_id.clone(), response_id.map(|s| s.to_string())))
                 .unwrap_or_default();
             let blocks: Vec<AssistantBlock> = drained
                 .into_iter()
@@ -867,7 +926,7 @@ mod tests {
 
         // Provider stamps `AssistantTranscriptFinal` with sentinel values
         // because stop_reason/usage only arrive atomically with `response.done`.
-        sink.append_assistant_final(&session_id, "the final text");
+        sink.append_assistant_final(&session_id, "the final text", Some("resp_1"));
 
         // Under the broken behavior, this is where canonical history was
         // committed — with the sentinel. With the fix it's pure buffering, so
@@ -881,7 +940,12 @@ mod tests {
 
         // Now `TurnCompleted` arrives carrying the authoritative stop_reason
         // and usage from `response.done`.
-        sink.signal_turn_completed(&session_id, StopReason::EndTurn, real_usage());
+        sink.signal_turn_completed(
+            &session_id,
+            StopReason::EndTurn,
+            real_usage(),
+            Some("resp_1"),
+        );
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -923,12 +987,17 @@ mod tests {
         let sink = BufferingTestSink::new();
         let session_id = test_session_id();
 
-        sink.append_assistant_final(&session_id, "part one");
-        sink.append_assistant_final(&session_id, "part two");
+        sink.append_assistant_final(&session_id, "part one", Some("resp_a"));
+        sink.append_assistant_final(&session_id, "part two", Some("resp_a"));
 
         assert!(sink.calls.lock().unwrap().is_empty());
 
-        sink.signal_turn_completed(&session_id, StopReason::EndTurn, real_usage());
+        sink.signal_turn_completed(
+            &session_id,
+            StopReason::EndTurn,
+            real_usage(),
+            Some("resp_a"),
+        );
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -948,7 +1017,7 @@ mod tests {
         let sink = BufferingTestSink::new();
         let session_id = test_session_id();
 
-        sink.signal_turn_completed(&session_id, StopReason::EndTurn, real_usage());
+        sink.signal_turn_completed(&session_id, StopReason::EndTurn, real_usage(), None);
 
         let calls = sink.calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
@@ -957,6 +1026,64 @@ mod tests {
                 assert!(blocks.is_empty());
             }
             other => panic!("expected ExternalAssistantOutput with empty blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn r6_assistant_final_buffer_keys_on_response_id() {
+        // R6 regression: two `AssistantTranscriptFinal` events from
+        // different provider responses must NOT pool into the same buffer.
+        // Pre-fix the buffer keyed only on SessionId, so a stale or
+        // overlapping `response.done` could flush text that belonged to a
+        // different response.
+        let sink = BufferingTestSink::new();
+        let session_id = test_session_id();
+
+        // Two responses interleaved on the same session.
+        sink.append_assistant_final(&session_id, "from resp_a", Some("resp_a"));
+        sink.append_assistant_final(&session_id, "from resp_b", Some("resp_b"));
+
+        // Completion for resp_a flushes only the resp_a slot.
+        sink.signal_turn_completed(
+            &session_id,
+            StopReason::EndTurn,
+            real_usage(),
+            Some("resp_a"),
+        );
+
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        match &calls[0] {
+            CapturedRuntimeCall::ExternalAssistantOutput { blocks, .. } => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AssistantBlock::Text { text, .. } => assert_eq!(text, "from resp_a"),
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected ExternalAssistantOutput, got {other:?}"),
+        }
+        drop(calls);
+
+        // The resp_b buffer survives — it is NOT flushed by resp_a's completion.
+        sink.signal_turn_completed(
+            &session_id,
+            StopReason::EndTurn,
+            real_usage(),
+            Some("resp_b"),
+        );
+
+        let calls = sink.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        match &calls[1] {
+            CapturedRuntimeCall::ExternalAssistantOutput { blocks, .. } => {
+                assert_eq!(blocks.len(), 1);
+                match &blocks[0] {
+                    AssistantBlock::Text { text, .. } => assert_eq!(text, "from resp_b"),
+                    other => panic!("expected text block, got {other:?}"),
+                }
+            }
+            other => panic!("expected ExternalAssistantOutput, got {other:?}"),
         }
     }
 

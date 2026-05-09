@@ -252,6 +252,13 @@ pub trait LiveProjectionSink: Send + Sync {
     ) -> Result<(), LiveProjectionError>;
 
     /// Append a finalized assistant transcript (with stop reason + usage).
+    ///
+    /// R6: the trait passes `response_id` from
+    /// [`LiveAdapterObservation::AssistantTranscriptFinal`] through so the
+    /// sink can key its per-turn buffer on `(SessionId, response_id)`.
+    /// Without this an interrupted, stale, or overlapping `response.done`
+    /// would cause [`signal_turn_completed`] to flush the wrong buffered
+    /// transcript. `None` when the provider does not surface a response id.
     async fn append_assistant_final(
         &self,
         session_id: &SessionId,
@@ -259,6 +266,7 @@ pub trait LiveProjectionSink: Send + Sync {
         identity: LiveTranscriptIdentity<'_>,
         stop_reason: StopReason,
         usage: Usage,
+        response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
     /// Project an assistant transcript truncation (barge-in side effect).
@@ -286,11 +294,18 @@ pub trait LiveProjectionSink: Send + Sync {
     ) -> Result<(), LiveProjectionError>;
 
     /// Mark the live turn complete in canonical session state.
+    ///
+    /// R6: `response_id` carries the provider's response identifier from
+    /// [`LiveAdapterObservation::TurnCompleted`] so the sink can drain the
+    /// matching `(SessionId, response_id)` buffer slot — not just by
+    /// session id, which lets a stale or overlapping `response.done` flush
+    /// the wrong buffered transcript.
     async fn signal_turn_completed(
         &self,
         session_id: &SessionId,
         stop_reason: StopReason,
         usage: Usage,
+        response_id: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
     /// Surface a terminal adapter error at the session level.
@@ -817,12 +832,15 @@ impl LiveAdapterHost {
                         *content_index,
                         response_id.as_deref(),
                     );
+                    // R6: forward the response_id so the sink keys its
+                    // per-turn buffer on (SessionId, response_id).
                     sink.append_assistant_final(
                         &session_id,
                         text,
                         identity,
                         *stop_reason,
                         usage.clone(),
+                        response_id.as_deref(),
                     )
                     .await?;
                 }
@@ -855,11 +873,23 @@ impl LiveAdapterHost {
 
             (
                 ObservationRouting::AppendTranscript,
-                LiveAdapterObservation::TurnCompleted { stop_reason, usage },
+                LiveAdapterObservation::TurnCompleted {
+                    response_id,
+                    stop_reason,
+                    usage,
+                },
             ) => {
                 if let Some(sink) = &self.projection_sink {
-                    sink.signal_turn_completed(&session_id, *stop_reason, usage.clone())
-                        .await?;
+                    // R6: pass the response_id through so the sink can
+                    // drain the matching (SessionId, response_id) buffer
+                    // slot, not just by session_id.
+                    sink.signal_turn_completed(
+                        &session_id,
+                        *stop_reason,
+                        usage.clone(),
+                        response_id.as_deref(),
+                    )
+                    .await?;
                 }
                 Ok(ObservationOutcome::TranscriptAppended)
             }
@@ -1409,6 +1439,7 @@ mod tests {
     #[test]
     fn turn_completed_routes_to_append() {
         let obs = LiveAdapterObservation::TurnCompleted {
+            response_id: None,
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 10,
@@ -1747,6 +1778,7 @@ mod tests {
         let host = LiveAdapterHost::new().with_projection_sink(Arc::clone(&sink) as _);
         let ch = host.open_channel(test_session_id()).await.unwrap();
         let obs = LiveAdapterObservation::TurnCompleted {
+            response_id: None,
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
         };
@@ -2580,7 +2612,16 @@ mod tests {
     struct RecordingProjectionSink {
         user_transcripts: StdMutex<Vec<(SessionId, String, OwnedIdentity)>>,
         assistant_deltas: StdMutex<Vec<(SessionId, String, OwnedIdentity)>>,
-        assistant_finals: StdMutex<Vec<(SessionId, String, OwnedIdentity, StopReason, Usage)>>,
+        assistant_finals: StdMutex<
+            Vec<(
+                SessionId,
+                String,
+                OwnedIdentity,
+                StopReason,
+                Usage,
+                Option<String>,
+            )>,
+        >,
         truncations: StdMutex<
             Vec<(
                 SessionId,
@@ -2592,7 +2633,7 @@ mod tests {
             )>,
         >,
         interrupts: StdMutex<Vec<SessionId>>,
-        turn_completed: StdMutex<Vec<(SessionId, StopReason, Usage)>>,
+        turn_completed: StdMutex<Vec<(SessionId, StopReason, Usage, Option<String>)>>,
         terminal_errors: StdMutex<Vec<(SessionId, LiveAdapterErrorCode, String)>>,
         realtime_events: StdMutex<Vec<(SessionId, RealtimeTranscriptEvent)>>,
     }
@@ -2634,6 +2675,7 @@ mod tests {
             identity: LiveTranscriptIdentity<'_>,
             stop_reason: StopReason,
             usage: Usage,
+            response_id: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
             self.assistant_finals.lock().unwrap().push((
                 session_id.clone(),
@@ -2641,6 +2683,7 @@ mod tests {
                 OwnedIdentity::from_borrowed(identity),
                 stop_reason,
                 usage,
+                response_id.map(|s| s.to_string()),
             ));
             Ok(())
         }
@@ -2678,11 +2721,14 @@ mod tests {
             session_id: &SessionId,
             stop_reason: StopReason,
             usage: Usage,
+            response_id: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
-            self.turn_completed
-                .lock()
-                .unwrap()
-                .push((session_id.clone(), stop_reason, usage));
+            self.turn_completed.lock().unwrap().push((
+                session_id.clone(),
+                stop_reason,
+                usage,
+                response_id.map(|s| s.to_string()),
+            ));
             Ok(())
         }
 

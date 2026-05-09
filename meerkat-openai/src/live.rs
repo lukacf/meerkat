@@ -623,6 +623,118 @@ fn openai_projection_session_update(open_config: &RealtimeSessionOpenConfig) -> 
     }
 }
 
+/// R1: build a `session.update` payload from a `LiveProjectionSnapshot`.
+///
+/// Routes the snapshot's mutable fields (`system_prompt`, `visible_tools`,
+/// `runtime_system_context`, `audio_config`) into the OpenAI Realtime
+/// `session.update` event. The OpenAI Realtime API does NOT accept a
+/// `model` field on `session.update` — model swaps require close + reopen
+/// — so the caller must guard against `snapshot.model_id` drift before
+/// invoking this helper. `provider_id` is similarly out of scope here.
+///
+/// Instructions: derived from `snapshot.system_prompt` plus the typed
+/// `runtime_system_context` projection. `system_prompt` is an explicit
+/// canonical-runtime fact, so when present it is used directly without
+/// re-walking the seed messages — those are replayed as
+/// `conversation.item.create` events by `seed_history_projection` after
+/// this update lands.
+///
+/// Tools: re-rendered through the same `openai_realtime_tools` helper the
+/// initial open path uses so the wire shape is identical.
+///
+/// Audio: when `audio_config` is `Some`, request matching input + output
+/// `pcm` formats at the snapshot's sample rate. When `None`, the audio
+/// field is omitted so the live session keeps whatever input/output
+/// audio config it was opened with.
+fn openai_refresh_session_update_from_snapshot(
+    snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
+) -> SessionUpdate {
+    let instructions = openai_refresh_instructions_from_snapshot(
+        snapshot.system_prompt.as_deref(),
+        &snapshot.runtime_system_context,
+    );
+
+    // OpenAI Realtime only supports `audio/pcm` at 24 kHz today
+    // (`AudioFormat::pcm_24khz`). When the snapshot carries an
+    // `audio_config` matching that, re-emit the audio block so the live
+    // session re-converges if the runtime previously degraded it. When
+    // the snapshot's sample rate does not match, leave audio out so we
+    // do not send a value the provider would reject — the caller's
+    // pre-flight validation in `execute_openai_live_command` is what
+    // surfaces the rate mismatch as a typed error.
+    let audio = snapshot.audio_config.as_ref().and_then(|cfg| {
+        if cfg.input_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
+            || cfg.output_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
+            || cfg.input_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
+            || cfg.output_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
+        {
+            return None;
+        }
+        Some(AudioConfig {
+            input: Some(InputAudioConfig {
+                format: Some(AudioFormat::pcm_24khz()),
+                // Refresh does not redefine turn detection / transcription /
+                // noise reduction — the open-time defaults stay live unless
+                // the runtime later issues another full reconfiguration.
+                turn_detection: None,
+                transcription: None,
+                noise_reduction: None,
+            }),
+            output: Some(OutputAudioConfig {
+                format: Some(AudioFormat::pcm_24khz()),
+                voice: None,
+                speed: None,
+                language: None,
+            }),
+        })
+    });
+
+    SessionUpdate {
+        config: SessionUpdateConfig {
+            instructions,
+            tools: Some(openai_realtime_tools(&snapshot.visible_tools)),
+            audio,
+            ..SessionUpdateConfig::default()
+        },
+    }
+}
+
+/// R1: instructions text for a snapshot-driven refresh.
+///
+/// Combines the language pin (when configured), the snapshot's explicit
+/// `system_prompt` (when present), and the typed `runtime_system_context`
+/// projection through `openai_realtime_authoritative_system_context`.
+/// Empty inputs collapse to `None` so the OpenAI session keeps whatever
+/// instructions are currently live rather than being cleared.
+fn openai_refresh_instructions_from_snapshot(
+    system_prompt: Option<&str>,
+    runtime_system_context: &[PendingSystemContextAppend],
+) -> Option<String> {
+    let language_pin = openai_realtime_output_language_instruction();
+    let authoritative_context =
+        openai_realtime_authoritative_system_context(runtime_system_context);
+    let trimmed_prompt = system_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .map(ToOwned::to_owned);
+
+    let mut blocks: Vec<String> = Vec::new();
+    if let Some(pin) = language_pin {
+        blocks.push(pin);
+    }
+    if let Some(ctx) = authoritative_context {
+        blocks.push(ctx);
+    }
+    if let Some(prompt) = trimmed_prompt {
+        blocks.push(prompt);
+    }
+    if blocks.is_empty() {
+        None
+    } else {
+        Some(blocks.join("\n\n"))
+    }
+}
+
 fn openai_realtime_voice() -> Voice {
     Voice::from(
         std::env::var("RKAT_REALTIME_OPENAI_VOICE")
@@ -1022,6 +1134,20 @@ pub struct OpenAiRealtimeSession {
     /// `conversation.item.truncated` with the playback cursor when emitting
     /// `AssistantTranscriptTruncated`.
     pending_truncations: BTreeMap<String, u64>,
+    /// R1: snapshot of the model id this OpenAI realtime session was opened
+    /// against. The OpenAI Realtime API does not expose a mutable `model`
+    /// field on `session.update`; the model is locked to whatever the
+    /// initial `?model=...` query string set. A `LiveAdapterCommand::Refresh`
+    /// snapshot whose `model_id` differs from this value must be rejected
+    /// with a typed error so the runtime can close + reopen the channel
+    /// instead of silently running on stale model state. `None` means the
+    /// factory did not stamp identity (test sessions); model swap detection
+    /// is a no-op in that mode.
+    current_model_id: Option<String>,
+    /// R1: see `current_model_id`. Same rejection semantics for
+    /// `provider_id` since a provider swap (Anthropic ↔ OpenAI) cannot be
+    /// done in place on a hosted realtime session either.
+    current_provider_id: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1060,6 +1186,8 @@ impl OpenAiRealtimeSession {
             response_nudge_timeout_ms: None,
             response_nudge_max_attempts: None,
             pending_truncations: BTreeMap::new(),
+            current_model_id: None,
+            current_provider_id: None,
         }
     }
 
@@ -1068,6 +1196,22 @@ impl OpenAiRealtimeSession {
     pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
         self.response_nudge_timeout_ms = timeout_ms;
         self.response_nudge_max_attempts = max_attempts;
+    }
+
+    /// R1: stamp the model + provider identity this session was opened
+    /// against. Called from `OpenAiRealtimeSessionFactory` after the
+    /// underlying provider session is constructed; consumed by the
+    /// `Refresh { snapshot }` arm in `execute_openai_live_command` to
+    /// detect mid-session model/provider swaps and reject them with a
+    /// typed error (the OpenAI Realtime API has no mutable `model` field
+    /// on `session.update`, so a model swap requires close + reopen).
+    pub fn set_current_identity(
+        &mut self,
+        model_id: impl Into<String>,
+        provider_id: impl Into<String>,
+    ) {
+        self.current_model_id = Some(model_id.into());
+        self.current_provider_id = Some(provider_id.into());
     }
 
     fn effective_nudge_timeout_ms(&self) -> u64 {
@@ -1885,6 +2029,40 @@ impl OpenAiRealtimeSession {
             })
             .await?;
 
+        self.await_session_updated_ack().await
+    }
+
+    /// R1: emit a `session.update` event derived from a
+    /// [`LiveProjectionSnapshot`] and wait for the matching ack.
+    ///
+    /// Used by the `LiveAdapterCommand::Refresh { snapshot }` arm in
+    /// `execute_openai_live_command` to reconfigure an already-open OpenAI
+    /// realtime session in place against the snapshot's mutable fields:
+    /// `system_prompt` (→ `instructions`), `visible_tools` (→ `tools`),
+    /// `runtime_system_context` (folded into `instructions`), and
+    /// `audio_config` (→ input/output `AudioFormat`). Model swaps are
+    /// rejected by the caller before we ever send the update; this
+    /// helper assumes the model/provider identity is unchanged.
+    async fn apply_refresh_session_update_from_snapshot(
+        &mut self,
+        snapshot: &meerkat_core::live_adapter::LiveProjectionSnapshot,
+    ) -> Result<(), LlmError> {
+        self.raw_mut()?
+            .send_raw(ClientEvent::SessionUpdate {
+                event_id: None,
+                session: Box::new(openai_refresh_session_update_from_snapshot(snapshot)),
+            })
+            .await?;
+
+        self.await_session_updated_ack().await
+    }
+
+    /// Drain server events until a `SessionUpdated` ack arrives. Any
+    /// non-ack event observed during the wait is mapped through
+    /// `map_server_event` and queued so the caller's next `next_event`
+    /// poll receives it — exactly the same shape the open-time
+    /// configure path uses.
+    async fn await_session_updated_ack(&mut self) -> Result<(), LlmError> {
         loop {
             let Some(event) = self.raw_mut()?.next_event().await? else {
                 return Err(LlmError::ConnectionReset);
@@ -2353,6 +2531,14 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
             open_config.response_nudge_timeout_ms,
             open_config.response_nudge_max_attempts,
         );
+        // R1: stamp the open-time model + provider identity so the
+        // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
+        // mid-session model swap and reject it (the OpenAI Realtime API
+        // does not accept a `model` field on `session.update`).
+        session.set_current_identity(
+            open_config.llm_identity.model.clone(),
+            open_config.llm_identity.provider.as_str().to_string(),
+        );
         session
             .seed_history_projection(
                 &open_config.seed_messages,
@@ -2387,6 +2573,14 @@ impl RealtimeSessionFactory for OpenAiRealtimeSessionFactory {
         session.set_response_nudge_config(
             open_config.response_nudge_timeout_ms,
             open_config.response_nudge_max_attempts,
+        );
+        // R1: stamp the open-time model + provider identity so the
+        // `LiveAdapterCommand::Refresh { snapshot }` arm can detect a
+        // mid-session model swap and reject it (the OpenAI Realtime API
+        // does not accept a `model` field on `session.update`).
+        session.set_current_identity(
+            open_config.llm_identity.model.clone(),
+            open_config.llm_identity.provider.as_str().to_string(),
         );
         // E25 + A9: seed canonical history at session-open time. The
         // `LiveAdapterCommand::Open { snapshot }` arm in
@@ -2781,32 +2975,81 @@ async fn execute_openai_live_command(
 ) -> Result<(), LlmError> {
     match command {
         LiveAdapterCommand::Open { snapshot } => {
-            // A9: drive the canonical seed path directly from the
+            // A9 + R3: drive the canonical seed path directly from the
             // projection snapshot — `seed_history_projection` is the same
             // routine the factory uses at open-time. It mints
             // `ConversationItemCreate` events on the sender side and waits
-            // for provider acknowledgements. The runtime system context
-            // carried alongside seed history is not part of the snapshot
-            // shape (it is reconstructed from canonical session metadata
-            // upstream and folded into the seed messages); pass an empty
-            // slice here.
+            // for provider acknowledgements. The typed runtime system
+            // context carried alongside the seed history flows through
+            // the snapshot's `runtime_system_context` field (R3) and is
+            // forwarded into the seed-events helper so authoritative
+            // system instructions (peer terminal, ops_lifecycle, etc.)
+            // are emitted alongside seed history.
             session
-                .seed_history_projection(&snapshot.seed_messages, &[])
+                .seed_history_projection(&snapshot.seed_messages, &snapshot.runtime_system_context)
                 .await
         }
         LiveAdapterCommand::Refresh { snapshot } => {
-            // P1#5: an already-open OpenAI realtime session can absorb a
-            // fresh projection by re-running `seed_history_projection` —
-            // it mints `ConversationItemCreate` events for every new seed
-            // message and waits for the matching provider acks. The
-            // OpenAI Realtime API tolerates additive history updates on a
-            // live session so this is the same path the initial Open arm
-            // takes, just at a later point in the session lifecycle.
+            // R1: a snapshot-driven refresh must apply EVERY mutable
+            // field, not just `seed_messages`. Pre-R1 only
+            // `seed_history_projection` ran here, so a `config/patch`
+            // that flipped `model_id` / `provider_id` / `visible_tools`
+            // / `system_prompt` / `audio_config` left the hosted OpenAI
+            // realtime session running on stale state while RPC reported
+            // `refreshed: true`.
             //
-            // System context follows the Open contract: not part of the
-            // snapshot shape, fold upstream into seed messages.
+            // Order matters: validate model/provider identity first
+            // (model swaps require close + reopen — the OpenAI Realtime
+            // API has no mutable `model` field on `session.update`),
+            // then issue a `session.update` with the new instructions /
+            // tools / audio config, then re-run
+            // `seed_history_projection` so newly-injected runtime
+            // context still lands as authoritative system instructions
+            // alongside the seed history.
+            if let Some(current_model) = session.current_model_id.as_deref()
+                && current_model != snapshot.model_id
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "live adapter refresh: model swap from `{current_model}` to `{}` requires close + reopen \
+                         (OpenAI Realtime does not accept a mutable `model` on session.update)",
+                        snapshot.model_id
+                    ),
+                });
+            }
+            if let Some(current_provider) = session.current_provider_id.as_deref()
+                && current_provider != snapshot.provider_id
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "live adapter refresh: provider swap from `{current_provider}` to `{}` requires close + reopen",
+                        snapshot.provider_id
+                    ),
+                });
+            }
+            if let Some(audio_cfg) = snapshot.audio_config.as_ref()
+                && (audio_cfg.input_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
+                    || audio_cfg.output_sample_rate_hz != OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
+                    || audio_cfg.input_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
+                    || audio_cfg.output_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS))
+            {
+                return Err(LlmError::InvalidRequest {
+                    message: format!(
+                        "live adapter refresh: audio config rate={}/{} ch={}/{} cannot be applied in place \
+                         (OpenAI Realtime live session is fixed to pcm/{}Hz mono); close + reopen required",
+                        audio_cfg.input_sample_rate_hz,
+                        audio_cfg.output_sample_rate_hz,
+                        audio_cfg.input_channels,
+                        audio_cfg.output_channels,
+                        OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ
+                    ),
+                });
+            }
             session
-                .seed_history_projection(&snapshot.seed_messages, &[])
+                .apply_refresh_session_update_from_snapshot(&snapshot)
+                .await?;
+            session
+                .seed_history_projection(&snapshot.seed_messages, &snapshot.runtime_system_context)
                 .await
         }
         LiveAdapterCommand::SendInput { chunk } => {
@@ -2934,8 +3177,18 @@ fn translate_realtime_event(event: RealtimeSessionEvent) -> LiveAdapterObservati
             }
         }
         RealtimeSessionEvent::TurnCompleted {
-            stop_reason, usage, ..
-        } => LiveAdapterObservation::TurnCompleted { stop_reason, usage },
+            response_id,
+            stop_reason,
+            usage,
+        } => LiveAdapterObservation::TurnCompleted {
+            // R6: plumb the provider's response_id through so the
+            // projection sink can buffer-key on (SessionId, response_id).
+            // Without this an interrupted, stale, or overlapping
+            // `response.done` flushes the wrong buffered transcript.
+            response_id: Some(response_id),
+            stop_reason,
+            usage,
+        },
         RealtimeSessionEvent::Interrupted { .. } => LiveAdapterObservation::TurnInterrupted,
         RealtimeSessionEvent::ToolCallRequested {
             call_id,
@@ -4969,17 +5222,39 @@ mod tests {
             RealtimeTurningMode::ProviderManaged,
         );
 
+        // Event ordering note (R4): the A13 flow at
+        // `ServerEvent::ResponseOutputAudioTranscriptDone` returns the
+        // trailing-delta as the primary observation and queues the
+        // matching `AssistantTranscriptFinal` for the next `next_event`
+        // call. So per item we expect: streaming delta(s) → the queued
+        // final → next item's events. The previous shape of this test
+        // skipped the queued finals, which masked production behavior;
+        // the BuildBuddy `cargo-all-features-clippy` / `test-unit`
+        // lanes correctly tripped on it.
         assert!(matches!(
             session.next_event().await.expect("first delta"),
-            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "birch "
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, item_id, .. })
+                if delta == "birch " && item_id == "item_audio_1"
         ));
         assert!(matches!(
             session.next_event().await.expect("suffix delta"),
-            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "seventeen"
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, item_id, .. })
+                if delta == "seventeen" && item_id == "item_audio_1"
         ));
         assert!(matches!(
-            session.next_event().await.expect("done without delta still projects text"),
-            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, .. }) if delta == "silver harbor"
+            session.next_event().await.expect("queued final for item_audio_1"),
+            Some(RealtimeSessionEvent::AssistantTranscriptFinal { item_id, text, .. })
+                if item_id == "item_audio_1" && text == "birch seventeen"
+        ));
+        assert!(matches!(
+            session.next_event().await.expect("done without prior delta still projects text"),
+            Some(RealtimeSessionEvent::OutputTextDeltaForItem { delta, item_id, .. })
+                if delta == "silver harbor" && item_id == "item_audio_2"
+        ));
+        assert!(matches!(
+            session.next_event().await.expect("queued final for item_audio_2"),
+            Some(RealtimeSessionEvent::AssistantTranscriptFinal { item_id, text, .. })
+                if item_id == "item_audio_2" && text == "silver harbor"
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
     }
@@ -5852,6 +6127,69 @@ mod tests {
         }
     }
 
+    /// R1 test helper: spin until the recorded outbound `seen` log has
+    /// at least `expected` entries, yielding between checks. Bounded
+    /// at 2s so a regression that genuinely never lands an outbound
+    /// event panics cleanly instead of hanging the test runner.
+    async fn wait_for_seen_count(seen: &Arc<Mutex<Vec<ClientEvent>>>, expected: usize) {
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if seen.lock().await.len() >= expected {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        if result.is_err() {
+            let snap = seen.lock().await.clone();
+            panic!(
+                "wait_for_seen_count: timed out waiting for {expected} events; got {} ({snap:?})",
+                snap.len()
+            );
+        }
+    }
+
+    /// Test fake: like `ParkingOpenAiLiveSession` but reads server events
+    /// from a tokio mpsc receiver instead of a shared `VecDeque`. This
+    /// lets the test push events at exact moments during the run — in
+    /// particular, AFTER a command has been dispatched to the pump so
+    /// the pump's biased select cannot accidentally race-consume them
+    /// in its idle next_event branch before the command executes.
+    ///
+    /// Used by the R1 refresh tests where the pump must see
+    /// `SessionUpdate` first (sent by the Refresh arm) before reading
+    /// the matching `SessionUpdated` server-event ack — pre-queueing
+    /// the ack on a polled VecDeque would let the pump's idle next_event
+    /// poll silently drain the ack while waiting for the command to
+    /// arrive in cmd_rx.
+    struct ChannelOpenAiLiveSession {
+        seen: Arc<Mutex<Vec<ClientEvent>>>,
+        rx: tokio::sync::Mutex<mpsc::UnboundedReceiver<Result<Option<ServerEvent>, LlmError>>>,
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl OpenAiLiveSession for ChannelOpenAiLiveSession {
+        async fn send_raw(&mut self, event: ClientEvent) -> Result<(), LlmError> {
+            self.seen.lock().await.push(event);
+            Ok(())
+        }
+
+        async fn next_event(&mut self) -> Result<Option<ServerEvent>, LlmError> {
+            // Park forever once the channel closes (matches
+            // `ParkingOpenAiLiveSession`'s "session is held open by
+            // tests, do not signal EOF" semantics).
+            match self.rx.lock().await.recv().await {
+                Some(result) => result,
+                None => {
+                    std::future::pending::<()>().await;
+                    Ok(None)
+                }
+            }
+        }
+    }
+
     /// E25: the new `OpenAiLiveAdapter` implements `LiveAdapter` directly
     /// (no `meerkat-live::ProviderSessionAdapter` wrapper). Construct one,
     /// drain the initial Ready observation, and assert basic command flow
@@ -5977,6 +6315,7 @@ mod tests {
             model_id: "gpt-realtime".to_string(),
             provider_id: Provider::OpenAI.as_str().to_string(),
             audio_config: None,
+            runtime_system_context: Vec::new(),
         };
         adapter
             .send_command(LiveAdapterCommand::Open { snapshot })
@@ -6049,28 +6388,27 @@ mod tests {
             "test setup: seed messages must produce at least one ConversationItemCreate"
         );
 
-        // Pre-stage acks for the Refresh seed dance.
-        let mut ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
-        for index in 0..seed_event_count {
-            ack_queue.push_back(Ok(Some(ServerEvent::ConversationItemCreated {
-                event_id: format!("evt_refresh_seed_ack_{index}"),
-                previous_item_id: None,
-                item: Item::Message {
-                    id: Some(format!("msg_refresh_seed_{index}")),
-                    status: None,
-                    phase: None,
-                    role: Role::System,
-                    content: vec![ContentPart::InputText {
-                        text: format!("ack {index}"),
-                    }],
-                },
-            })));
-        }
+        // R1: Refresh now sends `session.update` first (so a snapshot
+        // with mutated tools / instructions / audio config actually
+        // applies) and then re-seeds history. Both phases must read
+        // their own server-event acks back from the raw session.
+        //
+        // We use a `ChannelOpenAiLiveSession` here instead of a
+        // pre-loaded `ParkingOpenAiLiveSession` queue: the pump's
+        // biased select runs an idle `next_event` poll between
+        // commands, so any event that's already sitting in a polled
+        // `VecDeque` would be silently consumed by that idle branch
+        // before the Refresh command ran. Pushing acks AFTER each
+        // outbound client event lands in `seen` keeps the pump
+        // synchronized with the Refresh execution path.
+        let total_outbound_count = seed_event_count + 1;
 
+        let (server_tx, server_rx) =
+            mpsc::unbounded_channel::<Result<Option<ServerEvent>, LlmError>>();
         let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
-        let raw = Box::new(ParkingOpenAiLiveSession {
+        let raw = Box::new(ChannelOpenAiLiveSession {
             seen: Arc::clone(&seen),
-            next_events: Arc::new(Mutex::new(ack_queue)),
+            rx: tokio::sync::Mutex::new(server_rx),
         });
         let session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
         let adapter = OpenAiLiveAdapter::new(session);
@@ -6086,8 +6424,9 @@ mod tests {
         assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
 
         // Send `Refresh { snapshot }`. The pump dispatches into
-        // `execute_openai_live_command`, which calls
-        // `seed_history_projection` against the new snapshot.
+        // `execute_openai_live_command`, which (R1) sends a
+        // SessionUpdate first, awaits its ack, then re-runs
+        // `seed_history_projection` against the snapshot.
         let snapshot = LiveProjectionSnapshot {
             session_id: SessionId::new(),
             snapshot_version: 9,
@@ -6097,38 +6436,298 @@ mod tests {
             model_id: "gpt-realtime".to_string(),
             provider_id: Provider::OpenAI.as_str().to_string(),
             audio_config: None,
+            runtime_system_context: Vec::new(),
         };
         adapter
             .send_command(LiveAdapterCommand::Refresh { snapshot })
             .await
             .expect("Refresh must dispatch");
 
-        let recorded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop {
-                let len = seen.lock().await.len();
-                if len >= seed_event_count {
-                    return seen.lock().await.clone();
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("Refresh seed events must be recorded within 2s");
+        // Wait for the SessionUpdate to land, then push its ack.
+        wait_for_seen_count(&seen, 1).await;
+        server_tx
+            .send(Ok(Some(ServerEvent::SessionUpdated {
+                event_id: "evt_refresh_session_updated".to_string(),
+                session: sample_server_session("gpt-realtime"),
+            })))
+            .expect("server channel must accept SessionUpdated ack");
+
+        // Then wait for all N seed `ConversationItemCreate` events to
+        // land and push the matching N acks.
+        wait_for_seen_count(&seen, total_outbound_count).await;
+        for index in 0..seed_event_count {
+            server_tx
+                .send(Ok(Some(ServerEvent::ConversationItemCreated {
+                    event_id: format!("evt_refresh_seed_ack_{index}"),
+                    previous_item_id: None,
+                    item: Item::Message {
+                        id: Some(format!("msg_refresh_seed_{index}")),
+                        status: None,
+                        phase: None,
+                        role: Role::System,
+                        content: vec![ContentPart::InputText {
+                            text: format!("ack {index}"),
+                        }],
+                    },
+                })))
+                .expect("server channel must accept seed ack");
+        }
+
+        // Yield long enough for the pump to drain the seed acks and
+        // return from `seed_history_projection`. After that point the
+        // `seen` log is complete.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        let recorded = seen.lock().await.clone();
 
         assert_eq!(
             recorded.len(),
-            seed_event_count,
-            "Refresh must forward every seed event to the provider"
+            total_outbound_count,
+            "Refresh must forward 1× SessionUpdate + every seed event to the provider"
         );
         let mut create_count = 0_usize;
+        let mut session_update_count = 0_usize;
         for event in &recorded {
-            if matches!(event, ClientEvent::ConversationItemCreate { .. }) {
-                create_count += 1;
+            match event {
+                ClientEvent::ConversationItemCreate { .. } => create_count += 1,
+                ClientEvent::SessionUpdate { .. } => session_update_count += 1,
+                _ => {}
             }
         }
         assert_eq!(
             create_count, seed_event_count,
             "every recorded Refresh seed event must be a ConversationItemCreate"
+        );
+        assert_eq!(
+            session_update_count, 1,
+            "Refresh must emit exactly one session.update before re-seeding"
+        );
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R1: a `Refresh { snapshot }` whose `system_prompt` and
+    /// `visible_tools` differ from the open-time configuration must
+    /// reach the provider as exactly one `session.update` ClientEvent
+    /// carrying the snapshot's instructions text and tool list.
+    /// Pre-R1 the Refresh arm only re-ran `seed_history_projection`,
+    /// so a `config/patch` that flipped tools or instructions left the
+    /// hosted realtime session running on stale state while RPC
+    /// reported `refreshed: true`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_command_emits_session_update_for_mutated_prompt_and_tools() {
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+        use meerkat_core::{Provider, ToolDef};
+
+        // Empty seed messages so the test focuses on the SessionUpdate
+        // branch — the seed-history dance is exercised by the sibling
+        // `refresh_command_reseeds_provider_with_snapshot_messages`.
+        let seed_messages: Vec<Message> = Vec::new();
+
+        // Pre-stage just the SessionUpdated ack — there are no seed
+        // events to ack since the snapshot's seed_messages is empty.
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> =
+            VecDeque::from(vec![Ok(Some(ServerEvent::SessionUpdated {
+                event_id: "evt_refresh_session_updated".to_string(),
+                session: sample_server_session("gpt-realtime"),
+            }))]);
+
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        // Stamp identity so the model-swap guard sees a stable origin
+        // and proceeds (matching model + provider).
+        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        // Drain initial Ready so the pump is in its select! loop.
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        let mutated_tools = vec![ToolDef {
+            name: "fresh_tool".into(),
+            description: "Tool added by refresh.".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+            provenance: None,
+        }];
+        let mutated_prompt = "fresh system prompt for refresh".to_string();
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 17,
+            seed_messages: seed_messages.clone(),
+            visible_tools: mutated_tools.clone(),
+            system_prompt: Some(mutated_prompt.clone()),
+            model_id: "gpt-realtime".to_string(),
+            provider_id: Provider::OpenAI.as_str().to_string(),
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+        };
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .expect("Refresh must dispatch");
+
+        // Wait for exactly one outbound SessionUpdate.
+        let recorded = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let snapshot = seen.lock().await.clone();
+                if snapshot
+                    .iter()
+                    .any(|event| matches!(event, ClientEvent::SessionUpdate { .. }))
+                {
+                    return snapshot;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Refresh must emit a session.update within 2s");
+
+        let session_updates: Vec<&SessionUpdate> = recorded
+            .iter()
+            .filter_map(|event| match event {
+                ClientEvent::SessionUpdate { session, .. } => Some(session.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            session_updates.len(),
+            1,
+            "Refresh must emit exactly one session.update; got {recorded:?}"
+        );
+        let update = session_updates[0];
+
+        // Instructions: the snapshot's `system_prompt` must appear
+        // verbatim in the rendered instructions block.
+        let instructions = update
+            .config
+            .instructions
+            .as_deref()
+            .expect("Refresh session.update must carry instructions");
+        assert!(
+            instructions.contains(&mutated_prompt),
+            "instructions must include the snapshot's system_prompt verbatim, got: {instructions}"
+        );
+
+        // Tools: the rendered tool list must equal the snapshot's
+        // `visible_tools` mapped through `openai_realtime_tools`.
+        let tools = update
+            .config
+            .tools
+            .as_ref()
+            .expect("Refresh session.update must carry tools");
+        assert_eq!(tools.len(), mutated_tools.len());
+        let has_fresh_tool = tools.iter().any(|tool| match tool {
+            Tool::Function { name, .. } => name.as_str() == "fresh_tool",
+            _ => false,
+        });
+        assert!(
+            has_fresh_tool,
+            "tools must include the snapshot's mutated `fresh_tool`, got {tools:?}"
+        );
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R1: a `Refresh { snapshot }` whose `model_id` differs from the
+    /// open-time identity must be rejected with a typed
+    /// `LiveAdapterObservation::Error` — the OpenAI Realtime API does
+    /// not accept a mutable `model` field on `session.update`, so the
+    /// only correct thing is to ask the caller to close + reopen.
+    /// Critically: NO `session.update` ClientEvent must reach the
+    /// provider when the model swap is detected.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_command_rejects_model_swap_without_emitting_session_update() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+
+        // No staged server events — the refresh path must error out
+        // before it ever reads from the raw session.
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        // Drain Ready.
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 22,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            // Mutated model — the swap target. Must be rejected.
+            model_id: "gpt-realtime-mini-v2".to_string(),
+            provider_id: Provider::OpenAI.as_str().to_string(),
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+        };
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .expect("Refresh must dispatch even though it'll fail downstream");
+
+        // The pump translates the typed `LlmError::InvalidRequest` into
+        // a `LiveAdapterObservation::Error` with `ProviderError` code +
+        // a message that names the swap.
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+        match observation {
+            Some(LiveAdapterObservation::Error { message, .. }) => {
+                assert!(
+                    message.contains("model swap")
+                        && message.contains("gpt-realtime-mini-v2")
+                        && message.contains("close + reopen"),
+                    "model swap rejection must name the swap target and direct \
+                     the caller to close + reopen, got: {message}"
+                );
+            }
+            other => panic!("expected Error observation for model swap, got {other:?}"),
+        }
+
+        // Yield enough async ticks that any (incorrectly emitted)
+        // session.update would land in `seen`. Then assert it didn't.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        let recorded = seen.lock().await.clone();
+        assert!(
+            recorded
+                .iter()
+                .all(|event| !matches!(event, ClientEvent::SessionUpdate { .. })),
+            "model-swap rejection must not have emitted any session.update events; got {recorded:?}"
         );
 
         adapter.close().await.expect("close must succeed");

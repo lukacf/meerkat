@@ -609,9 +609,28 @@ mod tests {
 
     #[tokio::test]
     async fn websocket_roundtrip_with_token() {
+        // R5 (Option A): the test exercises the full input roundtrip path —
+        // upgrade → consume_token → `host.send_input` → adapter.send_command.
+        // Without an attached & Ready adapter, `send_input` errors with
+        // `NoAdapter`, the server emits a JSON error frame and may tear the
+        // socket down before the client's subsequent Close is observed,
+        // surfacing as a Linux broken-pipe failure on BuildBuddy. Attach an
+        // idle (Ready) stub so `send_input` succeeds; the server then idles
+        // on `next_observation_raw` (pending forever) until the client sends
+        // Close. The test no longer relies on any server-initiated close
+        // frame as a success signal.
         let host = Arc::new(LiveAdapterHost::new());
         let session_id = meerkat_core::types::SessionId::new();
         let channel_id = host.open_channel(session_id).await.unwrap();
+        host.attach_adapter(&channel_id, Arc::new(IdleAdapter))
+            .await
+            .unwrap();
+        host.apply_status_update(
+            &channel_id,
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready,
+        )
+        .await
+        .unwrap();
 
         let state = Arc::new(LiveWsState::new(host));
         let token = state.mint_token(channel_id.clone()).await;

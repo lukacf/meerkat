@@ -12,6 +12,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::realtime_transcript::RealtimeTranscriptEvent;
+use crate::session::PendingSystemContextAppend;
 use crate::types::{ContentBlock, Message, SessionId, StopReason, ToolDef, Usage};
 
 // ---------------------------------------------------------------------------
@@ -93,6 +94,16 @@ pub struct LiveToolResult {
 #[serde(tag = "command", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveAdapterCommand {
+    /// R2: reserved for cross-session re-seed scenarios (resume,
+    /// cross-session attach) where the runtime hands an already-bound
+    /// adapter a snapshot that was *not* seeded at factory-construction
+    /// time. `live/open` does NOT dispatch this — `factory.open_live_adapter`
+    /// already passed `seed_messages` + `runtime_system_context` to the
+    /// provider session before adapter wrap, so dispatching `Open` again
+    /// would double-seed the conversation. Adapters that receive this
+    /// command after the channel is already live must replay the snapshot's
+    /// seed history into their provider session (the OpenAI arm does this
+    /// via `seed_history_projection`).
     Open {
         snapshot: LiveProjectionSnapshot,
     },
@@ -213,6 +224,15 @@ pub enum LiveAdapterObservation {
     },
     TurnInterrupted,
     TurnCompleted {
+        /// R6: the provider's response identifier for the turn that just
+        /// completed. The OpenAI realtime API delivers `response.done` with a
+        /// `response_id`; without plumbing this through, the projection sink
+        /// can only key buffered finals by `SessionId`, which lets a stale or
+        /// overlapping `response.done` flush the wrong buffered transcript.
+        /// Optional because not every provider surfaces an opaque response id
+        /// (transcript-only adapters, degraded ack paths).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
         stop_reason: StopReason,
         usage: Usage,
     },
@@ -292,6 +312,24 @@ pub struct LiveProjectionSnapshot {
     pub model_id: String,
     pub provider_id: String,
     pub audio_config: Option<LiveAudioConfig>,
+    /// R3: typed runtime system-context entries projected alongside seed
+    /// history.
+    ///
+    /// `RealtimeSessionOpenConfig` keeps `runtime_system_context` separate
+    /// from `seed_messages` so adapters can fold the entries into their
+    /// provider session as authoritative system instructions (peer terminal
+    /// context, ops_lifecycle context, etc.) rather than mixing them into
+    /// the canonical history. The snapshot must preserve that separation;
+    /// flattening into `seed_messages` would lose provenance and trip the
+    /// realtime layer's idempotent ordering on cross-source dedup.
+    ///
+    /// `PendingSystemContextAppend` does not (yet) derive `JsonSchema`;
+    /// represent as opaque JSON in the emitted schema until upstream
+    /// derives it (matches the treatment used for `Message` and `ToolDef`
+    /// above).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
+    pub runtime_system_context: Vec<PendingSystemContextAppend>,
 }
 
 /// Audio format configuration for the live session.
@@ -665,11 +703,51 @@ mod tests {
                 model_id: "gpt-5.4".into(),
                 provider_id: "openai".into(),
                 audio_config: None,
+                runtime_system_context: vec![],
             },
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains("\"snapshot_version\":42"));
         assert!(json.contains("\"provider_id\":\"openai\""));
+        // R3: empty runtime_system_context must be skipped on the wire so
+        // existing consumers don't see a new field they don't recognize.
+        assert!(!json.contains("runtime_system_context"));
+    }
+
+    #[test]
+    fn snapshot_round_trips_with_runtime_system_context() {
+        // R3: typed runtime system-context entries must round-trip through
+        // the snapshot without being folded into seed_messages.
+        use std::time::SystemTime;
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 7,
+            seed_messages: vec![],
+            visible_tools: vec![],
+            system_prompt: None,
+            model_id: "gpt-5.4".into(),
+            provider_id: "openai".into(),
+            audio_config: None,
+            runtime_system_context: vec![crate::session::PendingSystemContextAppend {
+                text: "peer terminal: pty=42".into(),
+                source: Some("peer_terminal".into()),
+                idempotency_key: Some("k1".into()),
+                accepted_at: SystemTime::UNIX_EPOCH,
+            }],
+        };
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert!(json.contains("runtime_system_context"));
+        assert!(json.contains("peer_terminal"));
+        let deser: LiveProjectionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.runtime_system_context.len(), 1);
+        assert_eq!(
+            deser.runtime_system_context[0].text,
+            "peer terminal: pty=42"
+        );
+        assert_eq!(
+            deser.runtime_system_context[0].source.as_deref(),
+            Some("peer_terminal")
+        );
     }
 
     // -- Observation serialization round-trips --
@@ -706,6 +784,7 @@ mod tests {
     #[test]
     fn observation_turn_completed_round_trips() {
         let obs = LiveAdapterObservation::TurnCompleted {
+            response_id: None,
             stop_reason: StopReason::EndTurn,
             usage: Usage {
                 input_tokens: 100,
@@ -715,6 +794,29 @@ mod tests {
             },
         };
         let json = serde_json::to_string(&obs).unwrap();
+        // R6: absent response_id is skipped on the wire.
+        assert!(!json.contains("response_id"));
+        let deser: LiveAdapterObservation = serde_json::from_str(&json).unwrap();
+        assert_eq!(obs, deser);
+    }
+
+    #[test]
+    fn observation_turn_completed_round_trips_with_response_id() {
+        // R6: when the provider surfaces a `response.done` with a
+        // `response_id`, the observation must carry it so the projection
+        // sink can key the buffered final on `(SessionId, response_id)`.
+        let obs = LiveAdapterObservation::TurnCompleted {
+            response_id: Some("resp_42".into()),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage {
+                input_tokens: 12,
+                output_tokens: 7,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+            },
+        };
+        let json = serde_json::to_string(&obs).unwrap();
+        assert!(json.contains("\"response_id\":\"resp_42\""));
         let deser: LiveAdapterObservation = serde_json::from_str(&json).unwrap();
         assert_eq!(obs, deser);
     }
@@ -1028,6 +1130,7 @@ mod tests {
             model_id: "gpt-5.4".into(),
             provider_id: "openai".into(),
             audio_config: None,
+            runtime_system_context: vec![],
         };
         assert_eq!(s1.snapshot_version, 1);
         let s2 = LiveProjectionSnapshot {

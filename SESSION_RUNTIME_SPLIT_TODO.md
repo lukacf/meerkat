@@ -233,7 +233,7 @@ self-verify.
   `meerkat::session_runtime::recovery`. These are pure data types;
   zero behavioural risk.
 
-- [ ] fix · [ ] verify · **W1-E.** Move `ArchiveRuntimeCleanup`,
+- [x] fix · [ ] verify · **W1-E.** Move `ArchiveRuntimeCleanup`,
   `PendingSessionEventStreams`, `PendingSessionEventStreamDrop` from
   `session_runtime.rs:222-300` to
   `meerkat::session_runtime::runtime_state`. The Drop impl on
@@ -241,6 +241,13 @@ self-verify.
   `runtime_adapter` — ensure the abstraction crosses crate bounds
   cleanly (`Arc<MeerkatMachine>` is in `meerkat-runtime`, already a
   facade dep).
+  *Deviation:* `ArchiveRuntimeCleanup` deferred to W3-A. Its fields
+  reference `SessionMcpState` (RPC-private) and
+  `meerkat_mob_mcp::MobMcpState` (a crate that `meerkat` does not yet
+  depend on). Moving it now would require generics + trait bounds
+  (behaviour-changing) or new `meerkat` deps; both broader than the
+  Wave-1 "pure type move" charter. Only `PendingSessionEventStreams`
+  and `PendingSessionEventStreamDrop` moved.
 
 ### Phase 2 — Wave 2: surface-agnostic methods (parallel by area)
 

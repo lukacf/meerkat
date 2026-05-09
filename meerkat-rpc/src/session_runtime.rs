@@ -216,11 +216,9 @@ pub(crate) use meerkat::session_runtime::recovery::{
     RecoveredCreateRequest, RecoveryRuntimeBindingMode,
 };
 
-#[derive(Clone)]
-struct PendingSessionEventStreams {
-    events: broadcast::Sender<EventEnvelope<AgentEvent>>,
-    receiver_dropped: Arc<Notify>,
-}
+pub(crate) use meerkat::session_runtime::runtime_state::{
+    PendingSessionEventStreamDrop, PendingSessionEventStreams,
+};
 
 #[derive(Clone)]
 struct ArchiveRuntimeCleanup {
@@ -286,16 +284,6 @@ impl ArchiveRuntimeCleanup {
         #[cfg(feature = "comms")]
         self.runtime_adapter.abort_comms_drain(session_id).await;
         Ok(())
-    }
-}
-
-struct PendingSessionEventStreamDrop {
-    receiver_dropped: Arc<Notify>,
-}
-
-impl Drop for PendingSessionEventStreamDrop {
-    fn drop(&mut self) {
-        self.receiver_dropped.notify_one();
     }
 }
 

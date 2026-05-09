@@ -317,10 +317,11 @@ impl MeerkatMachine {
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
     ) {
+        let mut repaired_dead_attachment = false;
         let existing = {
             let mut sessions = self.sessions.write().await;
             sessions.get_mut(&session_id).map(|entry| {
-                entry.clear_dead_attachment();
+                repaired_dead_attachment = entry.clear_dead_attachment();
                 let occupied = entry.has_attachment_or_attaching();
                 if !occupied {
                     // Claim the attachment slot so concurrent callers see
@@ -396,7 +397,7 @@ impl MeerkatMachine {
                 // the entry while we were rebuilding runtime state.
                 let mut sessions = self.sessions.write().await;
                 if let Some(entry) = sessions.get_mut(&session_id) {
-                    entry.clear_dead_attachment();
+                    repaired_dead_attachment = entry.clear_dead_attachment();
                     if entry.has_attachment_or_attaching() {
                         return;
                     }
@@ -468,10 +469,17 @@ impl MeerkatMachine {
             match machine_executor_attach_projection(&mut driver_guard) {
                 Ok(true) => {}
                 Ok(false) => {
-                    tracing::warn!(
-                        %session_id,
-                        "runtime driver remained attached without a live published loop; republishing attachment"
-                    );
+                    if repaired_dead_attachment {
+                        tracing::warn!(
+                            %session_id,
+                            "runtime driver remained attached without a live published loop; republishing attachment"
+                        );
+                    } else {
+                        tracing::debug!(
+                            %session_id,
+                            "runtime driver already attached before live loop publication; publishing attachment"
+                        );
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(

@@ -28,6 +28,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: /tmp/meerkat-cargo-home
+  RUSTUP_TOOLCHAIN: 1.94.0
   BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
   BUILDBUDDY_ENDPOINT: ${{ secrets.BUILDBUDDY_ENDPOINT }}
   ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -52,8 +53,8 @@ jobs:
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: rustup target add wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust-ci
+      - run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
@@ -75,8 +76,8 @@ jobs:
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - run: rustup target add wasm32-unknown-unknown
+      - uses: ./.github/actions/setup-rust-ci
+      - run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"

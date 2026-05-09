@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+cd "${root}"
+
+toolchain="${RUSTUP_TOOLCHAIN:-}"
+if [[ -z "${toolchain}" && -f rust-toolchain.toml ]]; then
+  toolchain="$(awk -F '"' '/^[[:space:]]*channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
+fi
+
+if [[ -z "${toolchain}" ]]; then
+  echo "error: RUSTUP_TOOLCHAIN is unset and rust-toolchain.toml has no channel" >&2
+  exit 1
+fi
+
+if ! command -v rustup >/dev/null 2>&1; then
+  echo "error: rustup is required to pin CI toolchain binaries" >&2
+  exit 1
+fi
+
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  cargo_home="${CARGO_HOME:-/tmp/meerkat-cargo-home}"
+  if [[ "${cargo_home}" == "/tmp/meerkat-cargo-home" ]]; then
+    cargo_home="/tmp/meerkat-cargo-home/${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}"
+  fi
+  mkdir -p "${cargo_home}"
+else
+  cargo_home="${CARGO_HOME:-}"
+fi
+
+wrapper_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/meerkat-rust-toolchains"
+wrapper_bin="${wrapper_root}/${toolchain}/bin"
+mkdir -p "${wrapper_bin}"
+
+write_wrapper() {
+  local tool="$1"
+  local path="${wrapper_bin}/${tool}"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'exec rustup run %q %q "$@"\n' "${toolchain}" "${tool}"
+  } >"${path}"
+  chmod +x "${path}"
+}
+
+write_wrapper cargo
+write_wrapper rustc
+write_wrapper rustdoc
+write_wrapper rustfmt
+
+resolved_cargo_path="$(rustup which --toolchain "${toolchain}" cargo)"
+resolved_toolchain_bin="$(dirname "${resolved_cargo_path}")"
+
+echo "Pinned Rust toolchain: ${toolchain}"
+"${wrapper_bin}/rustc" -Vv
+
+if [[ -n "${GITHUB_PATH:-}" ]]; then
+  echo "${wrapper_bin}" >>"${GITHUB_PATH}"
+fi
+
+if [[ -n "${GITHUB_ENV:-}" ]]; then
+  {
+    if [[ -n "${cargo_home}" ]]; then
+      echo "CARGO_HOME=${cargo_home}"
+    fi
+    echo "RUSTUP_TOOLCHAIN=${toolchain}"
+    echo "RUSTC=${wrapper_bin}/rustc"
+    echo "RUSTDOC=${wrapper_bin}/rustdoc"
+    echo "RUSTFMT=${wrapper_bin}/rustfmt"
+    echo "MEERKAT_RUST_TOOLCHAIN_BIN=${wrapper_bin}"
+    echo "MEERKAT_RUST_RESOLVED_TOOLCHAIN_BIN=${resolved_toolchain_bin}"
+  } >>"${GITHUB_ENV}"
+fi

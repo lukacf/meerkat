@@ -106,6 +106,7 @@ concurrency:
 
 env:
   CARGO_HOME: /tmp/meerkat-cargo-home
+  RUSTUP_TOOLCHAIN: 1.94.0
   MEERKAT_BUILDBUDDY: ${{ vars.MEERKAT_BUILDBUDDY || 'false' }}
   MEERKAT_BAZEL_BACKEND: ${{ inputs.backend || 'buildbuddy-hosted' }}
   BUILDBUDDY_BAZEL_CONFIG: ${{ (inputs.backend || '') == 'gcp-local' && 'gcp-linux' || (inputs.backend || '') == 'gcp-buildbuddy' && 'buildbuddy-linux-gcp-ci-rbe' || '' }}

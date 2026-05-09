@@ -1,0 +1,12 @@
+name: Setup Rust CI
+description: Install Meerkat's pinned Rust toolchain and force its binaries ahead of runner defaults.
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@1.94.0
+
+    - name: Pin Rust toolchain binaries
+      shell: bash
+      run: scripts/ci-pin-rust-toolchain-env

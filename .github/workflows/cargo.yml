@@ -21,6 +21,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   CARGO_HOME: /tmp/meerkat-cargo-home
+  RUSTUP_TOOLCHAIN: 1.94.0
 
 jobs:
   fmt-lint:
@@ -30,8 +31,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -75,8 +76,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -144,9 +145,9 @@ jobs:
         if: ${{ steps.machine-changes.outputs.changed != 'true' }}
         run: echo "No machine-authority inputs changed; skipping TLA+ machine checks."
 
-      - name: Install Rust
+      - name: Setup Rust
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
-        uses: dtolnay/rust-toolchain@1.94.0
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         if: ${{ steps.machine-changes.outputs.changed == 'true' }}
@@ -205,8 +206,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -229,8 +230,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -247,11 +248,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+        run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -313,8 +314,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -334,11 +335,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+        run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -368,8 +369,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -391,11 +392,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+        run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -425,8 +426,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -454,8 +455,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -486,8 +487,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
@@ -507,11 +508,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.94.0
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust-ci
 
       - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+        run: rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" wasm32-unknown-unknown
 
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2

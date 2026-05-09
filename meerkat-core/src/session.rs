@@ -971,7 +971,15 @@ impl Session {
                     RealtimeTranscriptRole::Assistant,
                     Some(response_id),
                 ) {
-                    if !promote_item_lane(item, TranscriptLane::Display) {
+                    if promote_item_lane(item, TranscriptLane::Display) {
+                        item.content_segments
+                            .entry(content_index)
+                            .or_default()
+                            .push_str(&delta);
+                        if response_completed && !item.text().is_empty() {
+                            item.ready = true;
+                        }
+                    } else {
                         // R5-6 sibling: this delta was routed at a
                         // Spoken-classified item (e.g. truncation arrived
                         // first and locked the lane). `promote_item_lane`
@@ -981,14 +989,6 @@ impl Session {
                         tracing::warn!(
                             "AssistantTextDelta routed to a Spoken-lane item; dropping delta to preserve lane invariant — this indicates a provider lane-classification bug"
                         );
-                    } else {
-                        item.content_segments
-                            .entry(content_index)
-                            .or_default()
-                            .push_str(&delta);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
                     }
                 }
             }
@@ -1028,7 +1028,15 @@ impl Session {
                     RealtimeTranscriptRole::Assistant,
                     Some(response_id),
                 ) {
-                    if !promote_item_lane(item, TranscriptLane::Spoken) {
+                    if promote_item_lane(item, TranscriptLane::Spoken) {
+                        item.content_segments
+                            .entry(content_index)
+                            .or_default()
+                            .push_str(&delta);
+                        if response_completed && !item.text().is_empty() {
+                            item.ready = true;
+                        }
+                    } else {
                         // R5-6 sibling: this transcript delta arrived for a
                         // Display-classified item (a Display delta or other
                         // Display-lane event landed first). `promote_item_lane`
@@ -1037,14 +1045,6 @@ impl Session {
                         tracing::warn!(
                             "AssistantTranscriptDelta routed to a Display-lane item; dropping delta to preserve lane invariant — this indicates a provider lane-classification bug"
                         );
-                    } else {
-                        item.content_segments
-                            .entry(content_index)
-                            .or_default()
-                            .push_str(&delta);
-                        if response_completed && !item.text().is_empty() {
-                            item.ready = true;
-                        }
                     }
                 }
             }
@@ -1067,6 +1067,8 @@ impl Session {
                     return outcome;
                 }
                 let response_completed = state.assistant_completions.contains_key(&response_id);
+                let item_id_for_log = item_id.clone();
+                let response_id_for_log = response_id.clone();
                 if let Some(item) = observe_realtime_item(
                     &mut state,
                     item_id,
@@ -1074,18 +1076,27 @@ impl Session {
                     RealtimeTranscriptRole::Assistant,
                     Some(response_id),
                 ) {
-                    // R5-6: truncation is a Spoken-lane-only semantic — it
-                    // describes the audio output that was actually heard
-                    // before barge-in cut it short. Promote to Spoken so the
-                    // materializer commits as `AssistantBlock::Transcript`.
-                    // If a Display delta arrived first and content is
-                    // staged under Display, `promote_item_lane` keeps the
-                    // existing lane and returns `false` — that's a provider
-                    // bug (truncation routed to a Display-classified item).
-                    // Treat as a no-op so we don't clobber Display content
-                    // with spoken-truncation text. The warn was already
-                    // emitted inside `promote_item_lane`.
-                    if promote_item_lane(item, TranscriptLane::Spoken) {
+                    // R5-7-sibling: a late truncation arriving after the
+                    // canonical message has already committed cannot mutate
+                    // history (append-only invariant). Same shape as the
+                    // late-FinalText guard above — warn and skip.
+                    if item.materialized {
+                        tracing::warn!(
+                            target: "meerkat::session",
+                            item_id = %item_id_for_log,
+                            response_id = %response_id_for_log,
+                            "AssistantTranscriptTruncated arrived after item already materialized; canonical message is locked, late truncation dropped",
+                        );
+                    } else if promote_item_lane(item, TranscriptLane::Spoken) {
+                        // R5-6: truncation is a Spoken-lane-only semantic —
+                        // it describes the audio output that was actually
+                        // heard before barge-in cut it short. Promote to
+                        // Spoken so the materializer commits as
+                        // `AssistantBlock::Transcript`. If a Display delta
+                        // arrived first, `promote_item_lane` keeps the
+                        // existing lane and returns `false` — that's a
+                        // provider bug; warn already emitted inside
+                        // `promote_item_lane`.
                         item.content_segments.insert(content_index, text);
                         if response_completed && !item.text().is_empty() {
                             item.ready = true;
@@ -1151,11 +1162,7 @@ impl Session {
                     // it), drop the final to preserve the lane invariant —
                     // append-only history would otherwise silently switch
                     // block type at materialize time.
-                    if !promote_item_lane(item, TranscriptLane::Spoken) {
-                        tracing::warn!(
-                            "AssistantTranscriptFinalText routed to a Display-lane item; dropping authoritative final to preserve lane invariant — this indicates a provider lane-classification bug"
-                        );
-                    } else {
+                    if promote_item_lane(item, TranscriptLane::Spoken) {
                         // Replace, not append: the final's text is
                         // authoritative and supersedes any (possibly
                         // partial) accumulated segment text.
@@ -1163,6 +1170,10 @@ impl Session {
                         if response_completed && !item.text().is_empty() {
                             item.ready = true;
                         }
+                    } else {
+                        tracing::warn!(
+                            "AssistantTranscriptFinalText routed to a Display-lane item; dropping authoritative final to preserve lane invariant — this indicates a provider lane-classification bug"
+                        );
                     }
                 }
             }

@@ -761,13 +761,12 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
 /// observation surface — observations flow adapter -> wire -> SDK only —
 /// but `WireStopReason` and `WireUsage` already provide the inverse via
 /// their dedicated wire types in `wire/session.rs` and the helper above.
-//
-// (No `impl From<WireLiveAdapterObservation> for LiveAdapterObservation`
-// emitted: the wire-side observation is a downstream projection, never the
-// authority. Adding one would invite reverse-direction flows that bypass
-// the adapter contract; the round-trip *value* equality is asserted via
-// JSON in `wire_live_adapter_observation_round_trips_for_all_variants`.)
-
+///
+/// (No `impl From<WireLiveAdapterObservation> for LiveAdapterObservation`
+/// emitted: the wire-side observation is a downstream projection, never the
+/// authority. Adding one would invite reverse-direction flows that bypass
+/// the adapter contract; the round-trip *value* equality is asserted via
+/// JSON in `wire_live_adapter_observation_round_trips_for_all_variants`.)
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::panic)]
 mod tests {

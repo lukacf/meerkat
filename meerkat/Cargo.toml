@@ -38,6 +38,7 @@ meerkat-contracts = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-skills = { workspace = true, optional = true }
 async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }

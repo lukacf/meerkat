@@ -1848,36 +1848,7 @@ struct SessionMcpState {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Observable state of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    /// The session is idle and ready to accept a new turn.
-    Idle,
-    /// A turn is currently running.
-    Running,
-    /// The session is shutting down.
-    ShuttingDown,
-}
-
-impl SessionState {
-    /// Return a stable string representation matching the serde `rename_all` convention.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::ShuttingDown => "shutting_down",
-        }
-    }
-}
-
-/// Summary information about a session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionInfo {
-    pub session_id: SessionId,
-    pub state: SessionState,
-    pub labels: BTreeMap<String, String>,
-}
+pub use meerkat::session_runtime::runtime_state::{SessionInfo, SessionState};
 
 fn now_unix_secs() -> u64 {
     meerkat_core::time_compat::SystemTime::now()
@@ -2203,26 +2174,11 @@ impl SessionRuntime {
     }
 
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
-        if self
-            .service
-            .synchronize_live_session_from_durable_authority_if_needed(session_id)
+        let recovery_ctx = self.recovery_context();
+        self.runtime_state_ops()
+            .live_session_is_stale(session_id, &recovery_ctx)
             .await
-            .map_err(session_error_to_rpc)?
-        {
-            return Ok(false);
-        }
-
-        let live = match self.service.export_live_session(session_id).await {
-            Ok(session) => session,
-            Err(SessionError::NotFound { .. }) => {
-                return Ok(self.load_persisted_session(session_id).await?.is_some());
-            }
-            Err(err) => return Err(session_error_to_rpc(err)),
-        };
-        let Some(stored) = self.load_persisted_session(session_id).await? else {
-            return Ok(false);
-        };
-        Ok(stored.messages().len() > live.messages().len())
+            .map_err(session_error_to_rpc)
     }
 
     async fn archived_persisted_session_without_live(
@@ -4625,16 +4581,24 @@ impl SessionRuntime {
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        let result = self.service.discard_live_session(session_id).await;
-        if result.is_ok() && !self.staged_sessions.contains(session_id).await {
-            self.discard_staged_capacity_admission(session_id);
-        }
-        result
+        self.runtime_state_ops()
+            .discard_live_session(session_id)
+            .await
     }
 
     async fn discard_stale_live_session(&self, session_id: &SessionId) {
-        let _ = self.discard_live_session(session_id).await;
-        self.runtime_adapter.unregister_session(session_id).await;
+        self.runtime_state_ops()
+            .discard_stale_live_session(session_id)
+            .await;
+    }
+
+    fn runtime_state_ops(&self) -> meerkat::session_runtime::runtime_state::RuntimeStateOps<'_> {
+        meerkat::session_runtime::runtime_state::RuntimeStateOps {
+            service: &self.service,
+            staged_sessions: &self.staged_sessions,
+            staged_capacity_admissions: &self.staged_capacity_admissions,
+            runtime_adapter: &self.runtime_adapter,
+        }
     }
 
     pub async fn dispatch_external_tool_call(

@@ -323,12 +323,24 @@ self-verify.
   callsites remain identical; verify the spawned tasks have the same
   cancellation semantics in the new crate.
 
-- [ ] fix · [ ] verify · **W2-E.** Move `SessionInfo`, `SessionState`
+- [x] fix · [ ] verify · **W2-E.** Move `SessionInfo`, `SessionState`
   enums and `archived_persisted_session_without_live`,
   `live_session_is_stale`, `try_recover_persisted_session`,
   `discard_live_session`, `discard_stale_live_session` to
   `meerkat::session_runtime::runtime_state`. These are session-state
   observers; surface-agnostic.
+  *Deviation:* `archived_persisted_session_without_live` depends on
+  the RPC-private `ArchiveRuntimeCleanup` (deferred to W3-A) and stays
+  in `meerkat-rpc`. `try_recover_persisted_session` is a
+  `#[cfg(test)]` helper that composes RPC-private `TurnOverrides` and
+  `RpcError`; stays in place. The real `SessionState`/`SessionInfo`
+  bodies replace the F2 placeholder enums in `runtime_state`. A new
+  `RuntimeStateOps<'a>` orchestrator owns `discard_live_session`,
+  `discard_stale_live_session`, and `live_session_is_stale`; SessionRuntime
+  exposes a `runtime_state_ops()` builder and re-exports
+  `SessionInfo`/`SessionState` from the moved module. `meerkat` gained
+  a `serde` dep (with `derive`) so the typed `SessionState` can carry
+  its `serde::Serialize`/`Deserialize` derives upstream.
 
 ### Phase 3 — Wave 3: builder + skill-identity + config plumbing
 

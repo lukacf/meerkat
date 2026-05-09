@@ -228,7 +228,7 @@ self-verify.
   `meerkat::session_runtime::admission`. These are RAII guards with
   `Drop` impls — confirm Drop runs in the new crate's tokio runtime.
 
-- [ ] fix · [ ] verify · **W1-D.** Move `RecoveredCreateRequest` and
+- [x] fix · [ ] verify · **W1-D.** Move `RecoveredCreateRequest` and
   `RecoveryRuntimeBindingMode` from `session_runtime.rs:210,216` to
   `meerkat::session_runtime::recovery`. These are pure data types;
   zero behavioural risk.

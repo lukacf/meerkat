@@ -212,17 +212,9 @@ pub(crate) struct RuntimePreAdmission {
     staged_restore: Option<StagedAdmissionRestore>,
 }
 
-#[derive(Debug)]
-struct RecoveredCreateRequest {
-    request: CreateSessionRequest,
-    runtime_was_registered: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RecoveryRuntimeBindingMode {
-    Authoritative,
-    LocalResources,
-}
+pub(crate) use meerkat::session_runtime::recovery::{
+    RecoveredCreateRequest, RecoveryRuntimeBindingMode,
+};
 
 #[derive(Clone)]
 struct PendingSessionEventStreams {

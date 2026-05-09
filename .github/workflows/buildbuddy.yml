@@ -74,7 +74,10 @@ env:
   MEERKAT_GCP_BUILDBUDDY_MIG: ${{ vars.MEERKAT_GCP_BUILDBUDDY_MIG || 'meerkat-bb-exec' }}
   MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE || '12' }}
   MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE || 'c3d-standard-30' }}
-  MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB || '1000' }}
+  MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB || '100' }}
+  MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB || '1000' }}
+  MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE || 'pd-ssd' }}
+  MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
   MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
@@ -92,7 +95,8 @@ env:
   MEERKAT_E2E_AUTH_GEMINI_MODEL: ${{ secrets.MEERKAT_E2E_AUTH_GEMINI_MODEL }}
   MEERKAT_E2E_AUTH_VERTEX_CANARY: ${{ secrets.MEERKAT_E2E_AUTH_VERTEX_CANARY }}
   MEERKAT_CLEAN_E2E_SCENARIO_TARGETS: "1"
-  MEERKAT_BUILDBUDDY_CI_JOBS: ${{ vars.MEERKAT_BUILDBUDDY_CI_JOBS || '8' }}
+  MEERKAT_BUILDBUDDY_CI_JOBS: ${{ vars.MEERKAT_BUILDBUDDY_CI_JOBS || '192' }}
+  MEERKAT_BUILDBUDDY_BATCH_JOBS: ${{ vars.MEERKAT_BUILDBUDDY_BATCH_JOBS || '1' }}
 
 jobs:
   control-plane-up:
@@ -216,9 +220,33 @@ jobs:
         shell: bash
         run: scripts/gcp-buildbuddy-executor-pool up
 
+  prebuild-submit:
+    name: Prebuild submitter
+    needs: [control-plane-up, executors-up]
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      BUILDBUDDY_GRPC_URL: ${{ needs.control-plane-up.outputs.grpc_url }}
+      BUILDBUDDY_HTTP_URL: ${{ needs.control-plane-up.outputs.http_url }}
+      BUILDBUDDY_ENDPOINT: ${{ needs.control-plane-up.outputs.grpc_url }}
+      CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: ./.github/actions/run-buildbuddy-ci-lane-batch
+        with:
+          group: gcp-prebuild
+          profile: submitter
+          mode: ${{ inputs.mode || 'full-fresh' }}
+          lanes: |
+            ci-prebuild
+
   native-submit:
     name: Native submitter
-    needs: [control-plane-up, executors-up]
+    needs: [control-plane-up, executors-up, prebuild-submit]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -255,7 +283,7 @@ jobs:
 
   governance-submit:
     name: Governance submitter
-    needs: [control-plane-up, executors-up]
+    needs: [control-plane-up, executors-up, prebuild-submit]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -330,7 +358,7 @@ jobs:
 
   wasm-feature-submit:
     name: WASM and feature submitter
-    needs: [control-plane-up, executors-up]
+    needs: [control-plane-up, executors-up, prebuild-submit]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -356,15 +384,13 @@ jobs:
             test-feature-matrix-lib
             test-feature-matrix-surface-checks
             audit
-            seam-inventory
-            rmat-audit
-            machine-authority
 
   executors-down:
     name: Executors down
     if: ${{ always() }}
     needs:
       - executors-up
+      - prebuild-submit
       - native-submit
       - governance-submit
       - wasm-feature-submit
@@ -381,6 +407,11 @@ jobs:
 
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v3
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
 
       - name: Authenticate to GCP with JSON fallback
         shell: bash
@@ -404,25 +435,7 @@ jobs:
         env:
           MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN: ${{ vars.MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN || '0' }}
           MEERKAT_GCP_BUILDBUDDY_WAIT_TIMEOUT: ${{ vars.MEERKAT_GCP_BUILDBUDDY_WAIT_TIMEOUT || '900' }}
-        run: |
-          gcloud compute instance-groups managed resize "${MEERKAT_GCP_BUILDBUDDY_MIG}" \
-            --project "${MEERKAT_GCP_PROJECT_ID}" \
-            --zone "${MEERKAT_GCP_ZONE}" \
-            --size 0 \
-            --quiet
-
-          case "${MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN}" in
-            0|false|False|FALSE|no|No|NO)
-              echo "Skipping wait for executor pool scale-down; target size is set to 0."
-              ;;
-            *)
-              gcloud compute instance-groups managed wait-until "${MEERKAT_GCP_BUILDBUDDY_MIG}" \
-                --project "${MEERKAT_GCP_PROJECT_ID}" \
-                --zone "${MEERKAT_GCP_ZONE}" \
-                --stable \
-                --timeout "${MEERKAT_GCP_BUILDBUDDY_WAIT_TIMEOUT}"
-              ;;
-          esac
+        run: scripts/gcp-buildbuddy-executor-pool down
 
   gate:
     name: GCP BuildBuddy gate
@@ -430,6 +443,7 @@ jobs:
     needs:
       - control-plane-up
       - executors-up
+      - prebuild-submit
       - native-submit
       - governance-submit
       - wasm-feature-submit

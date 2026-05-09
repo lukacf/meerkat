@@ -143,7 +143,7 @@ case "${mode}" in
       exec scripts/buildbuddy-ci-lane native-e2e-system --mode e2e-system
     fi
     ;;
-  release-validate|fmt-lint|sdk-suites|rust-release-packaging|machine-authority|rmat-audit|seam-inventory|wasm-contract-tests|test-unit|integration-fast|e2e-fast|e2e-system|e2e-live|e2e-smoke|test-minimal|test-feature-matrix-lib|test-feature-matrix-surface-checks|wasm-check|audit|native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|fmt-static|cargo-all-features-clippy|feature-clippy|unused-deps|wasm-contract|minimal-feature-builds|feature-matrix-lib|feature-matrix-surface|security-audit)
+  release-validate|ci-prebuild|fmt-lint|sdk-suites|rust-release-packaging|machine-authority|rmat-audit|seam-inventory|wasm-contract-tests|test-unit|integration-fast|e2e-fast|e2e-system|e2e-live|e2e-smoke|test-minimal|test-feature-matrix-lib|test-feature-matrix-surface-checks|wasm-check|audit|native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|fmt-static|cargo-all-features-clippy|feature-clippy|unused-deps|wasm-contract|minimal-feature-builds|feature-matrix-lib|feature-matrix-surface|security-audit)
     lane_args=("${mode}" --mode "${mode}")
     if [[ "${dry_run}" -eq 1 ]]; then
       lane_args+=(--dry-run)

@@ -86,7 +86,7 @@ source_local_secrets_env
 
 is_native_lane=0
 case "${lane}" in
-  native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|test-unit|integration-fast|e2e-system|e2e-fast|e2e-live|e2e-smoke|machine-authority|rmat-audit|seam-inventory)
+  ci-prebuild|native-build-clippy|native-unit-tests|native-integration-fast|native-e2e-system|test-unit|integration-fast|e2e-system|e2e-fast|e2e-live|e2e-smoke|machine-authority|rmat-audit|seam-inventory)
     is_native_lane=1
     ;;
 esac
@@ -225,6 +225,9 @@ run_bazel_lane() {
 }
 
 case "${lane}" in
+  ci-prebuild)
+    run_bazel_lane ci-prebuild-rbe --jobs="${bazel_jobs}" --color=no --curses=no
+    ;;
   native-build-clippy)
     run_bazel_lane workspace-build-clippy-rbe --jobs="${bazel_jobs}" --color=no --curses=no
     ;;

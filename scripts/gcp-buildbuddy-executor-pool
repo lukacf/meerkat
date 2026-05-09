@@ -17,7 +17,10 @@ Environment:
   MEERKAT_GCP_BUILDBUDDY_TEMPLATE        Instance template name
   MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE     Executor VM count for up (default: 12)
   MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE    Executor machine (default: c3d-standard-30)
-  MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB    Boot/cache disk size (default: 1000)
+  MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB    Boot disk size (default: 100)
+  MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB   Stateful cache disk size (default: 1000)
+  MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE Stateful cache disk type (default: pd-ssd)
+  MEERKAT_GCP_BUILDBUDDY_DOWN_MODE       stopped or delete (default: stopped)
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL       BuildBuddy pool name (default: meerkat-ci)
   MEERKAT_BUILDBUDDY_EXECUTOR_IMAGE      BuildBuddy executor image
   MEERKAT_BUILDBUDDY_CI_IMAGE            Bazel action container image
@@ -32,10 +35,14 @@ project="${MEERKAT_GCP_PROJECT_ID:-${GCP_PROJECT_ID:-king-dnn-training-dev}}"
 region="${MEERKAT_GCP_REGION:-europe-west1}"
 zone="${MEERKAT_GCP_ZONE:-europe-west1-b}"
 mig="${MEERKAT_GCP_BUILDBUDDY_MIG:-meerkat-bb-exec}"
-template="${MEERKAT_GCP_BUILDBUDDY_TEMPLATE:-${mig}-template-v3}"
+template="${MEERKAT_GCP_BUILDBUDDY_TEMPLATE:-${mig}-template-v4}"
 target_size="${MEERKAT_GCP_BUILDBUDDY_TARGET_SIZE:-12}"
 machine_type="${MEERKAT_GCP_BUILDBUDDY_MACHINE_TYPE:-c3d-standard-30}"
-boot_disk_gb="${MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB:-1000}"
+boot_disk_gb="${MEERKAT_GCP_BUILDBUDDY_BOOT_DISK_GB:-100}"
+cache_disk_gb="${MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB:-1000}"
+cache_disk_type="${MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE:-pd-ssd}"
+cache_disk_device="${MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_DEVICE:-bb-exec-cache}"
+down_mode="${MEERKAT_GCP_BUILDBUDDY_DOWN_MODE:-stopped}"
 pool="${MEERKAT_BUILDBUDDY_EXECUTOR_POOL:-meerkat-ci}"
 executor_image="${MEERKAT_BUILDBUDDY_EXECUTOR_IMAGE:-buildbuddy.bbcr.io/public/buildbuddy-executor-enterprise:enterprise-v2.265.0}"
 ci_image="${MEERKAT_BUILDBUDDY_CI_IMAGE:-europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0}"
@@ -191,10 +198,11 @@ API_KEY_SECRET="${api_key_secret}"
 ENDPOINT_SECRET="${endpoint_secret}"
 EXECUTOR_IMAGE="${executor_image}"
 CI_IMAGE="${ci_image}"
+CACHE_DISK_DEVICE="${cache_disk_device}"
 LOCAL_CACHE_SIZE_BYTES="${MEERKAT_GCP_BUILDBUDDY_LOCAL_CACHE_BYTES:-700000000000}"
 
 apt-get update -y
-DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl docker.io python3
+DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl docker.io e2fsprogs python3
 systemctl enable --now docker
 
 metadata() {
@@ -243,6 +251,38 @@ printf '%s' "\${registry_token}" |
     --username oauth2accesstoken \
     --password-stdin
 
+mount_cache_disk() {
+  local device="/dev/disk/by-id/google-\${CACHE_DISK_DEVICE}"
+  local mount_point="/buildbuddy"
+
+  for _ in {1..60}; do
+    if [[ -e "\${device}" ]]; then
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ ! -e "\${device}" ]]; then
+    echo "Stateful cache disk device is missing: \${device}" >&2
+    exit 1
+  fi
+
+  if ! blkid "\${device}" >/dev/null 2>&1; then
+    mkfs.ext4 -F -m 0 "\${device}"
+  fi
+
+  mkdir -p "\${mount_point}"
+  if ! grep -q " \${mount_point} " /etc/fstab; then
+    uuid="\$(blkid -s UUID -o value "\${device}")"
+    printf 'UUID=%s %s ext4 discard,defaults,nofail 0 2\n' "\${uuid}" "\${mount_point}" >> /etc/fstab
+  fi
+
+  if ! findmnt -rn "\${mount_point}" >/dev/null 2>&1; then
+    mount "\${mount_point}"
+  fi
+}
+
+mount_cache_disk
 mkdir -p /etc/buildbuddy /buildbuddy/remotebuilds /buildbuddy/filecache
 chmod -R a+rwX /buildbuddy
 
@@ -340,6 +380,7 @@ ensure_template_and_mig() {
       --machine-type "${machine_type}" \
       --boot-disk-size "${boot_disk_gb}GB" \
       --boot-disk-type pd-ssd \
+      --create-disk "auto-delete=no,boot=no,device-name=${cache_disk_device},mode=rw,size=${cache_disk_gb}GB,type=${cache_disk_type}" \
       --image-family debian-12 \
       --image-project debian-cloud \
       --maintenance-policy TERMINATE \
@@ -357,34 +398,96 @@ ensure_template_and_mig() {
       --zone "${zone}" \
       --base-instance-name "${mig}" \
       --size 0 \
+      --stopped-size 0 \
+      --stateful-disk "device-name=${cache_disk_device},auto-delete=never" \
+      --standby-policy-mode manual \
       --template "${template}" \
       --quiet
   else
     ensure_mig_template
+    ensure_mig_stateful_policy
   fi
 }
 
-resize_pool() {
+ensure_mig_stateful_policy() {
+  gcloud compute instance-groups managed update "${mig}" \
+    --project "${project}" \
+    --zone "${zone}" \
+    --stateful-disk "device-name=${cache_disk_device},auto-delete=never" \
+    --standby-policy-mode manual \
+    --quiet >/dev/null
+}
+
+resume_pool() {
   local size="$1"
   ensure_template_and_mig
-  gcloud compute instance-groups managed resize "${mig}" \
+  gcloud compute instance-groups managed update "${mig}" \
     --project "${project}" \
     --zone "${zone}" \
     --size "${size}" \
+    --stopped-size 0 \
+    --suspended-size 0 \
     --quiet
 }
 
-resize_existing_pool() {
-  local size="$1"
+target_field() {
+  local field="$1"
+  gcloud compute instance-groups managed describe "${mig}" \
+    --project "${project}" \
+    --zone "${zone}" \
+    --format="value(${field})" 2>/dev/null || true
+}
+
+park_existing_pool() {
   require_gcloud
   if ! mig_exists; then
     echo "MIG ${mig}: absent"
     return
   fi
-  gcloud compute instance-groups managed resize "${mig}" \
+
+  case "${down_mode}" in
+    delete)
+      echo "Deleting executor VMs and their non-stateful resources; preserved stateful cache disks may remain attached to MIG state."
+      gcloud compute instance-groups managed resize "${mig}" \
+        --project "${project}" \
+        --zone "${zone}" \
+        --size 0 \
+        --quiet
+      return
+      ;;
+    stopped|stop|park)
+      ;;
+    *)
+      echo "error: unknown MEERKAT_GCP_BUILDBUDDY_DOWN_MODE='${down_mode}' (expected stopped or delete)" >&2
+      exit 2
+      ;;
+  esac
+
+  local running stopped parked_size
+  running="$(target_field targetSize)"
+  stopped="$(target_field targetStoppedSize)"
+  running="${running:-0}"
+  stopped="${stopped:-0}"
+  parked_size="${MEERKAT_GCP_BUILDBUDDY_PARKED_SIZE:-}"
+  if [[ -z "${parked_size}" ]]; then
+    if [[ "${running}" =~ ^[0-9]+$ ]] && ((running > 0)); then
+      parked_size="${running}"
+    else
+      parked_size="${stopped}"
+    fi
+  fi
+  if ! [[ "${parked_size}" =~ ^[0-9]+$ ]]; then
+    echo "error: invalid parked executor size '${parked_size}'" >&2
+    exit 2
+  fi
+
+  echo "Parking executor pool with ${parked_size} stopped VMs so per-executor caches survive between CI runs."
+  gcloud compute instance-groups managed update "${mig}" \
     --project "${project}" \
     --zone "${zone}" \
-    --size "${size}" \
+    --size 0 \
+    --stopped-size "${parked_size}" \
+    --suspended-size 0 \
     --quiet
 }
 
@@ -403,12 +506,12 @@ wait_stable() {
 
 status() {
   require_gcloud
-  echo "project=${project} zone=${zone} mig=${mig} template=${template} pool=${pool}"
+  echo "project=${project} zone=${zone} mig=${mig} template=${template} pool=${pool} cache_disk=${cache_disk_device}:${cache_disk_gb}GB:${cache_disk_type} down_mode=${down_mode}"
   if mig_exists; then
     gcloud compute instance-groups managed describe "${mig}" \
       --project "${project}" \
       --zone "${zone}" \
-      --format='table(name,targetSize,currentActions.creating,currentActions.deleting,currentActions.recreating,currentActions.refreshing,currentActions.restarting,currentActions.verifying)'
+      --format='table(name,targetSize,targetStoppedSize,targetSuspendedSize,standbyPolicy.mode,currentActions.creating,currentActions.deleting,currentActions.starting,currentActions.stopping,currentActions.recreating,currentActions.refreshing,currentActions.restarting,currentActions.verifying)'
     gcloud compute instance-groups managed list-instances "${mig}" \
       --project "${project}" \
       --zone "${zone}" \
@@ -432,15 +535,15 @@ case "${command}" in
     ;;
   up)
     size="${2:-${target_size}}"
-    resize_pool "${size}"
+    resume_pool "${size}"
     wait_stable
     status
     ;;
   down)
-    resize_existing_pool 0
+    park_existing_pool
     case "${MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN:-1}" in
       0|false|False|FALSE|no|No|NO)
-        echo "Skipping wait for executor pool scale-down; target size is set to 0."
+        echo "Skipping wait for executor pool park; target running size is set to 0."
         ;;
       *)
         wait_stable

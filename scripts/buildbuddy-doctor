@@ -361,9 +361,12 @@ fi
 if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
   grep -Fq 'buildbuddy-gcp-executors' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'gcloud compute instance-groups managed resize "${MEERKAT_GCP_BUILDBUDDY_MIG}"' .github/workflows/buildbuddy.yml &&
-  grep -Fq 'resize_existing_pool 0' scripts/gcp-buildbuddy-executor-pool &&
-  grep -Fq 'Skipping wait for executor pool scale-down' scripts/gcp-buildbuddy-executor-pool &&
+  grep -Fq 'scripts/gcp-buildbuddy-executor-pool down' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'MEERKAT_GCP_BUILDBUDDY_DOWN_MODE' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB' .github/workflows/buildbuddy.yml &&
+  grep -Fq -- '--stateful-disk "device-name=${cache_disk_device},auto-delete=never"' scripts/gcp-buildbuddy-executor-pool &&
+  grep -Fq -- '--stopped-size "${parked_size}"' scripts/gcp-buildbuddy-executor-pool &&
+  grep -Fq 'Parking executor pool with' scripts/gcp-buildbuddy-executor-pool &&
   ! grep -Fq "mode: \${{ (github.event_name == 'workflow_dispatch'" .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
@@ -384,26 +387,37 @@ fi
 
 if job_has_line .github/workflows/ci.yml cargo 'name: GHA Cargo' &&
   job_has_line .github/workflows/ci.yml gcp-buildbuddy 'name: GCP BuildBuddy' &&
+  job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'name: Prebuild submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'group: gcp-prebuild' &&
+  job_has_line .github/workflows/buildbuddy.yml prebuild-submit 'ci-prebuild' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'name: Native submitter' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'name: Governance submitter' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'name: WASM and feature submitter' &&
+  job_has_line .github/workflows/buildbuddy.yml native-submit 'needs: [control-plane-up, executors-up, prebuild-submit]' &&
+  job_has_line .github/workflows/buildbuddy.yml governance-submit 'needs: [control-plane-up, executors-up, prebuild-submit]' &&
+  job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'needs: [control-plane-up, executors-up, prebuild-submit]' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'CI_STARTED_AT_EPOCH:' &&
   job_has_line .github/workflows/buildbuddy.yml native-submit 'group: gcp' &&
   job_has_line .github/workflows/buildbuddy.yml governance-submit 'group: gcp-governance' &&
   job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'group: gcp-wasm-feature' &&
+  ! job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'seam-inventory' &&
+  ! job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'rmat-audit' &&
+  ! job_has_line .github/workflows/buildbuddy.yml wasm-feature-submit 'machine-authority' &&
+  grep -Fq 'MEERKAT_BUILDBUDDY_BATCH_JOBS' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Check GCP CI duration SLO' .github/workflows/buildbuddy.yml &&
   grep -Fq 'Active BuildBuddy lane heartbeat' scripts/buildbuddy-ci-lane-batch &&
   grep -Fq "inputs.profile == 'submitter' || inputs.profile == 'doctor'" .github/actions/setup-buildbuddy-ci/action.yml &&
   grep -Fq 'scripts/buildbuddy-ci-lane-batch' .github/actions/run-buildbuddy-ci-lane-batch/action.yml &&
   job_has_line .github/workflows/buildbuddy.yml gate 'runs-on: ubuntu-latest'; then
-  pass "GCP BuildBuddy CI uses split GitHub-hosted submitters with SLO and live heartbeat"
+  pass "GCP BuildBuddy CI uses one remote prebuild before bounded split-submit validation"
 else
-  bad "GCP BuildBuddy CI is not using the bounded split-submitter shape"
+  bad "GCP BuildBuddy CI is not using the prebuild-plus-bounded-validation shape"
 fi
 
 if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'ci-prebuild' .github/workflows/buildbuddy.yml &&
   grep -Fq 'fmt-static' .github/workflows/buildbuddy.yml &&
   grep -Fq 'test-unit' .github/workflows/buildbuddy.yml &&
   grep -Fq 'integration-fast' .github/workflows/buildbuddy.yml &&
@@ -416,6 +430,7 @@ if grep -Fq 'full-fresh' .github/workflows/buildbuddy.yml &&
   ! grep -Fq '(compat)' .github/workflows/buildbuddy.yml &&
   ! grep -Fq 'strategy:' .github/workflows/buildbuddy.yml &&
   grep -Fq 'run-buildbuddy-ci-lane-batch' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'ci-prebuild-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'workspace-unit-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'workspace-integration-fast-rbe' scripts/buildbuddy-bazel-poc &&
   grep -Fq 'machine-authority-rbe' scripts/buildbuddy-bazel-poc &&

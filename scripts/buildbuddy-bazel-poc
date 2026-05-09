@@ -18,6 +18,7 @@ Common commands:
                             Integration-fast remote workspace test lane.
   workspace-fast-clippy-rbe  Fast tests plus clippy aspect.
   workspace-build-clippy-rbe Build/clippy labels for the workspace build set.
+  ci-prebuild-rbe          Build common CI binaries/test wrappers once to warm remote cache.
   e2e-system-rbe           Bazel-native system e2e suite with runfile binaries.
   e2e-fast-rbe             Bazel-native fast e2e lane.
   e2e-live-rbe             Bazel-native live e2e lane.
@@ -243,6 +244,18 @@ case "${command}" in
       --aspects="@rules_rust//rust:defs.bzl%rust_clippy_aspect"
       --output_groups="+clippy_checks"
       --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+    )
+    ;;
+  ci-prebuild-rbe)
+    command="build"
+    config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
+    workspace_build_targets="$("./scripts/bazel-affected-fast-tests.mjs" --all --build)"
+    default_target="${workspace_build_targets} //:surface_feature_matrix_builds //xtask:buildbuddy_static_lanes_test //tools/buildbuddy:sdk_suites_cargo_equivalent_test //tools/buildbuddy:wasm_check_cargo_equivalent_test //tools/buildbuddy:minimal_feature_builds_cargo_equivalent_test //tools/buildbuddy:feature_matrix_lib_cargo_equivalent_tests //tools/buildbuddy:security_audit_cargo_equivalent_test //xtask:machine_verify_all_tlc_test //xtask:machines_contracts_test //xtask:protocol_codegen_drift_test //meerkat-machine-codegen:render_contracts_test //meerkat-machine-codegen:runtime_alphabet_parity_test //meerkat-machine-codegen:runtime_schema_parity_test //:audit_effect_authority_test //xtask:rmat_audit_test //xtask:rmat_strict_test //xtask:seam_inventory_strict_test"
+    extra_args+=(
+      --build_tag_filters=-local,-manual
+      --remote_download_minimal
+      --color=no
+      --curses=no
     )
     ;;
   e2e-system-rbe)

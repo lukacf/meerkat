@@ -1910,4 +1910,202 @@ mod tests {
     // plus the session-layer end-to-end pin
     // `realtime_transcript_assistant_transcript_delta_materializes_transcript_block`
     // already in `meerkat-core/src/session.rs`.
+
+    // ------------------------------------------------------------------
+    // CC7 (Round-4 adversarial-verifier follow-up): host.apply_observation
+    // dispatches a mixed-modality realtime response (display-text deltas +
+    // spoken-transcript deltas under one response_id) onto the correct
+    // sink lanes, in order. The session-level end-to-end pin lives in
+    // `meerkat-core/src/session.rs::tests::round4_cc7_*` and asserts that
+    // the runtime materializer commits one ordered Text+Transcript message
+    // into canonical history. This sink-level pin asserts the production
+    // host's `apply_observation` routing -> the seam the production sink
+    // forwards into the runtime.
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn round4_cc7_host_apply_observation_routes_mixed_response_through_split_lanes() {
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let host = LiveAdapterHost::new()
+            .with_projection_sink(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
+        let session_id = test_session_id();
+        let channel = host.open_channel(session_id.clone()).await.unwrap();
+
+        // Mixed-response stream as described by CC7:
+        //   1. AssistantTextDelta("Here's the report:")
+        //   2. AssistantTextDelta(" (still writing)")
+        //   3. AssistantTranscriptDelta("I'm reading the report aloud:")
+        //   4. AssistantTranscriptDelta(" sentence two.")
+        //   5. TurnCompleted { response_id: "resp_mixed_1", EndTurn, usage }
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTextDelta {
+                provider_item_id: Some("item_display".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some("resp_mixed_1".to_string()),
+                delta_id: Some("delta_disp_1".to_string()),
+                delta: "Here's the report:".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTextDelta {
+                provider_item_id: Some("item_display".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some("resp_mixed_1".to_string()),
+                delta_id: Some("delta_disp_2".to_string()),
+                delta: " (still writing)".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTranscriptDelta {
+                provider_item_id: Some("item_spoken".to_string()),
+                previous_item_id: Some("item_display".to_string()),
+                content_index: Some(0),
+                response_id: Some("resp_mixed_1".to_string()),
+                delta_id: Some("delta_spoken_1".to_string()),
+                delta: "I'm reading the report aloud:".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTranscriptDelta {
+                provider_item_id: Some("item_spoken".to_string()),
+                previous_item_id: Some("item_display".to_string()),
+                content_index: Some(0),
+                response_id: Some("resp_mixed_1".to_string()),
+                delta_id: Some("delta_spoken_2".to_string()),
+                delta: " sentence two.".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::TurnCompleted {
+                response_id: Some("resp_mixed_1".to_string()),
+                stop_reason: StopReason::EndTurn,
+                usage: real_usage(),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Assert the host routed display deltas to the text-delta lane and
+        // spoken-transcript deltas to the transcript-delta lane. (The
+        // production sink forwards each lane into a distinct
+        // `RealtimeTranscriptEvent` variant; the session materializer is
+        // covered by the session-level CC7 pin.)
+        let text_deltas = sink.text_deltas.lock().unwrap();
+        assert_eq!(text_deltas.len(), 2, "display-text deltas: {text_deltas:?}");
+        assert_eq!(text_deltas[0].1, "Here's the report:");
+        assert_eq!(text_deltas[1].1, " (still writing)");
+        for entry in text_deltas.iter() {
+            assert_eq!(entry.0, session_id);
+            assert_eq!(entry.2.response_id.as_deref(), Some("resp_mixed_1"));
+        }
+
+        let transcript_deltas = sink.transcript_deltas.lock().unwrap();
+        assert_eq!(
+            transcript_deltas.len(),
+            2,
+            "spoken-transcript deltas: {transcript_deltas:?}"
+        );
+        assert_eq!(transcript_deltas[0].1, "I'm reading the report aloud:");
+        assert_eq!(transcript_deltas[1].1, " sentence two.");
+        for entry in transcript_deltas.iter() {
+            assert_eq!(entry.0, session_id);
+            assert_eq!(entry.2.response_id.as_deref(), Some("resp_mixed_1"));
+            // Spoken-transcript lane must NOT be confused with the
+            // display-text lane — even though both share response_id and
+            // identity shape, they route to different sink methods.
+            assert_eq!(entry.2.provider_item_id.as_deref(), Some("item_spoken"));
+        }
+
+        // TurnCompleted is the architectural boundary: the production sink
+        // synthesizes `RealtimeTranscriptEvent::AssistantTurnCompleted` here
+        // (per CC2), which is what triggers the session materializer to
+        // emit ONE ordered Text+Transcript message. The recording sink
+        // captures the host's call to its `signal_turn_completed` impl.
+        let completed = sink.completed.lock().unwrap();
+        assert_eq!(
+            completed.len(),
+            1,
+            "TurnCompleted observation routes to signal_turn_completed: {completed:?}"
+        );
+        assert_eq!(completed[0], session_id);
+
+        // Cross-lane sanity: no text-final calls (production providers
+        // stream display-text deltas only; CC3 documents this).
+        let text_finals = sink.text_finals.lock().unwrap();
+        assert!(
+            text_finals.is_empty(),
+            "no display-text-final emissions in this stream: {text_finals:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn round4_cc7_host_apply_observation_barge_in_after_mixed_deltas_signals_interrupt() {
+        // CC7 sibling: when barge-in (`TurnInterrupted`) lands after a mixed
+        // sequence of deltas, the host routes to `signal_turn_interrupt`
+        // (which in production fans `AssistantTurnInterrupted` realtime
+        // events to every in-flight response_id, discarding both lanes).
+        // The session-level pin for the actual cross-lane discard contract
+        // lives in the session.rs CC7 sibling test; here we only assert
+        // the host's barge-in routing reaches the sink.
+        let sink: Arc<RecordingSink> = Arc::new(RecordingSink::default());
+        let host = LiveAdapterHost::new()
+            .with_projection_sink(Arc::clone(&sink) as Arc<dyn LiveProjectionSink>);
+        let session_id = test_session_id();
+        let channel = host.open_channel(session_id.clone()).await.unwrap();
+
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTextDelta {
+                provider_item_id: Some("item_display".to_string()),
+                previous_item_id: None,
+                content_index: Some(0),
+                response_id: Some("resp_mixed_2".to_string()),
+                delta_id: Some("delta_disp_1".to_string()),
+                delta: "Working".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(
+            &channel,
+            &LiveAdapterObservation::AssistantTranscriptDelta {
+                provider_item_id: Some("item_spoken".to_string()),
+                previous_item_id: Some("item_display".to_string()),
+                content_index: Some(0),
+                response_id: Some("resp_mixed_2".to_string()),
+                delta_id: Some("delta_spoken_1".to_string()),
+                delta: "Reading".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        host.apply_observation(&channel, &LiveAdapterObservation::TurnInterrupted)
+            .await
+            .unwrap();
+
+        // The host invoked `signal_turn_interrupt` exactly once — no
+        // signal_turn_completed leaked through.
+        let interrupts = sink.interrupts.lock().unwrap();
+        assert_eq!(interrupts.len(), 1, "barge-in: {interrupts:?}");
+        assert_eq!(interrupts[0], session_id);
+        assert!(
+            sink.completed.lock().unwrap().is_empty(),
+            "barge-in must not also signal_turn_completed"
+        );
+    }
 }

@@ -910,6 +910,111 @@ serde shape change were both invisible at the SDK boundary.
 
 ---
 
+## Round-4 follow-ups (FIX-D, post-verifier) — mixed-response end-to-end
+
+The CC7 verifier finding was that the prior acceptance test "mixed response
+persists display text and spoken transcript as distinct ordered blocks" was
+only halfway covered: `mixed_response_emits_text_and_transcript_in_order`
+(`meerkat-openai/src/live.rs::tests`) verified only translation to distinct
+observation variants; `t6_mixed_lane_finals_collapse_into_ordered_blocks`
+(`live_projection_sink.rs::tests`, since deleted by CC2/CC3) drove
+buffered-final paths the production text path no longer invokes. There was
+no end-to-end test where text deltas + transcript deltas drive the
+production materializer through to ordered Text+Transcript blocks in
+canonical history.
+
+- [x] fix · [ ] verify · **CC7.** End-to-end mixed-response materialization
+  pin. `[R]`
+
+  **Architectural fix surfaced by the test:** the materializer at
+  `meerkat-core/src/session.rs::Session::materialize_realtime_transcript_ready_items`
+  previously called `append_external_assistant_blocks` once per staged item,
+  which split a mixed-modality response (display item + spoken item under
+  the same response_id) into TWO `Message::BlockAssistant` messages.
+  CC7 fix: lift the pending-blocks accumulator OUT of the inner batch loop
+  so it persists across outer-loop batches (chained items via
+  `previous_item_id` force serial materialization across batches; same
+  response_id must still collapse into one message). Walk the materialized
+  batch, accumulating consecutive same-response_id assistant items into a
+  single pending group. Flush when:
+  - a User item lands (canonical-history ordering boundary),
+  - an assistant item with a different response_id lands, or
+  - the outer materialization loop terminates.
+  Usage / stop_reason are seeded from the first item in the group;
+  subsequent items in the same group naturally see `Usage::default()`
+  because `usage_consumed` flips on the first assistant item, so token
+  accounting stays single-counted.
+
+  Tests added:
+  - `round4_cc7_mixed_response_persists_text_and_transcript_in_order`
+    (`meerkat-core/src/session.rs::tests`) — drives the production
+    materializer end-to-end through `Session::append_realtime_transcript_event`:
+    two `AssistantTextDelta` events + two `AssistantTranscriptDelta` events
+    + one `AssistantTurnCompleted`, all under `response_id = "resp_mixed_1"`.
+    Asserts `session.messages()` contains exactly ONE `Message::BlockAssistant`
+    with TWO blocks in arrival order: `AssistantBlock::Text { "Here's the
+    report: (still writing)", .. }` followed by `AssistantBlock::Transcript
+    { text: "I'm reading the report aloud: sentence two.", source: Spoken,
+    .. }`. Also asserts session usage is single-counted.
+  - `round4_cc7_mixed_response_barge_in_discards_entire_in_flight_response`
+    (sibling regression in same module) — same delta sequence followed by
+    `AssistantTurnInterrupted` instead of `AssistantTurnCompleted`. Asserts
+    NO `BlockAssistant` is committed (both lanes are discarded as a unit;
+    the in-flight response is treated atomically because the user spoke
+    over the assistant's reply mid-stream). A late `AssistantTurnCompleted`
+    arriving after barge-in must NOT resurrect the discarded items.
+  - `round4_cc7_host_apply_observation_routes_mixed_response_through_split_lanes`
+    (`meerkat-rpc/src/live_projection_sink.rs::tests`) — drives
+    `LiveAdapterHost::apply_observation` for the same mixed sequence and
+    asserts the host routes display-text deltas to
+    `RecordingSink.text_deltas` and spoken-transcript deltas to
+    `RecordingSink.transcript_deltas` (distinct lanes), then routes
+    `LiveAdapterObservation::TurnCompleted` to `signal_turn_completed`.
+    This pins the host-level routing the production sink relies on; the
+    materializer end-to-end is covered by the session.rs CC7 pin.
+  - `round4_cc7_host_apply_observation_barge_in_after_mixed_deltas_signals_interrupt`
+    (sibling) — barge-in after the mixed sequence routes to
+    `signal_turn_interrupt`, never `signal_turn_completed`.
+
+  **Quirks for the verifier:**
+  - The session.rs CC7 test uses `previous_item_id: Some("item_display")`
+    on the spoken items to mirror provider arrival semantics. This forces
+    cross-batch materialization (item_display materializes in batch 1,
+    item_spoken in batch 2), which is precisely the case the inner-loop-only
+    accumulator missed. The fix verifies cross-batch grouping, not just
+    within-batch grouping.
+  - The barge-in sibling test uses `Session::append_realtime_transcript_event`
+    directly — the full sink → runtime cross-layer fan-out (CC4) is covered
+    by `round4_cc4_*` tests. CC7's barge-in sibling pins the per-response
+    discard contract: both lanes go away as a unit, no late completion can
+    resurrect them.
+  - The host-level CC7 tests use `RecordingSink` (a fake; the real
+    production sink is `SessionServiceProjectionSink`). The
+    fake-vs-production gap is bridged by the session-level CC7 pin which
+    drives the same materializer code path the production sink ultimately
+    invokes via `runtime.append_realtime_transcript_event`.
+
+**Files touched (FIX-D scope):**
+- `meerkat-core/src/session.rs` — `materialize_realtime_transcript_ready_items`
+  refactored to lift the pending-blocks accumulator out of the inner batch
+  loop (CC7 architectural fix); two new tests
+  (`round4_cc7_mixed_response_persists_text_and_transcript_in_order`,
+  `round4_cc7_mixed_response_barge_in_discards_entire_in_flight_response`).
+- `meerkat-rpc/src/live_projection_sink.rs` — two new host-level routing
+  tests
+  (`round4_cc7_host_apply_observation_routes_mixed_response_through_split_lanes`,
+  `round4_cc7_host_apply_observation_barge_in_after_mixed_deltas_signals_interrupt`).
+- `LIVE_ADAPTER_ROUND4_TODO.md` — this section.
+
+**Verification commands run by FIX-D:**
+- `./scripts/repo-cargo check -p meerkat-core -p meerkat-rpc -p meerkat-live -p meerkat-openai` → clean.
+- `./scripts/repo-cargo nextest run -p meerkat-rpc -E 'test(round4_cc7)'` → 2/2 passed.
+- `./scripts/repo-cargo nextest run -p meerkat-core --lib` → 873/873 passed.
+- `./scripts/repo-cargo nextest run -p meerkat-rpc --lib` → 483/483 passed.
+- `git stash list | head -3` → `stash@{0}` preserved.
+
+---
+
 ## Counts
 
 - **Phase 1 (foundation):** 4 items (T1-T4)
@@ -917,5 +1022,5 @@ serde shape change were both invisible at the SDK boundary.
 - **Phase 3 (OpenAI mapping):** 2 items (T9-T10)
 - **Phase 4 (multimodal + continuity):** 2 items (T11-T12)
 - **Phase 5 (verification):** 1 item (T-VERIFY)
-- **Round-4 follow-ups (post-verifier):** 5 items (CC2, CC3, CC4, CC5, CC6)
-- **Total actionable:** 18
+- **Round-4 follow-ups (post-verifier):** 6 items (CC2, CC3, CC4, CC5, CC6, CC7)
+- **Total actionable:** 19

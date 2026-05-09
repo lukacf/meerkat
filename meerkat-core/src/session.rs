@@ -1177,6 +1177,26 @@ impl Session {
         state: &mut SessionRealtimeTranscriptState,
     ) -> RealtimeTranscriptApplyOutcome {
         let mut materialized = Vec::new();
+
+        // Round-4 CC7: when a single response_id produces both display-text
+        // and spoken-transcript items (mixed-modality response), we emit a
+        // SINGLE `Message::BlockAssistant` whose `blocks` interleave
+        // `AssistantBlock::Text` and `AssistantBlock::Transcript` in
+        // arrival order — not multiple messages. Pending state lives across
+        // outer-loop batches: when chained items (`previous_item_id`) force
+        // serial materialization, batch N may emit the display item and
+        // batch N+1 may emit the spoken item under the same response_id —
+        // we still want one combined message.
+        //
+        // The pending group is flushed when:
+        //   - a User item lands (canonical-history ordering boundary)
+        //   - an assistant item with a different response_id lands
+        //   - the outer materialization loop terminates
+        let mut pending_blocks: Vec<AssistantBlock> = Vec::new();
+        let mut pending_response_id: Option<String> = None;
+        let mut pending_stop_reason: StopReason = StopReason::EndTurn;
+        let mut pending_usage: Usage = Usage::default();
+
         loop {
             let order = realtime_transcript_order(state);
             let mut skipped_batch = Vec::new();
@@ -1240,9 +1260,19 @@ impl Session {
                     item.materialized = true;
                 }
             }
+
             for message in batch {
                 match &message {
                     RealtimeTranscriptMaterializedMessage::User { item_id, text } => {
+                        if !pending_blocks.is_empty() {
+                            let drained = std::mem::take(&mut pending_blocks);
+                            self.append_external_assistant_blocks(
+                                drained,
+                                pending_stop_reason,
+                                std::mem::take(&mut pending_usage),
+                            );
+                            pending_response_id = None;
+                        }
                         if let Some(item) = state.items.get_mut(item_id) {
                             item.materialized = true;
                         }
@@ -1256,6 +1286,22 @@ impl Session {
                         usage,
                         lane,
                     } => {
+                        // Flush if this assistant item belongs to a different
+                        // response than the pending group. (Same response_id
+                        // → accumulate; different → emit prior message.)
+                        if pending_response_id
+                            .as_ref()
+                            .is_some_and(|existing| existing != response_id)
+                            && !pending_blocks.is_empty()
+                        {
+                            let drained = std::mem::take(&mut pending_blocks);
+                            self.append_external_assistant_blocks(
+                                drained,
+                                pending_stop_reason,
+                                std::mem::take(&mut pending_usage),
+                            );
+                            pending_response_id = None;
+                        }
                         if let Some(item) = state.items.get_mut(item_id) {
                             item.materialized = true;
                         }
@@ -1279,16 +1325,34 @@ impl Session {
                                 meta: None,
                             },
                         };
-                        self.append_external_assistant_blocks(
-                            vec![block],
-                            *stop_reason,
-                            usage.clone(),
-                        );
+                        // First item in a group seeds the response_id /
+                        // stop_reason / usage. `usage_consumed` is flipped
+                        // to true above as the first item is processed, so
+                        // every subsequent item sees `Usage::default()` from
+                        // the materializer's per-item builder — accumulating
+                        // across items in one group is naturally
+                        // single-counted.
+                        if pending_response_id.is_none() {
+                            pending_response_id = Some(response_id.clone());
+                            pending_stop_reason = *stop_reason;
+                            pending_usage = usage.clone();
+                        }
+                        pending_blocks.push(block);
                     }
                 }
                 materialized.push(message);
             }
         }
+
+        // Final flush after the outer materialization loop has drained.
+        if !pending_blocks.is_empty() {
+            self.append_external_assistant_blocks(
+                pending_blocks,
+                pending_stop_reason,
+                pending_usage,
+            );
+        }
+
         RealtimeTranscriptApplyOutcome {
             materialized_messages: materialized,
         }
@@ -3697,5 +3761,237 @@ mod tests {
             },
             other => unreachable!("expected BlockAssistant message, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn round4_cc7_mixed_response_persists_text_and_transcript_in_order() {
+        // CC7 (Round-4 adversarial-verifier follow-up): a single mixed-modality
+        // realtime response that emits BOTH display-text deltas
+        // (`AssistantTextDelta`) AND spoken-transcript deltas
+        // (`AssistantTranscriptDelta`) under the same response_id must
+        // materialize as ONE `Message::BlockAssistant` whose `blocks` field
+        // contains exactly two ordered entries:
+        //   1. AssistantBlock::Text       (display-text lane)
+        //   2. AssistantBlock::Transcript { source: Spoken } (spoken lane)
+        // Pre-fix the materializer emitted one Message::BlockAssistant per
+        // staged item, splitting the mixed response into two messages.
+        //
+        // This test drives the production materializer end-to-end: deltas
+        // stage in `SessionRealtimeTranscriptState`; `AssistantTurnCompleted`
+        // triggers the materializer; canonical history is the assertion
+        // surface — exactly the same code path that
+        // `SessionServiceProjectionSink::signal_turn_completed` invokes via
+        // `runtime.append_realtime_transcript_event` in production.
+        let mut session = Session::new();
+
+        // Provider-arrival order: display first, then spoken.
+        let display_a = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_disp_1".to_string(),
+            item_id: "item_display".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "Here's the report:".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(display_a)
+                .is_inert()
+        );
+
+        let display_b = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_disp_2".to_string(),
+            item_id: "item_display".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: " (still writing)".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(display_b)
+                .is_inert()
+        );
+
+        // Spoken items chain after the display item to mirror provider
+        // arrival semantics — `previous_item_id` carries arrival ordering
+        // that the materializer must preserve as block ordering inside the
+        // single emitted message.
+        let spoken_a = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_spoken_1".to_string(),
+            item_id: "item_spoken".to_string(),
+            previous_item_id: Some("item_display".to_string()),
+            content_index: 0,
+            delta: "I'm reading the report aloud:".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(spoken_a)
+                .is_inert()
+        );
+
+        let spoken_b = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_1".to_string(),
+            delta_id: "delta_spoken_2".to_string(),
+            item_id: "item_spoken".to_string(),
+            previous_item_id: Some("item_display".to_string()),
+            content_index: 0,
+            delta: " sentence two.".to_string(),
+        };
+        assert!(
+            session
+                .append_realtime_transcript_event(spoken_b)
+                .is_inert()
+        );
+
+        // TurnCompleted triggers the materializer to flush all staged items
+        // for this response_id into ONE BlockAssistant message.
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_mixed_1".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 11,
+                    output_tokens: 22,
+                    cache_creation_tokens: None,
+                    cache_read_tokens: None,
+                },
+            },
+        );
+        // Materializer reports two staged items got materialized.
+        assert_eq!(outcome.materialized_messages.len(), 2);
+
+        // Canonical history MUST contain exactly ONE BlockAssistant message
+        // (the CC7 fix: mixed lanes interleave into one message, not two).
+        let messages = session.messages();
+        let assistants: Vec<&BlockAssistantMessage> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::BlockAssistant(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            assistants.len(),
+            1,
+            "mixed display+spoken response under one response_id must produce exactly ONE BlockAssistant message, got: {assistants:?}"
+        );
+        let assistant = assistants[0];
+        assert_eq!(
+            assistant.blocks.len(),
+            2,
+            "mixed response message must carry both blocks: {:?}",
+            assistant.blocks
+        );
+
+        // Block 0: display-text (concatenated deltas).
+        match &assistant.blocks[0] {
+            AssistantBlock::Text { text, .. } => {
+                assert_eq!(text, "Here's the report: (still writing)");
+            }
+            other => unreachable!(
+                "first block must be AssistantBlock::Text (display lane), got {other:?}"
+            ),
+        }
+        // Block 1: spoken transcript (concatenated deltas), tagged Spoken.
+        match &assistant.blocks[1] {
+            AssistantBlock::Transcript { text, source, .. } => {
+                assert_eq!(text, "I'm reading the report aloud: sentence two.");
+                assert_eq!(*source, crate::types::TranscriptSource::Spoken);
+            }
+            other => unreachable!(
+                "second block must be AssistantBlock::Transcript {{ source: Spoken }}, got {other:?}"
+            ),
+        }
+
+        // Usage was recorded once for the turn.
+        assert_eq!(session.usage.input_tokens, 11);
+        assert_eq!(session.usage.output_tokens, 22);
+    }
+
+    #[test]
+    fn round4_cc7_mixed_response_barge_in_discards_entire_in_flight_response() {
+        // CC7 sibling regression: when a mixed-modality response is
+        // interrupted (barge-in) BEFORE TurnCompleted, the entire in-flight
+        // response is discarded — both the display-text lane and the
+        // spoken-transcript lane. No `BlockAssistant` is committed for the
+        // interrupted response.
+        //
+        // The architectural rationale: barge-in semantics treat the in-flight
+        // response as a single unit because the user spoke over the
+        // assistant's reply mid-stream. The display-text portion of that same
+        // mixed reply is an artifact of the same uncommitted draft and is
+        // discarded with it. (Display text from a SEPARATE, earlier turn
+        // would already have been committed by its own TurnCompleted event;
+        // CC4 tests cover the cross-response isolation. This test pins the
+        // intra-response unit-of-discard contract.)
+        let mut session = Session::new();
+
+        let display = RealtimeTranscriptEvent::AssistantTextDelta {
+            response_id: "resp_mixed_2".to_string(),
+            delta_id: "delta_disp_1".to_string(),
+            item_id: "item_display_2".to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            delta: "Working on the report...".to_string(),
+        };
+        let _ = session.append_realtime_transcript_event(display);
+
+        let spoken = RealtimeTranscriptEvent::AssistantTranscriptDelta {
+            response_id: "resp_mixed_2".to_string(),
+            delta_id: "delta_spoken_1".to_string(),
+            item_id: "item_spoken_2".to_string(),
+            previous_item_id: Some("item_display_2".to_string()),
+            content_index: 0,
+            delta: "I'm reading the report".to_string(),
+        };
+        let _ = session.append_realtime_transcript_event(spoken);
+
+        // Barge-in arrives BEFORE TurnCompleted.
+        let outcome = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnInterrupted {
+                response_id: "resp_mixed_2".to_string(),
+            },
+        );
+        // Interruption itself does not materialize anything.
+        assert_eq!(outcome.materialized_messages.len(), 0);
+
+        // Even if a (delayed/late) TurnCompleted arrives after barge-in, the
+        // discarded items must remain unmaterialized — the response is dead.
+        let late_completion = session.append_realtime_transcript_event(
+            RealtimeTranscriptEvent::AssistantTurnCompleted {
+                response_id: "resp_mixed_2".to_string(),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            },
+        );
+        assert_eq!(
+            late_completion.materialized_messages.len(),
+            0,
+            "post-barge-in TurnCompleted must not resurrect discarded mixed-response items"
+        );
+
+        // Canonical history is unchanged: no BlockAssistant message survives.
+        let messages = session.messages();
+        let assistants: Vec<&BlockAssistantMessage> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::BlockAssistant(a) => Some(a),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            assistants.is_empty(),
+            "barge-in on a mixed response must discard ALL in-flight content (display + spoken), got: {assistants:?}"
+        );
+
+        // The in-flight tracker also reports the response as gone.
+        assert!(
+            !session
+                .in_flight_realtime_assistant_response_ids()
+                .contains(&"resp_mixed_2".to_string()),
+            "barged-in response must not appear in in_flight_realtime_assistant_response_ids"
+        );
     }
 }

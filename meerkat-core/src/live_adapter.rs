@@ -96,6 +96,19 @@ pub enum LiveAdapterCommand {
     Open {
         snapshot: LiveProjectionSnapshot,
     },
+    /// P1#5: refresh an *already-open* adapter's projection with a freshly
+    /// built [`LiveProjectionSnapshot`].
+    ///
+    /// Triggered when upstream session state changes (model switch via
+    /// `config/patch`, snapshot drift after a session edit, etc.) and the
+    /// runtime wants the live adapter to re-seed its provider session
+    /// against the new canonical state without tearing the channel down.
+    /// Adapters that do not support live re-seeding should treat this as a
+    /// no-op or surface a typed error observation; the OpenAI adapter
+    /// re-runs `seed_history_projection` against the new snapshot.
+    Refresh {
+        snapshot: LiveProjectionSnapshot,
+    },
     SendInput {
         chunk: LiveInputChunk,
     },
@@ -176,6 +189,12 @@ pub enum LiveAdapterObservation {
     AssistantTranscriptTruncated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_item_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_item_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_index: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
@@ -417,6 +436,25 @@ pub trait LiveAdapter: Send + Sync {
     fn status(&self) -> LiveAdapterStatus;
 
     async fn close(&self) -> Result<(), LiveAdapterError>;
+
+    /// P2#3: report the adapter's real capability set so `live/open` can
+    /// truthfully advertise what the underlying provider supports.
+    ///
+    /// The default impl returns the conservative-but-honest baseline used by
+    /// every realtime provider Meerkat ships today (text + audio in/out,
+    /// barge-in, transcripts; no provider-native resume yet). Providers that
+    /// expose narrower or richer capability sets should override this.
+    fn capabilities(&self) -> LiveChannelCapabilities {
+        LiveChannelCapabilities {
+            audio_input: true,
+            audio_output: true,
+            text_input: true,
+            text_output: true,
+            barge_in: true,
+            transcript: true,
+            provider_native_resume: false,
+        }
+    }
 }
 
 /// Errors from the adapter layer. These are transport/provider errors,
@@ -853,24 +891,37 @@ mod tests {
     fn assistant_transcript_truncated_round_trips_all_shapes() {
         let both = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: Some("item_abc".into()),
+            previous_item_id: Some("item_aba".into()),
+            content_index: Some(0),
+            response_id: Some("resp_5".into()),
             text: Some("partial transcript".into()),
         };
         let json = serde_json::to_string(&both).unwrap();
+        assert!(json.contains("\"response_id\":\"resp_5\""));
+        assert!(json.contains("\"content_index\":0"));
         let deser: LiveAdapterObservation = serde_json::from_str(&json).unwrap();
         assert_eq!(both, deser);
 
         let neither = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: None,
+            previous_item_id: None,
+            content_index: None,
+            response_id: None,
             text: None,
         };
         let json = serde_json::to_string(&neither).unwrap();
         assert!(!json.contains("provider_item_id"));
+        assert!(!json.contains("response_id"));
+        assert!(!json.contains("content_index"));
         assert!(!json.contains("\"text\""));
         let deser: LiveAdapterObservation = serde_json::from_str(&json).unwrap();
         assert_eq!(neither, deser);
 
         let id_only = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: Some("item_def".into()),
+            previous_item_id: None,
+            content_index: None,
+            response_id: None,
             text: None,
         };
         let json = serde_json::to_string(&id_only).unwrap();
@@ -879,6 +930,9 @@ mod tests {
 
         let text_only = LiveAdapterObservation::AssistantTranscriptTruncated {
             provider_item_id: None,
+            previous_item_id: None,
+            content_index: None,
+            response_id: None,
             text: Some("only text".into()),
         };
         let json = serde_json::to_string(&text_only).unwrap();

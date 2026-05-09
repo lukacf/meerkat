@@ -2539,6 +2539,7 @@ dependencies = [
 name = "meerkat-contracts"
 version = "0.6.4"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "inventory",
@@ -2668,10 +2669,10 @@ dependencies = [
  "axum",
  "base64",
  "futures",
+ "indexmap",
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
- "meerkat-runtime",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2941,7 +2942,6 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
- "meerkat-runtime",
  "oai-rt-rs",
  "reqwest",
  "serde",

@@ -88,6 +88,13 @@ pub enum RealtimeSessionEvent {
     AssistantTranscriptTruncated {
         response_id: Option<String>,
         item_id: String,
+        /// Content segment index that was truncated. Some providers (OpenAI
+        /// realtime) carry this on the truncation client command and echo it
+        /// implicitly through the server `conversation.item.truncated` ack.
+        /// `None` means the provider did not surface a content segment id and
+        /// downstream projectors should treat the truncation as covering the
+        /// item's primary content segment.
+        content_index: Option<u32>,
         audio_played_ms: u64,
         truncated_text: Option<String>,
     },
@@ -265,6 +272,28 @@ pub trait RealtimeSessionFactory: Send + Sync {
         target: &RealtimeExternalSessionTarget,
         turning_mode: RealtimeTurningMode,
     ) -> Result<Box<dyn RealtimeSession>, LlmError>;
+
+    /// E25: Open a provider-native `LiveAdapter` directly.
+    ///
+    /// The default impl returns `Unsupported` so providers that have not
+    /// yet implemented the direct seam keep working (their callers continue
+    /// to go through the `RealtimeSession` trait via mob/test harnesses).
+    /// The OpenAI factory overrides this to construct an `OpenAiLiveAdapter`
+    /// without boxing the session as `Box<dyn RealtimeSession>`.
+    ///
+    /// Returns an `Arc<dyn LiveAdapter>` because the live-adapter host owns
+    /// adapters by `Arc` and exposes `&self` methods (concurrent
+    /// send/receive without an outer mutex).
+    async fn open_live_adapter(
+        &self,
+        _open_config: &RealtimeSessionOpenConfig,
+    ) -> Result<std::sync::Arc<dyn meerkat_core::live_adapter::LiveAdapter>, LlmError> {
+        Err(LlmError::InvalidRequest {
+            message: "this provider has not implemented direct LiveAdapter; \
+                      callers must wrap a RealtimeSession via meerkat-live"
+                .to_string(),
+        })
+    }
 }
 
 #[cfg(test)]

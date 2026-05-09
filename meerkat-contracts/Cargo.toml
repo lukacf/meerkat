@@ -31,7 +31,8 @@ base64 = { workspace = true }
 schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "test-util"] }
+async-trait = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 jsonschema = { workspace = true }

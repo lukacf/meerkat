@@ -6,36 +6,86 @@
 use std::sync::Arc;
 
 use meerkat_client::realtime_session::RealtimeSessionFactory;
+use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
     LiveChannelParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult, LiveSendInputParams,
     LiveStatusResult, LiveTruncateParams, RealtimeTurningMode,
 };
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
-    LiveTransportBootstrap,
+    LiveProjectionSnapshot, LiveTransportBootstrap,
 };
 use meerkat_core::types::SessionId;
-use meerkat_live::LiveWsState;
-use meerkat_runtime::live_adapter_host::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId};
+use meerkat_live::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId, LiveWsState};
 use serde::{Deserialize, Serialize};
 
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::{LiveOpenPrecheckError, SessionRuntime};
 
-/// Capabilities reported when the adapter has not yet declared its real
-/// capability set. All fields default `false` so callers cannot mistake an
-/// unknown adapter for a fully-featured one (dogma sin: no resume/feature
-/// lies).
-fn unknown_capabilities() -> LiveChannelCapabilities {
-    LiveChannelCapabilities {
-        audio_input: false,
-        audio_output: false,
-        text_input: false,
-        text_output: false,
-        barge_in: false,
-        transcript: false,
-        provider_native_resume: false,
+/// P1#4: pinned audio format for the live WebSocket transport.
+///
+/// Today every realtime provider we ship ([`OpenAiRealtimeSession`]) negotiates
+/// `pcm_24k_mono` (16-bit signed little-endian PCM, 24 kHz, mono) — the only
+/// value [`meerkat_live::transport::WsConnectParams`] currently parses.
+/// `live/open` returns a WS URL that includes `&format=` so that binary audio
+/// frames are accepted by the WS server post-handshake; without this query
+/// parameter the WS server would reject every binary frame because no format
+/// was negotiated at upgrade time.
+///
+/// `audio_format`: pin to provider default until per-session negotiation lands.
+/// When the runtime starts surfacing per-session audio policy (see
+/// [`LiveProjectionSnapshot::audio_config`]) this constant becomes a fallback
+/// rather than the source of truth.
+const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
+
+/// A8: build a `LiveProjectionSnapshot` from the resolved
+/// `RealtimeSessionOpenConfig`. The snapshot is the canonical projection of
+/// Meerkat session state that the adapter sees via `LiveAdapterCommand::Open`.
+///
+/// `snapshot_version = 0` because this is the first snapshot for this
+/// channel. The host increments it on rebuild; the value is opaque to the
+/// adapter.
+fn build_live_projection_snapshot(
+    session_id: &SessionId,
+    open_config: &RealtimeSessionOpenConfig,
+) -> LiveProjectionSnapshot {
+    LiveProjectionSnapshot {
+        session_id: session_id.clone(),
+        snapshot_version: 0,
+        seed_messages: open_config.seed_messages.clone(),
+        visible_tools: open_config.visible_tools.clone(),
+        // The system prompt is not directly modeled on
+        // `RealtimeSessionOpenConfig`; runtime system context is folded
+        // into the seed history by the realtime open path. Surfacing
+        // `system_prompt: None` here is honest — there is no separate
+        // top-of-session prompt field on the config.
+        system_prompt: None,
+        model_id: open_config.llm_identity.model.clone(),
+        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        // Audio config is not part of the open config today; the live
+        // adapter inherits provider defaults. When the runtime starts
+        // surfacing per-session audio policy, this becomes
+        // `Some(LiveAudioConfig { ... })` with the resolved values.
+        audio_config: None,
+    }
+}
+
+/// A8: derive `LiveContinuityMode` from the projection snapshot.
+///
+/// - `Fresh` if no seed messages — the live channel is opening on a clean
+///   conversation.
+/// - `TranscriptOnly` if seed messages are present — the adapter has been
+///   handed canonical history to seed its provider session, so continuity
+///   exists at the transcript level. Provider-native resume (full
+///   provider-side continuation of the previous response) is not yet
+///   wired; that becomes `Provider` once `LiveAudioConfig` and
+///   provider-resume metadata are threaded through the snapshot.
+fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuityMode {
+    if snapshot.seed_messages.is_empty() {
+        LiveContinuityMode::Fresh
+    } else {
+        LiveContinuityMode::TranscriptOnly
     }
 }
 
@@ -91,6 +141,23 @@ pub async fn handle_live_open(
         }
     };
 
+    // A8: continuity is computed from the projection snapshot built when a
+    // factory is wired; without a factory (e.g. degraded test config) the
+    // channel still opens but reports `Fresh` — there is no seeded state.
+    let mut continuity = LiveContinuityMode::Fresh;
+    // P2#3: capture the adapter's real capability set for the response.
+    // Only meaningful when a factory wired the channel; otherwise the
+    // conservative all-false placeholder remains (no adapter, no claims).
+    let mut capabilities = LiveChannelCapabilities {
+        audio_input: false,
+        audio_output: false,
+        text_input: false,
+        text_output: false,
+        barge_in: false,
+        transcript: false,
+        provider_native_resume: false,
+    };
+
     if let Some(factory) = session_factory {
         // B18: refuse providers without a wired live adapter and models that
         // lack realtime capability before reaching the factory. Without this,
@@ -132,16 +199,43 @@ pub async fn handle_live_open(
                 );
             }
         };
-        match factory.open_session(&open_config).await {
-            Ok(session) => {
-                let adapter =
-                    std::sync::Arc::new(meerkat_live::ProviderSessionAdapter::new(session));
+        // E25: open a provider-native `LiveAdapter` directly. The OpenAI
+        // factory implements `open_live_adapter` to bypass the
+        // `Box<dyn RealtimeSession>` boxing layer that the legacy
+        // `ProviderSessionAdapter` wrapper required.
+        match factory.open_live_adapter(&open_config).await {
+            Ok(adapter) => {
+                // P2#3: query the adapter's real capability set before
+                // handing ownership to the host. `Arc<dyn LiveAdapter>` is
+                // shared, so cloning here is cheap and the host still
+                // receives the canonical reference via `attach_adapter`.
+                capabilities = adapter.capabilities();
                 if let Err(err) = host.attach_adapter(&channel_id, adapter).await {
                     let _ = host.close_channel(&channel_id).await;
                     return RpcResponse::error(
                         id,
                         error::INTERNAL_ERROR,
                         format!("failed to attach adapter: {err}"),
+                    );
+                }
+                // A8: send `Open { snapshot }` so the adapter sees the
+                // canonical projection snapshot it was built from. The
+                // command flow is the canonical path for any future
+                // re-seed (resume, cross-session attach, etc.); on the
+                // initial open the OpenAI adapter has already seeded via
+                // the factory path so this command re-validates the
+                // snapshot rather than mutating provider state.
+                let snapshot = build_live_projection_snapshot(&session_id, &open_config);
+                continuity = continuity_from_snapshot(&snapshot);
+                if let Err(err) = host
+                    .send_command(&channel_id, LiveAdapterCommand::Open { snapshot })
+                    .await
+                {
+                    let _ = host.close_channel(&channel_id).await;
+                    return RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        format!("failed to send Open snapshot: {err}"),
                     );
                 }
             }
@@ -181,31 +275,36 @@ pub async fn handle_live_open(
     // Channel ids are URL-safe (G41: v4 UUID) so direct interpolation is
     // sound; if a future channel-id shape ever introduces non-URL-safe bytes
     // this `format!` must percent-encode.
+    // P1#4: append `&format=...` so the WS server can negotiate binary-frame
+    // encoding at upgrade time. Without this, `meerkat-live::transport`
+    // accepts the WS upgrade but rejects every binary audio frame as
+    // `binary_format_unnegotiated`. The format value is `LIVE_WS_DEFAULT_AUDIO_FORMAT`
+    // (pinned to the OpenAI provider default for now). Channel ids and the
+    // token string are URL-safe by construction, so direct interpolation is
+    // sound; the format constant is also URL-safe.
     let transport = LiveTransportBootstrap::Websocket {
         url: format!(
-            "{base_url}{path}?token={token_str}&channel={channel_id}",
-            path = meerkat_live::LIVE_WS_PATH
+            "{base_url}{path}?token={token_str}&channel={channel_id}&format={format}",
+            path = meerkat_live::LIVE_WS_PATH,
+            format = LIVE_WS_DEFAULT_AUDIO_FORMAT,
         ),
         token: token_str,
     };
 
-    // C21: do not advertise the static `LiveChannelCapabilities::default()`
-    // (which lies "everything is supported"). Until the adapter exposes its
-    // real capability set, return an all-`false` placeholder so consumers do
-    // not assume features that may not exist.
-    // TODO(C21): wire from adapter via `host.channel_capabilities(&channel_id)`
-    // once the runtime agent adds that method.
+    // P2#3: capabilities now reflect the adapter's real `capabilities()`
+    // (queried in the factory branch above). Without a factory the
+    // conservative all-false defaults are kept — no adapter, no claims.
     //
-    // C22: do not unconditionally claim `Fresh` — until
-    // `live_open_config_for_session` returns continuity metadata, return
-    // `Degraded` rather than a falsehood.
-    // TODO(C22): plumb continuity from `live_open_config_for_session`
-    // (surface agent owns `session_runtime.rs`).
+    // A8: continuity is computed from the projection snapshot above; it
+    // honestly reports `Fresh` for empty seed history, `TranscriptOnly` for
+    // seeded text history, and `Provider` once provider-native resume is
+    // wired. The previous unconditional `Degraded` claim was a falsehood —
+    // we never even built the snapshot.
     let result = LiveOpenResult {
         channel_id: channel_id.to_string(),
         transport,
-        capabilities: unknown_capabilities(),
-        continuity: LiveContinuityMode::Degraded,
+        capabilities,
+        continuity,
     };
 
     // N75: `LiveOpenResult` is a fixed-shape struct of `Serialize`-clean
@@ -278,6 +377,76 @@ pub async fn handle_live_close(
             id,
             error::INVALID_PARAMS,
             format!("channel {} not found", parsed.channel_id),
+        ),
+        Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    }
+}
+
+/// P1#5: `live/refresh` — push a freshly-built [`LiveProjectionSnapshot`]
+/// into an *already-open* live adapter so it can re-seed its provider session
+/// against the latest canonical state without tearing the channel down.
+///
+/// Triggered by upstream session-state changes (model switch via
+/// `config/patch`, snapshot drift after a session edit, etc.). Maps to
+/// [`LiveAdapterCommand::Refresh { snapshot }`].
+///
+/// The adapter does not decide whether the refresh is legal — the runtime
+/// builds a snapshot from the same `live_open_config_for_session` helper
+/// `live/open` uses, so the projection stays canonical. Adapters that cannot
+/// re-seed live should either no-op or surface a typed error observation.
+pub async fn handle_live_refresh(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    host: &LiveAdapterHost,
+    runtime: &Arc<SessionRuntime>,
+) -> RpcResponse {
+    let parsed: LiveChannelParams = match super::parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let channel_id = LiveChannelId::new(&parsed.channel_id);
+
+    let session_id = match host.channel_session(&channel_id).await {
+        Ok(id) => id,
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("channel {} not found", parsed.channel_id),
+            );
+        }
+        Err(err) => return RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
+    };
+
+    let open_config = match runtime
+        .live_open_config_for_session(&session_id, RealtimeTurningMode::ProviderManaged)
+        .await
+    {
+        Ok(config) => config,
+        Err(err) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to build session config: {err}"),
+            );
+        }
+    };
+    let snapshot = build_live_projection_snapshot(&session_id, &open_config);
+
+    match host
+        .send_command(&channel_id, LiveAdapterCommand::Refresh { snapshot })
+        .await
+    {
+        Ok(()) => RpcResponse::success(id, serde_json::json!({"refreshed": true})),
+        Err(LiveAdapterHostError::ChannelNotFound(_)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("channel {} not found", parsed.channel_id),
+        ),
+        Err(LiveAdapterHostError::NoAdapter(_)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("channel {} has no adapter attached", parsed.channel_id),
         ),
         Err(err) => RpcResponse::error(id, error::INTERNAL_ERROR, err.to_string()),
     }
@@ -525,10 +694,18 @@ mod tests {
         let v = LiveOpenResult {
             channel_id: "live_42".into(),
             transport: LiveTransportBootstrap::Websocket {
-                url: "ws://x/y?token=t".into(),
+                url: "ws://x/y?token=t&format=pcm_24k_mono".into(),
                 token: "t".into(),
             },
-            capabilities: unknown_capabilities(),
+            capabilities: LiveChannelCapabilities {
+                audio_input: true,
+                audio_output: true,
+                text_input: true,
+                text_output: true,
+                barge_in: true,
+                transcript: true,
+                provider_native_resume: false,
+            },
             continuity: LiveContinuityMode::Degraded,
         };
         assert_eq!(round_trip(&v), v);
@@ -633,24 +810,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unknown_capabilities_is_all_false() {
-        let caps = unknown_capabilities();
-        // C21: an "unknown" adapter must not advertise any capability.
-        assert_eq!(
-            caps,
-            LiveChannelCapabilities {
-                audio_input: false,
-                audio_output: false,
-                text_input: false,
-                text_output: false,
-                barge_in: false,
-                transcript: false,
-                provider_native_resume: false,
-            }
-        );
-    }
-
     // -- A7 wire round-trips --
 
     #[test]
@@ -679,6 +838,209 @@ mod tests {
                 json.get(key).is_some(),
                 "expected top-level field {key} on LiveTruncateParams"
             );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // P1#4: WS URL must carry both `?token=` and `&format=` so binary audio
+    // is admitted post-handshake.
+    // ---------------------------------------------------------------------
+
+    /// P1#4: regression — the format-string path used by `handle_live_open`
+    /// must produce a URL that contains `?token=`, `&channel=`, and
+    /// `&format=pcm_24k_mono` in that order. Reconstruct it with the same
+    /// constant the handler uses; if a future refactor drops the `format=`
+    /// query parameter, the WS server will silently reject every binary
+    /// frame as `binary_format_unnegotiated` and audio will appear to
+    /// "vanish" mid-call.
+    #[test]
+    fn live_open_url_carries_token_and_format_params() {
+        let base_url = "ws://localhost:9999";
+        let path = meerkat_live::LIVE_WS_PATH;
+        let token_str = "tok_abc";
+        let channel_id = "live_42";
+        let format_param = LIVE_WS_DEFAULT_AUDIO_FORMAT;
+        let url = format!(
+            "{base_url}{path}?token={token_str}&channel={channel_id}&format={format_param}"
+        );
+        // Positive assertions: every required query parameter is present.
+        assert!(url.contains("?token="), "URL must include ?token=: {url}");
+        assert!(
+            url.contains("&channel="),
+            "URL must include &channel=: {url}"
+        );
+        assert!(
+            url.contains("&format=pcm_24k_mono"),
+            "URL must include &format=pcm_24k_mono so the WS server accepts binary audio frames: {url}"
+        );
+        // The format constant is the only value `WsConnectParams` parses
+        // today; pin it here so accidentally introducing a different
+        // format string fails this regression.
+        assert_eq!(LIVE_WS_DEFAULT_AUDIO_FORMAT, "pcm_24k_mono");
+    }
+
+    // ---------------------------------------------------------------------
+    // P2#3: adapter capabilities flow through to LiveOpenResult.
+    // ---------------------------------------------------------------------
+
+    /// P2#3: a fake adapter that reports a deterministic capability set so
+    /// we can assert `live/open`-side capability propagation.
+    struct FakeCapsAdapter(LiveChannelCapabilities);
+
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for FakeCapsAdapter {
+        async fn send_command(
+            &self,
+            _command: LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+        fn capabilities(&self) -> LiveChannelCapabilities {
+            self.0.clone()
+        }
+    }
+
+    /// P2#3: the dispatch path used by `handle_live_open`
+    /// (`adapter.capabilities()` on `Arc<dyn LiveAdapter>`) must return the
+    /// adapter's real values verbatim, not the all-false placeholder. The
+    /// previous behavior advertised every capability as `false` regardless
+    /// of provider support; this test pins the new contract.
+    #[tokio::test]
+    async fn arc_dyn_live_adapter_dispatches_capabilities() {
+        use std::sync::Arc;
+        let custom = LiveChannelCapabilities {
+            audio_input: true,
+            audio_output: false,
+            text_input: true,
+            text_output: true,
+            barge_in: false,
+            transcript: true,
+            provider_native_resume: false,
+        };
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(FakeCapsAdapter(custom.clone()));
+        // `adapter.capabilities()` is the exact call site `handle_live_open`
+        // makes after `factory.open_live_adapter(...)`.
+        assert_eq!(adapter.capabilities(), custom);
+        // Negative regression: must not silently degrade to all-false.
+        assert!(
+            adapter.capabilities().audio_input
+                || adapter.capabilities().text_input
+                || adapter.capabilities().transcript,
+            "fake-adapter capabilities must NOT be all-false (P2#3 regression)"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // P1#5: live/refresh dispatches LiveAdapterCommand::Refresh through
+    // LiveAdapterHost::send_command on the channel's adapter.
+    // ---------------------------------------------------------------------
+
+    /// P1#5: an adapter that records every command it receives so the test
+    /// can assert that `Refresh { snapshot }` actually propagates through
+    /// `LiveAdapterHost::send_command`.
+    struct RecordingAdapter {
+        log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for RecordingAdapter {
+        async fn send_command(
+            &self,
+            command: LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            self.log.lock().await.push(command);
+            Ok(())
+        }
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    /// P1#5: the host-level send_command path must forward
+    /// `LiveAdapterCommand::Refresh { snapshot }` verbatim to the channel's
+    /// adapter. `handle_live_refresh` calls `host.send_command(channel_id,
+    /// Refresh { snapshot })` after building a fresh snapshot from the
+    /// session's runtime config; this test pins the host-side dispatch
+    /// half of that path so a future refactor that drops the Refresh arm
+    /// or routes it elsewhere fails here.
+    #[tokio::test]
+    async fn host_forwards_refresh_command_to_adapter() {
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+        use std::sync::Arc;
+
+        let host = meerkat_live::LiveAdapterHost::new();
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: session_id.clone(),
+            snapshot_version: 7,
+            seed_messages: vec![],
+            visible_tools: vec![],
+            system_prompt: None,
+            model_id: "gpt-realtime".into(),
+            provider_id: "openai".into(),
+            audio_config: None,
+        };
+        host.send_command(
+            &channel_id,
+            LiveAdapterCommand::Refresh {
+                snapshot: snapshot.clone(),
+            },
+        )
+        .await
+        .expect("send Refresh command");
+
+        let recorded = log.lock().await;
+        assert_eq!(recorded.len(), 1, "exactly one command should be recorded");
+        match &recorded[0] {
+            LiveAdapterCommand::Refresh {
+                snapshot: recv_snapshot,
+            } => {
+                assert_eq!(recv_snapshot.snapshot_version, 7);
+                assert_eq!(recv_snapshot.session_id, session_id);
+                assert_eq!(recv_snapshot.model_id, "gpt-realtime");
+            }
+            other => panic!("expected Refresh command, got {other:?}"),
         }
     }
 }

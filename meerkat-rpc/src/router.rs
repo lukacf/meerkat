@@ -588,7 +588,7 @@ pub struct MethodRouter {
     #[cfg(feature = "mob")]
     closed_mob_streams: Arc<Mutex<ClosedStreamSet>>,
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
-    live_adapter_host: Arc<meerkat_runtime::live_adapter_host::LiveAdapterHost>,
+    live_adapter_host: Arc<meerkat_live::LiveAdapterHost>,
     live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
     live_ws_base_url: Option<String>,
     live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
@@ -697,7 +697,7 @@ impl MethodRouter {
             #[cfg(feature = "mob")]
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             runtime_adapter,
-            live_adapter_host: Arc::new(meerkat_runtime::live_adapter_host::LiveAdapterHost::new()),
+            live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new()),
             live_ws_state: None,
             live_ws_base_url: None,
             live_session_factory: None,
@@ -716,6 +716,11 @@ impl MethodRouter {
         if let Some(dispatcher) = self.runtime.live_tool_dispatcher() {
             self.live_adapter_host.set_tool_dispatcher(dispatcher);
         }
+        // P1#5: hand the host to the runtime so `propagate_config_to_live_channels`
+        // can fan out `Refresh`/`Close` commands when an upstream config patch
+        // changes a session's resolved model/provider.
+        self.runtime
+            .set_live_adapter_host(Arc::clone(&self.live_adapter_host));
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
         self
@@ -1008,7 +1013,7 @@ impl MethodRouter {
             active_mob_streams: Arc::new(Mutex::new(HashMap::new())),
             closed_mob_streams: Arc::new(Mutex::new(ClosedStreamSet::new())),
             runtime_adapter,
-            live_adapter_host: Arc::new(meerkat_runtime::live_adapter_host::LiveAdapterHost::new()),
+            live_adapter_host: Arc::new(meerkat_live::LiveAdapterHost::new()),
             live_ws_state: None,
             live_ws_base_url: None,
             live_session_factory: None,
@@ -1529,6 +1534,20 @@ impl MethodRouter {
             #[cfg(not(feature = "mini-surface"))]
             "live/close" if self.live_ws_state.is_some() => {
                 handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
+            }
+            // P1#5: push a fresh projection snapshot into an already-open
+            // live adapter (model switch via `config/patch`, snapshot drift
+            // after a session edit, etc.). Same gating as the other live/*
+            // arms — without `--live-ws` the router has no transport state.
+            #[cfg(not(feature = "mini-surface"))]
+            "live/refresh" if self.live_ws_state.is_some() => {
+                handlers::live::handle_live_refresh(
+                    id,
+                    params,
+                    &self.live_adapter_host,
+                    &self.runtime,
+                )
+                .await
             }
             #[cfg(not(feature = "mini-surface"))]
             "live/send_input" if self.live_ws_state.is_some() => {

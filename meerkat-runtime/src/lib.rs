@@ -60,12 +60,6 @@ pub mod input;
 pub mod input_ledger;
 pub mod input_scope;
 pub mod input_state;
-// Live adapter host bridges WebSocket transport state (axum/tokio) into
-// `LiveAdapterHost` semantic state. The whole transport stack is non-wasm —
-// gate the module on the host target so wasm builds don't try to resolve
-// `tokio::sync::Mutex` against the limited `tokio_with_wasm` alias surface.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod live_adapter_host;
 pub mod meerkat_machine;
 pub(crate) mod meerkat_machine_types;
 pub mod mob_adapter;

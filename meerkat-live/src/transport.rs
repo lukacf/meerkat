@@ -35,13 +35,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::host::{LiveAdapterHost, LiveChannelId, ObservationOutcome};
 use axum::Router;
 use axum::extract::ws::{CloseFrame, Message as WsMessage, WebSocket, close_code};
 use axum::extract::{Query, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use meerkat_core::live_adapter::LiveInputChunk;
-use meerkat_runtime::live_adapter_host::{LiveAdapterHost, LiveChannelId, ObservationOutcome};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 

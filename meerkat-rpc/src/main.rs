@@ -350,16 +350,14 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         // become canonical Meerkat semantic facts (A1-A6, A14). Without the
         // sink, `apply_observation` only updates host status and projection
         // becomes a silent no-op.
-        let projection_sink: std::sync::Arc<
-            dyn meerkat_runtime::live_adapter_host::LiveProjectionSink,
-        > = std::sync::Arc::new(
-            meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
-                &runtime,
-            )),
-        );
+        let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
+            std::sync::Arc::new(
+                meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &runtime,
+                )),
+            );
         let host = std::sync::Arc::new(
-            meerkat_runtime::live_adapter_host::LiveAdapterHost::new()
-                .with_projection_sink(projection_sink),
+            meerkat_live::LiveAdapterHost::new().with_projection_sink(projection_sink),
         );
         let ws_state = std::sync::Arc::new(meerkat_live::LiveWsState::new(host));
         let ws_state_clone = std::sync::Arc::clone(&ws_state);

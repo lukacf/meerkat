@@ -1,4 +1,12 @@
-//! Live adapter host — runtime-owned orchestrator for live provider sessions.
+//! Live adapter host — transport-side orchestrator for live provider sessions.
+//!
+//! E26: relocated from `meerkat-runtime` into `meerkat-live` so the dependency
+//! direction matches the architectural intent — transport (`meerkat-live`)
+//! owns the live-adapter seam directly and surfaces (`meerkat-rpc`) compose
+//! the host with a `SessionService`-backed `LiveProjectionSink`. Previously
+//! `meerkat-live` depended on `meerkat-runtime` to import the host, which
+//! was the wrong direction (the runtime crate is heavyweight and shouldn't
+//! be a transitive dep of a thin transport crate).
 //!
 //! Sits outside MeerkatMachine (not machine state, not a second machine).
 //! Uses Meerkat services to build projections and gate observations.
@@ -28,9 +36,11 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use indexmap::IndexMap;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
@@ -110,6 +120,16 @@ pub enum ObservationOutcome {
         provider_call_id: String,
         tool_name: String,
         reason: ToolDispatchSkipReason,
+    },
+    /// A tool call was dispatched but did not produce a result within the
+    /// configured timeout. The adapter has been notified via
+    /// `LiveAdapterCommand::SubmitToolError` so the provider can unblock its
+    /// turn; no `ToolDispatched` outcome is projected (dogma sin #3 — the
+    /// runtime decides the semantic consequence of a stuck tool).
+    ToolCallTimedOut {
+        provider_call_id: String,
+        tool_name: String,
+        timeout: std::time::Duration,
     },
     /// Turn-interrupt signal was forwarded to the projection sink.
     InterruptSignalled,
@@ -242,10 +262,19 @@ pub trait LiveProjectionSink: Send + Sync {
     ) -> Result<(), LiveProjectionError>;
 
     /// Project an assistant transcript truncation (barge-in side effect).
+    ///
+    /// `response_id` and `content_index` are the provider-supplied identity
+    /// fields the runtime's realtime-transcript layer needs to fold the
+    /// truncation into the staged response. When `response_id` is `None`,
+    /// implementors must surface a typed [`LiveProjectionError::Rejected`]
+    /// rather than silently committing an empty value (P1#3).
     async fn truncate_assistant_transcript(
         &self,
         session_id: &SessionId,
         provider_item_id: Option<&str>,
+        previous_item_id: Option<&str>,
+        content_index: Option<u32>,
+        response_id: Option<&str>,
         text: Option<&str>,
     ) -> Result<(), LiveProjectionError>;
 
@@ -271,6 +300,26 @@ pub trait LiveProjectionSink: Send + Sync {
         code: LiveAdapterErrorCode,
         message: &str,
     ) -> Result<(), LiveProjectionError>;
+
+    /// Append a structured realtime transcript event to canonical session state.
+    ///
+    /// P1#2: provider adapters now emit `LiveAdapterObservation::RealtimeTranscript`
+    /// for events the host previously dropped on the floor (`ItemObserved`,
+    /// `ItemSkipped`, `AssistantTurnCompleted`, `AssistantTurnInterrupted`).
+    /// Routing them through this seam wires those events into the session
+    /// runtime's idempotent ordering / staging machinery — the same path that
+    /// already handles streaming assistant deltas.
+    ///
+    /// A default `Ok(())` body is provided so existing implementations stay
+    /// compilable while production sinks (`SessionServiceProjectionSink`)
+    /// gain a real implementation. Tests should override to assert routing.
+    async fn append_realtime_transcript(
+        &self,
+        _session_id: &SessionId,
+        _event: &RealtimeTranscriptEvent,
+    ) -> Result<(), LiveProjectionError> {
+        Ok(())
+    }
 }
 
 /// Errors returned by [`LiveProjectionSink`] implementations.
@@ -337,6 +386,14 @@ pub enum LiveAdapterHostError {
 #[non_exhaustive]
 pub enum ObservationRouting {
     AppendTranscript,
+    /// Pass-through of a structured [`RealtimeTranscriptEvent`] from the
+    /// provider adapter. Routed to [`LiveProjectionSink::append_realtime_transcript`]
+    /// so the session layer's idempotent ordering / staging machinery owns
+    /// materialization (P1#2). Replaces the prior `Noop` fallthrough that
+    /// silently dropped these structured events.
+    AppendRealtimeTranscript {
+        event: RealtimeTranscriptEvent,
+    },
     DispatchToolCall {
         provider_call_id: String,
         tool_name: String,
@@ -377,7 +434,27 @@ pub struct LiveAdapterHost {
     /// late setter. Reads are short and fully sync — never held across an
     /// `.await`.
     tool_dispatcher: std::sync::Mutex<Option<Arc<dyn AgentToolDispatcher>>>,
+    /// Optional per-tool-call dispatch timeout. When set, `dispatch_tool_call`
+    /// races the dispatcher future against
+    /// [`tokio::time::timeout`](tokio::time::timeout); on elapse, the host
+    /// submits a typed `LiveAdapterCommand::SubmitToolError` to the adapter
+    /// and returns [`ObservationOutcome::ToolCallTimedOut`] instead of
+    /// `ToolCallDispatched`. The runtime is therefore not deadlockable by a
+    /// dispatcher that holds a tool call forever (dogma: the adapter cannot
+    /// stall canonical session lifecycle).
+    ///
+    /// `None` (the default) preserves legacy unbounded-await behavior. Surfaces
+    /// that want a deadline budget explicitly opt in via
+    /// [`Self::with_tool_timeout`].
+    tool_timeout: Option<Duration>,
 }
+
+/// Default tool-call dispatch timeout used by surfaces that opt into a
+/// timeout without specifying a value. Picked to be long enough to
+/// accommodate reasonable tool work (HTTP fetches, database calls, model
+/// calls invoked from a tool) but short enough that a stuck dispatcher
+/// cannot indefinitely hold a live provider's turn.
+pub const DEFAULT_LIVE_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct HostInner {
     /// `IndexMap` keeps insertion order stable for `active_channels` (which a
@@ -398,7 +475,27 @@ impl LiveAdapterHost {
             }),
             projection_sink: None,
             tool_dispatcher: std::sync::Mutex::new(None),
+            tool_timeout: None,
         }
+    }
+
+    /// Builder: install a per-tool-call dispatch timeout.
+    ///
+    /// When set, every `ToolCallRequested` observation triggers a dispatcher
+    /// call wrapped in [`tokio::time::timeout`]; if the dispatcher does not
+    /// produce a result before the deadline, the host:
+    ///
+    /// 1. Sends a typed `LiveAdapterCommand::SubmitToolError` to the adapter
+    ///    so the provider can unblock the live turn.
+    /// 2. Returns [`ObservationOutcome::ToolCallTimedOut`] (not
+    ///    `ToolCallDispatched`) so the projection layer can audit the miss.
+    ///
+    /// Surfaces that omit this builder retain the prior unbounded-await
+    /// behavior. [`DEFAULT_LIVE_TOOL_TIMEOUT`] is the recommended default.
+    #[must_use]
+    pub fn with_tool_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_timeout = Some(timeout);
+        self
     }
 
     /// Builder: install the canonical projection sink.
@@ -736,6 +833,9 @@ impl LiveAdapterHost {
                 ObservationRouting::AppendTranscript,
                 LiveAdapterObservation::AssistantTranscriptTruncated {
                     provider_item_id,
+                    previous_item_id,
+                    content_index,
+                    response_id,
                     text,
                 },
             ) => {
@@ -743,6 +843,9 @@ impl LiveAdapterHost {
                     sink.truncate_assistant_transcript(
                         &session_id,
                         provider_item_id.as_deref(),
+                        previous_item_id.as_deref(),
+                        *content_index,
+                        response_id.as_deref(),
                         text.as_deref(),
                     )
                     .await?;
@@ -757,6 +860,17 @@ impl LiveAdapterHost {
                 if let Some(sink) = &self.projection_sink {
                     sink.signal_turn_completed(&session_id, *stop_reason, usage.clone())
                         .await?;
+                }
+                Ok(ObservationOutcome::TranscriptAppended)
+            }
+
+            // P1#2: structured realtime transcript events flow through the
+            // typed sink seam so the session runtime's idempotent ordering /
+            // staging machinery owns materialization. Mirrors the seam wave-3
+            // wired up for assistant deltas.
+            (ObservationRouting::AppendRealtimeTranscript { event }, _) => {
+                if let Some(sink) = &self.projection_sink {
+                    sink.append_realtime_transcript(&session_id, &event).await?;
                 }
                 Ok(ObservationOutcome::TranscriptAppended)
             }
@@ -826,6 +940,25 @@ impl LiveAdapterHost {
         let dispatcher = match self.load_dispatcher() {
             Some(d) => d,
             None => {
+                // P2#2: without a dispatcher, the provider would otherwise
+                // wait forever for a tool result that will never arrive,
+                // deadlocking the live session until the provider's own
+                // timeout (or never). Send a typed `SubmitToolError` so the
+                // provider can complete the response with an error and
+                // unstick the live turn. The typed
+                // `ObservationOutcome::ToolCallSkipped { NoDispatcher }`
+                // return is preserved so the host's audit trail still shows
+                // the miswiring. Best-effort: if the adapter is not attached
+                // (no channel adapter yet), swallow the error rather than
+                // poisoning the projection — the original miswiring is the
+                // root cause and is already audited via the outcome.
+                let _ = self
+                    .submit_tool_error(
+                        channel_id,
+                        provider_call_id.to_string(),
+                        "live tool dispatcher not configured".to_string(),
+                    )
+                    .await;
                 return Ok(ObservationOutcome::ToolCallSkipped {
                     provider_call_id: provider_call_id.to_string(),
                     tool_name: tool_name.to_string(),
@@ -863,7 +996,31 @@ impl LiveAdapterHost {
             args: &raw,
         };
 
-        let dispatch_result = dispatcher.dispatch(view).await;
+        // Race the dispatcher future against the configured timeout (if any).
+        // Without a timeout, fall through to the legacy unbounded await so
+        // existing surfaces (and tests that don't pause the clock) keep their
+        // behavior.
+        let dispatch_call = dispatcher.dispatch(view);
+        let dispatch_result = match self.tool_timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, dispatch_call).await {
+                Ok(result) => result,
+                Err(_elapsed) => {
+                    // Notify the adapter so the provider can unblock its turn.
+                    // The error string is a stable, parseable shape: "tool
+                    // dispatch timeout after Ns" so downstream surfaces can
+                    // route on it without parsing the dispatcher's error.
+                    let error_text = format!("tool dispatch timeout after {timeout:?}");
+                    self.submit_tool_error(channel_id, provider_call_id.to_string(), error_text)
+                        .await?;
+                    return Ok(ObservationOutcome::ToolCallTimedOut {
+                        provider_call_id: provider_call_id.to_string(),
+                        tool_name: tool_name.to_string(),
+                        timeout,
+                    });
+                }
+            },
+            None => dispatch_call.await,
+        };
         match dispatch_result {
             Ok(outcome) => {
                 let live_result =
@@ -983,6 +1140,16 @@ impl LiveAdapterHost {
             }
             LiveAdapterObservation::AssistantTranscriptTruncated { .. } => {
                 ObservationRouting::AppendTranscript
+            }
+            // P1#2: structured realtime events flow through the typed
+            // realtime-transcript seam so the session layer owns idempotent
+            // ordering. Without this route, ItemObserved / ItemSkipped /
+            // AssistantTurnCompleted / AssistantTurnInterrupted dropped to
+            // `Noop` and bypassed canonical staging.
+            LiveAdapterObservation::RealtimeTranscript { event } => {
+                ObservationRouting::AppendRealtimeTranscript {
+                    event: event.clone(),
+                }
             }
             LiveAdapterObservation::ToolCallRequested {
                 provider_call_id,
@@ -1588,6 +1755,88 @@ mod tests {
         assert_eq!(turns.len(), 1);
     }
 
+    // -- P1#2: structured realtime transcript pass-through --
+    //
+    // Regression: provider adapters emit
+    // `LiveAdapterObservation::RealtimeTranscript { event }` for events the
+    // host previously fell through to `Noop` on (`ItemObserved`,
+    // `ItemSkipped`, `AssistantTurnCompleted`, `AssistantTurnInterrupted`).
+    // The host must route those through the typed sink seam so the session
+    // runtime's idempotent ordering / staging machinery owns materialization
+    // — the same path that already handles streaming assistant deltas.
+
+    #[tokio::test]
+    async fn realtime_transcript_observation_routes_to_append_realtime_transcript() {
+        use meerkat_core::RealtimeTranscriptRole;
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new().with_projection_sink(Arc::clone(&sink) as _);
+        let session_id = test_session_id();
+        let ch = host.open_channel(session_id.clone()).await.unwrap();
+
+        let event = RealtimeTranscriptEvent::ItemObserved {
+            item_id: "item_realtime_1".into(),
+            previous_item_id: Some("item_realtime_0".into()),
+            role: RealtimeTranscriptRole::Assistant,
+            response_id: Some("resp_realtime_1".into()),
+        };
+        let obs = LiveAdapterObservation::RealtimeTranscript {
+            event: event.clone(),
+        };
+
+        // Routing first: must NOT be Noop — it must be the structured pass-
+        // through variant with the event preserved.
+        let routing = LiveAdapterHost::classify_observation(&obs);
+        match routing {
+            ObservationRouting::AppendRealtimeTranscript { event: routed } => {
+                assert_eq!(routed, event);
+            }
+            other => panic!("expected AppendRealtimeTranscript, got {other:?}"),
+        }
+
+        // End-to-end: apply_observation routes through the sink exactly once.
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+        assert!(
+            matches!(outcome, ObservationOutcome::TranscriptAppended),
+            "expected TranscriptAppended, got {outcome:?}"
+        );
+
+        let recorded = sink.realtime_events.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "sink must see exactly one append");
+        assert_eq!(recorded[0].0, session_id);
+        assert_eq!(recorded[0].1, event);
+
+        // No legacy fallthrough: `Noop` would mean nothing else in the sink
+        // moved either. Pin that by checking adjacent recorders are empty.
+        assert!(sink.assistant_deltas.lock().unwrap().is_empty());
+        assert!(sink.assistant_finals.lock().unwrap().is_empty());
+        assert!(sink.user_transcripts.lock().unwrap().is_empty());
+        assert!(sink.turn_completed.lock().unwrap().is_empty());
+        assert!(sink.interrupts.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn realtime_transcript_assistant_turn_completed_routes_through_sink() {
+        // Pin that AssistantTurnCompleted — historically lost by the fall-
+        // through to `Noop` — also reaches the sink. (Different inner variant
+        // shape: stop_reason + usage, not item identity.)
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let host = LiveAdapterHost::new().with_projection_sink(Arc::clone(&sink) as _);
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        let event = RealtimeTranscriptEvent::AssistantTurnCompleted {
+            response_id: "resp_complete".into(),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let obs = LiveAdapterObservation::RealtimeTranscript {
+            event: event.clone(),
+        };
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+        assert!(matches!(outcome, ObservationOutcome::TranscriptAppended));
+        let recorded = sink.realtime_events.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].1, event);
+    }
+
     // -- A4/A5: tool call dispatch + submit --
 
     #[tokio::test]
@@ -1650,6 +1899,76 @@ mod tests {
             } => {}
             other => panic!("expected ToolCallSkipped/NoDispatcher, got {other:?}"),
         }
+    }
+
+    // -- P2#2: missing-dispatcher does not deadlock the live session --
+    //
+    // Regression: when no tool dispatcher is wired and a `ToolCallRequested`
+    // observation arrives, the host previously returned `ToolCallSkipped {
+    // NoDispatcher }` and silently dropped the call on the floor. The
+    // provider then waited forever for a tool result that would never come,
+    // deadlocking the live session until the provider's own timeout (or
+    // never). The fix is to ALSO send a typed `SubmitToolError` back to the
+    // adapter so the provider can complete the response with an error and
+    // unstick its turn — while still surfacing the typed
+    // `ToolCallSkipped/NoDispatcher` outcome for the host audit trail.
+    #[tokio::test]
+    async fn tool_call_no_dispatcher_submits_error_to_adapter() {
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let adapter = Arc::new(RecordingAdapter::default());
+        // No dispatcher installed.
+        let host = LiveAdapterHost::new().with_projection_sink(Arc::clone(&sink) as _);
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        // Status must accept commands so the adapter command path is exercised
+        // (otherwise `send_command` rejects with ChannelNotReady — but the
+        // helper used for SubmitToolError uses `require_ready=false` since the
+        // command is allowed when not Ready; verifying via apply_status_update
+        // anyway to mirror the production attach sequence).
+        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+
+        let obs = LiveAdapterObservation::ToolCallRequested {
+            provider_call_id: "call_unwired".into(),
+            tool_name: "calculator".into(),
+            arguments: serde_json::json!({}),
+        };
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+
+        // 1. The typed audit-trail outcome is preserved.
+        match outcome {
+            ObservationOutcome::ToolCallSkipped {
+                provider_call_id,
+                tool_name,
+                reason: ToolDispatchSkipReason::NoDispatcher,
+            } => {
+                assert_eq!(provider_call_id, "call_unwired");
+                assert_eq!(tool_name, "calculator");
+            }
+            other => panic!("expected ToolCallSkipped/NoDispatcher, got {other:?}"),
+        }
+
+        // 2. The adapter received a SubmitToolError keyed on the same call_id
+        //    so the provider can complete its response and unblock the live
+        //    turn. This is the new behavior P2#2 introduces.
+        let errors = adapter.submitted_errors.lock().unwrap();
+        assert_eq!(
+            errors.len(),
+            1,
+            "adapter must receive exactly one SubmitToolError when dispatcher is missing"
+        );
+        assert_eq!(errors[0].0, "call_unwired");
+        assert!(
+            errors[0].1.contains("dispatcher"),
+            "error message should mention the missing dispatcher; got {:?}",
+            errors[0].1
+        );
+
+        // 3. No phantom SubmitToolResult was sent.
+        assert!(adapter.submitted_results.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1761,6 +2080,231 @@ mod tests {
         let errors = adapter.submitted_errors.lock().unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "call_err");
+    }
+
+    // -- K61: tool-call dispatch timeout --
+    //
+    // Original deleted test: `realtime_tool_timeout`. Pins the contract that a
+    // dispatcher which holds a tool call past the configured deadline does NOT
+    // hang the runtime. The host must:
+    //   1. Submit a typed `LiveAdapterCommand::SubmitToolError` to the adapter
+    //      so the provider can unblock its turn.
+    //   2. Return `ObservationOutcome::ToolCallTimedOut` (NOT
+    //      `ToolCallDispatched`) so the projection layer sees the miss.
+    //   3. Skip the projection sink — no phantom `ToolDispatched` outcome
+    //      surfaces to canonical session state.
+    //
+    // The deterministic-clock harness (`tokio::time::pause` + `advance`) makes
+    // the test exercise the real `tokio::time::timeout` boundary without a
+    // wall-clock dependency, closing the original "needs harness" gap.
+
+    /// Tool dispatcher whose `dispatch` future awaits a long sleep before
+    /// returning. Under `tokio::time::pause()` the sleep never elapses on its
+    /// own; the test drives the clock past the host's `tool_timeout` to force
+    /// the timeout branch.
+    struct SlowDispatcher {
+        sleep_for: Duration,
+        calls: StdMutex<u32>,
+    }
+
+    impl SlowDispatcher {
+        fn new(sleep_for: Duration) -> Self {
+            Self {
+                sleep_for,
+                calls: StdMutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for SlowDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::from([])
+        }
+
+        fn tool_catalog_capabilities(&self) -> ToolCatalogCapabilities {
+            ToolCatalogCapabilities::default()
+        }
+
+        fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
+            Arc::from([])
+        }
+
+        fn pending_catalog_sources(&self) -> Arc<[String]> {
+            Arc::from([])
+        }
+
+        async fn dispatch(
+            &self,
+            call: meerkat_core::types::ToolCallView<'_>,
+        ) -> Result<ToolDispatchOutcome, meerkat_core::error::ToolError> {
+            *self.calls.lock().unwrap() += 1;
+            tokio::time::sleep(self.sleep_for).await;
+            // Echo result so a non-timed-out dispatch still produces a sane outcome.
+            let tool_result =
+                meerkat_core::types::ToolResult::new(call.id.to_string(), "ok".into(), false);
+            Ok(ToolDispatchOutcome::from(tool_result))
+        }
+
+        fn capabilities(&self) -> DispatcherCapabilities {
+            DispatcherCapabilities::default()
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_call_dispatch_times_out_when_dispatcher_exceeds_deadline() {
+        // K61: a dispatcher that takes longer than the host's `tool_timeout`
+        // must produce a typed `ToolCallTimedOut` outcome and a
+        // `SubmitToolError` to the adapter — no phantom dispatch result.
+        let timeout = Duration::from_millis(500);
+        let dispatcher_sleep = Duration::from_secs(60);
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
+        let adapter = Arc::new(RecordingAdapter::default());
+        let host = LiveAdapterHost::new()
+            .with_projection_sink(Arc::clone(&sink) as _)
+            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_tool_timeout(timeout);
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+
+        let obs = LiveAdapterObservation::ToolCallRequested {
+            provider_call_id: "call_slow".into(),
+            tool_name: "slow_tool".into(),
+            arguments: serde_json::json!({"q": 1}),
+        };
+
+        // Race the host's apply_observation against a clock-advance. Both
+        // futures are driven by the same tokio runtime under `start_paused`,
+        // so advancing the clock past the timeout is what unblocks the
+        // host's `tokio::time::timeout`.
+        let host_call = async { host.apply_observation(&ch, &obs).await.unwrap() };
+        let drive_clock = async {
+            // Yield once so apply_observation gets to the timeout boundary
+            // before we advance the clock.
+            tokio::task::yield_now().await;
+            tokio::time::advance(timeout + Duration::from_millis(1)).await;
+        };
+        let (outcome, _) = tokio::join!(host_call, drive_clock);
+
+        match outcome {
+            ObservationOutcome::ToolCallTimedOut {
+                provider_call_id,
+                tool_name,
+                timeout: t,
+            } => {
+                assert_eq!(provider_call_id, "call_slow");
+                assert_eq!(tool_name, "slow_tool");
+                assert_eq!(t, timeout);
+            }
+            other => panic!("expected ToolCallTimedOut, got {other:?}"),
+        }
+
+        // Dispatcher was invoked exactly once.
+        assert_eq!(*dispatcher.calls.lock().unwrap(), 1);
+
+        // Adapter saw a SubmitToolError (NOT a SubmitToolResult).
+        let errors = adapter.submitted_errors.lock().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "call_slow");
+        assert!(
+            errors[0].1.contains("timeout"),
+            "tool error message should mention timeout: {}",
+            errors[0].1
+        );
+        let results = adapter.submitted_results.lock().unwrap();
+        assert!(
+            results.is_empty(),
+            "no SubmitToolResult should reach the adapter on timeout: {results:?}"
+        );
+
+        // Projection sink saw no spurious tool-related projection.
+        assert_eq!(sink.assistant_finals.lock().unwrap().len(), 0);
+        assert_eq!(sink.terminal_errors.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn tool_call_dispatch_succeeds_when_within_deadline() {
+        // K61 companion: with a deadline configured, a dispatcher that
+        // returns before the deadline must still produce
+        // `ToolCallDispatched` and submit the result. Pins that the timeout
+        // wrapper does not change the success path.
+        let timeout = Duration::from_secs(5);
+        let dispatcher_sleep = Duration::from_millis(100);
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let dispatcher = Arc::new(SlowDispatcher::new(dispatcher_sleep));
+        let adapter = Arc::new(RecordingAdapter::default());
+        let host = LiveAdapterHost::new()
+            .with_projection_sink(Arc::clone(&sink) as _)
+            .with_tool_dispatcher(Arc::clone(&dispatcher) as _)
+            .with_tool_timeout(timeout);
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+
+        let obs = LiveAdapterObservation::ToolCallRequested {
+            provider_call_id: "call_fast".into(),
+            tool_name: "fast_tool".into(),
+            arguments: serde_json::json!({}),
+        };
+        let host_call = async { host.apply_observation(&ch, &obs).await.unwrap() };
+        let drive_clock = async {
+            tokio::task::yield_now().await;
+            // Advance past dispatcher_sleep but well before timeout.
+            tokio::time::advance(dispatcher_sleep + Duration::from_millis(10)).await;
+        };
+        let (outcome, _) = tokio::join!(host_call, drive_clock);
+
+        match outcome {
+            ObservationOutcome::ToolCallDispatched {
+                provider_call_id, ..
+            } => assert_eq!(provider_call_id, "call_fast"),
+            other => panic!("expected ToolCallDispatched, got {other:?}"),
+        }
+        let results = adapter.submitted_results.lock().unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].call_id, "call_fast");
+        assert!(adapter.submitted_errors.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_call_dispatch_without_timeout_preserves_unbounded_await() {
+        // K61 companion: a host without `with_tool_timeout` must still
+        // produce `ToolCallDispatched` for a fast dispatcher (the legacy
+        // unbounded-await branch). Smoke-tests the `None` arm of
+        // `tool_timeout`.
+        let sink = Arc::new(RecordingProjectionSink::default());
+        let dispatcher = Arc::new(RecordingDispatcher::default());
+        let adapter = Arc::new(RecordingAdapter::default());
+        let host = LiveAdapterHost::new()
+            .with_projection_sink(Arc::clone(&sink) as _)
+            .with_tool_dispatcher(Arc::clone(&dispatcher) as _);
+        let ch = host.open_channel(test_session_id()).await.unwrap();
+        host.attach_adapter(&ch, Arc::clone(&adapter) as _)
+            .await
+            .unwrap();
+        host.apply_status_update(&ch, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+        let obs = LiveAdapterObservation::ToolCallRequested {
+            provider_call_id: "call_legacy".into(),
+            tool_name: "calc".into(),
+            arguments: serde_json::json!({}),
+        };
+        match host.apply_observation(&ch, &obs).await.unwrap() {
+            ObservationOutcome::ToolCallDispatched { .. } => {}
+            other => panic!("expected ToolCallDispatched on no-timeout host, got {other:?}"),
+        }
+        assert_eq!(adapter.submitted_results.lock().unwrap().len(), 1);
     }
 
     // -- A6: barge-in projection --
@@ -2032,14 +2576,25 @@ mod tests {
     /// decisions deterministically. Identity is captured in full so tests
     /// can pin A11's end-to-end identity preservation.
     #[derive(Default)]
+    #[allow(clippy::type_complexity)]
     struct RecordingProjectionSink {
         user_transcripts: StdMutex<Vec<(SessionId, String, OwnedIdentity)>>,
         assistant_deltas: StdMutex<Vec<(SessionId, String, OwnedIdentity)>>,
         assistant_finals: StdMutex<Vec<(SessionId, String, OwnedIdentity, StopReason, Usage)>>,
-        truncations: StdMutex<Vec<(SessionId, Option<String>, Option<String>)>>,
+        truncations: StdMutex<
+            Vec<(
+                SessionId,
+                Option<String>,
+                Option<String>,
+                Option<u32>,
+                Option<String>,
+                Option<String>,
+            )>,
+        >,
         interrupts: StdMutex<Vec<SessionId>>,
         turn_completed: StdMutex<Vec<(SessionId, StopReason, Usage)>>,
         terminal_errors: StdMutex<Vec<(SessionId, LiveAdapterErrorCode, String)>>,
+        realtime_events: StdMutex<Vec<(SessionId, RealtimeTranscriptEvent)>>,
     }
 
     #[async_trait]
@@ -2094,11 +2649,17 @@ mod tests {
             &self,
             session_id: &SessionId,
             provider_item_id: Option<&str>,
+            previous_item_id: Option<&str>,
+            content_index: Option<u32>,
+            response_id: Option<&str>,
             text: Option<&str>,
         ) -> Result<(), LiveProjectionError> {
             self.truncations.lock().unwrap().push((
                 session_id.clone(),
                 provider_item_id.map(|s| s.to_string()),
+                previous_item_id.map(|s| s.to_string()),
+                content_index,
+                response_id.map(|s| s.to_string()),
                 text.map(|s| s.to_string()),
             ));
             Ok(())
@@ -2136,6 +2697,18 @@ mod tests {
                 code,
                 message.to_string(),
             ));
+            Ok(())
+        }
+
+        async fn append_realtime_transcript(
+            &self,
+            session_id: &SessionId,
+            event: &RealtimeTranscriptEvent,
+        ) -> Result<(), LiveProjectionError> {
+            self.realtime_events
+                .lock()
+                .unwrap()
+                .push((session_id.clone(), event.clone()));
             Ok(())
         }
     }

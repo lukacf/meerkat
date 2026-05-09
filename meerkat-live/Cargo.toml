@@ -17,7 +17,6 @@ async-trait = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
 meerkat-llm-core = { workspace = true }
-meerkat-runtime = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -26,8 +25,9 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
+indexmap = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 tokio-tungstenite = "0.29"
 futures = { workspace = true }

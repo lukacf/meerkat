@@ -4184,10 +4184,20 @@ fn live_audio_chunking_appends_trailing_silence_in_fixed_frames() {
         LIVE_AUDIO_FRAME_MS,
         LIVE_AUDIO_TRAILING_SILENCE_MS,
     );
+    // Expected frame count derives from the chunker's contract:
+    //   ceil((audio_ms + trailing_silence_ms) / frame_ms)
+    // Computed from the LIVE_AUDIO_* constants in scope so future tunings of
+    // `LIVE_AUDIO_TRAILING_SILENCE_MS` (e.g. f08ce9e3b bumped 500 -> 1500ms
+    // for gpt-realtime-2 VAD reliability) don't silently break this test.
+    let audio_ms = LIVE_AUDIO_FRAME_MS;
+    let total_ms = audio_ms + LIVE_AUDIO_TRAILING_SILENCE_MS;
+    let expected_frames = total_ms.div_ceil(LIVE_AUDIO_FRAME_MS);
     assert_eq!(
         chunks.len(),
-        4,
-        "200ms audio + 500ms silence should yield four 200ms frames"
+        expected_frames,
+        "{audio_ms}ms audio + {trail}ms silence at {frame}ms frames should yield {expected_frames} frames",
+        trail = LIVE_AUDIO_TRAILING_SILENCE_MS,
+        frame = LIVE_AUDIO_FRAME_MS,
     );
     assert_eq!(
         chunks[0].len(),

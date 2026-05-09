@@ -31,7 +31,6 @@ tracing = { workspace = true }
 indexmap = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-meerkat-runtime = { workspace = true, optional = true, default-features = false }
 tokio = { workspace = true }
 reqwest = { workspace = true }
 base64 = { workspace = true }
@@ -51,7 +50,7 @@ axum = { workspace = true }
 [features]
 default = ["oauth"]
 oauth = ["meerkat-auth-core/oauth"]
-realtime = ["dep:oai-rt-rs", "dep:meerkat-runtime"]
+realtime = ["dep:oai-rt-rs"]
 
 [package.metadata.cargo-machete]
 ignored = ["getrandom", "base64", "indexmap", "tempfile"]

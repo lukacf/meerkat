@@ -301,6 +301,31 @@ impl Drop for PendingSessionEventStreamDrop {
     }
 }
 
+/// P1#5: build a [`LiveProjectionSnapshot`] from the resolved
+/// [`RealtimeSessionOpenConfig`].
+///
+/// Mirror of `build_live_projection_snapshot` in
+/// `handlers/live.rs`; we duplicate here so `propagate_config_to_live_channels`
+/// can run from the runtime layer without depending on handler-private
+/// helpers. `snapshot_version = 0` because the host owns version
+/// monotonicity; the value is opaque to the adapter and only used for
+/// staleness detection across rebuilds.
+fn build_live_projection_snapshot_for_runtime(
+    session_id: &SessionId,
+    open_config: &RealtimeSessionOpenConfig,
+) -> meerkat_core::live_adapter::LiveProjectionSnapshot {
+    meerkat_core::live_adapter::LiveProjectionSnapshot {
+        session_id: session_id.clone(),
+        snapshot_version: 0,
+        seed_messages: open_config.seed_messages.clone(),
+        visible_tools: open_config.visible_tools.clone(),
+        system_prompt: None,
+        model_id: open_config.llm_identity.model.clone(),
+        provider_id: open_config.llm_identity.provider.as_str().to_string(),
+        audio_config: None,
+    }
+}
+
 fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
     let build_state = session.build_state().unwrap_or_default();
     let mut content = build_state
@@ -2355,6 +2380,15 @@ pub struct SessionRuntime {
     /// Runtime-owned approval records. Surfaces only project decisions into
     /// this service; approval status is service-owned.
     approval_service: meerkat_core::ApprovalService,
+    /// P1#5: live adapter host, attached when the surface wires
+    /// `with_live_ws`. Held as an interior-mutable slot so it can be set
+    /// after the runtime is wrapped in `Arc` (matches the
+    /// `callback_request_tx` / `mob_state` pattern). Used by
+    /// `propagate_config_to_live_channels` to fan out `Refresh` (or `Close`)
+    /// commands to active live channels when an upstream model/provider
+    /// resolution change requires a re-seed.
+    #[allow(clippy::type_complexity)]
+    live_adapter_host: Arc<StdRwLock<Option<Arc<meerkat_live::LiveAdapterHost>>>>,
 }
 
 #[cfg(test)]
@@ -2725,6 +2759,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host: Arc::new(StdRwLock::new(None)),
         }
     }
 
@@ -2826,6 +2861,7 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host: Arc::new(StdRwLock::new(None)),
         }
     }
 
@@ -5161,6 +5197,115 @@ impl SessionRuntime {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+    }
+
+    /// P1#5: attach the live adapter host so the runtime can fan out
+    /// `Refresh`/`Close` commands to active live channels when an upstream
+    /// model/provider resolution change requires a re-seed.
+    ///
+    /// Takes `&self` so it can be called after the runtime is wrapped in
+    /// `Arc` (matches the `set_callback_channel` pattern). Called by
+    /// `RpcServer`/router construction immediately after `with_live_ws`.
+    pub fn set_live_adapter_host(&self, host: Arc<meerkat_live::LiveAdapterHost>) {
+        if let Ok(mut slot) = self.live_adapter_host.write() {
+            *slot = Some(host);
+        }
+    }
+
+    /// Read the current live adapter host, if attached.
+    pub fn live_adapter_host(&self) -> Option<Arc<meerkat_live::LiveAdapterHost>> {
+        self.live_adapter_host
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// P1#5: fan out `Refresh` (or `Close` if the new resolved model is no
+    /// longer realtime-capable) commands to every active live channel.
+    ///
+    /// Called after a successful `config/patch` commit so live adapters
+    /// sitting on stale model/provider resolution observe the new canonical
+    /// state. Each channel resolves its own session_id, builds a fresh
+    /// `LiveProjectionSnapshot` via `live_open_config_for_session`, and
+    /// dispatches a `Refresh { snapshot }` command. If the precheck fails
+    /// (e.g. the new resolved model has no realtime capability) the channel
+    /// is closed instead — leaving a live channel attached to an unsupported
+    /// resolution would silently route audio to a now-incompatible provider
+    /// session.
+    ///
+    /// Best-effort: per-channel errors are swallowed (logged via tracing) so
+    /// one stale channel cannot block propagation across the fleet. The
+    /// caller does not get per-channel error reporting; this method exists
+    /// to keep state honest, not to expose channel-level diagnostics.
+    pub async fn propagate_config_to_live_channels(&self) {
+        let Some(host) = self.live_adapter_host() else {
+            return;
+        };
+        let channels = host.active_channels().await;
+        for channel_id in channels {
+            let session_id = match host.channel_session(&channel_id).await {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::debug!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?err,
+                        "live channel session lookup failed during config propagation"
+                    );
+                    continue;
+                }
+            };
+            // If the new resolved model/provider is not realtime-capable,
+            // close the channel rather than refreshing — a non-realtime
+            // model bound to a live transport would silently route audio
+            // through an incompatible provider session.
+            if let Err(precheck_err) = self.precheck_live_open(&session_id).await {
+                tracing::info!(
+                    target: "meerkat_rpc::session_runtime",
+                    ?channel_id,
+                    ?session_id,
+                    ?precheck_err,
+                    "closing live channel: new resolution not realtime-capable"
+                );
+                let _ = host.close_channel(&channel_id).await;
+                continue;
+            }
+            let open_config = match self
+                .live_open_config_for_session(
+                    &session_id,
+                    meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+                )
+                .await
+            {
+                Ok(config) => config,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "meerkat_rpc::session_runtime",
+                        ?channel_id,
+                        ?session_id,
+                        ?err,
+                        "failed to build refreshed open_config for live channel"
+                    );
+                    continue;
+                }
+            };
+            let snapshot = build_live_projection_snapshot_for_runtime(&session_id, &open_config);
+            if let Err(err) = host
+                .send_command(
+                    &channel_id,
+                    meerkat_core::live_adapter::LiveAdapterCommand::Refresh { snapshot },
+                )
+                .await
+            {
+                tracing::warn!(
+                    target: "meerkat_rpc::session_runtime",
+                    ?channel_id,
+                    ?session_id,
+                    ?err,
+                    "failed to dispatch Refresh command to live channel"
+                );
+            }
+        }
     }
 
     #[cfg(feature = "mob")]

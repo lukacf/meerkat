@@ -165,8 +165,8 @@ if [[ -x "${default_rustc}" ]]; then
 fi
 if [[ -n "${rust_channel}" ]] &&
   [[ "${default_rustc_release}" == "${rust_channel}" ]] &&
-  [[ "${default_rustc}" == "${default_target}/.repo-cargo-toolchain-bin/rustc" ]] &&
-  [[ "${default_toolchain_bin}" == "${default_target}/.repo-cargo-toolchain-bin" ]]; then
+  [[ "${default_rustc}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"*"/rustc" ]] &&
+  [[ "${default_toolchain_bin}" == "${default_home}/.repo-cargo-toolchain-bin/${rust_channel}-"* ]]; then
   pass "repo-cargo resolves stable pinned Rust toolchain wrappers"
 else
   bad "repo-cargo does not resolve stable pinned Rust toolchain wrappers"
@@ -201,10 +201,12 @@ else
 fi
 
 if grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/cargo.yml &&
-  grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/buildbuddy.yml; then
-  pass "CI and BuildBuddy workflows keep repo-cargo Cargo home cacheable"
+  grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/buildbuddy.yml &&
+  grep -q 'CARGO_HOME: /tmp/meerkat-cargo-home' .github/workflows/live-e2e.yml &&
+  grep -Fq '${GITHUB_JOB:-job}' scripts/ci-pin-rust-toolchain-env; then
+  pass "CI and BuildBuddy workflows isolate Cargo home per GitHub job before cache restore"
 else
-  bad "CI or BuildBuddy workflow is missing a stable repo-cargo CARGO_HOME"
+  bad "CI or BuildBuddy workflow can share mutable Cargo home across parallel jobs"
 fi
 
 selector_selftest_output="$(./scripts/rust-selector-selftest.mjs 2>&1 || true)"

@@ -94,7 +94,11 @@ target_dir_was_set=false
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   target_dir_was_set=true
 fi
-export CARGO_HOME="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
+cargo_home="${CARGO_HOME:-${cache_root}/${repo_key}/cargo-home}"
+if [[ "${GITHUB_ACTIONS:-}" == "true" && "${cargo_home}" == "/tmp/meerkat-cargo-home" ]]; then
+  cargo_home="${cargo_home}/${lane_key}"
+fi
+export CARGO_HOME="${cargo_home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${cache_root}/${repo_key}/targets/${target_cache_schema}/${toolchain_key}/${lane_key}}"
 
 mkdir -p "${CARGO_HOME}" "${CARGO_TARGET_DIR}"
@@ -114,7 +118,7 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" && "${target_dir_was_set}" == "false" ]]; 
 fi
 
 if [[ -n "${toolchain_spec}" ]] && command -v rustup >/dev/null 2>&1; then
-  toolchain_bin="${CARGO_TARGET_DIR}/.repo-cargo-toolchain-bin"
+  toolchain_bin="${CARGO_HOME}/.repo-cargo-toolchain-bin/${toolchain_key}"
   mkdir -p "${toolchain_bin}"
   for tool in cargo rustc rustdoc rustfmt; do
     tool_path="${toolchain_bin}/${tool}"

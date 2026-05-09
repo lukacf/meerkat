@@ -19,6 +19,16 @@ if ! command -v rustup >/dev/null 2>&1; then
   exit 1
 fi
 
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  cargo_home="${CARGO_HOME:-/tmp/meerkat-cargo-home}"
+  if [[ "${cargo_home}" == "/tmp/meerkat-cargo-home" ]]; then
+    cargo_home="/tmp/meerkat-cargo-home/${GITHUB_RUN_ID:-run}-${GITHUB_RUN_ATTEMPT:-1}-${GITHUB_JOB:-job}"
+  fi
+  mkdir -p "${cargo_home}"
+else
+  cargo_home="${CARGO_HOME:-}"
+fi
+
 wrapper_root="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/meerkat-rust-toolchains"
 wrapper_bin="${wrapper_root}/${toolchain}/bin"
 mkdir -p "${wrapper_bin}"
@@ -50,6 +60,9 @@ fi
 
 if [[ -n "${GITHUB_ENV:-}" ]]; then
   {
+    if [[ -n "${cargo_home}" ]]; then
+      echo "CARGO_HOME=${cargo_home}"
+    fi
     echo "RUSTUP_TOOLCHAIN=${toolchain}"
     echo "RUSTC=${wrapper_bin}/rustc"
     echo "RUSTDOC=${wrapper_bin}/rustdoc"

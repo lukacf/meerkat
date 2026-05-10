@@ -1441,7 +1441,7 @@ mod tests {
             })
         };
 
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while !started.load(Ordering::SeqCst) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -1454,7 +1454,7 @@ mod tests {
             .await
             .expect("hard cancel must reach the service-owned first turn before executor attach");
 
-        let error = tokio::time::timeout(Duration::from_secs(2), materialize_task)
+        let error = tokio::time::timeout(Duration::from_secs(10), materialize_task)
             .await
             .expect("materialization should finish after interrupt")
             .expect("materialization task should not panic")

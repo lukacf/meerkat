@@ -3,7 +3,11 @@
 //! in W3-B and W3-C.
 
 #![allow(clippy::expect_used)]
-#![cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#![cfg(all(
+    feature = "session-store",
+    feature = "memory-store",
+    not(target_arch = "wasm32")
+))]
 
 use std::sync::Arc;
 

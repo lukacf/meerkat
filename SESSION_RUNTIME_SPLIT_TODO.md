@@ -344,7 +344,7 @@ self-verify.
 
 ### Phase 3 — Wave 3: builder + skill-identity + config plumbing
 
-- [x] fix · [ ] verify · **W3-A.** Move `SkillIdentityRegistryState`,
+- [x] fix · [x] verify · **W3-A.** Move `SkillIdentityRegistryState`,
   `build_skill_identity_registry`, plus the W1-E-deferred
   `ArchiveRuntimeCleanup` (now generalized via two thin traits
   `ArchiveRuntimeMcpState` and `ArchiveRuntimeMobState`) and the
@@ -356,7 +356,7 @@ self-verify.
   (`session_runtime_runtime_state.rs`,
   `session_runtime_admission.rs`).
 
-- [x] fix · [ ] verify · **W3-B.** `MeerkatSessionRuntime` is now a
+- [x] fix · [x] verify · **W3-B.** `MeerkatSessionRuntime` is now a
   populated struct holding the `service`, `staged_sessions`,
   `staged_capacity_admissions`, `runtime_adapter`, `live_adapter_host`,
   `config_runtime`, `default_llm_client`, `realm_id`, `instance_id`,
@@ -390,7 +390,7 @@ self-verify.
   preserved in `meerkat-rpc`. The move is properly tracked as Phase
   4 R1 work.
 
-- [x] fix · [ ] verify · **W3-C.** `SessionRuntimeBuilder` now
+- [x] fix · [x] verify · **W3-C.** `SessionRuntimeBuilder` now
   implements `new(service, staged_sessions, runtime_adapter)` plus
   `with_live_adapter_host`, `with_live_adapter_host_slot`,
   `with_config_runtime`, `with_config_runtime_slot`,
@@ -421,7 +421,20 @@ self-verify.
   helpers (`session_error_to_rpc`, `RpcError`-returning shims for
   `start_turn`/`create_session`, `RpcMobSessionService`,
   comms/skills/mob/MCP wire glue). The file shrinks by an order of
-  magnitude.
+  magnitude. **Closes V4-1 by definition** (the Wave-3 verifier
+  flagged that `realm_id` / `instance_id` / `backend` are write-mirrored
+  from RPC into the inner `MeerkatSessionRuntime` via `set_realm_context`
+  rather than slot-shared at construction; today both sides stay
+  consistent because `set_realm_context` is the only writer, but R1
+  collapses the duplication entirely so the concern dissolves).
+  **Also addresses the W2-A "load-bearing-method deferral":** the W3-B
+  agent left `precheck_live_open`, `recover_live_session_for_realtime_open`,
+  `materialize_staged_session_for_realtime_open`,
+  `realtime_session_open_config`, `live_open_config_for_session`,
+  and `propagate_config_to_live_channels` in `meerkat-rpc::SessionRuntime`
+  because they consume RPC-private helpers. R1 either inlines the
+  helpers, lifts them to `MeerkatSessionRuntime`, or refactors the
+  signatures so the methods land on `LiveOrchestrator<'a>` at last.
 
 - [ ] fix · [ ] verify · **R2.** `meerkat-cli/src/main.rs` switches
   from `meerkat_rpc::session_runtime::SessionRuntime` to

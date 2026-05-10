@@ -60,13 +60,19 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test
     fi
-    exec "${cargo_bin}" fast
+    # Cargo's worktree+parent config-merge concatenates list-form aliases
+    # (the workspace's `fast`/`int`/`rct` aliases live as TOML arrays at
+    # both the worktree and the main checkout's `.cargo/config.toml`),
+    # which duplicates `--workspace` and trips clap's "cannot be used
+    # multiple times" guard. Expand the alias inline until the upstream
+    # aliases are normalized to string form on `main`.
+    exec "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail
     ;;
   test-all)
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-all
     fi
-    exec "${cargo_bin}" fast --all-features
+    exec "${cargo_bin}" nextest run --workspace --profile fast --show-progress none --status-level none --final-status-level fail --all-features
     ;;
   test-unit)
     if meerkat_buildbuddy_enabled; then
@@ -78,7 +84,7 @@ case "${lane}" in
     if meerkat_buildbuddy_enabled; then
       exec "${root}/scripts/buildbuddy-dev" test-int
     fi
-    exec "${cargo_bin}" int
+    exec "${cargo_bin}" nextest run --workspace --tests --profile fast --show-progress none --status-level none --final-status-level fail
     ;;
   e2e-fast)
     if meerkat_buildbuddy_enabled; then

@@ -219,20 +219,99 @@ Likely sub-findings:
 
 ### Phase D — Cargo.toml cleanups (sequential, gates on Phase C)
 
-- [ ] fix · [ ] verify · **D1.** Drop `meerkat-rpc` from
+- [x] fix · [x] verify · **D1.** Drop `meerkat-rpc` from
   `meerkat-cli/Cargo.toml` IF AND ONLY IF every (R) annotation on the
   CLI side resolves through indirect transitive deps (e.g.,
   `meerkat-mob-mcp` already pulls `meerkat-rpc`). Verify by removing
   the dep, running `./scripts/repo-cargo check -p rkat --all-targets`,
-  and re-adding only if the build breaks.
-- [ ] fix · [ ] verify · **D2.** Same audit for
-  `examples/035-mdm-tux-rs/Cargo.toml`.
-- [ ] fix · [ ] verify · **D3.** Same audit for any other surface
-  Cargo.toml that lists `meerkat-rpc` as a direct dep.
+  and re-adding only if the build breaks. **Verdict: keep.** Direct
+  imports of `meerkat_rpc::session_runtime::SessionRuntime`,
+  `serve_tcp`, and `RpcServerConfig` in `meerkat-cli/src/main.rs`
+  require the direct dep; transitive resolution through
+  `meerkat-mob-mcp` is insufficient (Cargo path-dep visibility is
+  not transitive). Dep is correctly feature-gated behind `mob` and
+  uses `optional = true, features = ["mob"]`.
+- [x] fix · [x] verify · **D2.** Same audit for
+  `examples/035-mdm-tux-rs/Cargo.toml`. **Verdict: keep.** Both
+  `kennel.rs` and `target.rs` inline-host TCP RPC servers via
+  `meerkat_rpc::serve_tcp` + `SessionRuntime::new` +
+  `NotificationSink::noop`; direct dep is required. Already pulls
+  `features = ["mob"]` to match the CLI deploy_mob shape. No package-
+  level feature gate appropriate (binary example whose entire purpose
+  is the RPC-host demo).
+- [x] fix · [x] verify · **D3.** Same audit for any other surface
+  Cargo.toml that lists `meerkat-rpc` as a direct dep. **Verdict:
+  keep.** Only `tests/integration/Cargo.toml` matches; both
+  `e2e_auth_lane.rs` and `live_mob_tools.rs` directly drive the
+  `MethodRouter` + `RpcRequest`/`RpcResponse`/`RpcNotification`
+  protocol surface — legitimate (R) integration tests of the RPC
+  dispatch path. Dep already declared `meerkat-rpc.workspace = true`.
 - [ ] fix · [ ] verify · **D4.** Add a `live` feature passthrough to
   `meerkat-cli` (and other surfaces if applicable) so any future
   CLI command that wants live-channel access can opt in via the
   facade rather than directly depending on `meerkat-live`.
+
+### Phase D audit deliverable
+
+**Audit invariant.** Every Cargo.toml that lists `meerkat-rpc` as a
+direct dep must map to ≥1 file in that crate's `src/` (or
+`tests/`/`benches/`/`examples/`) that imports `meerkat_rpc::*` AND
+carries ≥1 `// RPC-host:` annotated import block per Phase C.
+Otherwise, the dep is droppable.
+
+**Method.** Enumerated every `meerkat-rpc` reference in every
+`Cargo.toml` (5 hits — workspace root + 3 consumer crates +
+`meerkat-rpc/Cargo.toml` itself), then for each consumer crate,
+greppped its source tree for `meerkat_rpc::` imports and counted
+`// RPC-host:` annotations per importing file. Where any importing
+file lacked an annotation, that would be a Phase C escape and would
+block this audit.
+
+**Cargo.toml sweep.**
+
+| Cargo.toml | dep kind | feature gates | imports in src/ (`meerkat_rpc::` count) | files with ≥1 `// RPC-host:` annotation? | verdict |
+|---|---|---|---|---|---|
+| `Cargo.toml` (root) | workspace member (line 25) + `[workspace.dependencies]` decl (line 150) | n/a | n/a | n/a | **keep** (workspace-mechanics, not consumer) |
+| `meerkat-rpc/Cargo.toml` | self | n/a | n/a | n/a | **N/A** (own crate) |
+| `meerkat-cli/Cargo.toml` | `[dependencies]` `optional = true, features = ["mob"]` | `mob = ["dep:meerkat-rpc", ...]` | `src/main.rs` × 5 | yes (4 annotation blocks; one block covers a multi-line use cluster) | **keep** |
+| `examples/035-mdm-tux-rs/Cargo.toml` | `[dependencies]` `features = ["mob"]` | none (binary example) | `src/bin/kennel.rs` × 4, `src/bin/target.rs` × 8 | yes (kennel: 2 blocks; target: 4 blocks; covers 9 (R) sites from A1) | **keep** |
+| `tests/integration/Cargo.toml` | `meerkat-rpc.workspace = true` (line 20) + `cargo-machete ignored` (line 57) | `live_mob_tools` test gated on `integration-real-tests` feature | `tests/e2e_auth_lane.rs` × 3, `tests/live_mob_tools.rs` × 7 | yes (1 annotation block per file, covering the file-level (R) rationale) | **keep** |
+
+**Doc-only false positives** (do not require dep): `meerkat/src/lib.rs:15`
+and `meerkat/src/session_runtime/errors.rs:13` reference
+`meerkat_rpc::*` only inside doc-comments — no compile dependency.
+Confirmed `meerkat/Cargo.toml` does NOT list `meerkat-rpc`.
+
+**Phase C escape check.** Zero escapes. Every importing file has at
+least one `// RPC-host:` annotation, and the annotation density
+(annotation_blocks ≥ 1, even when imports > annotations) is
+acceptable because a single annotation block legitimately covers a
+clustered `use` group or a related set of inline-pathed call sites
+(matches the team-lead's Phase C protocol — annotate "above each
+import block").
+
+**Drop count.** 0. **Feature-gate change count.** 0 (existing gates
+honest: `meerkat-cli` already gates `dep:meerkat-rpc` behind `mob`;
+`tests/integration` already gates the live test on
+`integration-real-tests`; the example is intentionally ungated).
+
+**Why "zero findings" is honest, not a rubber-stamp.** The audit
+grep enumerates every `Cargo.toml` containing `meerkat-rpc` AND
+every `.rs` file containing `meerkat_rpc::` AND every `.rs` file
+containing `// RPC-host:`. Each consumer crate's dep maps to ≥1
+importing source file with ≥1 annotation block per Phase C. No dep
+without a matching annotated import was found, and no annotated
+import without a matching dep was found. The consumer set
+(meerkat-cli, examples/035-mdm-tux-rs, tests/integration) is closed
+under "transitively reachable from a workspace member" because
+`meerkat/Cargo.toml` (the facade) contains zero compile references —
+only doc comments that name the symbol for cross-link purposes.
+
+**D4 status.** Out of scope for this audit (forward-looking feature
+passthrough work). Existing `mob = ["dep:meerkat-rpc", ...]` gate in
+`meerkat-cli` is the right shape for D1's verdict; whether a
+parallel `live = [...]` passthrough should exist is a separate
+design decision tracked under D4.
 
 ### Phase E — Adversarial verifier
 

@@ -15,6 +15,7 @@ printf '%s\n' \
   meerkat-contracts \
   meerkat-store \
   meerkat-llm-core \
+  meerkat-live \
   meerkat-skills \
   meerkat-auth-core \
   meerkat-memory \

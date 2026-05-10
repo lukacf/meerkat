@@ -116,6 +116,9 @@ fn smoke_factory(paths: &SmokePaths) -> AgentFactory {
 /// Returns (router, mob_state, notification_rx).
 /// The mob_state is the SAME instance used by both the router (archive cleanup)
 /// and the builder (tool factory), ensuring single-state truth.
+// RPC-host: inline `meerkat_rpc::protocol::RpcNotification` is the
+// notification channel item type for the test's RpcNotification mpsc;
+// covered by the file-level RPC-host rationale at the use-block.
 async fn make_smoke_rpc_stack(
     paths: &SmokePaths,
 ) -> (
@@ -180,6 +183,9 @@ fn rpc_request(method: &str, params: impl Serialize) -> RpcRequest {
     }
 }
 
+// RPC-host: inline `meerkat_rpc::protocol::RpcResponse` is the dispatch
+// result type the test pulls apart; covered by the file-level RPC-host
+// rationale at the use-block.
 fn rpc_result(resp: &meerkat_rpc::protocol::RpcResponse) -> Value {
     assert!(resp.error.is_none(), "RPC error: {:?}", resp.error);
     let raw = resp.result.as_ref().expect("missing result");

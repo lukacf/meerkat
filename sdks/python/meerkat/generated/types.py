@@ -1797,10 +1797,10 @@ WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterStatusOpening
 # server-side observability.
 class WireLiveConfigRejectionReasonChannelIdentitySwap(TypedDict, total=False):
     from_model: Required[str]
-    from_provider: Required[Any]
+    from_provider: Required[WireProvider]
     kind: Required[Literal['channel_identity_swap']]
     to_model: Required[str]
-    to_provider: Required[Any]
+    to_provider: Required[WireProvider]
 
 class WireLiveConfigRejectionReasonNonRealtimeResolution(TypedDict, total=False):
     detail: Required[str]
@@ -2796,6 +2796,18 @@ WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 
 
 # Wire-safe tool result content that handles both legacy string and array formats.
 WireToolResultContent = str | list[WireContentBlock]
+
+# Wire-safe projection of [`meerkat_core::Provider`].
+#
+# The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
+# transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
+# `"openai"`. `WireProvider` pins the correct wire names with explicit
+# `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
+# `"anthropic"`, `"gemini"`, etc.
+#
+# Includes an `Unknown { debug: String }` variant for future-proofing per
+# the wire-mirror dogma used throughout this module.
+WireProvider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other'] | Literal['unknown']
 
 # Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
 # for spoken-transcript blocks.

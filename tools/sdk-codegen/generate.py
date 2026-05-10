@@ -358,6 +358,10 @@ def _promote_nested_schema_def(name: str) -> bool:
         # widens it to `Record<string, unknown>` and SDK consumers cannot
         # narrow on the typed `kind: "spoken" | "unknown"` lane provenance.
         "WireTranscriptSource",
+        # R8 (P2): promote `WireProvider` so `ChannelIdentitySwap.from_provider`
+        # / `to_provider` carry the typed enum shape into SDK codegen instead
+        # of being widened to `unknown` / `Any`.
+        "WireProvider",
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
@@ -1172,6 +1176,13 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
+    # R8 (P2): emit `WireProvider` string-enum alias so
+    # `ChannelIdentitySwap.from_provider`/`to_provider` are typed.
+    append_python_alias(
+        "WireProvider",
+        wire_schema,
+        "Wire-safe projection of Provider with correct serde renames.",
+    )
     # R7-1 (P2): emit `WireTranscriptSource` alias before `WireAssistantBlock`
     # so the generated `Transcript` variant's inline `data.source` field
     # references the typed `kind`-tagged union by name.
@@ -1535,6 +1546,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireAuthStatus", wire_schema)
     append_typescript_interface("WireAuthStatusDetail", wire_schema)
     append_typescript_alias("WireAuthError", wire_schema)
+    # R8 (P2): emit `WireProvider` string-enum alias.
+    append_typescript_alias("WireProvider", wire_schema)
     # R7-1 (P2): emit `WireTranscriptSource` alias before `WireAssistantBlock`
     # so the generated `Transcript` variant references the typed `kind`-tagged
     # union by name.

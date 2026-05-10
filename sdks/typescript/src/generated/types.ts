@@ -1931,10 +1931,10 @@ export type WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterS
 
 export interface WireLiveConfigRejectionReasonChannelIdentitySwap {
   from_model: string;
-  from_provider: unknown;
+  from_provider: WireProvider;
   kind: "channel_identity_swap";
   to_model: string;
-  to_provider: unknown;
+  to_provider: WireProvider;
 }
 
 export interface WireLiveConfigRejectionReasonNonRealtimeResolution {
@@ -2498,6 +2498,8 @@ export interface WireAuthErrorOther {
 }
 
 export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
+
+export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
 
 export interface WireTranscriptSourceSpoken {
   kind: "spoken";

@@ -120,7 +120,7 @@ Use `live/status` to read the current state of a live channel:
   "jsonrpc": "2.0",
   "id": 3,
   "method": "live/status",
-  "params": {"session_id": "01936f8a-7b2c-7000-8000-000000000001"}
+  "params": {"channel_id": "ch_01936f8a-..."}
 }
 ```
 </CodeGroup>
@@ -157,17 +157,18 @@ async with MeerkatClient() as client:
         provider="openai",
     )
 
-    # 2. Open a live channel.
-    channel = await client.live_open(session.id)
-    # channel.transport_bootstrap contains the WebSocket URL
-    # channel.capabilities describes supported input/output modalities
+    # 2. Open a live channel (returns channel_id + transport bootstrap).
+    result = await client.live_open(session.id)
+    channel_id = result["channel_id"]
+    # result["transport"] contains the WebSocket URL + token
+    # result["capabilities"] describes supported input/output modalities
 
     # 3. Send audio input and commit at turn boundaries.
-    await client.live_send_input_audio(session.id, audio_data)
-    await client.live_commit_input(session.id)
+    await client.live_send_input_audio(channel_id, audio_data, 24000, 1)
+    await client.live_commit_input(channel_id)
 
     # 4. Close the channel when done.
-    await client.live_close(session.id)
+    await client.live_close(channel_id)
 
     # 5. The session's history accumulates committed turns — same as a text session.
     history = await client.read_session_history(session.id)

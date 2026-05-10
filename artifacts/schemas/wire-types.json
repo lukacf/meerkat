@@ -23050,17 +23050,6 @@
   },
   "WireLiveAdapterErrorCode": {
     "$defs": {
-      "Provider": {
-        "description": "Supported LLM providers.",
-        "enum": [
-          "anthropic",
-          "open_a_i",
-          "gemini",
-          "self_hosted",
-          "other"
-        ],
-        "type": "string"
-      },
       "WireLiveConfigRejectionReason": {
         "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.\n\nR6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The\nprevious wildcard fallback collapsed future core variants into\n`Other { detail: \"unknown_live_config_rejection_reason\" }`, which SDK\nconsumers had to pattern-match on the English `detail` to route — the\nexact \"typed route becomes detail string\" antipattern R3-6 + R5-3\nclosed for transport / observation / continuity / modality / status /\nerror_code. Future core variants now surface as `Unknown { debug }`\nwith the `{:?}` projection of the source variant preserved for\nserver-side observability.",
         "oneOf": [
@@ -23070,7 +23059,7 @@
                 "type": "string"
               },
               "from_provider": {
-                "$ref": "#/$defs/Provider"
+                "$ref": "#/$defs/WireProvider"
               },
               "kind": {
                 "const": "channel_identity_swap",
@@ -23080,7 +23069,7 @@
                 "type": "string"
               },
               "to_provider": {
-                "$ref": "#/$defs/Provider"
+                "$ref": "#/$defs/WireProvider"
               }
             },
             "required": [
@@ -23273,6 +23262,26 @@
             "type": "object"
           }
         ]
+      },
+      "WireProvider": {
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "oneOf": [
+          {
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "self_hosted",
+              "other"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Fail-loud sentinel for future core variants. When a new\n`Provider` variant is added, add an explicit arm in the `From`\nimpl rather than letting it fall through to `Unknown`.\n\nUnlike other wire-mirror `Unknown` variants, this is a unit\nvariant because `WireProvider` serializes as a flat string value\n(not an internally-tagged object). The debug payload from the\nsource variant is captured in the `WireConversionError::Provider`\nerror on the reverse path (and logged server-side in the forward\n`From<Provider>` impl via `debug_assert!`).",
+            "type": "string"
+          }
+        ]
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -23392,17 +23401,6 @@
   },
   "WireLiveAdapterObservation": {
     "$defs": {
-      "Provider": {
-        "description": "Supported LLM providers.",
-        "enum": [
-          "anthropic",
-          "open_a_i",
-          "gemini",
-          "self_hosted",
-          "other"
-        ],
-        "type": "string"
-      },
       "RealtimeTranscriptEvent": {
         "description": "A typed, identity-bearing realtime transcript event consumed by the session.",
         "oneOf": [
@@ -23983,7 +23981,7 @@
                 "type": "string"
               },
               "from_provider": {
-                "$ref": "#/$defs/Provider"
+                "$ref": "#/$defs/WireProvider"
               },
               "kind": {
                 "const": "channel_identity_swap",
@@ -23993,7 +23991,7 @@
                 "type": "string"
               },
               "to_provider": {
-                "$ref": "#/$defs/Provider"
+                "$ref": "#/$defs/WireProvider"
               }
             },
             "required": [
@@ -24241,6 +24239,26 @@
               "detail"
             ],
             "type": "object"
+          }
+        ]
+      },
+      "WireProvider": {
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "oneOf": [
+          {
+            "enum": [
+              "anthropic",
+              "openai",
+              "gemini",
+              "self_hosted",
+              "other"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "unknown",
+            "description": "Fail-loud sentinel for future core variants. When a new\n`Provider` variant is added, add an explicit arm in the `From`\nimpl rather than letting it fall through to `Unknown`.\n\nUnlike other wire-mirror `Unknown` variants, this is a unit\nvariant because `WireProvider` serializes as a flat string value\n(not an internally-tagged object). The debug payload from the\nsource variant is captured in the `WireConversionError::Provider`\nerror on the reverse path (and logged server-side in the forward\n`From<Provider>` impl via `debug_assert!`).",
+            "type": "string"
           }
         ]
       },

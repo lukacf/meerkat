@@ -60,11 +60,10 @@ class AudioFormat:
 
     def input_chunk(self, pcm_bytes: bytes) -> dict[str, Any]:
         return {
-            "kind": "audio_chunk",
-            "mime_type": self.mime_type,
+            "kind": "audio",
+            "data": base64.b64encode(pcm_bytes).decode("ascii"),
             "sample_rate_hz": self.sample_rate_hz,
             "channels": self.channels,
-            "data": base64.b64encode(pcm_bytes).decode("ascii"),
         }
 
 
@@ -467,70 +466,52 @@ async def live_receiver(
     stop_event: asyncio.Event,
     text_probe_signals: TextProbeSignals | None = None,
 ) -> None:
+    """Receive WireLiveAdapterObservation JSON from the WS and dispatch."""
     try:
         while not stop_event.is_set():
-            frame = await connection.recv()
-            if frame is None:
+            obs = await connection.recv()
+            if obs is None:
                 printer.status("live websocket closed")
                 if text_probe_signals is not None:
                     text_probe_signals.channel_closed.set()
                 stop_event.set()
                 break
-            frame_type = frame.get("type")
-            if frame_type == "channel.closed":
-                printer.status(f"channel closed: {frame.get('reason', 'done')}")
-                if text_probe_signals is not None:
-                    text_probe_signals.channel_closed.set()
-                stop_event.set()
-                break
-            if frame_type == "channel.error":
-                code = frame.get("code", "unknown")
-                message = frame.get("message", "live channel error")
-                printer.status(f"channel error {code}: {message}")
-                stop_event.set()
-                raise RuntimeError(f"live channel error {code}: {message}")
-            if frame_type != "channel.event":
-                continue
 
-            event = frame.get("event", {})
-            event_type = event.get("type")
-            if event_type == "input_transcript_partial":
-                printer.user_partial(str(event.get("text", "")))
-            elif event_type == "input_transcript_final":
-                printer.user_final(str(event.get("text", "")))
-            elif event_type == "output_text_delta":
-                printer.assistant_delta(str(event.get("delta", "")))
-            elif event_type == "output_audio_chunk":
-                chunk = event.get("chunk", {})
-                data = read_field(chunk, "data", "")
+            kind = obs.get("observation")
+            if kind == "user_transcript_final":
+                printer.user_final(str(obs.get("text", "")))
+            elif kind == "assistant_text_delta":
+                printer.assistant_delta(str(obs.get("delta", "")))
+            elif kind == "assistant_transcript_delta":
+                printer.assistant_delta(str(obs.get("delta", "")))
+            elif kind == "assistant_audio_chunk":
+                data = obs.get("data", "")
                 if data:
                     await output_queue.put(base64.b64decode(data))
-            elif event_type == "turn_started":
-                printer.status("turn started")
-            elif event_type == "turn_committed":
-                printer.status("turn committed")
-            elif event_type == "turn_completed":
+            elif kind == "turn_completed":
                 printer.turn_completed()
                 printer.status("turn completed")
                 if text_probe_signals is not None:
                     text_probe_signals.turn_completed.set()
-            elif event_type == "interrupted":
+            elif kind == "turn_interrupted":
                 printer.status("interrupted")
-            elif event_type == "tool_call_requested":
-                printer.tool(f"requested {event.get('tool_name')} ({event.get('call_id')})")
-            elif event_type == "tool_call_completed":
-                printer.tool(f"completed {event.get('call_id')}")
-                if text_probe_signals is not None:
-                    text_probe_signals.tool_completed.set()
-            elif event_type == "tool_call_failed":
-                printer.tool(f"failed {event.get('call_id')}: {event.get('error')}")
-            elif event_type == "tool_call_timed_out":
-                printer.tool(f"timed out {event.get('call_id')} after {event.get('elapsed_ms')} ms")
-            elif event_type == "status_changed":
-                status = event.get("status", {})
+            elif kind == "tool_call_requested":
+                printer.tool(f"requested {obs.get('tool_name')} ({obs.get('provider_call_id')})")
+            elif kind == "status_changed":
+                status = obs.get("status", {})
                 printer.status(f"channel {read_field(status, 'state', 'unknown')}")
-            elif event_type == "needs_reattach":
-                printer.status("channel needs reattach")
+            elif kind == "error":
+                code = obs.get("code", {})
+                message = obs.get("message", "live channel error")
+                printer.status(f"channel error {code}: {message}")
+                if text_probe_signals is not None:
+                    text_probe_signals.channel_closed.set()
+                stop_event.set()
+                raise RuntimeError(f"live channel error: {message}")
+            elif kind == "command_rejected":
+                printer.status(f"command rejected: {obs.get('message', '')}")
+            elif kind == "ready":
+                printer.status("adapter ready")
     finally:
         await output_queue.put(None)
 
@@ -564,6 +545,7 @@ async def wait_for_first_event(
 
 async def run_text_probe(
     connection: Any,
+    channel: LiveChannel,
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     signals: TextProbeSignals,
@@ -571,14 +553,14 @@ async def run_text_probe(
 ) -> None:
     await connection.send_input(
         {
-            "kind": "text_chunk",
+            "kind": "text",
             "text": (
                 "This is a text probe for the live channel. Say one short sentence, "
                 "then call voice_session_note with 'text probe completed'."
             ),
         }
     )
-    await connection.commit_turn()
+    await channel.commit_input(response_modality="text")
     printer.status("text probe sent; waiting for a tool or turn completion event")
     completed = await wait_for_first_event(
         {
@@ -660,18 +642,20 @@ def require_text_capabilities(open_result: dict[str, Any]) -> None:
 
 
 class LiveConnection:
-    """Thin WebSocket wrapper for the live channel frame protocol."""
+    """Thin WebSocket wrapper for the live channel transport.
+
+    The live WS transport is raw: the token is consumed from the URL query
+    string on connect (no handshake frame). Client sends ``LiveInputChunk``
+    JSON (``{"kind":"audio",...}``) or binary PCM. Server sends
+    ``WireLiveAdapterObservation`` JSON. Commit/interrupt go through the
+    ``LiveChannel`` RPC methods, not through the WS.
+    """
 
     def __init__(self, websocket: Any):
         self._websocket = websocket
 
     @classmethod
-    async def open(
-        cls,
-        open_result: dict[str, Any],
-        *,
-        turning_mode: str = "provider_managed",
-    ) -> "LiveConnection":
+    async def connect(cls, open_result: dict[str, Any]) -> "LiveConnection":
         try:
             import websockets
         except ModuleNotFoundError as exc:
@@ -681,43 +665,20 @@ class LiveConnection:
 
         transport = open_result.get("transport", {})
         url = transport.get("url", "")
-        token = transport.get("token", "")
         if not url:
             raise RuntimeError("live/open did not return a websocket transport URL")
 
         websocket = await websockets.connect(url)
-        connection = cls(websocket)
-        await connection.send_frame({
-            "type": "channel.open",
-            "protocol_version": 1,
-            "open_token": token,
-            "role": "primary",
-            "turning_mode": turning_mode,
-        })
-
-        opened = await connection.recv()
-        if opened is None:
-            raise RuntimeError("live websocket closed before channel.open completed")
-        if opened.get("type") == "channel.error":
-            raise RuntimeError(str(opened.get("message", "channel.open rejected")))
-        if opened.get("type") != "channel.opened":
-            raise RuntimeError(f"Expected channel.opened, got {opened.get('type')!r}")
-        return connection
-
-    async def send_frame(self, frame: dict[str, Any]) -> None:
-        await self._websocket.send(json.dumps(frame))
+        return cls(websocket)
 
     async def send_input(self, chunk: dict[str, Any]) -> None:
-        await self.send_frame({"type": "channel.input", "chunk": chunk})
+        await self._websocket.send(json.dumps(chunk))
 
-    async def commit_turn(self) -> None:
-        await self.send_frame({"type": "channel.commit_turn"})
-
-    async def interrupt(self) -> None:
-        await self.send_frame({"type": "channel.interrupt"})
+    async def send_binary(self, data: bytes) -> None:
+        await self._websocket.send(data)
 
     async def close(self) -> None:
-        await self.send_frame({"type": "channel.close"})
+        await self._websocket.close()
 
     async def recv(self) -> dict[str, Any] | None:
         try:
@@ -818,6 +779,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         "context_root": str(example_root),
         "realm_id": args.realm,
         "isolated": args.realm is None,
+        "live_ws": True,
     }
     output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     connection = None
@@ -837,8 +799,7 @@ async def async_main(argv: list[str] | None = None) -> int:
             require_text_capabilities(open_result)
         else:
             input_audio, output_audio = require_audio_capabilities(open_result)
-        turning_mode = "explicit_commit" if args.text_probe else "provider_managed"
-        connection = await LiveConnection.open(open_result, turning_mode=turning_mode)
+        connection = await LiveConnection.connect(open_result)
         if args.text_probe:
             printer.status("live channel ready; running text probe")
         else:
@@ -865,7 +826,7 @@ async def async_main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("text probe signals were not initialized")
             tasks.append(
                 asyncio.create_task(
-                    run_text_probe(connection, printer, stop_event, text_probe_signals),
+                    run_text_probe(connection, channel, printer, stop_event, text_probe_signals),
                     name="text probe",
                 )
             )

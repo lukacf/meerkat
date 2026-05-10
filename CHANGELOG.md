@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-05-10
+
+Meerkat 0.6.5 ships the live-adapter MVP and a SessionRuntime split that moves
+runtime ownership into clearer session-runtime modules while keeping public
+surfaces aligned through regenerated SDKs, schemas, and release packaging.
+
+### Added
+
+- **Live adapter MVP** (#659) — `meerkat-live` provides the composable
+  WebSocket transport for live channels, `rkat-rpc --live-ws` exposes
+  live/open token flow end to end, and the OpenAI realtime bridge now supports
+  live input, output, interruption, and refresh observations through typed
+  public contracts.
+- **Live channel SDK helpers** (#659) — Python and TypeScript SDKs gain typed
+  live/open and live-channel helpers backed by generated wire contracts,
+  including named payload types for inline variants and explicit unknown
+  variants for forward-compatible mirrors.
+- **SessionRuntime split** (#659) — runtime admission, staged promotion,
+  recovery, live orchestration, LLM reconfiguration, skill identity, and runtime
+  state observers now live behind session-runtime modules instead of the older
+  monolithic runtime shape.
+
+### Changed
+
+- **Realtime model catalog** (#659) — live realtime support is aligned with the
+  current `gpt-realtime-2` catalog and model-affecting config changes propagate
+  to live channels without overwriting per-session model overrides.
+- **Live public boundary typing** (#659) — live adapter status, observations,
+  refresh results, config rejection reasons, transcript sources, modality
+  continuity, and transport results now use typed wire contracts rather than
+  opaque values or string detail fields.
+- **Release surface** (#659) — the new live-adapter crates are included in the
+  release crate list and generated Bazel metadata, keeping packaging and
+  BuildBuddy release validation in sync.
+
+### Fixed
+
+- **Live session lifecycle** (#659) — deferred-session promotion, duplicate
+  live channel rejection, channel ownership cleanup, provider EOF propagation,
+  cancel-safe receive handling, and text-only response requests are covered by
+  regression tests and typed runtime observations.
+- **Live WebSocket and examples** (#659) — example protocol usage, docs, and
+  smoke scenarios were refreshed for the live/open flow and the deleted legacy
+  realtime channel surface.
+- **BuildBuddy batch diagnostics** (#660) — CI batch diagnostics now preserve
+  clearer lane-level failure context for release and validation runs.
+
 ## [0.6.4] - 2026-05-08
 
 ### Fixed

@@ -221,12 +221,12 @@ impl SessionRuntime {
         build_config.realm_id = create
             .realm_id
             .clone()
-            .or_else(|| self.realm_id.as_ref().map(|r| r.as_str().to_string()));
+            .or_else(|| self.inner.realm_id().map(|r| r.as_str().to_string()));
         build_config.instance_id = create
             .instance_id
             .clone()
-            .or_else(|| self.instance_id.clone());
-        build_config.backend = create.backend.clone().or_else(|| self.backend.clone());
+            .or_else(|| self.inner.instance_id());
+        build_config.backend = create.backend.clone().or_else(|| self.inner.backend());
         build_config.keep_alive = create.keep_alive;
         build_config.app_context = create.app_context.clone();
         build_config.config_generation = if let Some(runtime) = self.config_runtime() {
@@ -383,12 +383,10 @@ impl SessionRuntime {
     }
 
     fn schedule_owner_id(&self) -> String {
-        let realm = self
-            .realm_id
-            .as_ref()
-            .map(|r| r.as_str())
-            .unwrap_or("realm");
-        let instance = self.instance_id.as_deref().unwrap_or("rpc");
+        let realm_owned = self.inner.realm_id();
+        let realm = realm_owned.as_ref().map(|r| r.as_str()).unwrap_or("realm");
+        let instance_owned = self.inner.instance_id();
+        let instance = instance_owned.as_deref().unwrap_or("rpc");
         format!("rpc-scheduler:{realm}:{instance}")
     }
 }

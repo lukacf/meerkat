@@ -8,9 +8,6 @@ import type {
   MobRotateSupervisorResult,
   MobTurnStartOptions,
   PeerCorrelationId,
-  RealtimeChannelOpenFrame,
-  RealtimeOpenInfo,
-  RealtimeProtocolVersion,
   PeerId,
   RunFailedEvent,
   SpawnManySpec,
@@ -21,6 +18,16 @@ import type {
 import type {
   MobSpawnParams as PublicMobSpawnParams,
   MobSpawnSpecParams as PublicMobSpawnSpecParams,
+} from "../src/index.js";
+import type {
+  LiveInputChunkWire,
+  LiveSendInputParams,
+  WireAssistantBlock,
+  WireLiveAdapterErrorCode,
+  WireLiveAdapterObservation,
+  WireLiveAdapterObservationAssistantAudioChunk,
+  WireLiveAdapterObservationCommandRejected,
+  WireLiveConfigRejectionReason,
 } from "../src/index.js";
 import type {
   MobCreateParams,
@@ -255,43 +262,6 @@ type MobTurnStartNoUncoveredWireOptionKeys =
   AssertNever<MobTurnStartUncoveredWireOptionKeys>;
 const generatedMobTurnStartOptionCoverage: MobTurnStartNoUncoveredWireOptionKeys =
   null as never;
-
-const realtimeProtocolVersion: RealtimeProtocolVersion = "2";
-const realtimeOpenFrame: RealtimeChannelOpenFrame = {
-  open_token: "token-typed",
-  protocol_version: realtimeProtocolVersion,
-  role: "primary",
-  turning_mode: "provider_managed",
-};
-void realtimeOpenFrame;
-
-const realtimeOpenFrameWithUnknownProtocol: RealtimeChannelOpenFrame = {
-  open_token: "token-unknown",
-  // @ts-expect-error realtime protocol version truth is generated and typed.
-  protocol_version: "999",
-  role: "primary",
-  turning_mode: "provider_managed",
-};
-void realtimeOpenFrameWithUnknownProtocol;
-
-const realtimeOpenInfo: RealtimeOpenInfo = {
-  ws_url: "ws://127.0.0.1:4900/realtime/ws",
-  open_token: "token-info",
-  expires_at: "2026-04-15T12:00:00Z",
-  target: { type: "session_target", session_id: "session-typed" },
-  supported_protocol_versions: [realtimeProtocolVersion],
-  default_protocol_version: realtimeProtocolVersion,
-  capabilities: {
-    input_kinds: ["text"],
-    output_kinds: ["text"],
-    turning_modes: ["provider_managed"],
-    interrupt_supported: true,
-    transcript_supported: true,
-    tool_lifecycle_events_supported: false,
-    video_supported: false,
-  },
-};
-void realtimeOpenInfo;
 
 const publicMobTurnStartClient = new MeerkatClient();
 void publicMobTurnStartClient.mobTurnStart(
@@ -689,3 +659,328 @@ void sdkCommsPeerMessageWithBlocks;
 void sdkCommsPeerRequestWithBlocks;
 void sdkCommsSupervisorBridgeWithPublicBlocks;
 void sdkCommsPeerRequestIntentMismatch;
+
+// R5-10: `LiveSendInputParams.chunk` must be the typed `LiveInputChunkWire`
+// discriminated union, not an opaque `Record<string, unknown>`. Each typed
+// variant must compile under the typed `chunk` slot.
+const liveAudioChunk: LiveInputChunkWire = {
+  kind: "audio",
+  data: "AQID",
+  sample_rate_hz: 24_000,
+  channels: 1,
+};
+const liveTextChunk: LiveInputChunkWire = {
+  kind: "text",
+  text: "hello",
+};
+const liveImageChunk: LiveInputChunkWire = {
+  kind: "image",
+  mime: "image/png",
+  data: "iVBORw0KGgo=",
+};
+const liveVideoFrameChunk: LiveInputChunkWire = {
+  kind: "video_frame",
+  codec: "vp8",
+  data: "AQID",
+  timestamp_ms: 1_234,
+};
+
+const liveSendInputAudio: LiveSendInputParams = {
+  channel_id: "live_1",
+  chunk: liveAudioChunk,
+};
+const liveSendInputText: LiveSendInputParams = {
+  channel_id: "live_1",
+  chunk: liveTextChunk,
+};
+const liveSendInputImage: LiveSendInputParams = {
+  channel_id: "live_1",
+  chunk: liveImageChunk,
+};
+const liveSendInputVideoFrame: LiveSendInputParams = {
+  channel_id: "live_1",
+  chunk: liveVideoFrameChunk,
+};
+
+// R5-10: chunks missing the `kind` discriminator must be rejected at compile
+// time. This proves `chunk` is no longer typed as `Record<string, unknown>`,
+// which would have accepted any free-form object.
+const liveSendInputUntyped: LiveSendInputParams = {
+  channel_id: "live_1",
+  // @ts-expect-error LiveInputChunkWire requires a discriminated `kind` tag.
+  chunk: { foo: "bar" },
+};
+
+void liveSendInputAudio;
+void liveSendInputText;
+void liveSendInputImage;
+void liveSendInputVideoFrame;
+void liveSendInputUntyped;
+
+// FIX-SDK-OBS: `WireLiveAdapterObservation` is a discriminated union over
+// the `observation` tag. Browser/Node clients can type-narrow on each
+// variant and read R5-4 identity fields (`item_id`, `response_id`,
+// `content_index`) on `assistant_audio_chunk` and the typed `code`
+// payload on R5-9 `command_rejected` without parsing raw JSON.
+
+const liveObsAudio: WireLiveAdapterObservation = {
+  observation: "assistant_audio_chunk",
+  data: "AQID",
+  sample_rate_hz: 24_000,
+  channels: 1,
+  item_id: "item_audio",
+  response_id: "resp_audio",
+  content_index: 0,
+};
+const liveObsCommandRejected: WireLiveAdapterObservation = {
+  observation: "command_rejected",
+  // R7-2 (P2): `reason` is now emitted as the typed
+  // `WireLiveConfigRejectionReason` discriminated union (tagged on
+  // `kind`) rather than `Record<string, unknown>`. SDK codegen follows
+  // the schema-local `$defs` reference into a named union so consumers
+  // route on `kind` without parsing raw JSON.
+  code: {
+    code: "config_rejected",
+    reason: { kind: "image_input_not_implemented" },
+  },
+  message: "rejected",
+};
+const liveObsReady: WireLiveAdapterObservation = { observation: "ready" };
+const liveObsTurnInterrupted: WireLiveAdapterObservation = {
+  observation: "turn_interrupted",
+};
+
+// Type narrowing on the discriminator: each branch sees the right
+// payload without an `as` cast.
+function readAudioIdentity(
+  obs: WireLiveAdapterObservation,
+): { item_id?: string; response_id?: string; content_index?: number } | null {
+  if (obs.observation !== "assistant_audio_chunk") return null;
+  // Compile-time proof: `obs` is narrowed to the audio variant; the
+  // identity fields are visible without further type assertions.
+  const audio: WireLiveAdapterObservationAssistantAudioChunk = obs;
+  return {
+    item_id: audio.item_id,
+    response_id: audio.response_id,
+    content_index: audio.content_index,
+  };
+}
+
+function readRejectionCode(
+  obs: WireLiveAdapterObservation,
+): WireLiveAdapterErrorCode | null {
+  if (obs.observation !== "command_rejected") return null;
+  const rejected: WireLiveAdapterObservationCommandRejected = obs;
+  return rejected.code;
+}
+
+// `chunk: { foo: "bar" }` was the @ts-expect-error pattern for chunks; the
+// same constraint must hold for observations missing the discriminator.
+const liveObsUntyped: WireLiveAdapterObservation = {
+  // @ts-expect-error WireLiveAdapterObservation requires the typed `observation` tag.
+  observation: "not_a_real_variant",
+};
+
+void liveObsAudio;
+void liveObsCommandRejected;
+void liveObsReady;
+void liveObsTurnInterrupted;
+void liveObsUntyped;
+void readAudioIdentity;
+void readRejectionCode;
+
+// =============================================================================
+// R7-2 (P2) regression: `WireLiveConfigRejectionReason` lands as a typed
+// discriminated union (tagged on `kind`) at the SDK boundary, NOT
+// `Record<string, unknown>`. Each variant is constructible with its typed
+// payload, and the union slots into `WireLiveAdapterErrorCodeConfigRejected.reason`
+// without `as` casts. This pins the codegen contract: schema-local `$defs`
+// referenced by promoted typed enums must be followed across the ref so SDK
+// consumers can route on `kind` without parsing English from a wildcard.
+// =============================================================================
+
+const reasonChannelIdentitySwap: WireLiveConfigRejectionReason = {
+  kind: "channel_identity_swap",
+  from_model: "gpt-5.4",
+  from_provider: "openai",
+  to_model: "gemini-3.1-flash-lite",
+  to_provider: "gemini",
+};
+const reasonNonRealtime: WireLiveConfigRejectionReason = {
+  kind: "non_realtime_resolution",
+  detail: "no realtime adapter available",
+};
+const reasonImageInput: WireLiveConfigRejectionReason = {
+  kind: "image_input_not_implemented",
+};
+const reasonVideoFrameInput: WireLiveConfigRejectionReason = {
+  kind: "video_frame_input_not_implemented",
+};
+const reasonUnsupportedChunk: WireLiveConfigRejectionReason = {
+  kind: "unsupported_input_chunk_variant",
+};
+const reasonRefreshModelSwap: WireLiveConfigRejectionReason = {
+  kind: "refresh_model_swap",
+  from_model: "gpt-5.4",
+  to_model: "gpt-5.4-mini",
+};
+const reasonRefreshProviderSwap: WireLiveConfigRejectionReason = {
+  kind: "refresh_provider_swap",
+  from_provider: "openai",
+  to_provider: "gemini",
+};
+const reasonRefreshAudioMismatch: WireLiveConfigRejectionReason = {
+  kind: "refresh_audio_config_mismatch",
+  detail: "mismatched sample rate",
+};
+const reasonAudioFormatMismatch: WireLiveConfigRejectionReason = {
+  kind: "audio_input_format_mismatch",
+  expected_sample_rate_hz: 24_000,
+  expected_channels: 1,
+  actual_sample_rate_hz: 48_000,
+  actual_channels: 2,
+};
+const reasonOther: WireLiveConfigRejectionReason = {
+  kind: "other",
+  detail: "freeform escape hatch",
+};
+const reasonUnknown: WireLiveConfigRejectionReason = {
+  kind: "unknown",
+  debug: "future_core_variant_x",
+};
+
+// Each variant slots into the typed `config_rejected` error code without
+// `as` casts, proving the discriminated union is followed across the
+// schema reference.
+const errorCodeWithReason: WireLiveAdapterErrorCode = {
+  code: "config_rejected",
+  reason: reasonAudioFormatMismatch,
+};
+
+// Type narrowing on `kind` exposes the variant-specific payload fields.
+function readRejectionDetail(reason: WireLiveConfigRejectionReason): string {
+  switch (reason.kind) {
+    case "channel_identity_swap":
+      return `${reason.from_model} -> ${reason.to_model}`;
+    case "non_realtime_resolution":
+    case "refresh_audio_config_mismatch":
+    case "other":
+      return reason.detail;
+    case "audio_input_format_mismatch":
+      return `${reason.actual_sample_rate_hz}Hz`;
+    case "refresh_model_swap":
+      return `${reason.from_model} -> ${reason.to_model}`;
+    case "refresh_provider_swap":
+      return `${reason.from_provider} -> ${reason.to_provider}`;
+    case "image_input_not_implemented":
+    case "video_frame_input_not_implemented":
+    case "unsupported_input_chunk_variant":
+      return reason.kind;
+    case "unknown":
+      return reason.debug;
+    default:
+      return "exhaustive";
+  }
+}
+
+void reasonChannelIdentitySwap;
+void reasonNonRealtime;
+void reasonImageInput;
+void reasonVideoFrameInput;
+void reasonUnsupportedChunk;
+void reasonRefreshModelSwap;
+void reasonRefreshProviderSwap;
+void reasonRefreshAudioMismatch;
+void reasonAudioFormatMismatch;
+void reasonOther;
+void reasonUnknown;
+void errorCodeWithReason;
+void readRejectionDetail;
+
+// =============================================================================
+// R7-1 (P2) regression: `WireAssistantBlock::Transcript`'s inline `data`
+// shape lands as a typed structural object (with `text`, `source`, optional
+// `meta`), NOT `Record<string, unknown>`. SDK consumers can read transcript
+// `text` and route on the `source` lane without ad-hoc JSON parsing. This
+// pins the codegen contract: discriminated-union variant payloads with
+// inline anonymous-object schemas are emitted as inline structural types.
+// =============================================================================
+
+const transcriptBlock: WireAssistantBlock = {
+  block_type: "transcript",
+  data: {
+    text: "Hello, world.",
+    source: { kind: "spoken" },
+  },
+};
+
+function readTranscriptText(block: WireAssistantBlock): string | null {
+  if (block.block_type !== "transcript") return null;
+  // Compile-time proof: `block.data.text` is `string`, `block.data.source`
+  // is `"spoken"` — both visible without further type assertions.
+  return block.data.text;
+}
+
+void transcriptBlock;
+void readTranscriptText;
+
+// =============================================================================
+// LiveChannel: type-level smoke tests proving the helper class is exported
+// from the SDK root, constructs from a MeerkatClient + session id, and
+// exposes the expected method signatures at the type level.
+// =============================================================================
+
+import { LiveChannel } from "../src/index.js";
+import type { LiveChannelOptions } from "../src/index.js";
+
+// LiveChannel.session() is the named constructor — it returns a LiveChannel.
+declare const mockClient: MeerkatClient;
+const liveChannel: LiveChannel = LiveChannel.session(mockClient, "session_123");
+void liveChannel;
+
+// LiveChannelOptions is assignable with turning_mode.
+const liveOpts: LiveChannelOptions = { turningMode: "explicit_commit" };
+void liveOpts;
+
+// LiveChannel with options
+const liveChannelWithOpts: LiveChannel = LiveChannel.session(
+  mockClient,
+  "session_456",
+  { turningMode: "provider_managed" },
+);
+void liveChannelWithOpts;
+
+// channelId is string | undefined before open().
+const maybeChannelId: string | undefined = liveChannel.channelId;
+void maybeChannelId;
+
+// sessionId is always a string.
+const liveSessionId: string = liveChannel.sessionId;
+void liveSessionId;
+
+// open() returns Promise<LiveOpenResult>.
+async function liveChannelOpenShape(ch: LiveChannel) {
+  const result = await ch.open();
+  const channelId: string = result.channel_id;
+  void channelId;
+  return result;
+}
+void liveChannelOpenShape;
+
+// status() returns Promise<LiveStatusResult>.
+async function liveChannelStatusShape(ch: LiveChannel) {
+  const result = await ch.status();
+  const status: import("../src/generated/types.js").WireLiveAdapterStatus = result.status;
+  void status;
+  return result;
+}
+void liveChannelStatusShape;
+
+// refresh() returns Promise<LiveRefreshResult>.
+async function liveChannelRefreshShape(ch: LiveChannel) {
+  const result = await ch.refresh();
+  const queued: "queued" = result.status;
+  void queued;
+  return result;
+}
+void liveChannelRefreshShape;

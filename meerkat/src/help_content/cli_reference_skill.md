@@ -46,7 +46,7 @@ rkat init
 rkat run <PROMPT> [OPTIONS]
 rkat help <QUESTION> [OPTIONS]
 rkat session list|show|delete|interrupt ...
-rkat realtime open-info|status|capabilities|bridge ...
+rkat live open|status|close ...
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|remove|list|get ...
@@ -187,21 +187,17 @@ rkat realm delete <REALM_ID> [--force]
 rkat realm prune [--isolated-only] [--older-than-hours N] [--force]
 ```
 
-## Realtime
+## Live channels
 
 ```bash
-rkat realtime open-info session <SESSION-ID>
-rkat realtime status session <SESSION-ID>
-rkat realtime capabilities session <SESSION-ID>
-rkat realtime bridge session <SESSION-ID>
-rkat realtime open-info member <MOB-ID> <AGENT-IDENTITY>
-rkat realtime status member <MOB-ID> <AGENT-IDENTITY>
-rkat realtime capabilities member <MOB-ID> <AGENT-IDENTITY>
-rkat realtime bridge member <MOB-ID> <AGENT-IDENTITY>
+rkat live open session <SESSION-ID>
+rkat live status session <SESSION-ID>
+rkat live close session <SESSION-ID>
 ```
 
-`status` is public realtime channel status, not the attachment-status enum.
-`bridge` proxies typed realtime frames over stdin/stdout.
+`live open` opens a live audio/text channel on a session with a realtime-capable model.
+`live status` reads the live channel status.
+`live close` closes the channel.
 
 ## Mob
 

@@ -69,10 +69,9 @@ approval methods enabled.
 | `StepLedgerEntry` | `meerkat_mob` | Per-target step execution record |
 | `FailureLedgerEntry` | `meerkat_mob` | Flow-level failure log record |
 | `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
-| `RealtimeAttachmentStatus` | `meerkat_runtime` | Runtime-owned realtime attachment state (`Unattached`, `IntentPresentUnbound`, `BindingNotReady`, `BindingReady`, `ReplacementPending`, `ReattachRequired`) |
-| `RealtimeAttachmentSignalAuthority` | `meerkat_runtime` | Authority-epoch token (`session_id` + `authority_epoch`) required on every provider callback |
-| `SessionLlmReconfigureRequest` | `meerkat_runtime` | Request to swap provider/model on a session; capability-driven realtime transport branch attaches/detaches the binding based on the target model's `ModelCapabilities.realtime` (`model`, `provider`, `provider_params`) |
-| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` drives automatic realtime transport attach/detach |
+| `LiveAdapterStatus` | `meerkat_core` | Live channel adapter status |
+| `LiveChannelCapabilities` | `meerkat_core` | Capabilities advertised by an open live channel (input/output modalities, continuity mode, tool semantics) |
+| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` gates whether `live/open` succeeds for a session |
 
 ## Traits
 

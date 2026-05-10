@@ -57,8 +57,7 @@ rkat session list [--limit N] [--offset N] [--label KEY=VALUE]
 rkat session show <ID>
 rkat session delete <ID>
 rkat session interrupt <ID>
-rkat realtime open-info|status|capabilities|bridge session <SESSION-ID>
-rkat realtime open-info|status|capabilities|bridge member <MOB-ID> <AGENT-IDENTITY>
+rkat live open|status|close session <SESSION-ID>
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|remove|list|get ...
@@ -216,7 +215,7 @@ CAS writes:
 
 ## JSON-RPC (`rkat-rpc`)
 
-Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; some realtime hosts attach an optional websocket alongside):
+Start the server (stdio is default; `--tcp <addr>` exposes the same protocol over TCP; `--live-ws <addr>` enables the live audio WebSocket listener):
 
 ```bash
 rkat-rpc --realm team-alpha
@@ -244,15 +243,18 @@ rkat run --allow-tool generate_image "Use generate_image to create a 1024x1024 P
 rkat blob get <BLOB-ID> --output meerkat.png
 ```
 
-### Realtime (capability-driven)
+### Live channels (caller-initiated)
 
-- `realtime/open_info` — open audio channel info
-- `realtime/status` — public realtime channel status projection for a target
-- `realtime/capabilities` — capability projection
-- `session/realtime_attachment_status` — single-session status (no batch sibling)
-- `mob/member_status` includes `realtime_attachment_status` per member
+- `live/open` — open a live audio/text channel on a session
+- `live/status` — get the status of a live channel
+- `live/close` — close a live channel
+- `live/send_input` — send an input chunk (audio/text) to a live channel
+- `live/commit_input` — commit pending input on a live channel (turn boundary)
+- `live/interrupt` — interrupt the assistant turn on a live channel (barge-in)
+- `live/truncate` — truncate assistant output at a client-tracked playback cursor
+- `live/refresh` — apply mutable session config (instructions/tools/audio) to an open live channel
 
-Set `model: "gpt-realtime-1.5"` on `session/create` to enable realtime; transport follows the resolved model's `ModelCapabilities.realtime`.
+Set `model: "gpt-realtime-2"` on `session/create` and call `live/open` to open a live channel; capability is gated on `ModelCapabilities.realtime`.
 
 ### Auth (realm/binding model)
 
@@ -399,10 +401,6 @@ Schedule tools:
 - `meerkat_schedule_pause`, `meerkat_schedule_resume`, `meerkat_schedule_delete`
 - `meerkat_schedule_occurrences`
 
-Realtime tools:
-
-- `meerkat_realtime_status`
-
 Comms tools (feature-gated):
 
 - `meerkat_comms_send` / `meerkat_comms_peers`
@@ -451,11 +449,13 @@ Client methods:
 - `capabilities` (property, populated during `connect()`)
 - `get_runtime_host_info()` / `get_runtime_host_capabilities()` / `get_runtime_host_health()`
 
-Realtime helpers:
+Live channel helpers:
 
-- `runtime_realtime_attachment_status(session_id)` → status projection
-- `realtime_open_info(session_id)` → audio channel info
-- `realtime_capabilities()` / `realtime_status(params)`
+- `live_open(session_id)` → `LiveOpenResult`
+- `live_status(session_id)` / `live_close(session_id)`
+- `live_send_input_text(session_id, text)` / `live_send_input_audio(session_id, data)`
+- `live_commit_input(session_id)` / `live_interrupt(session_id)` / `live_truncate(session_id, ...)`
+- `live_refresh(session_id, ...)`
 
 Auth helpers:
 
@@ -538,11 +538,12 @@ Client methods:
 - `capabilities` (property, populated during `connect()`)
 - `getRuntimeHostInfo()` / `getRuntimeHostCapabilities()` / `getRuntimeHostHealth()`
 
-Realtime helpers:
+Live channel helpers:
 
-- `runtimeRealtimeAttachmentStatus(params)`
-- `realtimeOpenInfo(params)`
-- `realtimeCapabilities(params)` / `realtimeStatus(params)`
+- `liveOpen(params)` / `liveStatus(params)` / `liveClose(params)`
+- `liveSendInput(params)` / `liveSendInputImage(params)` / `liveSendInputVideoFrame(params)`
+- `liveCommitInput(params)` / `liveInterrupt(params)` / `liveTruncate(params)`
+- `liveRefresh(params)`
 
 Auth helpers:
 

@@ -204,6 +204,15 @@ export interface SessionToolResult {
   readonly isError: boolean;
 }
 
+/**
+ * Ordered block inside a block-assistant transcript message.
+ *
+ * `blockType` carries the lane discriminator (`text`, `transcript`,
+ * `reasoning`, `tool_use`, `server_tool_content`, `image`, ...). For
+ * `transcript` blocks `source` records the originating lane (today
+ * `"spoken"`); both `text` and `transcript` blocks expose their rendered
+ * string in `text`.
+ */
 export interface SessionAssistantBlock {
   readonly blockType: string;
   readonly text?: string;
@@ -217,6 +226,11 @@ export interface SessionAssistantBlock {
   readonly height?: number;
   readonly revisedPrompt?: Record<string, unknown>;
   readonly meta?: Record<string, unknown>;
+  /**
+   * Lane provenance for `transcript` blocks (e.g. `"spoken"`). Undefined
+   * for non-transcript block types.
+   */
+  readonly source?: string;
 }
 
 export interface SessionMessage {

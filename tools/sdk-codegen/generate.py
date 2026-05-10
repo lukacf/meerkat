@@ -314,10 +314,54 @@ def _schema_root_with_nested_defs(root_schema: dict[str, Any]) -> dict[str, Any]
 
 def _promote_nested_schema_def(name: str) -> bool:
     return name.startswith("Realtime") or name in {
-        "AudioFormatMismatchContext",
-        "ToolCallTimeoutContext",
         "WireTrustedPeerIdentity",
         "McpServerConfig",
+        # CC5/CC6: promote the live-adapter wire mirrors so SDK codegen
+        # references them by name from `LiveOpenResult` instead of inlining
+        # the schema-local `$defs` as anonymous `dict[str, Any]` / `unknown`.
+        "WireLiveChannelCapabilities",
+        "WireLiveContinuityMode",
+        # G8 (P2): promote `WireLiveTransportBootstrap` so `LiveOpenResult.transport`
+        # carries the typed discriminated-union shape into SDK codegen instead
+        # of falling back to `Record<string, unknown>` / `dict[str, Any]`.
+        "WireLiveTransportBootstrap",
+        # G9 (P2): promote `WireLiveResponseModality` so
+        # `LiveCommitInputParams.response_modality` carries the typed
+        # `audio | text` discriminated union into SDK codegen.
+        "WireLiveResponseModality",
+        # R5-10: promote `LiveInputChunkWire` so `LiveSendInputParams.chunk`
+        # carries the typed discriminated-union shape into SDK codegen instead
+        # of falling back to opaque `dict[str, Any]` / `Record<string, unknown>`.
+        "LiveInputChunkWire",
+        # FIX-SDK-OBS: promote the live-adapter observation wire mirror and
+        # its supporting payload mirrors so SDK codegen produces a typed
+        # discriminated union (`WireLiveAdapterObservation`) rather than an
+        # opaque blob. Without this, browser/Python SDK clients cannot
+        # type-narrow on `assistant_audio_chunk` (R5-4 identity fields:
+        # `item_id` / `response_id` / `content_index`) or the R5-9
+        # `command_rejected` typed channel-survives error variant.
+        "WireLiveAdapterObservation",
+        "WireLiveAdapterStatus",
+        "WireLiveDegradationReason",
+        "WireLiveAdapterErrorCode",
+        # R7-2 (P2): promote `WireLiveConfigRejectionReason` so the typed
+        # `config_rejected.reason` discriminated-union shape lands in SDK
+        # codegen as a named reference (typed union of the R5-2 / R6-4 / R6-5
+        # variants) instead of being widened to `Record<string, unknown>` /
+        # `dict[str, Any]`. The reason type is registered as a schema-local
+        # `$defs` entry under `WireLiveAdapterErrorCode` and was previously
+        # treated as a private nested type by the codegen, erasing its shape.
+        "WireLiveConfigRejectionReason",
+        # R7-1 (P2): promote `WireTranscriptSource` so the typed `source`
+        # field on `WireAssistantBlock::Transcript`'s inline `data` shape
+        # lands as a named reference. Without this, schema-local resolution
+        # widens it to `Record<string, unknown>` and SDK consumers cannot
+        # narrow on the typed `kind: "spoken" | "unknown"` lane provenance.
+        "WireTranscriptSource",
+        # R8 (P2): promote `WireProvider` so `ChannelIdentitySwap.from_provider`
+        # / `to_provider` carry the typed enum shape into SDK codegen instead
+        # of being widened to `unknown` / `Any`.
+        "WireProvider",
         *MCP_CONFIG_HELPER_TYPES,
         *MCP_CONFIG_ALIAS_TYPES,
         *MOB_RPC_PROMOTED_SCHEMA_DEFS,
@@ -348,6 +392,34 @@ def _variant_type_prefix(name: str) -> str:
 
 def _typed_dict_variant_name(alias_name: str, discriminator_value: str) -> str:
     return f"{_variant_type_prefix(alias_name)}{_pascal_case(discriminator_value)}"
+
+
+def _is_inline_object_payload(field_schema: Any) -> bool:
+    """Detect inline (anonymous) object-shaped variant payload schemas.
+
+    Mirrors the TS `inline_objects=True` admission rule in
+    `_typescript_type_from_schema`: the schema must be a JSON-Schema object
+    with `properties` and NOT a `$ref`, NOT a discriminated union
+    (`oneOf`/`anyOf`), and NOT a singleton `const`. This is the same shape
+    that the TS path inlines as `{ field: type; ... }` instead of widening
+    to `Record<string, unknown>`; the Python path promotes it to a named
+    TypedDict to preserve `mypy`/`pyright` narrowing on variant payloads.
+    """
+    if not isinstance(field_schema, dict):
+        return False
+    if "$ref" in field_schema:
+        return False
+    if "oneOf" in field_schema or "anyOf" in field_schema:
+        return False
+    if "const" in field_schema:
+        return False
+    properties = field_schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return False
+    schema_type = field_schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        return False
+    return True
 
 
 def _const_variants(variants: list[Any]) -> list[Any] | None:
@@ -516,8 +588,21 @@ def _typescript_type_from_schema(
     root: dict[str, Any],
     field_schema: Any,
     local_defs: set[str] | None = None,
+    *,
+    inline_objects: bool = False,
 ) -> tuple[str, bool]:
-    """Return (typescript_type, optional)."""
+    """Return (typescript_type, optional).
+
+    When `inline_objects` is True, anonymous JSON-schema objects that declare
+    `properties` are emitted as inline structural TypeScript object types
+    (`{ field: type; ... }`) rather than widened to `Record<string, unknown>`.
+    This preserves typed-narrowing for discriminated-union variant payloads
+    whose `data` shape is described inline in the schema (e.g. R7-1
+    `AssistantBlock::Transcript`'s `{ text, source, meta }`). The flag does
+    NOT propagate recursively — only the immediate level is inlined; nested
+    anonymous objects keep the existing widening behavior to bound the
+    blast radius.
+    """
     if field_schema is True:
         return ("unknown", False)
     if field_schema is False or not isinstance(field_schema, dict):
@@ -596,6 +681,25 @@ def _typescript_type_from_schema(
                 (field_name, value_schema), = properties.items()
                 value_type, _ = _typescript_type_from_schema(root, value_schema)
                 return (f"{{ {field_name}: {value_type} }}", optional)
+            # R7-1 (P2): when the caller is emitting a discriminated-union
+            # variant payload (`inline_objects=True`), inline the typed
+            # property shape rather than widening to `Record<string, unknown>`.
+            # This restores type-narrowing for `AssistantBlock::Transcript`
+            # (and the other `WireAssistantBlock` variants whose `data` shape
+            # is described inline in the schema). The inline emission only
+            # applies to the immediate object level — nested anonymous
+            # objects inside the inlined fields keep the existing widening
+            # behavior.
+            if inline_objects and isinstance(properties, dict) and properties:
+                required_set = set(field_schema.get("required", []) or [])
+                inline_parts: list[str] = []
+                for inline_field, inline_schema in properties.items():
+                    inline_type, inline_optional = _typescript_type_from_schema(
+                        root, inline_schema, local_defs
+                    )
+                    suffix = "" if (inline_field in required_set and not inline_optional) else "?"
+                    inline_parts.append(f"{inline_field}{suffix}: {inline_type}")
+                return (f"{{ {'; '.join(inline_parts)} }}", optional)
             return ("Record<string, unknown>", optional)
         case _:
             return ("unknown", optional)
@@ -786,13 +890,60 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
                 variant_names.append(variant_name)
                 required = set(variant.get("required", []))
                 local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                # R7-1 Python lift: mirror the TS `inline_objects=True` path.
+                # For each variant property whose schema is an anonymous
+                # inline object (has `properties`, no `$ref`/`oneOf`/`anyOf`),
+                # emit a named TypedDict for the payload BEFORE the variant
+                # class and reference it from the variant. This restores the
+                # TS/Python codegen symmetry that R7-1+2 (TS) opened up — every
+                # inline-object variant payload now gets a typed Python shape
+                # instead of widening to `dict[str, Any]`. Only the immediate
+                # variant-field level is promoted; nested anonymous objects
+                # inside the inlined shape still widen (matches the TS
+                # `inline_objects=True`-only-at-the-immediate-level bound).
+                inline_payload_blocks: list[str] = []
+                inline_field_overrides: dict[str, str] = {}
+                for field_name, field_schema in properties.items():
+                    if not _is_inline_object_payload(field_schema):
+                        continue
+                    payload_name = (
+                        f"{variant_name}{_pascal_case(field_name)}"
+                    )
+                    payload_required = set(field_schema.get("required", []) or [])
+                    payload_props = field_schema.get("properties", {})
+                    payload_lines = [
+                        f"class {payload_name}(TypedDict, total=False):\n"
+                    ]
+                    for inline_field, inline_schema in payload_props.items():
+                        inline_type, _ = _python_type_from_schema(
+                            schema_root,
+                            inline_schema,
+                            local_variant_defs,
+                        )
+                        wrapper = (
+                            "Required"
+                            if inline_field in payload_required
+                            else "NotRequired"
+                        )
+                        payload_lines.append(
+                            f"    {_python_identifier(inline_field)}: "
+                            f"{wrapper}[{inline_type}]\n"
+                        )
+                    payload_lines.append("\n")
+                    inline_payload_blocks.append("".join(payload_lines))
+                    inline_field_overrides[field_name] = payload_name
+                for block in inline_payload_blocks:
+                    types_content += block
                 types_content += f"class {variant_name}(TypedDict, total=False):\n"
                 for field_name, field_schema in properties.items():
-                    field_type, _ = _python_type_from_schema(
-                        schema_root,
-                        field_schema,
-                        local_variant_defs,
-                    )
+                    if field_name in inline_field_overrides:
+                        field_type = inline_field_overrides[field_name]
+                    else:
+                        field_type, _ = _python_type_from_schema(
+                            schema_root,
+                            field_schema,
+                            local_variant_defs,
+                        )
                     wrapper = "Required" if field_name in required else "NotRequired"
                     types_content += (
                         f"    {_python_identifier(field_name)}: {wrapper}[{field_type}]\n"
@@ -835,14 +986,6 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         append_python_contract_dataclass(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_python_contract_dataclass(name)
-    append_python_dataclass(
-        "RuntimeRealtimeAttachmentStatusParams",
-        params_schema,
-        "Request payload for session/realtime_attachment_status.",
-    )
-    append_python_dataclass("RealtimeOpenRequest", params_schema, "Request payload for realtime/open_info.")
-    append_python_dataclass("RealtimeStatusParams", params_schema, "Request payload for realtime/status.")
-    append_python_dataclass("RealtimeCapabilitiesParams", params_schema, "Request payload for realtime/capabilities.")
     append_python_dataclass("ScheduleIdParams", params_schema, "Request payload for schedule id lookups.")
     append_python_dataclass("ListSchedulesParams", params_schema, "Request payload for schedule/list.")
     append_python_dataclass("ScheduleOccurrencesParams", params_schema, "Request payload for schedule/occurrences.")
@@ -857,38 +1000,107 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         runtime_state_result_root,
         "Response payload for runtime-backed session status projections.",
     )
+    append_python_dataclass("RealtimeAudioFormat", wire_schema, "Provider-realtime audio format descriptor.")
+    append_python_dataclass("RealtimeCapabilities", wire_schema, "Provider-realtime session capability projection.")
+    append_python_dataclass("RealtimeTextChunk", wire_schema, "Text chunk for provider-realtime ingress.")
+    append_python_dataclass("RealtimeAudioChunk", wire_schema, "Opaque provider-realtime audio chunk.")
+    append_python_dataclass("RealtimeVideoChunk", wire_schema, "Opaque provider-realtime video chunk.")
+    append_python_dataclass("LiveOpenParams", wire_schema, "Request payload for live/open.")
+    # CC5/CC6: emit the typed wire mirrors **before** `LiveOpenResult` so the
+    # generated dataclass references them by name (typed) rather than as
+    # forward-referenced `Any` blobs.
     append_python_dataclass(
-        "RuntimeRealtimeAttachmentStatusResult",
+        "WireLiveChannelCapabilities",
         wire_schema,
-        "Response payload for session/realtime_attachment_status.",
+        "Wire projection of LiveChannelCapabilities (typed-boolean matrix).",
     )
-    append_python_dataclass("RealtimeReconnectPolicy", wire_schema, "Reconnect policy for realtime channels.")
     append_python_alias(
-        "RealtimeToolTimeoutPolicy",
-        params_schema,
-        "Tool timeout policy for realtime channels.",
+        "WireLiveContinuityMode",
+        wire_schema,
+        "Wire projection of LiveContinuityMode (internally-tagged on `mode`).",
     )
-    append_python_dataclass("RealtimeChannelConfig", params_schema, "Runtime knobs for a realtime channel.")
-    append_python_dataclass("RealtimeAudioFormat", wire_schema, "Realtime audio format descriptor.")
-    append_python_dataclass("RealtimeCapabilities", wire_schema, "Capability set for a realtime channel.")
-    append_python_dataclass("RealtimeChannelStatus", wire_schema, "Public realtime channel status projection.")
-    append_python_dataclass("RealtimeOpenInfo", wire_schema, "Response payload for realtime/open_info.")
-    append_python_dataclass("RealtimeStatusResult", wire_schema, "Response payload for realtime/status.")
-    append_python_dataclass("RealtimeCapabilitiesResult", wire_schema, "Response payload for realtime/capabilities.")
-    append_python_dataclass("RealtimeTextChunk", wire_schema, "Text chunk for realtime ingress.")
-    append_python_dataclass("RealtimeTextDelta", wire_schema, "Text delta for realtime output.")
-    append_python_dataclass("RealtimeAudioChunk", wire_schema, "Opaque realtime audio chunk.")
-    append_python_dataclass("RealtimeVideoChunk", wire_schema, "Opaque realtime video chunk.")
-    append_python_dataclass("RealtimeBargeInTruncateFrame", wire_schema, "Payload for channel.barge_in_truncate.")
-    append_python_dataclass("AudioFormatMismatchContext", wire_schema, "Typed context for audio format mismatch errors.")
-    append_python_dataclass("ToolCallTimeoutContext", wire_schema, "Typed context for tool timeout errors.")
-    append_python_dataclass("RealtimeChannelOpenFrame", wire_schema, "Payload for channel.open.")
-    append_python_dataclass("RealtimeChannelInputFrame", wire_schema, "Payload for channel.input.")
-    append_python_dataclass("RealtimeChannelOpenedFrame", wire_schema, "Payload for channel.opened.")
-    append_python_dataclass("RealtimeChannelStatusFrame", wire_schema, "Payload for channel.status.")
-    append_python_dataclass("RealtimeChannelEventFrame", wire_schema, "Payload for channel.event.")
-    append_python_dataclass("RealtimeChannelErrorFrame", wire_schema, "Payload for channel.error.")
-    append_python_dataclass("RealtimeChannelClosedFrame", wire_schema, "Payload for channel.closed.")
+    # G8 (P2): typed wire mirror for `LiveOpenResult.transport`.
+    append_python_alias(
+        "WireLiveTransportBootstrap",
+        wire_schema,
+        "Wire projection of LiveTransportBootstrap (internally-tagged on `transport`).",
+    )
+    append_python_dataclass("LiveOpenResult", wire_schema, "Response payload for live/open.")
+    append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,interrupt}.")
+    append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
+    append_python_dataclass("LiveSendInputParams", wire_schema, "Request payload for live/send_input.")
+    append_python_dataclass("LiveTruncateParams", wire_schema, "Request payload for live/truncate.")
+    # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`,
+    # then the params dataclass that references it.
+    append_python_alias(
+        "WireLiveResponseModality",
+        wire_schema,
+        "Wire projection of LiveResponseModality (internally-tagged on `modality`).",
+    )
+    append_python_dataclass(
+        "LiveCommitInputParams",
+        wire_schema,
+        "Request payload for live/commit_input with optional response_modality override.",
+    )
+    # R4-5 (P3): typed wire mirror for `live/refresh`.
+    # `LiveRefreshStatus` is a tagged union (today: only `queued`; the enum is
+    # `non_exhaustive` so future variants land here without breaking the wire);
+    # `LiveRefreshResult` carries both the typed `status` discriminator and
+    # the legacy `refresh_enqueued: true` back-compat boolean.
+    append_python_alias(
+        "LiveRefreshStatus",
+        wire_schema,
+        "Wire projection of LiveRefreshStatus (internally-tagged on `status`; today: only `queued`).",
+    )
+    append_python_dataclass(
+        "LiveRefreshResult",
+        wire_schema,
+        "Response payload for live/refresh: typed `status` plus back-compat `refresh_enqueued` boolean.",
+    )
+    # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
+    # tagged-payload helpers. Aliases (not dataclasses) because each is a
+    # discriminated union (internally tagged on `observation` / `status` /
+    # `code` / `kind`). `RealtimeTranscriptEvent` is referenced by the
+    # `realtime_transcript` variant payload; emit it explicitly so the
+    # generated reference resolves.
+    append_python_alias(
+        "RealtimeTranscriptEvent",
+        wire_schema,
+        "Provider-realtime transcript event (tagged on `type`).",
+    )
+    append_python_alias(
+        "RealtimeTranscriptRole",
+        wire_schema,
+        "Provider-neutral role for a realtime transcript item.",
+    )
+    append_python_alias(
+        "WireLiveDegradationReason",
+        wire_schema,
+        "Wire projection of LiveDegradationReason (tagged on `kind`).",
+    )
+    append_python_alias(
+        "WireLiveAdapterStatus",
+        wire_schema,
+        "Wire projection of LiveAdapterStatus (tagged on `status`).",
+    )
+    # R7-2 (P2): typed wire mirror for `WireLiveAdapterErrorCode::ConfigRejected.reason`.
+    # Emit the named alias before `WireLiveAdapterErrorCode` so the generated
+    # `config_rejected` variant references the typed discriminated union by name.
+    append_python_alias(
+        "WireLiveConfigRejectionReason",
+        wire_schema,
+        "Wire projection of LiveConfigRejectionReason (tagged on `kind`).",
+    )
+    append_python_alias(
+        "WireLiveAdapterErrorCode",
+        wire_schema,
+        "Wire projection of LiveAdapterErrorCode (tagged on `code`).",
+    )
+    append_python_alias(
+        "WireLiveAdapterObservation",
+        wire_schema,
+        "Wire projection of LiveAdapterObservation (tagged on `observation`).",
+    )
     append_python_dataclass(
         "RuntimeAcceptResult",
         wire_schema,
@@ -951,25 +1163,11 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireRenderClass", wire_schema, "Public render class contract for mob member delivery.")
     append_python_alias("WireRenderSalience", wire_schema, "Public render salience contract for mob member delivery.")
     append_python_alias("WireRuntimeState", wire_schema, "Public runtime state projection used by RPC surfaces.")
-    append_python_alias(
-        "WireRealtimeAttachmentStatus",
-        wire_schema,
-        "Public live attachment status projection used by runtime and mob surfaces.",
-    )
-    append_python_alias("RealtimeChannelTarget", wire_schema, "Public realtime target union.")
-    append_python_alias("RealtimeChannelRole", wire_schema, "Realtime channel opening role.")
-    append_python_alias("RealtimeTurningMode", wire_schema, "Realtime turning mode.")
-    append_python_alias("RealtimeProtocolVersion", wire_schema, "Realtime protocol version.")
-    append_python_alias("RealtimeInputKind", wire_schema, "Realtime input kind.")
-    append_python_alias("RealtimeOutputKind", wire_schema, "Realtime output kind.")
-    append_python_alias("RealtimeChannelState", wire_schema, "Realtime channel lifecycle state.")
-    append_python_alias("RealtimeErrorCode", wire_schema, "Realtime error code.")
-    append_python_alias("RealtimeErrorDetails", wire_schema, "Realtime error details.")
-    append_python_alias("RealtimeInputChunk", wire_schema, "Realtime input chunk union.")
-    append_python_alias("RealtimeOutputChunk", wire_schema, "Realtime output chunk union.")
-    append_python_alias("RealtimeEvent", wire_schema, "Realtime event union.")
-    append_python_alias("RealtimeClientFrame", wire_schema, "Realtime client frame union.")
-    append_python_alias("RealtimeServerFrame", wire_schema, "Realtime server frame union.")
+    append_python_alias("RealtimeTurningMode", wire_schema, "Provider-realtime turning mode.")
+    append_python_alias("RealtimeInputKind", wire_schema, "Provider-realtime input kind.")
+    append_python_alias("RealtimeOutputKind", wire_schema, "Provider-realtime output kind.")
+    append_python_alias("RealtimeInputChunk", wire_schema, "Provider-realtime input chunk union.")
+    append_python_alias("LiveInputChunkWire", wire_schema, "Live RPC input chunk union (audio | text).")
     append_python_alias(
         "RuntimeAcceptOutcomeType",
         wire_schema,
@@ -978,6 +1176,21 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     append_python_alias("WireInputLifecycleState", wire_schema, "Public input lifecycle state projection used by RPC surfaces.")
     append_python_alias("WireStopReason", wire_schema, "Canonical stop reason for transcript messages.")
     append_python_alias("WireToolResultContent", wire_schema, "Wire-safe tool result content.")
+    # R8 (P2): emit `WireProvider` string-enum alias so
+    # `ChannelIdentitySwap.from_provider`/`to_provider` are typed.
+    append_python_alias(
+        "WireProvider",
+        wire_schema,
+        "Wire-safe projection of Provider with correct serde renames.",
+    )
+    # R7-1 (P2): emit `WireTranscriptSource` alias before `WireAssistantBlock`
+    # so the generated `Transcript` variant's inline `data.source` field
+    # references the typed `kind`-tagged union by name.
+    append_python_alias(
+        "WireTranscriptSource",
+        wire_schema,
+        "Wire projection of TranscriptSource (tagged on `kind`).",
+    )
     append_python_alias("WireAssistantBlock", wire_schema, "Block assistant transcript item.")
     append_python_alias("WireImageOperationPhase", wire_schema, "Machine-owned image operation phase.")
     append_python_alias("WireModelTier", schemas.get("models", {}), "Wire-level model recommendation tier.")
@@ -1173,10 +1386,18 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
                 local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
                 types_content += f"\nexport interface {variant_name} {{\n"
                 for field_name, field_schema in properties.items():
+                    # R7-1 (P2): inline anonymous-object payload schemas so
+                    # discriminated-union variant data shapes (e.g.
+                    # `WireAssistantBlock::Transcript`'s `data: { text,
+                    # source, meta }`) emit a typed structural shape rather
+                    # than `Record<string, unknown>`. Only the immediate
+                    # variant-field level is inlined; nested anonymous
+                    # objects inside the inlined shape still widen.
                     field_type, _ = _typescript_type_from_schema(
                         schema_root,
                         field_schema,
                         local_variant_defs,
+                        inline_objects=True,
                     )
                     optional = "" if field_name in required else "?"
                     types_content += f"  {field_name}{optional}: {field_type};\n"
@@ -1204,10 +1425,6 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
         append_typescript_contract_interface(name)
     for name in COMMS_SESSION_STREAM_RPC_CONTRACT_TYPES:
         append_typescript_contract_interface(name)
-    append_typescript_interface("RuntimeRealtimeAttachmentStatusParams", params_schema)
-    append_typescript_interface("RealtimeOpenRequest", params_schema)
-    append_typescript_interface("RealtimeStatusParams", params_schema)
-    append_typescript_interface("RealtimeCapabilitiesParams", params_schema)
     append_typescript_interface("ScheduleIdParams", params_schema)
     append_typescript_interface("ListSchedulesParams", params_schema)
     append_typescript_interface("ScheduleOccurrencesParams", params_schema)
@@ -1226,21 +1443,10 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_alias("WireRenderClass", wire_schema)
     append_typescript_alias("WireRenderSalience", wire_schema)
     append_typescript_alias("WireRuntimeState", wire_schema)
-    append_typescript_alias("WireRealtimeAttachmentStatus", wire_schema)
-    append_typescript_alias("RealtimeChannelTarget", wire_schema)
-    append_typescript_alias("RealtimeChannelRole", wire_schema)
     append_typescript_alias("RealtimeTurningMode", wire_schema)
-    append_typescript_alias("RealtimeProtocolVersion", wire_schema)
     append_typescript_alias("RealtimeInputKind", wire_schema)
     append_typescript_alias("RealtimeOutputKind", wire_schema)
-    append_typescript_alias("RealtimeChannelState", wire_schema)
-    append_typescript_alias("RealtimeErrorCode", wire_schema)
-    append_typescript_alias("RealtimeErrorDetails", wire_schema)
     append_typescript_alias("RealtimeInputChunk", wire_schema)
-    append_typescript_alias("RealtimeOutputChunk", wire_schema)
-    append_typescript_alias("RealtimeEvent", wire_schema)
-    append_typescript_alias("RealtimeClientFrame", wire_schema)
-    append_typescript_alias("RealtimeServerFrame", wire_schema)
     append_typescript_alias("RuntimeAcceptOutcomeType", wire_schema)
     append_typescript_alias("WireInputLifecycleState", wire_schema)
     append_typescript_alias("WireStopReason", wire_schema)
@@ -1256,30 +1462,53 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("MobWireResult", wire_schema)
     append_typescript_interface("MobUnwireResult", wire_schema)
     append_typescript_interface("RuntimeStateResult", runtime_state_result_root)
-    append_typescript_interface("RuntimeRealtimeAttachmentStatusResult", wire_schema)
-    append_typescript_interface("RealtimeReconnectPolicy", wire_schema)
-    append_typescript_alias("RealtimeToolTimeoutPolicy", params_schema)
-    append_typescript_interface("RealtimeChannelConfig", params_schema)
     append_typescript_interface("RealtimeAudioFormat", wire_schema)
     append_typescript_interface("RealtimeCapabilities", wire_schema)
-    append_typescript_interface("RealtimeChannelStatus", wire_schema)
-    append_typescript_interface("RealtimeOpenInfo", wire_schema)
-    append_typescript_interface("RealtimeStatusResult", wire_schema)
-    append_typescript_interface("RealtimeCapabilitiesResult", wire_schema)
     append_typescript_interface("RealtimeTextChunk", wire_schema)
-    append_typescript_interface("RealtimeTextDelta", wire_schema)
     append_typescript_interface("RealtimeAudioChunk", wire_schema)
     append_typescript_interface("RealtimeVideoChunk", wire_schema)
-    append_typescript_interface("RealtimeBargeInTruncateFrame", wire_schema)
-    append_typescript_interface("AudioFormatMismatchContext", wire_schema)
-    append_typescript_interface("ToolCallTimeoutContext", wire_schema)
-    append_typescript_interface("RealtimeChannelOpenFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelInputFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelOpenedFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelStatusFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelEventFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelErrorFrame", wire_schema)
-    append_typescript_interface("RealtimeChannelClosedFrame", wire_schema)
+    append_typescript_interface("LiveOpenParams", wire_schema)
+    # CC5/CC6: typed wire mirrors emitted before `LiveOpenResult` so the
+    # generated interface references them as named typed shapes (interface
+    # for the bool matrix, discriminated union on `mode` for continuity).
+    append_typescript_interface("WireLiveChannelCapabilities", wire_schema)
+    append_typescript_alias("WireLiveContinuityMode", wire_schema)
+    # G8 (P2): typed wire mirror for `LiveOpenResult.transport`
+    # (discriminated union on `transport`).
+    append_typescript_alias("WireLiveTransportBootstrap", wire_schema)
+    append_typescript_interface("LiveOpenResult", wire_schema)
+    append_typescript_interface("LiveChannelParams", wire_schema)
+    append_typescript_interface("LiveStatusResult", wire_schema)
+    append_typescript_interface("LiveSendInputParams", wire_schema)
+    append_typescript_interface("LiveTruncateParams", wire_schema)
+    # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`
+    # (discriminated union on `modality`), then the params interface that
+    # references it.
+    append_typescript_alias("WireLiveResponseModality", wire_schema)
+    append_typescript_interface("LiveCommitInputParams", wire_schema)
+    # R4-5 (P3): typed wire mirror for `live/refresh`. `LiveRefreshStatus` is
+    # a tagged union (alias) because the schema is a `oneOf` discriminated
+    # on `status`; `LiveRefreshResult` is the wrapping interface that flatten-
+    # composes status with the back-compat `refresh_enqueued` boolean.
+    append_typescript_alias("LiveRefreshStatus", wire_schema)
+    append_typescript_interface("LiveRefreshResult", wire_schema)
+    append_typescript_alias("LiveInputChunkWire", wire_schema)
+    # FIX-SDK-OBS: typed adapter observation discriminated unions. Aliases
+    # because each is a serde-tagged enum. `RealtimeTranscriptEvent` is
+    # referenced by the `realtime_transcript` variant payload — it is
+    # auto-promoted by the `Realtime*` allowlist but the alias must be
+    # emitted explicitly for the generated TypeScript / Python references
+    # to resolve.
+    append_typescript_alias("RealtimeTranscriptEvent", wire_schema)
+    append_typescript_alias("RealtimeTranscriptRole", wire_schema)
+    append_typescript_alias("WireLiveDegradationReason", wire_schema)
+    append_typescript_alias("WireLiveAdapterStatus", wire_schema)
+    # R7-2 (P2): typed wire mirror for `WireLiveAdapterErrorCode::ConfigRejected.reason`.
+    # Emit the named alias before `WireLiveAdapterErrorCode` so the generated
+    # `config_rejected` variant references the typed union by name.
+    append_typescript_alias("WireLiveConfigRejectionReason", wire_schema)
+    append_typescript_alias("WireLiveAdapterErrorCode", wire_schema)
+    append_typescript_alias("WireLiveAdapterObservation", wire_schema)
     append_typescript_interface("RuntimeAcceptResult", wire_schema)
     append_typescript_interface("WireInputStateHistoryEntry", wire_schema)
     append_typescript_interface("WireInputState", wire_schema)
@@ -1317,6 +1546,12 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("WireAuthStatus", wire_schema)
     append_typescript_interface("WireAuthStatusDetail", wire_schema)
     append_typescript_alias("WireAuthError", wire_schema)
+    # R8 (P2): emit `WireProvider` string-enum alias.
+    append_typescript_alias("WireProvider", wire_schema)
+    # R7-1 (P2): emit `WireTranscriptSource` alias before `WireAssistantBlock`
+    # so the generated `Transcript` variant references the typed `kind`-tagged
+    # union by name.
+    append_typescript_alias("WireTranscriptSource", wire_schema)
     append_typescript_alias("WireAssistantBlock", wire_schema)
     append_typescript_alias("WireImageOperationPhase", wire_schema)
 

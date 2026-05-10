@@ -30,7 +30,7 @@ import tempfile
 import warnings
 import zipfile
 from pathlib import Path
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict, cast
 from urllib.error import URLError
 import urllib.request
 
@@ -38,6 +38,8 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    LiveRefreshResult,
+    LiveRefreshStatus,
     McpServerConfig,
     MobDefinitionInput,
     MobSpawnManyFailedResult,
@@ -46,12 +48,6 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobRotateSupervisorResult,
     MobTurnStartParams,
-    RealtimeCapabilitiesResult,
-    RealtimeChannelStatus,
-    RealtimeOpenInfo,
-    RealtimeOpenRequest,
-    RealtimeStatusResult,
-    RuntimeRealtimeAttachmentStatusResult,
     WireBudgetSplitPolicy,
     WireAuthBindingRef,
     WireContentInput,
@@ -327,6 +323,7 @@ class MeerkatClient:
         state_root: str | None = None,
         context_root: str | None = None,
         user_config_root: str | None = None,
+        live_ws: bool = False,
     ) -> MeerkatClient:
         """Start the rkat-rpc subprocess and perform handshake."""
         if realm_id and isolated:
@@ -338,7 +335,7 @@ class MeerkatClient:
 
         has_advanced_opts = any([
             isolated, realm_id, instance_id, realm_backend,
-            state_root, context_root, user_config_root,
+            state_root, context_root, user_config_root, live_ws,
         ])
         if self._legacy_rpc_subcommand and has_advanced_opts:
             raise MeerkatError(
@@ -351,7 +348,7 @@ class MeerkatClient:
             use_legacy, isolated=isolated, realm_id=realm_id,
             instance_id=instance_id, realm_backend=realm_backend,
             state_root=state_root, context_root=context_root,
-            user_config_root=user_config_root,
+            user_config_root=user_config_root, live_ws=live_ws,
         )
 
         self._process = await asyncio.create_subprocess_exec(
@@ -1685,11 +1682,6 @@ class MeerkatClient:
                 "Invalid mob/member_status response",
             ),
             **(
-                {"realtime_attachment_status": str(result["realtime_attachment_status"])}
-                if result.get("realtime_attachment_status") is not None
-                else {}
-            ),
-            **(
                 {"resolved_capabilities": resolved_capabilities}
                 if resolved_capabilities is not None
                 else {}
@@ -1704,9 +1696,7 @@ class MeerkatClient:
                 if isinstance(result.get("kickoff"), dict)
                 else {}
             ),
-            # Preserve `current_session_id` as diagnostic status/continuity
-            # data only. Realtime callers use the stable `mob_member` target
-            # and let the server resolve the current bridge binding.
+            # Preserve `current_session_id` as diagnostic status/continuity data only.
             **(
                 {"current_session_id": str(result["current_session_id"])}
                 if isinstance(result.get("current_session_id"), str)
@@ -2439,14 +2429,299 @@ class MeerkatClient:
         self._warn_retired_runtime_session_control()
         raise self._retired_runtime_session_control_error()
 
-    async def runtime_realtime_attachment_status(
-        self, session_id: str
-    ) -> RuntimeRealtimeAttachmentStatusResult:
-        raw = await self._request(
-            "session/realtime_attachment_status",
-            {"session_id": session_id},
+    # ---- Live audio/text adapter (`live/*`) ---------------------------
+    #
+    # Typed wrappers over the `live/*` JSON-RPC surface (gated by
+    # `rkat-rpc --live-ws`). Result shapes come from `meerkat-contracts`
+    # (regenerated into `meerkat/generated/types.py` as `LiveOpenResult`,
+    # `LiveStatusResult`, etc.). I52 + I53.
+    #
+    # CC5/CC6: `capabilities` and `continuity` on `LiveOpenResult` are now
+    # typed wire mirrors:
+    #   * `result["capabilities"]` is shaped like
+    #     `meerkat.types.WireLiveChannelCapabilities` — a dict with typed
+    #     boolean fields (`image_in`, `video_in`, `transcript_supported`,
+    #     `barge_in_supported`, `provider_native_resume`, `audio_in`,
+    #     `audio_out`, `text_in`, `text_out`).
+    #   * `result["continuity"]` is shaped like
+    #     `meerkat.types.WireLiveContinuityMode` — a tagged dict with
+    #     `mode: "fresh" | "transcript_only" | "degraded" | "provider_native_resume"`.
+    #     The `provider_native_resume` variant additionally carries
+    #     `provider_session_id: str`.
+    # Consumers route on `result["continuity"]["mode"]` and read
+    # capability booleans by name. Static type checkers (mypy / pyright)
+    # validate field access via the regenerated types in
+    # `meerkat.generated.types`.
+
+    async def live_open(
+        self,
+        session_id: str,
+        turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+    ) -> dict[str, Any]:
+        """Open a live audio/text channel for a session. Wraps `live/open`.
+
+        Returns a dict shaped like `meerkat.types.LiveOpenResult` with keys
+        `channel_id`, `transport`, `capabilities`, and `continuity`. The
+        `capabilities` value is shaped like
+        `meerkat.types.WireLiveChannelCapabilities` (typed booleans:
+        `audio_in`, `audio_out`, `text_in`, `text_out`, `image_in`,
+        `video_in`, `transcript_supported`, `barge_in_supported`,
+        `provider_native_resume`). The `continuity` value is shaped like
+        `meerkat.types.WireLiveContinuityMode` (tagged on `mode`; the
+        `provider_native_resume` variant additionally carries
+        `provider_session_id`). CC5/CC6.
+
+        R4-2 (P2): the optional ``turning_mode`` argument selects between
+        the provider-managed flow (server VAD owns commits) and the
+        explicit-commit flow (client owns commits). The G9 typed text-only
+        ``live_commit_input(channel_id, response_modality="text")`` path
+        requires ``"explicit_commit"`` because the OpenAI realtime API
+        rejects ``input_audio_buffer.commit`` unless the session was
+        opened with explicit-commit semantics. Defaults to ``None``,
+        which omits the field on the wire — the server treats omitted as
+        ``"provider_managed"`` for back-compat.
+        """
+        params: dict[str, Any] = {"session_id": session_id}
+        if turning_mode is not None:
+            params["turning_mode"] = turning_mode
+        return await self._request("live/open", params)
+
+    async def live_status(self, channel_id: str) -> dict[str, Any]:
+        """Get the status of a live channel. Wraps `live/status`.
+
+        Returns the `LiveStatusResult` shape: `channel_id`, `status`.
+        """
+        return await self._request("live/status", {"channel_id": channel_id})
+
+    async def live_close(self, channel_id: str) -> dict[str, Any]:
+        """Close a live channel. Wraps `live/close`."""
+        return await self._request("live/close", {"channel_id": channel_id})
+
+    async def live_send_input_text(
+        self, channel_id: str, text: str
+    ) -> dict[str, Any]:
+        """Send a text input chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::Text { text } }` (the nested-shape form
+        per `BREAKING_LIVE_WIRE_FORMAT_V1`).
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {"kind": "text", "text": text},
+            },
         )
-        return RuntimeRealtimeAttachmentStatusResult(**raw)
+
+    async def live_send_input_audio(
+        self,
+        channel_id: str,
+        data_base64: str,
+        sample_rate_hz: int,
+        channels: int,
+    ) -> dict[str, Any]:
+        """Send a base64-encoded audio chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::Audio { data, sample_rate_hz, channels } }`.
+        Caller is responsible for encoding the PCM payload as base64; mismatched
+        sample rates or channel counts will be rejected by the adapter.
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {
+                    "kind": "audio",
+                    "data": data_base64,
+                    "sample_rate_hz": sample_rate_hz,
+                    "channels": channels,
+                },
+            },
+        )
+
+    async def live_send_input_image(
+        self,
+        channel_id: str,
+        mime: str,
+        data_base64: str,
+    ) -> dict[str, Any]:
+        """Send a base64-encoded image input chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::Image { mime, data } }`. ``mime`` is the
+        IANA MIME type (``image/png``, ``image/jpeg``, ``image/webp``, …)
+        and ``data_base64`` is the raw image bytes encoded as standard
+        base64. Adapters that do not implement image input (today: every
+        provider Meerkat ships) reject with the typed
+        ``LiveAdapterErrorCode::ConfigRejected { reason:
+        "image_input_not_implemented" }``.
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {
+                    "kind": "image",
+                    "mime": mime,
+                    "data": data_base64,
+                },
+            },
+        )
+
+    async def live_send_input_video_frame(
+        self,
+        channel_id: str,
+        codec: str,
+        data_base64: str,
+        timestamp_ms: int,
+    ) -> dict[str, Any]:
+        """Send a base64-encoded video-frame input chunk to a live channel.
+
+        Wraps `live/send_input` with `LiveSendInputParams { channel_id,
+        chunk: LiveInputChunkWire::VideoFrame { codec, data,
+        timestamp_ms } }`. ``codec`` is the frame encoding (``vp8``,
+        ``vp9``, ``h264``, ``image/jpeg`` for keyframe-as-image transports,
+        …); ``timestamp_ms`` is the presentation timestamp the adapter
+        will stamp into the provider envelope so frames remain ordered.
+        Adapters that do not implement video input (today: every provider
+        Meerkat ships) reject with the typed
+        ``LiveAdapterErrorCode::ConfigRejected { reason:
+        "video_frame_input_not_implemented" }``.
+        """
+        return await self._request(
+            "live/send_input",
+            {
+                "channel_id": channel_id,
+                "chunk": {
+                    "kind": "video_frame",
+                    "codec": codec,
+                    "data": data_base64,
+                    "timestamp_ms": timestamp_ms,
+                },
+            },
+        )
+
+    async def live_commit_input(
+        self,
+        channel_id: str,
+        response_modality: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit any buffered input on a live channel. Wraps `live/commit_input`.
+
+        G9 (P2): the optional ``response_modality`` argument lets the caller
+        request a text-only response on an audio-first channel without
+        flipping the channel-wide modality. Pass ``"audio"`` (channel
+        default for OpenAI realtime) or ``"text"`` to suppress audio output
+        for this single response. ``None`` keeps the channel default.
+        """
+        params: dict[str, Any] = {"channel_id": channel_id}
+        if response_modality is not None:
+            params["response_modality"] = {"modality": response_modality}
+        return await self._request("live/commit_input", params)
+
+    async def live_interrupt(self, channel_id: str) -> dict[str, Any]:
+        """Interrupt the in-progress assistant turn on a live channel.
+
+        Wraps `live/interrupt`.
+        """
+        return await self._request("live/interrupt", {"channel_id": channel_id})
+
+    async def live_truncate(
+        self,
+        channel_id: str,
+        item_id: str,
+        content_index: int,
+        audio_played_ms: int,
+    ) -> dict[str, Any]:
+        """Truncate the assistant output on a live channel at the
+        client-tracked playback cursor. Wraps `live/truncate`.
+        """
+        return await self._request(
+            "live/truncate",
+            {
+                "channel_id": channel_id,
+                "item_id": item_id,
+                "content_index": content_index,
+                "audio_played_ms": audio_played_ms,
+            },
+        )
+
+    async def live_refresh(self, channel_id: str) -> LiveRefreshResult:
+        """Apply mutable session config (instructions / tools / audio) to an
+        open live channel. Wraps ``live/refresh``.
+
+        **Does NOT replay canonical history.** Refresh enqueues a single
+        ``session.update`` carrying the latest projection snapshot's mutable
+        config fields. History seeding is owned by ``live/open``; refresh is
+        config-only by design — re-seeding the transcript on every refresh
+        would compound the provider conversation by N+1 every call.
+
+        **Identity changes require close + reopen.** Refresh validates that
+        ``model_id`` and ``provider_id`` match the channel's currently-open
+        identity and rejects swaps with a typed adapter-level error — the
+        OpenAI Realtime API does not accept a mutable ``model`` on
+        ``session.update``.
+
+        R4-5 (P3): the result is a typed
+        :class:`meerkat.generated.types.LiveRefreshResult` carrying both the
+        typed ``status`` discriminator (today: always ``"queued"``; the
+        wire enum is open so future variants like ``applied_sync`` can land
+        without breaking the shape) and the legacy ``refresh_enqueued: True``
+        back-compat boolean. Refresh completion is asynchronous (the adapter
+        pump applies the ``session.update`` after the host accepts the
+        queued command); the realtime stream is the source of truth for the
+        actual outcome (failures surface as
+        :class:`meerkat.types.WireLiveAdapterObservation` ``error``).
+        """
+        raw = await self._request(
+            "live/refresh",
+            {"channel_id": channel_id},
+        )
+        return LiveRefreshResult(
+            refresh_enqueued=bool(raw.get("refresh_enqueued", False)),
+            status=cast("LiveRefreshStatus", raw.get("status", "queued")),
+        )
+
+    @staticmethod
+    def parse_live_observation(raw: dict[str, Any]) -> dict[str, Any]:
+        """Type-narrow an inbound live-adapter observation against
+        :class:`meerkat.types.WireLiveAdapterObservation`.
+
+        Observations are streamed as JSON objects on the live-channel WS
+        transport returned by ``live/open``. Each object carries an
+        internally-tagged ``observation`` discriminator (``ready``,
+        ``assistant_audio_chunk``, ``command_rejected``, …). The Meerkat
+        SDK does not own the WS transport (the browser/Python client opens
+        the URL from ``LiveOpenResult.transport`` directly), so this helper
+        is a no-op cast that exists so callers can type-narrow inbound
+        frames against the regenerated ``WireLiveAdapterObservation``
+        TypedDict union without copying the discriminator wiring.
+
+        Example:
+            obs = MeerkatClient.parse_live_observation(json.loads(frame))
+            if obs["observation"] == "assistant_audio_chunk":
+                # Type-narrowed: obs["item_id"], obs["response_id"],
+                # obs["content_index"] are all known optional str / int.
+                truncate_at(obs.get("item_id"), obs.get("content_index"))
+            elif obs["observation"] == "command_rejected":
+                # Typed channel-survives error (R5-9).
+                handle_rejection(obs["code"], obs["message"])
+
+        FIX-SDK-OBS: closes the verifier gap that left
+        ``WireLiveAdapterObservation`` invisible at the SDK boundary.
+        Validation is deferred to the static type checker (mypy /
+        pyright); the helper raises ``ValueError`` only if the
+        ``observation`` discriminator is missing.
+        """
+        if not isinstance(raw, dict):
+            raise ValueError("live observation must be a JSON object")
+        if "observation" not in raw:
+            raise ValueError(
+                "live observation missing `observation` discriminator"
+            )
+        return raw
 
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]
@@ -2483,25 +2758,6 @@ class MeerkatClient:
             "mob/list_members_matching",
             {"mob_id": mob_id, "filter": filter},
         )
-
-    async def realtime_open_info(
-        self, request: RealtimeOpenRequest | dict[str, Any]
-    ) -> RealtimeOpenInfo:
-        raw = await self._request("realtime/open_info", _wire_params(request))
-        return RealtimeOpenInfo(**raw)
-
-    async def realtime_status(self, params: dict[str, Any]) -> RealtimeStatusResult:
-        raw = await self._request("realtime/status", _wire_params(params))
-        status_raw = raw.get("status", {})
-        if isinstance(status_raw, dict):
-            raw["status"] = RealtimeChannelStatus(**status_raw)
-        return RealtimeStatusResult(**raw)
-
-    async def realtime_capabilities(
-        self, params: dict[str, Any]
-    ) -> RealtimeCapabilitiesResult:
-        raw = await self._request("realtime/capabilities", _wire_params(params))
-        return RealtimeCapabilitiesResult(**raw)
 
     # -- Transport ---------------------------------------------------------
 
@@ -2657,10 +2913,13 @@ class MeerkatClient:
         state_root: str | None,
         context_root: str | None,
         user_config_root: str | None,
+        live_ws: bool,
     ) -> list[str]:
         if legacy:
             return ["rpc"]
-        args: list[str] = ["--realtime-ws", "127.0.0.1:0"]
+        args: list[str] = []
+        if live_ws:
+            args.extend(["--live-ws", "127.0.0.1:0"])
         if isolated:
             args.append("--isolated")
         if realm_id:
@@ -3036,6 +3295,10 @@ class MeerkatClient:
             block_data = {}
         blob_ref = block_data.get("blob_ref")
         blob_id = blob_ref.get("blob_id") if isinstance(blob_ref, dict) else None
+        # Lane provenance for transcript blocks (typed enum on the wire,
+        # serialized as snake_case string — currently only ``"spoken"``).
+        source_raw = block_data.get("source")
+        source = str(source_raw) if isinstance(source_raw, str) else None
         return SessionAssistantBlock(
             block_type=data.get("block_type", ""),
             text=block_data.get("text"),
@@ -3049,6 +3312,7 @@ class MeerkatClient:
             height=MeerkatClient._parse_int(block_data.get("height")) if "height" in block_data else None,
             revised_prompt=block_data.get("revised_prompt") if isinstance(block_data.get("revised_prompt"), dict) else None,
             meta=block_data.get("meta"),
+            source=source,
         )
 
     @staticmethod

@@ -200,6 +200,10 @@ async fn main() -> anyhow::Result<()> {
     // ── Hive agent: SessionRuntime with mob tools ───────────────────────────
     let hive_config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(meerkat_core::MemoryConfigStore::new(hive_config.clone()));
+    // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
+    // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
+    // serve_tcp form the canonical RPC-host triad. Lifting these would require an
+    // alternate transport stack; this surface legitimately owns the RPC-host role.
     let mut hive_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
         hive_factory,
         hive_config,
@@ -231,6 +235,10 @@ async fn main() -> anyhow::Result<()> {
         let hive_config_store_clone = Arc::clone(&hive_config_store);
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{hive_rpc_port}");
+            // RPC-host: inline-hosted TCP JSON-RPC server entry point.
+            // serve_tcp is the canonical RPC-host transport binding paired with the
+            // SessionRuntime + NotificationSink constructed above; this surface owns
+            // the RPC-host role and cannot be lifted without replacing the transport.
             if let Err(e) =
                 meerkat_rpc::serve_tcp(&addr, hive_runtime_clone, hive_config_store_clone, None)
                     .await

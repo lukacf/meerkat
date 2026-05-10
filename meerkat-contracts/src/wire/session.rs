@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    TranscriptEditRunningBehavior, TranscriptReplacement, VideoData,
+    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -418,6 +418,14 @@ pub enum WireAssistantBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
+    /// Spoken-transcript output (provider audio output → text). Distinct
+    /// from `Text` so callers can render or filter by lane provenance.
+    Transcript {
+        text: String,
+        source: WireTranscriptSource,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        meta: Option<WireProviderMeta>,
+    },
     Reasoning {
         #[serde(default)]
         text: String,
@@ -458,7 +466,70 @@ pub enum WireAssistantBlock {
         revised_prompt: meerkat_core::RevisedPromptDisposition,
         meta: meerkat_core::ProviderImageMetadata,
     },
+    #[serde(other)]
     Unknown,
+}
+
+/// Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
+/// for spoken-transcript blocks.
+///
+/// R7-4 (P3 dogma): the previous shape used a wildcard arm in
+/// `From<TranscriptSource>` that fell through to `Spoken`, silently
+/// misattributing future core variants as user-spoken transcript. The
+/// fix mirrors the live-wire pattern from R5-3 / R6-5 — future core
+/// variants surface as `Unknown { debug }` (a fail-loud sentinel), and
+/// the reverse direction is `TryFrom` returning
+/// `WireConversionError::TranscriptSource { debug }` for the `Unknown`
+/// case rather than fabricating a typed `Spoken`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireTranscriptSource {
+    Spoken,
+    /// R7-4 (P3 dogma): explicit fail-loud variant for unknown core
+    /// variants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;
+    /// when a future variant lands without an explicit arm in the wire
+    /// `From` impl, the conversion surfaces as `Unknown { debug }` rather
+    /// than silently coercing into `Spoken` — a "plausible lie" that would
+    /// mark a non-spoken provenance as user-voice on the wire. SDK
+    /// consumers route on the `kind: "unknown"` discriminator and treat
+    /// it as unrecognized — never as `Spoken`.
+    ///
+    /// **When a new core variant is added, add an explicit arm in the
+    /// forward `From` impl above this variant — `Unknown` is the floor,
+    /// not the destination.**
+    Unknown {
+        debug: String,
+    },
+}
+
+impl From<TranscriptSource> for WireTranscriptSource {
+    fn from(value: TranscriptSource) -> Self {
+        match value {
+            TranscriptSource::Spoken => Self::Spoken,
+            // Core enum is `#[non_exhaustive]`. R7-4 (P3 dogma): surface
+            // unknown variants explicitly via `Unknown { debug }` rather
+            // than silently coercing to `Spoken`. **When a new core
+            // variant is added, add an explicit arm above this comment.**
+            other => Self::Unknown {
+                debug: format!("{other:?}"),
+            },
+        }
+    }
+}
+
+impl TryFrom<WireTranscriptSource> for TranscriptSource {
+    type Error = crate::wire::error::WireConversionError;
+
+    fn try_from(value: WireTranscriptSource) -> Result<Self, Self::Error> {
+        match value {
+            WireTranscriptSource::Spoken => Ok(Self::Spoken),
+            WireTranscriptSource::Unknown { debug } => {
+                Err(crate::wire::error::WireConversionError::TranscriptSource { debug })
+            }
+        }
+    }
 }
 
 impl From<AssistantBlock> for WireAssistantBlock {
@@ -466,6 +537,11 @@ impl From<AssistantBlock> for WireAssistantBlock {
         match value {
             AssistantBlock::Text { text, meta } => Self::Text {
                 text,
+                meta: meta.map(|m| (*m).into()),
+            },
+            AssistantBlock::Transcript { text, source, meta } => Self::Transcript {
+                text,
+                source: source.into(),
                 meta: meta.map(|m| (*m).into()),
             },
             AssistantBlock::Reasoning { text, meta } => Self::Reasoning {
@@ -517,6 +593,126 @@ impl From<AssistantBlock> for WireAssistantBlock {
             },
             _ => Self::Unknown,
         }
+    }
+}
+
+/// CC1 (FIX-A): inverse of `From<ProviderMeta> for WireProviderMeta`.
+///
+/// Returns `None` for `WireProviderMeta::Unknown` (the wire-side sink for
+/// future provider variants we don't yet recognize). Caller should drop
+/// the meta in that case rather than fabricate a typed shape. Returns
+/// `Some(...)` for every typed variant — the conversion is lossless for
+/// the four typed cases.
+fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
+    match value {
+        WireProviderMeta::Anthropic { signature } => Some(ProviderMeta::Anthropic { signature }),
+        WireProviderMeta::AnthropicRedacted { data } => {
+            Some(ProviderMeta::AnthropicRedacted { data })
+        }
+        WireProviderMeta::AnthropicCompaction { content } => {
+            Some(ProviderMeta::AnthropicCompaction { content })
+        }
+        WireProviderMeta::Gemini { thought_signature } => {
+            Some(ProviderMeta::Gemini { thought_signature })
+        }
+        WireProviderMeta::OpenAi {
+            id,
+            encrypted_content,
+            phase,
+        } => Some(ProviderMeta::OpenAi {
+            id,
+            encrypted_content,
+            phase,
+        }),
+        WireProviderMeta::Unknown => None,
+    }
+}
+
+/// CC1 (FIX-A) / R7-5 (P3 dogma): inverse of
+/// `From<AssistantBlock> for WireAssistantBlock`.
+///
+/// Mirrors the forward direction arm-for-arm. `WireAssistantBlock::Unknown`
+/// is the wire-side sink for future core variants we don't yet recognize;
+/// the inverse cannot fabricate a typed `AssistantBlock` from it.
+///
+/// R7-4 (P3 dogma) promoted this from `From` to `TryFrom` so the inner
+/// `WireTranscriptSource::Unknown` can propagate via `?` instead of
+/// silently fabricating a `Spoken` provenance.
+///
+/// R7-5 (P3 dogma) replaced the previous fabrication of an empty
+/// `AssistantBlock::Text { "" }` for the `Unknown` arm with a typed
+/// [`WireConversionError::AssistantBlock`] error. SDK consumers and
+/// upstream callers now see a typed conversion failure rather than a
+/// zero-length text block silently injected into the canonical
+/// transcript.
+///
+/// Pre-1.0 dogma: when a new `AssistantBlock` variant lands, add an
+/// explicit arm both here and in the forward direction.
+impl TryFrom<WireAssistantBlock> for AssistantBlock {
+    type Error = crate::wire::error::WireConversionError;
+
+    fn try_from(value: WireAssistantBlock) -> Result<Self, Self::Error> {
+        Ok(match value {
+            WireAssistantBlock::Text { text, meta } => Self::Text {
+                text,
+                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+            },
+            WireAssistantBlock::Transcript { text, source, meta } => Self::Transcript {
+                text,
+                source: TranscriptSource::try_from(source)?,
+                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+            },
+            WireAssistantBlock::Reasoning { text, meta } => Self::Reasoning {
+                text,
+                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+            },
+            WireAssistantBlock::ToolUse {
+                id,
+                name,
+                args,
+                meta,
+            } => Self::ToolUse {
+                id,
+                name,
+                // Pass-through: opaque from provider to dispatcher; mirrors
+                // the forward direction's preservation of `Box<RawValue>`.
+                args,
+                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+            },
+            WireAssistantBlock::ServerToolContent {
+                id,
+                name,
+                content,
+                meta,
+            } => Self::ServerToolContent {
+                id,
+                name,
+                content,
+                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+            },
+            WireAssistantBlock::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
+            } => Self::Image {
+                image_id,
+                blob_ref,
+                media_type,
+                width,
+                height,
+                revised_prompt,
+                meta,
+            },
+            WireAssistantBlock::Unknown => {
+                return Err(crate::wire::error::WireConversionError::AssistantBlock {
+                    debug: "WireAssistantBlock::Unknown".to_string(),
+                });
+            }
+        })
     }
 }
 
@@ -861,7 +1057,7 @@ mod tests {
             updated_at: 2000,
             message_count: 3,
             is_active: true,
-            model: "gpt-realtime".to_string(),
+            model: "gpt-realtime-2".to_string(),
             provider: "openai".to_string(),
             last_assistant_text: None,
             labels: BTreeMap::new(),
@@ -980,6 +1176,13 @@ mod tests {
                         },
                         WireAssistantBlock::Text {
                             text: "done".to_string(),
+                            meta: None,
+                        },
+                        // T3-extension (FIX-A): pin spoken-transcript
+                        // round-trip alongside Text + Reasoning.
+                        WireAssistantBlock::Transcript {
+                            text: "spoken hi".to_string(),
+                            source: WireTranscriptSource::Spoken,
                             meta: None,
                         },
                     ],
@@ -1335,5 +1538,142 @@ mod tests {
             }
             _ => panic!("expected ToolResults message"),
         }
+    }
+
+    /// CC1 (FIX-A): assert `From<AssistantBlock> for WireAssistantBlock`
+    /// is symmetric with `From<WireAssistantBlock> for AssistantBlock`
+    /// for every typed variant. Round-trip core → wire → core must
+    /// preserve `Text`, `Reasoning`, `Transcript` (with `meta`),
+    /// `ToolUse` (opaque args), `ServerToolContent`, and `Image`.
+    #[test]
+    fn test_assistant_block_core_wire_core_round_trip_symmetric() {
+        use meerkat_core::{
+            AssistantImageId, BlobId, BlobRef, MediaType, ProviderImageMetadata,
+            RevisedPromptDisposition,
+        };
+        use uuid::Uuid;
+
+        let cases: Vec<AssistantBlock> = vec![
+            AssistantBlock::Text {
+                text: "display lane".to_string(),
+                meta: Some(Box::new(ProviderMeta::Anthropic {
+                    signature: "sig-1".to_string(),
+                })),
+            },
+            AssistantBlock::Reasoning {
+                text: "thinking".to_string(),
+                meta: Some(Box::new(ProviderMeta::OpenAi {
+                    id: "rs_1".to_string(),
+                    encrypted_content: Some("enc".to_string()),
+                    phase: Some("draft".to_string()),
+                })),
+            },
+            AssistantBlock::Transcript {
+                text: "spoken".to_string(),
+                source: TranscriptSource::Spoken,
+                meta: Some(Box::new(ProviderMeta::Gemini {
+                    thought_signature: "ts-1".to_string(),
+                })),
+            },
+            AssistantBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "search".to_string(),
+                args: serde_json::value::RawValue::from_string(r#"{"q":"rust"}"#.to_string())
+                    .expect("fixture args literal is valid JSON"),
+                meta: None,
+            },
+            AssistantBlock::ServerToolContent {
+                id: Some("st-1".to_string()),
+                name: "web_search".to_string(),
+                content: serde_json::json!({"hits": 3}),
+                meta: None,
+            },
+            AssistantBlock::Image {
+                image_id: AssistantImageId::new(Uuid::nil()),
+                blob_ref: BlobRef {
+                    blob_id: BlobId::new("blob-fixture"),
+                    media_type: "image/png".to_string(),
+                },
+                media_type: MediaType::new("image/png"),
+                width: 64,
+                height: 64,
+                revised_prompt: RevisedPromptDisposition::NotRequested,
+                meta: ProviderImageMetadata::NotEmitted,
+            },
+        ];
+
+        for case in cases {
+            let snapshot = format!("{case:?}");
+            let wire: WireAssistantBlock = case.clone().into();
+            let back: AssistantBlock =
+                AssistantBlock::try_from(wire).expect("typed wire variants round-trip");
+            // `AssistantBlock` is `PartialEq` (custom impl handles
+            // `ToolUse.args` via byte-equivalence on the underlying JSON).
+            assert_eq!(case, back, "round trip lost data for {snapshot}");
+        }
+    }
+
+    /// R7-4 (P3 dogma): the wire enum must carry an explicit `Unknown`
+    /// variant so future core variants surface as fail-loud sentinels
+    /// rather than silently coercing into `Spoken`. This test pins the
+    /// shape: `Unknown { debug }` exists, round-trips through JSON with
+    /// the `kind: "unknown"` discriminator, and is *not* equal to
+    /// `Spoken` after a round-trip.
+    #[test]
+    fn unknown_transcript_source_does_not_become_spoken() {
+        let wire = WireTranscriptSource::Unknown {
+            debug: "future_lane".to_string(),
+        };
+        let json = serde_json::to_value(&wire).unwrap();
+        assert_eq!(json["kind"], "unknown");
+        let parsed: WireTranscriptSource = serde_json::from_value(json).unwrap();
+        assert!(matches!(parsed, WireTranscriptSource::Unknown { ref debug }
+            if debug == "future_lane"));
+        assert!(!matches!(parsed, WireTranscriptSource::Spoken));
+    }
+
+    /// R7-4 (P3 dogma): the reverse direction `Wire -> core` returns a
+    /// typed error for `Unknown`, never silently fabricating a typed
+    /// `Spoken` value.
+    #[test]
+    fn wire_to_core_transcript_source_unknown_returns_typed_error() {
+        let wire = WireTranscriptSource::Unknown {
+            debug: "FutureSpokenSource".to_string(),
+        };
+        let err = TranscriptSource::try_from(wire).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::wire::error::WireConversionError::TranscriptSource { ref debug }
+                if debug == "FutureSpokenSource"
+        ));
+    }
+
+    /// R7-4 (P3 dogma): the typed `Unknown` variant must not poison
+    /// known-variant round-trips.
+    #[test]
+    fn known_transcript_sources_round_trip() {
+        let wire: WireTranscriptSource = TranscriptSource::Spoken.into();
+        assert!(matches!(wire, WireTranscriptSource::Spoken));
+        let back = TranscriptSource::try_from(wire).unwrap();
+        assert!(matches!(back, TranscriptSource::Spoken));
+    }
+
+    /// R7-5 (P3 dogma): the reverse `WireAssistantBlock::Unknown -> core`
+    /// path must surface a typed [`WireConversionError::AssistantBlock`]
+    /// rather than fabricating an empty `AssistantBlock::Text { "" }`.
+    /// Closes the silent zero-length-text injection regression that the
+    /// previous `From` impl exhibited for unknown future wire variants.
+    #[test]
+    fn wire_to_core_assistant_block_unknown_returns_typed_error() {
+        let wire = WireAssistantBlock::Unknown;
+        let err = AssistantBlock::try_from(wire).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::wire::error::WireConversionError::AssistantBlock { ref debug }
+                    if debug == "WireAssistantBlock::Unknown"
+            ),
+            "expected WireConversionError::AssistantBlock, got {err:?}"
+        );
     }
 }

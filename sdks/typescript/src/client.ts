@@ -43,13 +43,17 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
-  type RealtimeCapabilitiesResult,
-  type RealtimeOpenInfo,
-  type RealtimeOpenRequest,
-  type RealtimeStatusResult,
+  type LiveChannelParams,
+  type LiveCommitInputParams,
+  type LiveOpenParams,
+  type LiveOpenResult,
+  type LiveRefreshResult,
+  type LiveSendInputParams,
+  type LiveStatusResult,
+  type LiveTruncateParams,
+  type WireLiveAdapterObservation,
   type MobTurnStartParams,
   type MobRotateSupervisorResult,
-  type RuntimeRealtimeAttachmentStatusResult,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
@@ -203,6 +207,7 @@ export interface ConnectOptions {
   stateRoot?: string;
   contextRoot?: string;
   userConfigRoot?: string;
+  liveWs?: boolean;
 }
 
 interface WireSkillKey {
@@ -397,13 +402,23 @@ export class MeerkatClient {
     const resolved = await MeerkatClient.resolveBinaryPath(this.rkatPath);
     this.rkatPath = resolved.command;
 
-    const args = MeerkatClient.buildArgs(resolved.useLegacySubcommand, options);
-    if (resolved.useLegacySubcommand && args.length > 1) {
+    const hasAdvancedOptions = Boolean(
+      options?.isolated
+        || options?.realmId
+        || options?.instanceId
+        || options?.realmBackend
+        || options?.stateRoot
+        || options?.contextRoot
+        || options?.userConfigRoot
+        || options?.liveWs,
+    );
+    if (resolved.useLegacySubcommand && hasAdvancedOptions) {
       throw new MeerkatError(
         "LEGACY_BINARY_UNSUPPORTED",
         "Realm/context options require the standalone rkat-rpc binary. Install rkat-rpc and retry.",
       );
     }
+    const args = MeerkatClient.buildArgs(resolved.useLegacySubcommand, options);
 
     this.process = spawn(this.rkatPath, args, {
       stdio: ["pipe", "pipe", "pipe"],
@@ -1376,24 +1391,13 @@ export class MeerkatClient {
     error?: string;
     tokensUsed: number;
     isFinal: boolean;
-    liveAttachmentStatus?:
-      | "unattached"
-      | "intent_present_unbound"
-      | "binding_not_ready"
-      | "binding_ready"
-      | "replacement_pending"
-      | "reattach_required";
     peerConnectivity?: {
       reachablePeerCount: number;
       unknownPeerCount: number;
       unreachablePeers: Array<{ peer: string; reason?: string }>;
     };
     resolvedCapabilities?: ResolvedModelCapabilities;
-    /**
-     * Diagnostic bridge-session id for status/continuity only. Realtime
-     * callers open `RealtimeChannel.mobMember(...)`; the server resolves the
-     * current binding behind the stable mob-member target.
-     */
+    /** Diagnostic bridge-session id for status/continuity only. */
     currentSessionId?: string;
   }> {
     const result = await this.request("mob/member_status", {
@@ -1410,16 +1414,6 @@ export class MeerkatClient {
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
       isFinal: Boolean(result.is_final),
-      liveAttachmentStatus:
-        typeof result.realtime_attachment_status === "string"
-          ? (result.realtime_attachment_status as
-              | "unattached"
-              | "intent_present_unbound"
-              | "binding_not_ready"
-              | "binding_ready"
-              | "replacement_pending"
-              | "reattach_required")
-          : undefined,
       peerConnectivity: rawConnectivity
         ? {
             reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),
@@ -2253,21 +2247,6 @@ export class MeerkatClient {
     return this.request("comms/peers", { session_id: sessionId });
   }
 
-  async runtimeRealtimeAttachmentStatus(
-    sessionId: string,
-  ): Promise<RuntimeRealtimeAttachmentStatusResult> {
-    const result = await this.request("session/realtime_attachment_status", {
-      session_id: sessionId,
-    });
-    if (typeof result.status !== "string" || result.status.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid session/realtime_attachment_status response: missing status",
-      );
-    }
-    return result as unknown as RuntimeRealtimeAttachmentStatusResult;
-  }
-
   /** Idempotent spawn: spawns or returns the existing member entry. */
   async mobEnsureMember(
     mobId: string,
@@ -2301,43 +2280,168 @@ export class MeerkatClient {
     });
   }
 
-  async realtimeOpenInfo(
-    request: RealtimeOpenRequest,
-  ): Promise<RealtimeOpenInfo> {
-    const result = await this.request("realtime/open_info", request);
-    if (typeof result.ws_url !== "string" || result.ws_url.length === 0) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid realtime/open_info response: missing ws_url",
-      );
-    }
-    return result as unknown as RealtimeOpenInfo;
+  // -- Live audio/text adapter (`live/*`) ---------------------------------
+  //
+  // Typed wrappers over the `live/*` JSON-RPC surface (gated by
+  // `rkat-rpc --live-ws`). Result types come from `meerkat-contracts`
+  // schemas regenerated into `./generated/types.ts`. See I52/I53.
+
+  async liveOpen(params: LiveOpenParams): Promise<LiveOpenResult> {
+    const result = await this.request("live/open", params as unknown as Record<string, unknown>);
+    return result as unknown as LiveOpenResult;
   }
 
-  async realtimeStatus(
-    params: { target: Record<string, unknown> },
-  ): Promise<RealtimeStatusResult> {
-    const result = await this.request("realtime/status", params);
-    if (typeof result.status !== "object" || result.status === null) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid realtime/status response: missing status",
-      );
-    }
-    return result as unknown as RealtimeStatusResult;
+  async liveStatus(params: LiveChannelParams): Promise<LiveStatusResult> {
+    const result = await this.request(
+      "live/status",
+      params as unknown as Record<string, unknown>,
+    );
+    return result as unknown as LiveStatusResult;
   }
 
-  async realtimeCapabilities(
-    params: { target: Record<string, unknown> },
-  ): Promise<RealtimeCapabilitiesResult> {
-    const result = await this.request("realtime/capabilities", params);
-    if (typeof result.capabilities !== "object" || result.capabilities === null) {
+  async liveClose(params: LiveChannelParams): Promise<void> {
+    await this.request("live/close", params as unknown as Record<string, unknown>);
+  }
+
+  async liveSendInput(params: LiveSendInputParams): Promise<void> {
+    await this.request("live/send_input", params as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * T11: typed helper to build an image `LiveInputChunkWire` and send it
+   * via `live/send_input`. `mime` is the IANA MIME type
+   * (`image/png`, `image/jpeg`, `image/webp`, …); `dataBase64` is the
+   * raw image bytes encoded as standard base64. Adapters that do not
+   * implement image input reject with
+   * `LiveAdapterErrorCode::ConfigRejected { reason:
+   * "image_input_not_implemented" }`.
+   */
+  async liveSendInputImage(
+    channelId: string,
+    mime: string,
+    dataBase64: string,
+  ): Promise<void> {
+    await this.request("live/send_input", {
+      channel_id: channelId,
+      chunk: { kind: "image", mime, data: dataBase64 },
+    });
+  }
+
+  /**
+   * T11: typed helper to build a video-frame `LiveInputChunkWire` and
+   * send it via `live/send_input`. `codec` is the frame encoding (`vp8`,
+   * `vp9`, `h264`, `image/jpeg` for keyframe-as-image transports, …);
+   * `dataBase64` is the encoded frame bytes encoded as standard base64;
+   * `timestampMs` is the presentation timestamp the adapter will stamp
+   * into the provider envelope so frames remain ordered. Adapters that do
+   * not implement video input reject with
+   * `LiveAdapterErrorCode::ConfigRejected { reason:
+   * "video_frame_input_not_implemented" }`.
+   */
+  async liveSendInputVideoFrame(
+    channelId: string,
+    codec: string,
+    dataBase64: string,
+    timestampMs: number,
+  ): Promise<void> {
+    await this.request("live/send_input", {
+      channel_id: channelId,
+      chunk: {
+        kind: "video_frame",
+        codec,
+        data: dataBase64,
+        timestamp_ms: timestampMs,
+      },
+    });
+  }
+
+  async liveCommitInput(params: LiveCommitInputParams): Promise<void> {
+    await this.request("live/commit_input", params as unknown as Record<string, unknown>);
+  }
+
+  async liveInterrupt(params: LiveChannelParams): Promise<void> {
+    await this.request("live/interrupt", params as unknown as Record<string, unknown>);
+  }
+
+  async liveTruncate(params: LiveTruncateParams): Promise<void> {
+    await this.request("live/truncate", params as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * Apply mutable session config (instructions / tools / audio) to an open
+   * live channel. Wraps `live/refresh`.
+   *
+   * **Does NOT replay canonical history.** Refresh enqueues a single
+   * `session.update` carrying the latest projection snapshot's mutable
+   * config fields. History seeding is owned by `live/open`; refresh is
+   * config-only by design.
+   *
+   * **Identity changes require close + reopen.** Refresh validates that
+   * `model_id` and `provider_id` match the channel's currently-open
+   * identity and rejects swaps with a typed adapter-level error.
+   *
+   * R4-5 (P3): the result is a typed `LiveRefreshResult` carrying both the
+   * typed `status` discriminator (today: always `"queued"`; the wire enum
+   * is open so future variants like `applied_sync` can land without breaking
+   * the shape) and the legacy `refresh_enqueued: true` back-compat boolean.
+   * The host's `send_command` returns when the command has been queued on
+   * the adapter's mpsc channel; the adapter pump applies the
+   * `session.update` asynchronously, and the realtime stream is the source
+   * of truth for the actual outcome (failures surface as
+   * `WireLiveAdapterObservation::Error`).
+   */
+  async liveRefresh(params: LiveChannelParams): Promise<LiveRefreshResult> {
+    const result = await this.request(
+      "live/refresh",
+      params as unknown as Record<string, unknown>,
+    );
+    return result as unknown as LiveRefreshResult;
+  }
+
+  /**
+   * Type-narrow an inbound live-adapter observation against
+   * {@link WireLiveAdapterObservation}.
+   *
+   * Observations stream over the WS transport returned by `live/open` as
+   * JSON objects internally tagged on `observation` (`ready`,
+   * `assistant_audio_chunk`, `command_rejected`, …). The Meerkat SDK
+   * does not own the WS transport (browsers/Node clients connect the URL
+   * from `LiveOpenResult.transport` directly); this helper is a typed
+   * cast / runtime guard so callers can pattern-match each variant
+   * without re-typing the discriminator.
+   *
+   * Example:
+   * ```ts
+   * const obs = MeerkatClient.parseLiveObservation(JSON.parse(frame));
+   * switch (obs.observation) {
+   *   case "assistant_audio_chunk":
+   *     // Typed: obs.item_id, obs.response_id, obs.content_index — R5-4.
+   *     truncateAt(obs.item_id, obs.content_index);
+   *     break;
+   *   case "command_rejected":
+   *     // R5-9: typed channel-survives error.
+   *     handleRejection(obs.code, obs.message);
+   *     break;
+   * }
+   * ```
+   *
+   * FIX-SDK-OBS: closes the verifier gap that left
+   * `WireLiveAdapterObservation` invisible at the SDK boundary.
+   */
+  static parseLiveObservation(raw: unknown): WireLiveAdapterObservation {
+    if (raw === null || typeof raw !== "object") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
-        "Invalid realtime/capabilities response: missing capabilities",
+        "live observation must be a JSON object",
       );
     }
-    return result as unknown as RealtimeCapabilitiesResult;
+    if (!("observation" in raw)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "live observation missing `observation` discriminator",
+      );
+    }
+    return raw as WireLiveAdapterObservation;
   }
 
   // -- Auth + realm (Phase 4d) --------------------------------------------
@@ -3239,6 +3343,9 @@ export class MeerkatClient {
       height: blockData.height != null ? Number(blockData.height) : undefined,
       revisedPrompt,
       meta: blockData.meta as Record<string, unknown> | undefined,
+      // Lane provenance for transcript blocks (typed enum on the wire,
+      // serialized as a snake_case string — currently only "spoken").
+      source: typeof blockData.source === "string" ? blockData.source : undefined,
     };
   }
 
@@ -3514,8 +3621,9 @@ export class MeerkatClient {
 
   private static buildArgs(legacy: boolean, options?: ConnectOptions): string[] {
     if (legacy) return ["rpc"];
-    const args: string[] = ["--realtime-ws", "127.0.0.1:0"];
+    const args: string[] = [];
     if (!options) return args;
+    if (options.liveWs) args.push("--live-ws", "127.0.0.1:0");
     if (options.isolated) args.push("--isolated");
     if (options.realmId) args.push("--realm", options.realmId);
     if (options.instanceId) args.push("--instance", options.instanceId);

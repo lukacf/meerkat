@@ -1011,68 +1011,6 @@ impl std::fmt::Display for InteractionStreamState {
     serde::Serialize,
     serde::Deserialize,
 )]
-pub enum LiveTopologyPhase {
-    #[default]
-    #[serde(rename = "Idle")]
-    Idle,
-    #[serde(rename = "Reconfiguring")]
-    Reconfiguring,
-    #[serde(rename = "Detached")]
-    Detached,
-    #[serde(rename = "HostIdentityApplied")]
-    HostIdentityApplied,
-    #[serde(rename = "HostVisibilityApplied")]
-    HostVisibilityApplied,
-}
-impl LiveTopologyPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Reconfiguring => "Reconfiguring",
-            Self::Detached => "Detached",
-            Self::HostIdentityApplied => "HostIdentityApplied",
-            Self::HostVisibilityApplied => "HostVisibilityApplied",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for LiveTopologyPhase {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Idle" => Ok(Self::Idle),
-            "Reconfiguring" => Ok(Self::Reconfiguring),
-            "Detached" => Ok(Self::Detached),
-            "HostIdentityApplied" => Ok(Self::HostIdentityApplied),
-            "HostVisibilityApplied" => Ok(Self::HostVisibilityApplied),
-            other => Err(format!("invalid LiveTopologyPhase value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for LiveTopologyPhase {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for LiveTopologyPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
 pub enum LlmRetryFailureKind {
     #[default]
     #[serde(rename = "RateLimited")]
@@ -2178,288 +2116,6 @@ impl std::convert::TryFrom<String> for PreRunPhase {
     }
 }
 impl std::fmt::Display for PreRunPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeBindingState {
-    #[default]
-    #[serde(rename = "Unbound")]
-    Unbound,
-    #[serde(rename = "BindingNotReady")]
-    BindingNotReady,
-    #[serde(rename = "BindingReady")]
-    BindingReady,
-    #[serde(rename = "ReplacementPending")]
-    ReplacementPending,
-}
-impl RealtimeBindingState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Unbound => "Unbound",
-            Self::BindingNotReady => "BindingNotReady",
-            Self::BindingReady => "BindingReady",
-            Self::ReplacementPending => "ReplacementPending",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RealtimeBindingState {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Unbound" => Ok(Self::Unbound),
-            "BindingNotReady" => Ok(Self::BindingNotReady),
-            "BindingReady" => Ok(Self::BindingReady),
-            "ReplacementPending" => Ok(Self::ReplacementPending),
-            other => Err(format!("invalid RealtimeBindingState value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RealtimeBindingState {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RealtimeBindingState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProductTurnPhase {
-    #[default]
-    #[serde(rename = "Idle")]
-    Idle,
-    #[serde(rename = "AwaitingProgress")]
-    AwaitingProgress,
-    #[serde(rename = "Committed")]
-    Committed,
-    #[serde(rename = "OutputStarted")]
-    OutputStarted,
-    #[serde(rename = "Preemptible")]
-    Preemptible,
-}
-impl RealtimeProductTurnPhase {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::AwaitingProgress => "AwaitingProgress",
-            Self::Committed => "Committed",
-            Self::OutputStarted => "OutputStarted",
-            Self::Preemptible => "Preemptible",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RealtimeProductTurnPhase {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Idle" => Ok(Self::Idle),
-            "AwaitingProgress" => Ok(Self::AwaitingProgress),
-            "Committed" => Ok(Self::Committed),
-            "OutputStarted" => Ok(Self::OutputStarted),
-            "Preemptible" => Ok(Self::Preemptible),
-            other => Err(format!("invalid RealtimeProductTurnPhase value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RealtimeProductTurnPhase {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RealtimeProductTurnPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeProjectionFreshness {
-    #[default]
-    #[serde(rename = "Clean")]
-    Clean,
-    #[serde(rename = "StaleDeferred")]
-    StaleDeferred,
-    #[serde(rename = "StaleImmediate")]
-    StaleImmediate,
-}
-impl RealtimeProjectionFreshness {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Clean => "Clean",
-            Self::StaleDeferred => "StaleDeferred",
-            Self::StaleImmediate => "StaleImmediate",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RealtimeProjectionFreshness {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Clean" => Ok(Self::Clean),
-            "StaleDeferred" => Ok(Self::StaleDeferred),
-            "StaleImmediate" => Ok(Self::StaleImmediate),
-            other => Err(format!(
-                "invalid RealtimeProjectionFreshness value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RealtimeProjectionFreshness {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RealtimeProjectionFreshness {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeReconnectCycleState {
-    #[default]
-    #[serde(rename = "Idle")]
-    Idle,
-    #[serde(rename = "Reconnecting")]
-    Reconnecting,
-    #[serde(rename = "Exhausted")]
-    Exhausted,
-}
-impl RealtimeReconnectCycleState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Idle => "Idle",
-            Self::Reconnecting => "Reconnecting",
-            Self::Exhausted => "Exhausted",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RealtimeReconnectCycleState {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Idle" => Ok(Self::Idle),
-            "Reconnecting" => Ok(Self::Reconnecting),
-            "Exhausted" => Ok(Self::Exhausted),
-            other => Err(format!(
-                "invalid RealtimeReconnectCycleState value `{other}`"
-            )),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RealtimeReconnectCycleState {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RealtimeReconnectCycleState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum RealtimeReconnectPolicy {
-    #[default]
-    #[serde(rename = "CleanExit")]
-    CleanExit,
-    #[serde(rename = "ReattachAndRecover")]
-    ReattachAndRecover,
-}
-impl RealtimeReconnectPolicy {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::CleanExit => "CleanExit",
-            Self::ReattachAndRecover => "ReattachAndRecover",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for RealtimeReconnectPolicy {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "CleanExit" => Ok(Self::CleanExit),
-            "ReattachAndRecover" => Ok(Self::ReattachAndRecover),
-            other => Err(format!("invalid RealtimeReconnectPolicy value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for RealtimeReconnectPolicy {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for RealtimeReconnectPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -4178,16 +3834,6 @@ pub struct State {
     pub surface_removal_applied_at_turn: std::collections::BTreeMap<String, u64>,
     pub surface_phase: SurfacePhase,
     pub removal_timeout_ms: u64,
-    pub realtime_intent_present: bool,
-    pub realtime_binding_state: RealtimeBindingState,
-    pub realtime_binding_authority_epoch: Option<u64>,
-    pub realtime_reattach_required: bool,
-    pub realtime_next_authority_epoch: u64,
-    pub realtime_reconnect_cycle_state: RealtimeReconnectCycleState,
-    pub realtime_reconnect_attempt_count: u64,
-    pub realtime_reconnect_next_retry_at_ms: Option<u64>,
-    pub realtime_reconnect_deadline_at_ms: Option<u64>,
-    pub live_topology_phase: LiveTopologyPhase,
     pub mcp_server_states: std::collections::BTreeMap<McpServerId, McpServerState>,
     pub pending_peer_requests:
         std::collections::BTreeMap<PeerCorrelationId, OutboundPeerRequestState>,
@@ -4196,10 +3842,6 @@ pub struct State {
     pub last_session_context_updated_at_ms: u64,
     pub reserved_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
     pub attached_interaction_streams: std::collections::BTreeSet<PeerCorrelationId>,
-    pub realtime_product_turn_phase: RealtimeProductTurnPhase,
-    pub realtime_projection_freshness: RealtimeProjectionFreshness,
-    pub realtime_projection_frontier_ms: u64,
-    pub realtime_reconnect_policy: RealtimeReconnectPolicy,
     pub peer_ingress_owner_kind: PeerIngressOwnerKind,
     pub peer_ingress_comms_runtime_id: Option<CommsRuntimeId>,
     pub peer_ingress_mob_id: Option<MobId>,
@@ -4360,10 +4002,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RuntimeState {
         pub runtime_id: String,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RuntimeRealtimeAttachmentStatus {
-        pub session_id: SessionId,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ModelRoutingStatus {
@@ -4826,56 +4464,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct SurfaceShutdown {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProjectRealtimeIntent {
-        pub present: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BeginRealtimeBinding {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ReplaceRealtimeBinding {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct DetachRealtimeBinding {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RequireRealtimeReattach {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RequireRealtimeReattachForAuthority {
-        pub authority_epoch: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct PublishRealtimeSignal {
-        pub authority_epoch: u64,
-        pub next_binding_state: RealtimeBindingState,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BeginRealtimeReconnectCycle {
-        pub next_retry_at_ms: Option<u64>,
-        pub deadline_at_ms: Option<u64>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ScheduleRealtimeReconnectRetry {
-        pub next_retry_at_ms: Option<u64>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ExhaustRealtimeReconnectCycle {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClearRealtimeReconnectProgress {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct BeginLiveTopologyReconfigure {
-        pub authority_epoch: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct MarkLiveTopologyDetached {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ApplyLiveTopologyIdentity {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ApplyLiveTopologyVisibility {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct CompleteLiveTopology {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct AbortLiveTopologyBeforeDetach {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct FailLiveTopologyAfterDetach {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct McpServerConnectPending {
         pub server_id: McpServerId,
     }
@@ -4946,38 +4534,6 @@ pub mod inputs {
     pub struct InteractionStreamClosedEarly {
         pub corr_id: PeerCorrelationId,
     }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProductTurnInFlight {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProductTurnCommitted {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProductOutputStarted {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProductTurnInterrupted {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ProductTurnTerminal {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProjectionAdvanceObserved {
-        pub advanced_at_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProjectionRefreshed {
-        pub observed_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProjectionBaselineObserved {
-        pub observed_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProjectionReset {
-        pub baseline_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyRealtimeClientInputSubmitted {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyRealtimeMidTurnActivity {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct ClassifyRealtimeTurnTerminated {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AttachSessionIngress {
         pub comms_runtime_id: CommsRuntimeId,
@@ -5084,7 +4640,6 @@ pub enum Input {
     Ingest(inputs::Ingest),
     PublishEvent(inputs::PublishEvent),
     RuntimeState(inputs::RuntimeState),
-    RuntimeRealtimeAttachmentStatus(inputs::RuntimeRealtimeAttachmentStatus),
     ModelRoutingStatus(inputs::ModelRoutingStatus),
     SetModelRoutingBaseline(inputs::SetModelRoutingBaseline),
     RequestFiniteSwitchTurn(inputs::RequestFiniteSwitchTurn),
@@ -5186,24 +4741,6 @@ pub enum Input {
     SurfaceFinalizeRemovalForced(inputs::SurfaceFinalizeRemovalForced),
     SurfaceSnapshotAligned(inputs::SurfaceSnapshotAligned),
     SurfaceShutdown(inputs::SurfaceShutdown),
-    ProjectRealtimeIntent(inputs::ProjectRealtimeIntent),
-    BeginRealtimeBinding(inputs::BeginRealtimeBinding),
-    ReplaceRealtimeBinding(inputs::ReplaceRealtimeBinding),
-    DetachRealtimeBinding(inputs::DetachRealtimeBinding),
-    RequireRealtimeReattach(inputs::RequireRealtimeReattach),
-    RequireRealtimeReattachForAuthority(inputs::RequireRealtimeReattachForAuthority),
-    PublishRealtimeSignal(inputs::PublishRealtimeSignal),
-    BeginRealtimeReconnectCycle(inputs::BeginRealtimeReconnectCycle),
-    ScheduleRealtimeReconnectRetry(inputs::ScheduleRealtimeReconnectRetry),
-    ExhaustRealtimeReconnectCycle(inputs::ExhaustRealtimeReconnectCycle),
-    ClearRealtimeReconnectProgress(inputs::ClearRealtimeReconnectProgress),
-    BeginLiveTopologyReconfigure(inputs::BeginLiveTopologyReconfigure),
-    MarkLiveTopologyDetached(inputs::MarkLiveTopologyDetached),
-    ApplyLiveTopologyIdentity(inputs::ApplyLiveTopologyIdentity),
-    ApplyLiveTopologyVisibility(inputs::ApplyLiveTopologyVisibility),
-    CompleteLiveTopology(inputs::CompleteLiveTopology),
-    AbortLiveTopologyBeforeDetach(inputs::AbortLiveTopologyBeforeDetach),
-    FailLiveTopologyAfterDetach(inputs::FailLiveTopologyAfterDetach),
     McpServerConnectPending(inputs::McpServerConnectPending),
     McpServerConnected(inputs::McpServerConnected),
     McpServerFailed(inputs::McpServerFailed),
@@ -5221,18 +4758,6 @@ pub enum Input {
     InteractionStreamCompleted(inputs::InteractionStreamCompleted),
     InteractionStreamExpired(inputs::InteractionStreamExpired),
     InteractionStreamClosedEarly(inputs::InteractionStreamClosedEarly),
-    ProductTurnInFlight(inputs::ProductTurnInFlight),
-    ProductTurnCommitted(inputs::ProductTurnCommitted),
-    ProductOutputStarted(inputs::ProductOutputStarted),
-    ProductTurnInterrupted(inputs::ProductTurnInterrupted),
-    ProductTurnTerminal(inputs::ProductTurnTerminal),
-    RealtimeProjectionAdvanceObserved(inputs::RealtimeProjectionAdvanceObserved),
-    RealtimeProjectionRefreshed(inputs::RealtimeProjectionRefreshed),
-    RealtimeProjectionBaselineObserved(inputs::RealtimeProjectionBaselineObserved),
-    RealtimeProjectionReset(inputs::RealtimeProjectionReset),
-    ClassifyRealtimeClientInputSubmitted(inputs::ClassifyRealtimeClientInputSubmitted),
-    ClassifyRealtimeMidTurnActivity(inputs::ClassifyRealtimeMidTurnActivity),
-    ClassifyRealtimeTurnTerminated(inputs::ClassifyRealtimeTurnTerminated),
     AttachSessionIngress(inputs::AttachSessionIngress),
     AttachMobIngress(inputs::AttachMobIngress),
     DetachIngress(inputs::DetachIngress),
@@ -5283,7 +4808,6 @@ impl Input {
             Self::Ingest(_) => InputKind::Ingest,
             Self::PublishEvent(_) => InputKind::PublishEvent,
             Self::RuntimeState(_) => InputKind::RuntimeState,
-            Self::RuntimeRealtimeAttachmentStatus(_) => InputKind::RuntimeRealtimeAttachmentStatus,
             Self::ModelRoutingStatus(_) => InputKind::ModelRoutingStatus,
             Self::SetModelRoutingBaseline(_) => InputKind::SetModelRoutingBaseline,
             Self::RequestFiniteSwitchTurn(_) => InputKind::RequestFiniteSwitchTurn,
@@ -5387,26 +4911,6 @@ impl Input {
             Self::SurfaceFinalizeRemovalForced(_) => InputKind::SurfaceFinalizeRemovalForced,
             Self::SurfaceSnapshotAligned(_) => InputKind::SurfaceSnapshotAligned,
             Self::SurfaceShutdown(_) => InputKind::SurfaceShutdown,
-            Self::ProjectRealtimeIntent(_) => InputKind::ProjectRealtimeIntent,
-            Self::BeginRealtimeBinding(_) => InputKind::BeginRealtimeBinding,
-            Self::ReplaceRealtimeBinding(_) => InputKind::ReplaceRealtimeBinding,
-            Self::DetachRealtimeBinding(_) => InputKind::DetachRealtimeBinding,
-            Self::RequireRealtimeReattach(_) => InputKind::RequireRealtimeReattach,
-            Self::RequireRealtimeReattachForAuthority(_) => {
-                InputKind::RequireRealtimeReattachForAuthority
-            }
-            Self::PublishRealtimeSignal(_) => InputKind::PublishRealtimeSignal,
-            Self::BeginRealtimeReconnectCycle(_) => InputKind::BeginRealtimeReconnectCycle,
-            Self::ScheduleRealtimeReconnectRetry(_) => InputKind::ScheduleRealtimeReconnectRetry,
-            Self::ExhaustRealtimeReconnectCycle(_) => InputKind::ExhaustRealtimeReconnectCycle,
-            Self::ClearRealtimeReconnectProgress(_) => InputKind::ClearRealtimeReconnectProgress,
-            Self::BeginLiveTopologyReconfigure(_) => InputKind::BeginLiveTopologyReconfigure,
-            Self::MarkLiveTopologyDetached(_) => InputKind::MarkLiveTopologyDetached,
-            Self::ApplyLiveTopologyIdentity(_) => InputKind::ApplyLiveTopologyIdentity,
-            Self::ApplyLiveTopologyVisibility(_) => InputKind::ApplyLiveTopologyVisibility,
-            Self::CompleteLiveTopology(_) => InputKind::CompleteLiveTopology,
-            Self::AbortLiveTopologyBeforeDetach(_) => InputKind::AbortLiveTopologyBeforeDetach,
-            Self::FailLiveTopologyAfterDetach(_) => InputKind::FailLiveTopologyAfterDetach,
             Self::McpServerConnectPending(_) => InputKind::McpServerConnectPending,
             Self::McpServerConnected(_) => InputKind::McpServerConnected,
             Self::McpServerFailed(_) => InputKind::McpServerFailed,
@@ -5424,24 +4928,6 @@ impl Input {
             Self::InteractionStreamCompleted(_) => InputKind::InteractionStreamCompleted,
             Self::InteractionStreamExpired(_) => InputKind::InteractionStreamExpired,
             Self::InteractionStreamClosedEarly(_) => InputKind::InteractionStreamClosedEarly,
-            Self::ProductTurnInFlight(_) => InputKind::ProductTurnInFlight,
-            Self::ProductTurnCommitted(_) => InputKind::ProductTurnCommitted,
-            Self::ProductOutputStarted(_) => InputKind::ProductOutputStarted,
-            Self::ProductTurnInterrupted(_) => InputKind::ProductTurnInterrupted,
-            Self::ProductTurnTerminal(_) => InputKind::ProductTurnTerminal,
-            Self::RealtimeProjectionAdvanceObserved(_) => {
-                InputKind::RealtimeProjectionAdvanceObserved
-            }
-            Self::RealtimeProjectionRefreshed(_) => InputKind::RealtimeProjectionRefreshed,
-            Self::RealtimeProjectionBaselineObserved(_) => {
-                InputKind::RealtimeProjectionBaselineObserved
-            }
-            Self::RealtimeProjectionReset(_) => InputKind::RealtimeProjectionReset,
-            Self::ClassifyRealtimeClientInputSubmitted(_) => {
-                InputKind::ClassifyRealtimeClientInputSubmitted
-            }
-            Self::ClassifyRealtimeMidTurnActivity(_) => InputKind::ClassifyRealtimeMidTurnActivity,
-            Self::ClassifyRealtimeTurnTerminated(_) => InputKind::ClassifyRealtimeTurnTerminated,
             Self::AttachSessionIngress(_) => InputKind::AttachSessionIngress,
             Self::AttachMobIngress(_) => InputKind::AttachMobIngress,
             Self::DetachIngress(_) => InputKind::DetachIngress,
@@ -5495,7 +4981,6 @@ pub enum InputKind {
     Ingest,
     PublishEvent,
     RuntimeState,
-    RuntimeRealtimeAttachmentStatus,
     ModelRoutingStatus,
     SetModelRoutingBaseline,
     RequestFiniteSwitchTurn,
@@ -5597,24 +5082,6 @@ pub enum InputKind {
     SurfaceFinalizeRemovalForced,
     SurfaceSnapshotAligned,
     SurfaceShutdown,
-    ProjectRealtimeIntent,
-    BeginRealtimeBinding,
-    ReplaceRealtimeBinding,
-    DetachRealtimeBinding,
-    RequireRealtimeReattach,
-    RequireRealtimeReattachForAuthority,
-    PublishRealtimeSignal,
-    BeginRealtimeReconnectCycle,
-    ScheduleRealtimeReconnectRetry,
-    ExhaustRealtimeReconnectCycle,
-    ClearRealtimeReconnectProgress,
-    BeginLiveTopologyReconfigure,
-    MarkLiveTopologyDetached,
-    ApplyLiveTopologyIdentity,
-    ApplyLiveTopologyVisibility,
-    CompleteLiveTopology,
-    AbortLiveTopologyBeforeDetach,
-    FailLiveTopologyAfterDetach,
     McpServerConnectPending,
     McpServerConnected,
     McpServerFailed,
@@ -5632,18 +5099,6 @@ pub enum InputKind {
     InteractionStreamCompleted,
     InteractionStreamExpired,
     InteractionStreamClosedEarly,
-    ProductTurnInFlight,
-    ProductTurnCommitted,
-    ProductOutputStarted,
-    ProductTurnInterrupted,
-    ProductTurnTerminal,
-    RealtimeProjectionAdvanceObserved,
-    RealtimeProjectionRefreshed,
-    RealtimeProjectionBaselineObserved,
-    RealtimeProjectionReset,
-    ClassifyRealtimeClientInputSubmitted,
-    ClassifyRealtimeMidTurnActivity,
-    ClassifyRealtimeTurnTerminated,
     AttachSessionIngress,
     AttachMobIngress,
     DetachIngress,
@@ -5951,22 +5406,6 @@ pub mod effects {
         pub epoch: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeIntentProjected {
-        pub present: bool,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeBindingRotated {
-        pub authority_epoch: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeReconnectProgressProjected {
-        pub attempt_count: u64,
-        pub next_retry_at_ms: Option<u64>,
-        pub deadline_at_ms: Option<u64>,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct LiveTopologyPhaseChanged {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct McpServerStateChanged {
         pub server_id: McpServerId,
         pub new_state: McpServerState,
@@ -6001,19 +5440,6 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct InteractionStreamCleanup {
         pub corr_id: PeerCorrelationId,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProductTurnPhaseChanged {
-        pub new_phase: RealtimeProductTurnPhase,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeProjectionFreshnessChanged {
-        pub new_freshness: RealtimeProjectionFreshness,
-        pub frontier_ms: u64,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct RealtimeReconnectPolicyChanged {
-        pub new_policy: RealtimeReconnectPolicy,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct LocalEndpointChanged {
@@ -6088,10 +5514,6 @@ pub enum Effect {
     RejectSurfaceCall(effects::RejectSurfaceCall),
     PublishSupervisorTrustEdge(effects::PublishSupervisorTrustEdge),
     RevokeSupervisorTrustEdge(effects::RevokeSupervisorTrustEdge),
-    RealtimeIntentProjected(effects::RealtimeIntentProjected),
-    RealtimeBindingRotated(effects::RealtimeBindingRotated),
-    RealtimeReconnectProgressProjected(effects::RealtimeReconnectProgressProjected),
-    LiveTopologyPhaseChanged(effects::LiveTopologyPhaseChanged),
     McpServerStateChanged(effects::McpServerStateChanged),
     McpServerReloadRequested(effects::McpServerReloadRequested),
     PeerInteractionStateChanged(effects::PeerInteractionStateChanged),
@@ -6100,9 +5522,6 @@ pub enum Effect {
     SessionContextAdvanced(effects::SessionContextAdvanced),
     InteractionStreamStateChanged(effects::InteractionStreamStateChanged),
     InteractionStreamCleanup(effects::InteractionStreamCleanup),
-    RealtimeProductTurnPhaseChanged(effects::RealtimeProductTurnPhaseChanged),
-    RealtimeProjectionFreshnessChanged(effects::RealtimeProjectionFreshnessChanged),
-    RealtimeReconnectPolicyChanged(effects::RealtimeReconnectPolicyChanged),
     LocalEndpointChanged(effects::LocalEndpointChanged),
     PeerProjectionChanged(effects::PeerProjectionChanged),
     CommsTrustReconcileRequested(effects::CommsTrustReconcileRequested),
@@ -6166,10 +5585,6 @@ pub enum EffectKind {
     RejectSurfaceCall,
     PublishSupervisorTrustEdge,
     RevokeSupervisorTrustEdge,
-    RealtimeIntentProjected,
-    RealtimeBindingRotated,
-    RealtimeReconnectProgressProjected,
-    LiveTopologyPhaseChanged,
     McpServerStateChanged,
     McpServerReloadRequested,
     PeerInteractionStateChanged,
@@ -6178,9 +5593,6 @@ pub enum EffectKind {
     SessionContextAdvanced,
     InteractionStreamStateChanged,
     InteractionStreamCleanup,
-    RealtimeProductTurnPhaseChanged,
-    RealtimeProjectionFreshnessChanged,
-    RealtimeReconnectPolicyChanged,
     LocalEndpointChanged,
     PeerProjectionChanged,
     CommsTrustReconcileRequested,
@@ -6213,9 +5625,6 @@ pub enum TransitionId {
     RequestFiniteSwitchTurnApprovalDeniedIdle,
     RequestFiniteSwitchTurnApprovalDeniedAttached,
     RequestFiniteSwitchTurnApprovalDeniedRunning,
-    RequestFiniteSwitchTurnRealtimeConflictIdle,
-    RequestFiniteSwitchTurnRealtimeConflictAttached,
-    RequestFiniteSwitchTurnRealtimeConflictRunning,
     RequestFiniteSwitchTurnScopedConflictIdle,
     RequestFiniteSwitchTurnScopedConflictAttached,
     RequestFiniteSwitchTurnScopedConflictRunning,
@@ -6225,9 +5634,6 @@ pub enum TransitionId {
     RequestUntilChangedSwitchTurnAcceptedIdle,
     RequestUntilChangedSwitchTurnAcceptedAttached,
     RequestUntilChangedSwitchTurnAcceptedRunning,
-    RequestUntilChangedSwitchTurnRealtimeConflictIdle,
-    RequestUntilChangedSwitchTurnRealtimeConflictAttached,
-    RequestUntilChangedSwitchTurnRealtimeConflictRunning,
     RequestUntilChangedSwitchTurnApprovalUnavailableIdle,
     RequestUntilChangedSwitchTurnApprovalUnavailableAttached,
     RequestUntilChangedSwitchTurnApprovalUnavailableRunning,
@@ -6249,9 +5655,6 @@ pub enum TransitionId {
     BeginImageOperationScopedConflictIdle,
     BeginImageOperationScopedConflictAttached,
     BeginImageOperationScopedConflictRunning,
-    BeginImageOperationRealtimeConflictIdle,
-    BeginImageOperationRealtimeConflictAttached,
-    BeginImageOperationRealtimeConflictRunning,
     BeginImageOperationApprovalUnavailableIdle,
     BeginImageOperationApprovalUnavailableAttached,
     BeginImageOperationApprovalUnavailableRunning,
@@ -6709,96 +6112,6 @@ pub enum TransitionId {
     SyncVisibilityRevisionsRunning,
     SyncVisibilityRevisionsRetired,
     SyncVisibilityRevisionsStopped,
-    ProjectRealtimeIntentIdle,
-    ProjectRealtimeIntentAttached,
-    ProjectRealtimeIntentRunning,
-    ProjectRealtimeIntentRetired,
-    ProjectRealtimeIntentStopped,
-    BeginRealtimeBindingIdle,
-    BeginRealtimeBindingAttached,
-    BeginRealtimeBindingRunning,
-    BeginRealtimeBindingRetired,
-    BeginRealtimeBindingStopped,
-    ReplaceRealtimeBindingIdle,
-    ReplaceRealtimeBindingAttached,
-    ReplaceRealtimeBindingRunning,
-    ReplaceRealtimeBindingRetired,
-    ReplaceRealtimeBindingStopped,
-    DetachRealtimeBindingIdle,
-    DetachRealtimeBindingAttached,
-    DetachRealtimeBindingRunning,
-    DetachRealtimeBindingRetired,
-    DetachRealtimeBindingStopped,
-    RequireRealtimeReattachIdle,
-    RequireRealtimeReattachAttached,
-    RequireRealtimeReattachRunning,
-    RequireRealtimeReattachRetired,
-    RequireRealtimeReattachStopped,
-    RequireRealtimeReattachForAuthorityIdle,
-    RequireRealtimeReattachForAuthorityAttached,
-    RequireRealtimeReattachForAuthorityRunning,
-    RequireRealtimeReattachForAuthorityRetired,
-    RequireRealtimeReattachForAuthorityStopped,
-    PublishRealtimeSignalIdle,
-    PublishRealtimeSignalAttached,
-    PublishRealtimeSignalRunning,
-    PublishRealtimeSignalRetired,
-    PublishRealtimeSignalStopped,
-    BeginRealtimeReconnectCycleIdle,
-    BeginRealtimeReconnectCycleAttached,
-    BeginRealtimeReconnectCycleRunning,
-    BeginRealtimeReconnectCycleRetired,
-    BeginRealtimeReconnectCycleStopped,
-    ScheduleRealtimeReconnectRetryIdle,
-    ScheduleRealtimeReconnectRetryAttached,
-    ScheduleRealtimeReconnectRetryRunning,
-    ScheduleRealtimeReconnectRetryRetired,
-    ScheduleRealtimeReconnectRetryStopped,
-    ExhaustRealtimeReconnectCycleIdle,
-    ExhaustRealtimeReconnectCycleAttached,
-    ExhaustRealtimeReconnectCycleRunning,
-    ExhaustRealtimeReconnectCycleRetired,
-    ExhaustRealtimeReconnectCycleStopped,
-    ClearRealtimeReconnectProgressIdle,
-    ClearRealtimeReconnectProgressAttached,
-    ClearRealtimeReconnectProgressRunning,
-    ClearRealtimeReconnectProgressRetired,
-    ClearRealtimeReconnectProgressStopped,
-    BeginLiveTopologyReconfigureIdle,
-    BeginLiveTopologyReconfigureAttached,
-    BeginLiveTopologyReconfigureRunning,
-    BeginLiveTopologyReconfigureRetired,
-    BeginLiveTopologyReconfigureStopped,
-    MarkLiveTopologyDetachedIdle,
-    MarkLiveTopologyDetachedAttached,
-    MarkLiveTopologyDetachedRunning,
-    MarkLiveTopologyDetachedRetired,
-    MarkLiveTopologyDetachedStopped,
-    ApplyLiveTopologyIdentityIdle,
-    ApplyLiveTopologyIdentityAttached,
-    ApplyLiveTopologyIdentityRunning,
-    ApplyLiveTopologyIdentityRetired,
-    ApplyLiveTopologyIdentityStopped,
-    ApplyLiveTopologyVisibilityIdle,
-    ApplyLiveTopologyVisibilityAttached,
-    ApplyLiveTopologyVisibilityRunning,
-    ApplyLiveTopologyVisibilityRetired,
-    ApplyLiveTopologyVisibilityStopped,
-    CompleteLiveTopologyIdle,
-    CompleteLiveTopologyAttached,
-    CompleteLiveTopologyRunning,
-    CompleteLiveTopologyRetired,
-    CompleteLiveTopologyStopped,
-    AbortLiveTopologyBeforeDetachIdle,
-    AbortLiveTopologyBeforeDetachAttached,
-    AbortLiveTopologyBeforeDetachRunning,
-    AbortLiveTopologyBeforeDetachRetired,
-    AbortLiveTopologyBeforeDetachStopped,
-    FailLiveTopologyAfterDetachIdle,
-    FailLiveTopologyAfterDetachAttached,
-    FailLiveTopologyAfterDetachRunning,
-    FailLiveTopologyAfterDetachRetired,
-    FailLiveTopologyAfterDetachStopped,
     McpServerConnectPendingIdle,
     McpServerConnectPendingAttached,
     McpServerConnectPendingRunning,
@@ -6889,102 +6202,6 @@ pub enum TransitionId {
     InteractionStreamClosedEarlyRunning,
     InteractionStreamClosedEarlyRetired,
     InteractionStreamClosedEarlyStopped,
-    ProductTurnInFlightInitializing,
-    ProductTurnInFlightIdle,
-    ProductTurnInFlightAttached,
-    ProductTurnInFlightRunning,
-    ProductTurnInFlightRetired,
-    ProductTurnInFlightStopped,
-    ProductTurnCommittedFromAwaitingInitializing,
-    ProductTurnCommittedFromAwaitingIdle,
-    ProductTurnCommittedFromAwaitingAttached,
-    ProductTurnCommittedFromAwaitingRunning,
-    ProductTurnCommittedFromAwaitingRetired,
-    ProductTurnCommittedFromAwaitingStopped,
-    ProductTurnCommittedFromOutputInitializing,
-    ProductTurnCommittedFromOutputIdle,
-    ProductTurnCommittedFromOutputAttached,
-    ProductTurnCommittedFromOutputRunning,
-    ProductTurnCommittedFromOutputRetired,
-    ProductTurnCommittedFromOutputStopped,
-    ProductOutputStartedFromAwaitingInitializing,
-    ProductOutputStartedFromAwaitingIdle,
-    ProductOutputStartedFromAwaitingAttached,
-    ProductOutputStartedFromAwaitingRunning,
-    ProductOutputStartedFromAwaitingRetired,
-    ProductOutputStartedFromAwaitingStopped,
-    ProductOutputStartedFromCommittedInitializing,
-    ProductOutputStartedFromCommittedIdle,
-    ProductOutputStartedFromCommittedAttached,
-    ProductOutputStartedFromCommittedRunning,
-    ProductOutputStartedFromCommittedRetired,
-    ProductOutputStartedFromCommittedStopped,
-    ProductTurnInterruptedFromPreemptibleInitializing,
-    ProductTurnInterruptedFromPreemptibleIdle,
-    ProductTurnInterruptedFromPreemptibleAttached,
-    ProductTurnInterruptedFromPreemptibleRunning,
-    ProductTurnInterruptedFromPreemptibleRetired,
-    ProductTurnInterruptedFromPreemptibleStopped,
-    ProductTurnInterruptedFromOutputInitializing,
-    ProductTurnInterruptedFromOutputIdle,
-    ProductTurnInterruptedFromOutputAttached,
-    ProductTurnInterruptedFromOutputRunning,
-    ProductTurnInterruptedFromOutputRetired,
-    ProductTurnInterruptedFromOutputStopped,
-    ProductTurnTerminalInitializing,
-    ProductTurnTerminalIdle,
-    ProductTurnTerminalAttached,
-    ProductTurnTerminalRunning,
-    ProductTurnTerminalRetired,
-    ProductTurnTerminalStopped,
-    RealtimeProjectionAdvanceDuringTurnInitializing,
-    RealtimeProjectionAdvanceDuringTurnIdle,
-    RealtimeProjectionAdvanceDuringTurnAttached,
-    RealtimeProjectionAdvanceDuringTurnRunning,
-    RealtimeProjectionAdvanceDuringTurnRetired,
-    RealtimeProjectionAdvanceDuringTurnStopped,
-    RealtimeProjectionAdvanceWhileIdleInitializing,
-    RealtimeProjectionAdvanceWhileIdleIdle,
-    RealtimeProjectionAdvanceWhileIdleAttached,
-    RealtimeProjectionAdvanceWhileIdleRunning,
-    RealtimeProjectionAdvanceWhileIdleRetired,
-    RealtimeProjectionAdvanceWhileIdleStopped,
-    RealtimeProjectionRefreshedInitializing,
-    RealtimeProjectionRefreshedIdle,
-    RealtimeProjectionRefreshedAttached,
-    RealtimeProjectionRefreshedRunning,
-    RealtimeProjectionRefreshedRetired,
-    RealtimeProjectionRefreshedStopped,
-    RealtimeProjectionBaselineObservedCleanInitializing,
-    RealtimeProjectionBaselineObservedCleanIdle,
-    RealtimeProjectionBaselineObservedCleanAttached,
-    RealtimeProjectionBaselineObservedCleanRunning,
-    RealtimeProjectionBaselineObservedCleanRetired,
-    RealtimeProjectionBaselineObservedCleanStopped,
-    RealtimeProjectionResetInitializing,
-    RealtimeProjectionResetIdle,
-    RealtimeProjectionResetAttached,
-    RealtimeProjectionResetRunning,
-    RealtimeProjectionResetRetired,
-    RealtimeProjectionResetStopped,
-    ClassifyRealtimeClientInputSubmittedInitializing,
-    ClassifyRealtimeClientInputSubmittedIdle,
-    ClassifyRealtimeClientInputSubmittedAttached,
-    ClassifyRealtimeClientInputSubmittedRunning,
-    ClassifyRealtimeClientInputSubmittedRetired,
-    ClassifyRealtimeClientInputSubmittedStopped,
-    ClassifyRealtimeMidTurnActivityInitializing,
-    ClassifyRealtimeMidTurnActivityIdle,
-    ClassifyRealtimeMidTurnActivityAttached,
-    ClassifyRealtimeMidTurnActivityRunning,
-    ClassifyRealtimeMidTurnActivityRetired,
-    ClassifyRealtimeMidTurnActivityStopped,
-    ClassifyRealtimeTurnTerminatedInitializing,
-    ClassifyRealtimeTurnTerminatedIdle,
-    ClassifyRealtimeTurnTerminatedAttached,
-    ClassifyRealtimeTurnTerminatedRunning,
-    ClassifyRealtimeTurnTerminatedRetired,
-    ClassifyRealtimeTurnTerminatedStopped,
     AttachSessionIngressIdle,
     AttachSessionIngressAttached,
     AttachSessionIngressRunning,
@@ -7237,26 +6454,12 @@ pub fn initial_state() -> State {
         surface_removal_applied_at_turn: Default::default(),
         surface_phase: SurfacePhase::default(),
         removal_timeout_ms: 0,
-        realtime_intent_present: false,
-        realtime_binding_state: RealtimeBindingState::default(),
-        realtime_binding_authority_epoch: None,
-        realtime_reattach_required: false,
-        realtime_next_authority_epoch: 0,
-        realtime_reconnect_cycle_state: RealtimeReconnectCycleState::default(),
-        realtime_reconnect_attempt_count: 0,
-        realtime_reconnect_next_retry_at_ms: None,
-        realtime_reconnect_deadline_at_ms: None,
-        live_topology_phase: LiveTopologyPhase::default(),
         mcp_server_states: Default::default(),
         pending_peer_requests: Default::default(),
         inbound_peer_requests: Default::default(),
         last_session_context_updated_at_ms: 0,
         reserved_interaction_streams: Default::default(),
         attached_interaction_streams: Default::default(),
-        realtime_product_turn_phase: RealtimeProductTurnPhase::default(),
-        realtime_projection_freshness: RealtimeProjectionFreshness::default(),
-        realtime_projection_frontier_ms: 0,
-        realtime_reconnect_policy: RealtimeReconnectPolicy::default(),
         peer_ingress_owner_kind: PeerIngressOwnerKind::default(),
         peer_ingress_comms_runtime_id: None,
         peer_ingress_mob_id: None,

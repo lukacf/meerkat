@@ -15,6 +15,18 @@ repos:
         types: [rust]
         pass_filenames: false
 
+  # On commit: regenerate Bazel BUILD files when Cargo metadata changes.
+  # CI rejects stale generated BUILDs; pre-commit refreshes them before
+  # the commit lands and pre-commit re-stages the diff. No network.
+  - repo: local
+    hooks:
+      - id: buildbuddy-generate-fix
+        name: regenerate Bazel BUILD files (auto-fix)
+        entry: node scripts/generate-bazel-rust-builds.mjs
+        language: system
+        files: '(^Cargo\.toml$|^Cargo\.lock$|^[^/]+/Cargo\.toml$|^MODULE\.bazel$|^scripts/generate-bazel-rust-builds\.mjs$)'
+        pass_filenames: false
+
   # Manual: changed-crate deterministic validation when you want a local preflight.
   - repo: local
     hooks:
@@ -99,6 +111,22 @@ repos:
       - id: bridge-no-responsestatus
         name: bridge layer must not re-interpret ResponseStatus (W2-F)
         entry: scripts/pre-push-bridge-no-responsestatus.sh
+        language: script
+        pass_filenames: false
+        stages: [pre-push]
+
+  # On push: Bazel BUILD + MODULE.bazel.lock freshness gate
+  # Generated BUILD files are auto-fixed on pre-commit, but MODULE.bazel.lock
+  # refresh needs `bb mod deps --lockfile_mode=update` (network, requires the
+  # pinned `bb` CLI) — too expensive for every commit. This hook fails closed
+  # when either gate is stale and prints the exact `make` command to refresh.
+  # When `bb` is not installed locally, the lock check is skipped honestly
+  # (CI catches it).
+  - repo: local
+    hooks:
+      - id: bazel-locks-freshness
+        name: Bazel BUILD + MODULE.bazel.lock freshness
+        entry: scripts/pre-push-bazel-locks.sh
         language: script
         pass_filenames: false
         stages: [pre-push]

@@ -58,7 +58,7 @@ When a mob member runs in a different process or host, declare it with `MobBacke
 |---------|----------|----------|
 | `rkat` CLI | Shell commands | Developer workflows, scripting |
 | REST (`rkat-rest`) | HTTP/JSON + SSE | Services and language-agnostic clients |
-| JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional realtime websocket hosting | IDE integration, SDK backend, embeddable services |
+| JSON-RPC (`rkat-rpc`) | JSON-RPC 2.0 over stdio (default) or TCP (`--tcp <addr>`); optional live audio WebSocket (`--live-ws`, serves `/live/ws`) | IDE integration, SDK backend, embeddable services |
 | MCP (`rkat-mcp`) | Model Context Protocol | Expose Meerkat as tools to other agents |
 | Python SDK (`meerkat`) | Async Python over RPC | Python applications |
 | TypeScript SDK (`@rkat/sdk`) | TypeScript over RPC | Node.js applications |
@@ -119,30 +119,27 @@ Notes:
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
 - Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
-- Public realtime attachment capability is named `realtime`, not `voice`: surfaces describe `ModelCapabilities.realtime`, `session/realtime_attachment_status`, and `mob/member_status.realtime_attachment_status`. Realtime transport is capability-driven — there is no caller-initiated attach/detach RPC; set the session's model to a realtime-capable one (e.g. `gpt-realtime-1.5`) and the runtime manages attach/detach automatically.
-### Realtime voice attachment
+- Live (audio/video) channels are exposed through the live-adapter MVP surface, not the previous attachment-status family. Capability detection still uses `ModelCapabilities.realtime` to decide whether a model can back a live channel; channel lifecycle is caller-initiated through the `live/*` JSON-RPC methods (and SDK equivalents) below. The previous `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`, `realtime/open_info`, and `RealtimeAttachmentStatus` enum have been removed.
+### Live channels (audio/video)
 
-Realtime is a delivery mode of the session's LLM, not a separate subsystem. Enable it by setting the session's model to a realtime-capable one (today `gpt-realtime-1.5`; `gpt-realtime` is a compatibility alias). The runtime reads `ModelCapabilities.realtime` and attaches an OpenAI Realtime transport automatically. The session keeps a single canonical history; audio commits at turn boundaries.
+Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (`gpt-realtime-2`) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
 
-| Surface | Enable | Observe status | Open audio channel |
-|---------|--------|----------------|--------------------|
-| CLI | Start or resume a session/member on a realtime-capable model | `rkat realtime status session <SESSION-ID>` / `rkat realtime status member <MOB-ID> <AGENT-IDENTITY>` | `rkat realtime open-info session <SESSION-ID>` / `... member <MOB-ID> <AGENT-IDENTITY>` |
-| JSON-RPC | `session/create` with `model: "gpt-realtime-1.5"` | `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status` | `realtime/open_info` |
-| REST | `POST /sessions` `{ "model": "gpt-realtime-1.5" }` | `GET /sessions/{id}/realtime-attachment-status` | `realtime/open_info` via RPC |
-| MCP (public) | host sets model via composition | `meerkat_realtime_status`, `meerkat_realtime_capabilities` | `meerkat_realtime_open_info` |
-| Python SDK | `client.create_session(model="gpt-realtime-1.5", ...)` | `client.runtime_realtime_attachment_status(...)` | `client.realtime_open_info(...)` |
-| TypeScript SDK | `client.createSession({ model: "gpt-realtime-1.5", ... })` | `client.runtimeRealtimeAttachmentStatus(...)` | `client.realtimeOpenInfo(...)` |
-| Rust | `SessionBuildOptions { model: Some("gpt-realtime-1.5".into()), .. }` | `MeerkatMachine::realtime_attachment_status` | provider integration in `meerkat-openai` |
+| Surface | Open channel | Observe / control |
+|---------|--------------|-------------------|
+| JSON-RPC | `live/open` (returns `LiveOpenResult` with transport bootstrap + capabilities) | `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close` |
+| Python SDK | `client.live_open(session_id)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
+| TypeScript SDK | `client.liveOpen({ sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
+| Rust | `meerkat_live::LiveHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
 
-`RealtimeAttachmentStatus` reports `Unattached` / `IntentPresentUnbound` / `BindingNotReady` / `BindingReady` / `ReplacementPending` / `ReattachRequired`. There is no caller-initiated attach/detach RPC — transport follows the resolved model capability.
+The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for transports that need WebSocket bootstrap; `live/open` will fail if the listener isn't configured. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
 
 Practical caveats:
 
-- Single realtime binding per session. For per-member realtime in mobs, spawn members on realtime-capable profiles.
-- Idle sessions can't host a binding — start a turn or spawn via a mob.
+- One live channel per session at a time; for per-member live channels in mobs, open the channel against a member that runs on a realtime-capable profile.
+- Idle sessions can't host a channel — start a turn or spawn the member first.
 - Provider-native web search and tool-calling capability is per-model; check `ModelProfile` flat fields like `supports_web_search` if a tool unexpectedly disappears under a realtime model.
 
-User-facing guide: `docs/guides/realtime.mdx`. Internal authority/reconfigure flow: load the architecture skill's `references/realtime-attachment.md`.
+Wire types: see `LiveOpenParams`, `LiveOpenResult`, `WireLiveChannelCapabilities`, `LiveStatusResult`, `LiveSendInputParams`, `LiveTruncateParams`, `WireLiveAdapterStatus`, `WireLiveAdapterErrorCode`, and `WireLiveAdapterObservation` in `meerkat-contracts/src/wire/live.rs`.
 
 ### Mob lifecycle (standard/default usage)
 

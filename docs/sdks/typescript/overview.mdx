@@ -84,14 +84,10 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
 
-### Realtime and auth wrappers
+### Auth wrappers
 
-The SDK also exposes the runtime/product realtime helpers and auth-profile wrappers from the RPC surface:
+The SDK also exposes the auth-profile wrappers from the RPC surface:
 
-- `runtimeRealtimeAttachmentStatus(...)`
-- `realtimeOpenInfo(...)`
-- `realtimeStatus(...)`
-- `realtimeCapabilities(...)`
 - `authProfileList(...)`, `authProfileGet(...)`, `authProfileCreate(...)`, `authProfileDelete(...)`
 - `authLoginStart(...)`, `authLoginComplete(...)`, `authLoginDeviceStart(...)`, `authLoginDeviceComplete(...)`, `authLoginProvisionApiKey(...)`
 - `authStatusGet(...)`, `authLogout(...)`

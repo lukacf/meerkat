@@ -327,23 +327,6 @@ impl SessionId {
     }
 }
 
-/// Per-identity realtime binding state. Lives in MobMachine as the canonical
-/// join between identity continuity (MobMachine-owned) and the realtime
-/// attachment's concrete session target (MeerkatMachine-owned).
-///
-/// `Unbound` entries are never actually stored — absence of a key in
-/// `member_session_bindings` is the Unbound state. The variant exists so
-/// that the DSL has a tagged type to reason about and shell consumers can
-/// pattern match on it without relying on map-absence semantics.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum RealtimeBindingState {
-    #[default]
-    Unbound,
-    BoundToSession {
-        session_id: SessionId,
-    },
-}
-
 // ---------------------------------------------------------------------------
 // Projection helpers: domain types → bridging types
 // ---------------------------------------------------------------------------

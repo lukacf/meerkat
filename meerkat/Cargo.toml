@@ -28,6 +28,7 @@ meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
 meerkat-session = { workspace = true }
+meerkat-live = { workspace = true, optional = true }
 meerkat-memory = { workspace = true, optional = true }
 meerkat-mcp = { workspace = true, optional = true }
 meerkat-comms = { workspace = true, optional = true }
@@ -37,6 +38,7 @@ meerkat-contracts = { workspace = true }
 meerkat-models = { workspace = true }
 meerkat-skills = { workspace = true, optional = true }
 async-trait = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 futures = { workspace = true }
 thiserror = { workspace = true }
@@ -104,6 +106,9 @@ comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 schedule = []
 skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]
+# Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
+# helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.
+live = ["dep:meerkat-live"]
 
 [package.metadata.cargo-machete]
 ignored = ["which"]  # dev-dependency used in e2e tests

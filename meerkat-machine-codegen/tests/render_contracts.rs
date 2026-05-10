@@ -499,10 +499,6 @@ fn generated_meerkat_closed_dsl_domains_use_string_enum_bindings() {
             &["PendingConnect", "Connected", "Failed", "Disconnected"],
         ),
         (
-            "RealtimeReconnectCycleState",
-            &["Idle", "Reconnecting", "Exhausted"],
-        ),
-        (
             "OperationTerminalOutcomeKind",
             &[
                 "Completed",

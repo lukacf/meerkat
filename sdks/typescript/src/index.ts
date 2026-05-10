@@ -32,15 +32,10 @@ export type {
   MobReadyMemberSnapshot,
   MobReadyWaitOptions,
 } from "./mob.js";
+export { LiveChannel } from "./live.js";
+export type { LiveChannelOptions } from "./live.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
-export { RealtimeChannel, RealtimeConnection } from "./realtime.js";
-export type {
-  RealtimeChannelOptions,
-  RealtimeChannelTarget,
-  RealtimeSessionTarget,
-} from "./realtime.js";
-
 export type {
   AgentEventEnvelope,
   AttributedEvent,
@@ -203,34 +198,70 @@ export type {
   MobTopologySpecInput,
   MobTurnStartParams,
   MobWiringRulesInput,
+  LiveChannelParams,
+  LiveCommitInputParams,
+  LiveInputChunkWire,
+  // R5-10: re-export typed `LiveInputChunkWire` variants so TS consumers
+  // can construct typed chunks at the `LiveSendInputParams.chunk` slot
+  // without dipping into `./generated/types`.
+  LiveInputChunkWireAudio,
+  LiveInputChunkWireText,
+  LiveInputChunkWireImage,
+  LiveInputChunkWireVideoFrame,
+  LiveOpenParams,
+  LiveOpenResult,
+  LiveSendInputParams,
+  LiveStatusResult,
+  LiveTruncateParams,
+  // CC5/CC6: typed wire mirrors for `LiveOpenResult.capabilities` /
+  // `.continuity`. Re-exported from the SDK root so TS consumers can do
+  // typed-narrow on `result.continuity.mode` and read capability booleans
+  // (`image_in`, `video_in`, etc.) without dipping into `./generated/types`.
+  WireLiveChannelCapabilities,
+  WireLiveContinuityMode,
+  WireLiveContinuityModeFresh,
+  WireLiveContinuityModeTranscriptOnly,
+  WireLiveContinuityModeDegraded,
+  WireLiveContinuityModeProviderNativeResume,
+  // FIX-SDK-OBS: typed live-adapter observation discriminated union and
+  // its supporting wire mirrors (status / degradation reason / error
+  // code). Closes the verifier gap that left the R5-4 audio identity
+  // fields and R5-9 `command_rejected` typed variant invisible at the
+  // SDK boundary.
+  WireLiveAdapterObservation,
+  WireLiveAdapterObservationReady,
+  WireLiveAdapterObservationUserTranscriptFinal,
+  WireLiveAdapterObservationAssistantTextDelta,
+  WireLiveAdapterObservationAssistantTranscriptDelta,
+  WireLiveAdapterObservationAssistantAudioChunk,
+  WireLiveAdapterObservationAssistantTranscriptFinal,
+  WireLiveAdapterObservationAssistantTranscriptTruncated,
+  WireLiveAdapterObservationRealtimeTranscript,
+  WireLiveAdapterObservationToolCallRequested,
+  WireLiveAdapterObservationTurnInterrupted,
+  WireLiveAdapterObservationTurnCompleted,
+  WireLiveAdapterObservationStatusChanged,
+  WireLiveAdapterObservationError,
+  WireLiveAdapterObservationCommandRejected,
+  WireLiveAdapterStatus,
+  WireLiveAdapterErrorCode,
+  WireLiveConfigRejectionReason,
+  WireLiveDegradationReason,
+  // R7-1 (P2): typed `WireAssistantBlock` discriminated union — variants
+  // (Transcript, Text, Reasoning, ...) now emit typed inline `data` shapes
+  // rather than `Record<string, unknown>`, so SDK consumers can read
+  // transcript `text` / `source` and route on `block_type` without parsing
+  // raw JSON.
+  WireAssistantBlock,
+  WireProvider,
+  WireTranscriptSource,
   ProviderCatalog,
   RealtimeAudioChunk,
   RealtimeCapabilities,
-  RealtimeCapabilitiesParams,
-  RealtimeCapabilitiesResult,
-  RealtimeChannelClosedFrame,
-  RealtimeChannelErrorFrame,
-  RealtimeChannelEventFrame,
-  RealtimeChannelInputFrame,
-  RealtimeChannelOpenFrame,
-  RealtimeChannelOpenedFrame,
-  RealtimeChannelRole,
-  RealtimeChannelState,
-  RealtimeChannelStatus,
-  RealtimeChannelStatusFrame,
-  RealtimeOpenInfo,
-  RealtimeOpenRequest,
-  RealtimeOutputChunk,
-  RealtimeProtocolVersion,
-  RealtimeReconnectPolicy,
-  RealtimeStatusParams,
-  RealtimeStatusResult,
   RealtimeTextChunk,
-  RealtimeTextDelta,
   RealtimeTurningMode,
   RealtimeVideoChunk,
   RuntimeAcceptResult,
-  RuntimeRealtimeAttachmentStatusResult,
   RuntimeStateResult,
   SupervisorRotationReportWire,
   WireModelProfile,

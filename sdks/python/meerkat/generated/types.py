@@ -678,7 +678,6 @@ class MobMemberStatusResult:
     kickoff: Optional[Any] = None
     output_preview: Optional[str] = None
     peer_connectivity: Optional[Any] = None
-    realtime_attachment_status: Optional[str] = None
     resolved_capabilities: Optional[WireResolvedModelCapabilities] = None
 
 
@@ -1300,34 +1299,6 @@ class SessionStreamCloseResult:
 
 
 @dataclass
-class RuntimeRealtimeAttachmentStatusParams:
-    """Request payload for `session/realtime_attachment_status`."""
-    session_id: str
-
-
-@dataclass
-class RealtimeOpenRequest:
-    """Request payload for `realtime/open_info`."""
-    role: RealtimeChannelRole
-    target: RealtimeChannelTarget
-    turning_mode: RealtimeTurningMode
-    channel_config: Optional[RealtimeChannelConfig] = None
-    reconnect_policy: Optional[RealtimeReconnectPolicy] = None
-
-
-@dataclass
-class RealtimeStatusParams:
-    """Request payload for `realtime/status`."""
-    target: RealtimeChannelTarget
-
-
-@dataclass
-class RealtimeCapabilitiesParams:
-    """Request payload for `realtime/capabilities`."""
-    target: RealtimeChannelTarget
-
-
-@dataclass
 class ScheduleIdParams:
     """Request payload for schedule id lookups."""
     schedule_id: str
@@ -1398,44 +1369,6 @@ class RuntimeStateResult:
 
 
 @dataclass
-class RuntimeRealtimeAttachmentStatusResult:
-    """Response payload for `session/realtime_attachment_status`."""
-    status: Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
-
-
-@dataclass
-class RealtimeReconnectPolicy:
-    """Public reconnect policy for a realtime channel."""
-    initial_backoff_ms: int
-    max_attempts: int
-    max_backoff_ms: int
-    max_total_ms: int
-
-
-# Typed per-channel tool timeout policy.
-class RealtimeToolTimeoutPolicyDefault(TypedDict, total=False):
-    type: Required[Literal['default']]
-
-class RealtimeToolTimeoutPolicyDisabled(TypedDict, total=False):
-    type: Required[Literal['disabled']]
-
-class RealtimeToolTimeoutPolicyFinite(TypedDict, total=False):
-    timeout_ms: Required[int]
-    type: Required[Literal['finite']]
-
-RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite
-
-@dataclass
-class RealtimeChannelConfig:
-    """Per-channel runtime knobs negotiated at open time.
-
-Additive fields only — clients that do not carry this struct inherit the
-server-default behavior via `#[serde(default)]` on the parent
-[`RealtimeOpenRequest`]."""
-    tool_timeout: Optional[RealtimeToolTimeoutPolicy] = None
-
-
-@dataclass
 class RealtimeAudioFormat:
     """Descriptor for an expected or actual realtime audio format."""
     channels: int
@@ -1445,7 +1378,8 @@ class RealtimeAudioFormat:
 
 @dataclass
 class RealtimeCapabilities:
-    """Product-facing realtime capability set for one target/provider combination."""
+    """Provider-session capability projection used by the live adapter to
+publish what the negotiated provider session can actually do."""
     interrupt_supported: bool
     tool_lifecycle_events_supported: bool
     transcript_supported: bool
@@ -1458,49 +1392,9 @@ class RealtimeCapabilities:
 
 
 @dataclass
-class RealtimeChannelStatus:
-    """Public realtime channel status projection."""
-    state: RealtimeChannelState
-    attempt_count: Optional[int] = None
-    deadline_at: Optional[str] = None
-    next_retry_at: Optional[str] = None
-    reason: Optional[str] = None
-
-
-@dataclass
-class RealtimeOpenInfo:
-    """Response payload for `realtime/open_info`."""
-    capabilities: RealtimeCapabilities
-    default_protocol_version: RealtimeProtocolVersion
-    expires_at: str
-    open_token: str
-    target: RealtimeChannelTarget
-    ws_url: str
-    supported_protocol_versions: Optional[list[RealtimeProtocolVersion]] = None
-
-
-@dataclass
-class RealtimeStatusResult:
-    """Response payload for `realtime/status`."""
-    status: RealtimeChannelStatus
-
-
-@dataclass
-class RealtimeCapabilitiesResult:
-    """Response payload for `realtime/capabilities`."""
-    capabilities: RealtimeCapabilities
-
-
-@dataclass
 class RealtimeTextChunk:
     """A text chunk for realtime ingress/egress."""
     text: str
-
-
-@dataclass
-class RealtimeTextDelta:
-    """A text delta chunk for realtime output."""
-    delta: str
 
 
 @dataclass
@@ -1525,82 +1419,598 @@ class RealtimeVideoChunk:
 
 
 @dataclass
-class RealtimeBargeInTruncateFrame:
-    """Payload for `channel.barge_in_truncate`.
+class LiveOpenParams:
+    """Request payload for `live/open`.
 
-Sent by the client the moment it detects the user starting to speak over
-the assistant's audio, to tell the server what prefix was actually heard.
-Field names mirror OpenAI Realtime's `conversation.item.truncate` so the
-provider adapter can map straight through without re-encoding."""
+R3-1 (P1): `turning_mode` lets callers pick between the provider-managed
+(server-VAD) flow and the explicit-commit flow. The G9 typed text-only
+`live/commit_input { response_modality: text }` path requires
+`ExplicitCommit` because the OpenAI realtime API rejects
+`input_audio_buffer.commit` unless the session was opened with explicit
+commit semantics (server VAD owns commits otherwise). Pre-R3-1 the
+handler hard-coded `ProviderManaged`, which made the typed text-only
+path unreachable on a public channel — calling it killed the channel
+instead of producing sideband text.
+
+Default (`None`) preserves the prior wire shape: callers that omit the
+field get `ProviderManaged`, matching the legacy behavior."""
+    session_id: str
+    turning_mode: Optional[RealtimeTurningMode] = None
+
+
+@dataclass
+class WireLiveChannelCapabilities:
+    """Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
+
+Typed-boolean matrix advertised when a live channel opens. SDK consumers
+(Python `client.py`, TypeScript `client.ts`, Web SDK) get typed access to
+`image_in` / `video_in` / `transcript_supported` etc. without needing to
+hand-decode an opaque JSON object. CC5: closes the typed-surface gap that
+hid T8's "anticipate `gpt-realtime-2`" goal at the SDK boundary.
+
+Field shape mirrors the core type 1:1 — adding a new capability requires
+extending both the core type and this mirror; the `From` impls below
+fail-closed if a field is dropped (compile error: missing field). New
+modalities appear here as additional typed booleans, never as
+stringly-typed lists or provider-specific enums."""
+    audio_in: bool
+    audio_out: bool
+    barge_in_supported: bool
+    image_in: bool
+    provider_native_resume: bool
+    text_in: bool
+    text_out: bool
+    transcript_supported: bool
+    video_in: bool
+
+
+# Wire projection of [`meerkat_core::live_adapter::LiveContinuityMode`].
+#
+# Internally-tagged on `mode` (snake_case) — matches the core enum's serde
+# shape exactly so the wire payload is byte-identical. CC6: closes the
+# typed-surface gap. SDK consumers get a discriminated union (TS) or
+# tagged-variant (Python) instead of a raw JSON blob, and the
+# `ProviderNativeResume { provider_session_id }` payload field is visible
+# to schema codegen.
+#
+# **Breaking-change note (pre-1.0 dogma, no shims):** T12 already moved the
+# core enum from a bare-string serde shape (`"transcript_only"`) to the
+# internally-tagged form (`{"mode":"transcript_only"}`). This wire mirror
+# makes that shape change visible to schema codegen and SDK clients.
+class WireLiveContinuityModeFresh(TypedDict, total=False):
+    mode: Required[Literal['fresh']]
+
+class WireLiveContinuityModeTranscriptOnly(TypedDict, total=False):
+    mode: Required[Literal['transcript_only']]
+
+class WireLiveContinuityModeDegraded(TypedDict, total=False):
+    mode: Required[Literal['degraded']]
+
+class WireLiveContinuityModeProviderNativeResume(TypedDict, total=False):
+    mode: Required[Literal['provider_native_resume']]
+    provider_session_id: Required[str]
+
+class WireLiveContinuityModeUnknown(TypedDict, total=False):
+    debug: Required[str]
+    mode: Required[Literal['unknown']]
+
+WireLiveContinuityMode = WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly | WireLiveContinuityModeDegraded | WireLiveContinuityModeProviderNativeResume | WireLiveContinuityModeUnknown
+
+# Wire projection of [`meerkat_core::live_adapter::LiveTransportBootstrap`].
+#
+# Internally-tagged on `transport` (snake_case) — matches the core enum's
+# serde shape exactly so the wire payload is byte-identical. G8 (P2):
+# closes the typed-surface gap that left `transport: unknown` in TS and
+# `Any` in Python at the SDK boundary.
+#
+# The core enum is `#[non_exhaustive]`; new transports (e.g. WebRTC
+# reintroduction per Round-4 T4) appear here as additional typed variants
+# rather than as a free-form JSON blob.
+class WireLiveTransportBootstrapWebsocket(TypedDict, total=False):
+    token: Required[str]
+    transport: Required[Literal['websocket']]
+    url: Required[str]
+
+class WireLiveTransportBootstrapUnknown(TypedDict, total=False):
+    debug: Required[str]
+    transport: Required[Literal['unknown']]
+
+WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapUnknown
+
+@dataclass
+class LiveOpenResult:
+    """Response payload for `live/open`.
+
+`capabilities`, `continuity`, and `transport` are typed wire-side mirrors
+of the core `LiveChannelCapabilities` / `LiveContinuityMode` /
+`LiveTransportBootstrap` so SDK codegen sees the real shape (typed
+booleans, internally-tagged variant payloads, discriminated transport
+union) instead of an opaque JSON blob. CC5/CC6 (PR #650 verifier
+follow-up); G8 (P2): `transport` typed-mirror."""
+    capabilities: WireLiveChannelCapabilities
+    channel_id: str
+    continuity: WireLiveContinuityMode
+    transport: WireLiveTransportBootstrap
+
+
+@dataclass
+class LiveChannelParams:
+    """Request payload for `live/status`, `live/close`, and `live/interrupt`.
+They all take the same `{channel_id}` shape; this struct is the typed
+name for it.
+
+`live/commit_input` no longer uses this shape — it carries an optional
+`response_modality` override (G9) so callers can request a text-only
+response on an audio-first channel without flipping the channel
+modality. See [`LiveCommitInputParams`]."""
+    channel_id: str
+
+
+@dataclass
+class LiveStatusResult:
+    """Response payload for `live/status`.
+
+R6-3 (P2): `status` is now the typed [`WireLiveAdapterStatus`] mirror
+(with R5-3's `Unknown { debug }` floor) instead of the core
+[`LiveAdapterStatus`] under a `schemars(with = "serde_json::Value")`
+shroud. SDK codegen emits the typed discriminated union (TS) / typed
+dict union (Python) for `live/status` instead of `unknown` / `Any`.
+The runtime handler converts core → wire at the boundary; clients
+that fully understood the previous JSON shape see byte-identical
+payloads (the wire mirror serializes byte-compatible with the core
+enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
+    channel_id: str
+    status: WireLiveAdapterStatus
+
+
+@dataclass
+class LiveSendInputParams:
+    """Request payload for `live/send_input`.
+
+**`BREAKING_LIVE_WIRE_FORMAT_V1`** (H48): `chunk` is a nested object, not
+a flattened sibling of `channel_id`. WS protocol clients that piggyback on
+this shape must use the nested form."""
+    channel_id: str
+    chunk: LiveInputChunkWire
+
+
+@dataclass
+class LiveTruncateParams:
+    """Request payload for `live/truncate`.
+
+`item_id` and `content_index` are the provider-side handle for the
+assistant item being truncated; `audio_played_ms` is the client-tracked
+playback cursor at the moment of truncation. There is no server-side
+playback-cursor read API — clients track playback locally and pass the
+cursor in here when they want to truncate."""
     audio_played_ms: int
+    channel_id: str
     content_index: int
     item_id: str
 
 
-@dataclass
-class AudioFormatMismatchContext:
-    """Typed context carried alongside a [`RealtimeErrorCode::AudioFormatMismatch`]."""
-    actual: RealtimeAudioFormat
-    expected: RealtimeAudioFormat
+# Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
+#
+# Internally-tagged on `modality` (snake_case) — matches the core enum's
+# serde shape exactly so the wire payload is byte-identical. G9: closes
+# the typed-surface gap so SDK clients can pick `audio` vs `text` on a
+# per-response basis without round-tripping through a free-form string.
+#
+# The core enum is `#[non_exhaustive]`; new modalities (e.g. structured
+# output, image) appear here as additional typed variants.
+#
+# R5-3 (P3): no longer `Copy` because `Unknown { debug: String }` carries
+# an owned payload. The enum is small and conversions across the boundary
+# move-or-clone, so the loss of `Copy` is not material at call sites.
+class WireLiveResponseModalityAudio(TypedDict, total=False):
+    modality: Required[Literal['audio']]
 
+class WireLiveResponseModalityText(TypedDict, total=False):
+    modality: Required[Literal['text']]
 
-@dataclass
-class ToolCallTimeoutContext:
-    """Typed context carried alongside a [`RealtimeErrorCode::ToolCallTimeout`]."""
-    call_id: str
-    elapsed_ms: int
-    timeout_ms: int
+class WireLiveResponseModalityUnknown(TypedDict, total=False):
+    debug: Required[str]
+    modality: Required[Literal['unknown']]
 
-
-@dataclass
-class RealtimeChannelOpenFrame:
-    """Payload for `channel.open`."""
-    open_token: str
-    protocol_version: RealtimeProtocolVersion
-    role: RealtimeChannelRole
-    turning_mode: RealtimeTurningMode
-
-
-@dataclass
-class RealtimeChannelInputFrame:
-    """Payload for `channel.input`."""
-    chunk: RealtimeInputChunk
-
+WireLiveResponseModality = WireLiveResponseModalityAudio | WireLiveResponseModalityText | WireLiveResponseModalityUnknown
 
 @dataclass
-class RealtimeChannelOpenedFrame:
-    """Payload for `channel.opened`."""
-    capabilities: RealtimeCapabilities
-    protocol_version: RealtimeProtocolVersion
-    role: RealtimeChannelRole
-    status: RealtimeChannelStatus
+class LiveCommitInputParams:
+    """Request payload for `live/commit_input`.
 
+G9: optional `response_modality` lets the caller request a text-only
+response on an otherwise-audio channel without flipping the channel
+modality. `None` keeps the channel default (`audio` for the OpenAI
+realtime adapter today)."""
+    channel_id: str
+    response_modality: Optional[WireLiveResponseModality] = None
+
+
+# Status of a `live/refresh` request relative to the adapter pump.
+#
+# R4-5 (P3): the refresh path is asynchronous — `LiveAdapterHost::send_command`
+# returns when the command has been queued on the adapter's mpsc channel,
+# not when the adapter pump has applied the resulting `session.update`. The
+# realtime stream is the source of truth for the actual refresh outcome
+# (failures surface as `LiveAdapterObservation::Error`).
+#
+# Today every refresh path is `Queued`. The enum is `#[non_exhaustive]` so
+# a future revision can add `AppliedSync` (e.g. when a oneshot ack from the
+# adapter pump back through the command channel lands, or when a refresh
+# is detected as a no-op against the currently-applied snapshot) without
+# breaking the wire shape. SDK consumers route on the string value and
+# treat unknown values as "outcome unknown — observe the realtime stream".
+#
+# Serializes as a plain string (no envelope) so [`LiveRefreshResult`] can
+# place this typed status alongside the back-compat `refresh_enqueued`
+# boolean as ordinary sibling fields, which keeps SDK codegen on the
+# simple-struct path.
+LiveRefreshStatus = Literal['queued']
 
 @dataclass
-class RealtimeChannelStatusFrame:
-    """Payload for `channel.status`."""
-    status: RealtimeChannelStatus
+class LiveRefreshResult:
+    """Response payload for `live/refresh`.
+
+R4-5 (P3): replaces the previous untyped `{"refresh_enqueued": true}`
+JSON blob. The boolean `refresh_enqueued` field is preserved for back-
+compat (legacy clients that pattern-match on it stay on the green path)
+alongside the typed `status` discriminator. New code should route on
+`status`.
+
+See [`LiveRefreshStatus`] for the variant set and the contract on
+asynchronous adapter-pump application."""
+    refresh_enqueued: bool
+    status: Literal['queued']
 
 
-@dataclass
-class RealtimeChannelEventFrame:
-    """Payload for `channel.event`."""
-    event: RealtimeEvent
+# A typed, identity-bearing realtime transcript event consumed by the session.
+class RealtimeTranscriptEventItemObserved(TypedDict, total=False):
+    item_id: Required[str]
+    previous_item_id: NotRequired[str]
+    response_id: NotRequired[str]
+    role: Required[RealtimeTranscriptRole]
+    type: Required[Literal['item_observed']]
 
+class RealtimeTranscriptEventItemSkipped(TypedDict, total=False):
+    item_id: Required[str]
+    previous_item_id: NotRequired[str]
+    type: Required[Literal['item_skipped']]
 
-@dataclass
-class RealtimeChannelErrorFrame:
-    """Payload for `channel.error`."""
-    code: RealtimeErrorCode
-    message: str
-    details: Optional[RealtimeErrorDetails] = None
+class RealtimeTranscriptEventUserTranscriptFinal(TypedDict, total=False):
+    content_index: Required[int]
+    item_id: Required[str]
+    previous_item_id: NotRequired[str]
+    text: Required[str]
+    type: Required[Literal['user_transcript_final']]
 
+class RealtimeTranscriptEventAssistantTextDelta(TypedDict, total=False):
+    content_index: Required[int]
+    delta: Required[str]
+    delta_id: Required[str]
+    item_id: Required[str]
+    previous_item_id: NotRequired[str]
+    response_id: Required[str]
+    type: Required[Literal['assistant_text_delta']]
 
-@dataclass
-class RealtimeChannelClosedFrame:
-    """Payload for `channel.closed`."""
-    reason: Optional[str] = None
+class RealtimeTranscriptEventAssistantTranscriptDelta(TypedDict, total=False):
+    content_index: Required[int]
+    delta: Required[str]
+    delta_id: Required[str]
+    item_id: Required[str]
+    previous_item_id: NotRequired[str]
+    response_id: Required[str]
+    type: Required[Literal['assistant_transcript_delta']]
 
+class RealtimeTranscriptEventAssistantTranscriptTruncated(TypedDict, total=False):
+    content_index: Required[int]
+    item_id: Required[str]
+    response_id: Required[str]
+    text: Required[str]
+    type: Required[Literal['assistant_transcript_truncated']]
+
+class RealtimeTranscriptEventAssistantTranscriptFinalText(TypedDict, total=False):
+    content_index: Required[int]
+    item_id: Required[str]
+    response_id: Required[str]
+    text: Required[str]
+    type: Required[Literal['assistant_transcript_final_text']]
+
+class RealtimeTranscriptEventAssistantTurnCompleted(TypedDict, total=False):
+    response_id: Required[str]
+    stop_reason: Required[Any]
+    type: Required[Literal['assistant_turn_completed']]
+    usage: Required[Any]
+
+class RealtimeTranscriptEventAssistantTurnInterrupted(TypedDict, total=False):
+    response_id: Required[str]
+    type: Required[Literal['assistant_turn_interrupted']]
+
+RealtimeTranscriptEvent = RealtimeTranscriptEventItemObserved | RealtimeTranscriptEventItemSkipped | RealtimeTranscriptEventUserTranscriptFinal | RealtimeTranscriptEventAssistantTextDelta | RealtimeTranscriptEventAssistantTranscriptDelta | RealtimeTranscriptEventAssistantTranscriptTruncated | RealtimeTranscriptEventAssistantTranscriptFinalText | RealtimeTranscriptEventAssistantTurnCompleted | RealtimeTranscriptEventAssistantTurnInterrupted
+
+# Provider-neutral role for a realtime transcript item.
+RealtimeTranscriptRole = Literal['user', 'assistant']
+
+# Wire mirror of [`meerkat_core::live_adapter::LiveDegradationReason`].
+#
+# Internally-tagged on `kind` (snake_case) — matches the core enum's serde
+# shape exactly. SDK consumers route on `kind` to distinguish the
+# non-payload variants from the typed `other { detail }` payload.
+class WireLiveDegradationReasonRateLimited(TypedDict, total=False):
+    kind: Required[Literal['rate_limited']]
+
+class WireLiveDegradationReasonProviderThrottled(TypedDict, total=False):
+    kind: Required[Literal['provider_throttled']]
+
+class WireLiveDegradationReasonNetworkUnstable(TypedDict, total=False):
+    kind: Required[Literal['network_unstable']]
+
+class WireLiveDegradationReasonOther(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['other']]
+
+class WireLiveDegradationReasonUnknown(TypedDict, total=False):
+    debug: Required[str]
+    kind: Required[Literal['unknown']]
+
+WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown
+
+# Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].
+#
+# Internally-tagged on `status` (snake_case). The `degraded` variant
+# references [`WireLiveDegradationReason`] so the typed reason is visible at
+# the SDK boundary.
+class WireLiveAdapterStatusIdle(TypedDict, total=False):
+    status: Required[Literal['idle']]
+
+class WireLiveAdapterStatusOpening(TypedDict, total=False):
+    status: Required[Literal['opening']]
+
+class WireLiveAdapterStatusReady(TypedDict, total=False):
+    status: Required[Literal['ready']]
+
+class WireLiveAdapterStatusDegraded(TypedDict, total=False):
+    reason: Required[WireLiveDegradationReason]
+    status: Required[Literal['degraded']]
+
+class WireLiveAdapterStatusClosing(TypedDict, total=False):
+    status: Required[Literal['closing']]
+
+class WireLiveAdapterStatusClosed(TypedDict, total=False):
+    status: Required[Literal['closed']]
+
+class WireLiveAdapterStatusUnknown(TypedDict, total=False):
+    debug: Required[str]
+    status: Required[Literal['unknown']]
+
+WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterStatusOpening | WireLiveAdapterStatusReady | WireLiveAdapterStatusDegraded | WireLiveAdapterStatusClosing | WireLiveAdapterStatusClosed | WireLiveAdapterStatusUnknown
+
+# Wire mirror of
+# [`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2
+# dogma): pins the typed semantic-routing variants on the wire so SDKs
+# can distinguish a runtime-side identity swap from an adapter-side
+# input-modality rejection without string parsing.
+#
+# R6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The
+# previous wildcard fallback collapsed future core variants into
+# `Other { detail: "unknown_live_config_rejection_reason" }`, which SDK
+# consumers had to pattern-match on the English `detail` to route — the
+# exact "typed route becomes detail string" antipattern R3-6 + R5-3
+# closed for transport / observation / continuity / modality / status /
+# error_code. Future core variants now surface as `Unknown { debug }`
+# with the `{:?}` projection of the source variant preserved for
+# server-side observability.
+class WireLiveConfigRejectionReasonChannelIdentitySwap(TypedDict, total=False):
+    from_model: Required[str]
+    from_provider: Required[WireProvider]
+    kind: Required[Literal['channel_identity_swap']]
+    to_model: Required[str]
+    to_provider: Required[WireProvider]
+
+class WireLiveConfigRejectionReasonNonRealtimeResolution(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['non_realtime_resolution']]
+
+class WireLiveConfigRejectionReasonImageInputNotImplemented(TypedDict, total=False):
+    kind: Required[Literal['image_input_not_implemented']]
+
+class WireLiveConfigRejectionReasonVideoFrameInputNotImplemented(TypedDict, total=False):
+    kind: Required[Literal['video_frame_input_not_implemented']]
+
+class WireLiveConfigRejectionReasonUnsupportedInputChunkVariant(TypedDict, total=False):
+    kind: Required[Literal['unsupported_input_chunk_variant']]
+
+class WireLiveConfigRejectionReasonRefreshModelSwap(TypedDict, total=False):
+    from_model: Required[str]
+    kind: Required[Literal['refresh_model_swap']]
+    to_model: Required[str]
+
+class WireLiveConfigRejectionReasonRefreshProviderSwap(TypedDict, total=False):
+    from_provider: Required[str]
+    kind: Required[Literal['refresh_provider_swap']]
+    to_provider: Required[str]
+
+class WireLiveConfigRejectionReasonRefreshAudioConfigMismatch(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['refresh_audio_config_mismatch']]
+
+class WireLiveConfigRejectionReasonAudioInputFormatMismatch(TypedDict, total=False):
+    actual_channels: Required[int]
+    actual_sample_rate_hz: Required[int]
+    expected_channels: Required[int]
+    expected_sample_rate_hz: Required[int]
+    kind: Required[Literal['audio_input_format_mismatch']]
+
+class WireLiveConfigRejectionReasonOther(TypedDict, total=False):
+    detail: Required[str]
+    kind: Required[Literal['other']]
+
+class WireLiveConfigRejectionReasonUnknown(TypedDict, total=False):
+    debug: Required[str]
+    kind: Required[Literal['unknown']]
+
+WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown
+
+# Wire mirror of [`meerkat_core::live_adapter::LiveAdapterErrorCode`].
+#
+# Internally-tagged on `code` (snake_case). SDK consumers route on `code`
+# to distinguish payload-less variants from typed payload variants
+# (`config_rejected { reason }`, `other { raw }`). FIX-SDK-OBS: makes the
+# R5-9 `CommandRejected` observation's typed code visible at the SDK
+# boundary instead of a free-form blob.
+#
+# R5-2 (P2 dogma): `config_rejected.reason` is now a typed
+# [`WireLiveConfigRejectionReason`] mirror so SDK consumers route on the
+# variant rather than parsing English from the previous free-form
+# `String`.
+class WireLiveAdapterErrorCodeConnectionFailed(TypedDict, total=False):
+    code: Required[Literal['connection_failed']]
+
+class WireLiveAdapterErrorCodeConnectionLost(TypedDict, total=False):
+    code: Required[Literal['connection_lost']]
+
+class WireLiveAdapterErrorCodeConfigRejected(TypedDict, total=False):
+    code: Required[Literal['config_rejected']]
+    reason: Required[WireLiveConfigRejectionReason]
+
+class WireLiveAdapterErrorCodeProviderError(TypedDict, total=False):
+    code: Required[Literal['provider_error']]
+
+class WireLiveAdapterErrorCodeAuthenticationFailed(TypedDict, total=False):
+    code: Required[Literal['authentication_failed']]
+
+class WireLiveAdapterErrorCodeInternalError(TypedDict, total=False):
+    code: Required[Literal['internal_error']]
+
+class WireLiveAdapterErrorCodeOther(TypedDict, total=False):
+    code: Required[Literal['other']]
+    raw: Required[str]
+
+class WireLiveAdapterErrorCodeUnknown(TypedDict, total=False):
+    code: Required[Literal['unknown']]
+    debug: Required[str]
+
+WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown
+
+# Wire mirror of [`meerkat_core::live_adapter::LiveAdapterObservation`].
+#
+# FIX-SDK-OBS: closes the R5-4 verifier gap. The core enum is the canonical
+# shape adapters emit, but it is not registered for schema emission and is
+# therefore invisible at the SDK boundary — browser/Python clients receive
+# observations as untyped JSON and cannot type-narrow on
+# `assistant_audio_chunk` (to read the new `item_id` / `response_id` /
+# `content_index` fields driving `live/truncate`) or on `command_rejected`
+# (a typed channel-survives error introduced in R5-9). The wire mirror
+# makes every variant visible to schema codegen and produces a discriminated
+# TypeScript union / typed Python `TypedDict` union.
+#
+# Serde shape mirrors the core enum exactly: internally-tagged on
+# `observation` (snake_case). Round-trip with the core type is byte-
+# identical (see `wire_live_adapter_observation_byte_compatible_with_core`).
+#
+# Field types reference other wire mirrors where they exist
+# ([`WireStopReason`], [`WireUsage`], [`WireLiveAdapterStatus`],
+# [`WireLiveAdapterErrorCode`]) and the canonical
+# [`RealtimeTranscriptEvent`] (which already derives `JsonSchema` and is
+# auto-promoted by the SDK codegen `Realtime*` allowlist rule).
+#
+# Audio data is base64-encoded on the wire (matches the core
+# [`LiveAdapterObservation::AssistantAudioChunk`] base64 mode); the wire
+# mirror carries `data` as a `String` so the schema emits `String` instead
+# of an opaque `Vec<u8>` JSON-array shape.
+class WireLiveAdapterObservationReady(TypedDict, total=False):
+    observation: Required[Literal['ready']]
+
+class WireLiveAdapterObservationUserTranscriptFinal(TypedDict, total=False):
+    content_index: NotRequired[int]
+    observation: Required[Literal['user_transcript_final']]
+    previous_item_id: NotRequired[str]
+    provider_item_id: NotRequired[str]
+    text: Required[str]
+
+class WireLiveAdapterObservationAssistantTextDelta(TypedDict, total=False):
+    content_index: NotRequired[int]
+    delta: Required[str]
+    delta_id: NotRequired[str]
+    observation: Required[Literal['assistant_text_delta']]
+    previous_item_id: NotRequired[str]
+    provider_item_id: NotRequired[str]
+    response_id: NotRequired[str]
+
+class WireLiveAdapterObservationAssistantTranscriptDelta(TypedDict, total=False):
+    content_index: NotRequired[int]
+    delta: Required[str]
+    delta_id: NotRequired[str]
+    observation: Required[Literal['assistant_transcript_delta']]
+    previous_item_id: NotRequired[str]
+    provider_item_id: NotRequired[str]
+    response_id: NotRequired[str]
+
+class WireLiveAdapterObservationAssistantAudioChunk(TypedDict, total=False):
+    channels: Required[int]
+    content_index: NotRequired[int]
+    data: Required[str]
+    item_id: NotRequired[str]
+    observation: Required[Literal['assistant_audio_chunk']]
+    response_id: NotRequired[str]
+    sample_rate_hz: Required[int]
+
+class WireLiveAdapterObservationAssistantTranscriptFinal(TypedDict, total=False):
+    content_index: NotRequired[int]
+    observation: Required[Literal['assistant_transcript_final']]
+    previous_item_id: NotRequired[str]
+    provider_item_id: Required[str]
+    response_id: NotRequired[str]
+    stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
+    text: Required[str]
+    usage: Required[dict[str, Any]]
+
+class WireLiveAdapterObservationAssistantTranscriptTruncated(TypedDict, total=False):
+    content_index: NotRequired[int]
+    observation: Required[Literal['assistant_transcript_truncated']]
+    previous_item_id: NotRequired[str]
+    provider_item_id: NotRequired[str]
+    response_id: NotRequired[str]
+    text: NotRequired[str]
+
+class WireLiveAdapterObservationRealtimeTranscript(TypedDict, total=False):
+    event: Required[RealtimeTranscriptEvent]
+    observation: Required[Literal['realtime_transcript']]
+
+class WireLiveAdapterObservationToolCallRequested(TypedDict, total=False):
+    arguments: Required[Any]
+    observation: Required[Literal['tool_call_requested']]
+    provider_call_id: Required[str]
+    tool_name: Required[str]
+
+class WireLiveAdapterObservationTurnInterrupted(TypedDict, total=False):
+    observation: Required[Literal['turn_interrupted']]
+    response_id: NotRequired[str]
+
+class WireLiveAdapterObservationTurnCompleted(TypedDict, total=False):
+    observation: Required[Literal['turn_completed']]
+    response_id: NotRequired[str]
+    stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
+    usage: Required[dict[str, Any]]
+
+class WireLiveAdapterObservationStatusChanged(TypedDict, total=False):
+    observation: Required[Literal['status_changed']]
+    status: Required[WireLiveAdapterStatus]
+
+class WireLiveAdapterObservationError(TypedDict, total=False):
+    code: Required[WireLiveAdapterErrorCode]
+    message: Required[str]
+    observation: Required[Literal['error']]
+
+class WireLiveAdapterObservationCommandRejected(TypedDict, total=False):
+    code: Required[WireLiveAdapterErrorCode]
+    message: Required[str]
+    observation: Required[Literal['command_rejected']]
+
+class WireLiveAdapterObservationUnknown(TypedDict, total=False):
+    debug: Required[str]
+    observation: Required[Literal['unknown']]
+
+WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown
 
 @dataclass
 class RuntimeAcceptResult:
@@ -2316,86 +2726,16 @@ WireRenderSalience = Literal['background', 'normal', 'important', 'urgent']
 # Public runtime state projection used by RPC surfaces.
 WireRuntimeState = Literal['initializing', 'idle', 'attached', 'running', 'retired', 'stopped', 'destroyed']
 
-# Public live attachment status projection used by runtime and mob surfaces.
-WireRealtimeAttachmentStatus = Literal['unattached', 'intent_present_unbound', 'binding_not_ready', 'binding_ready', 'replacement_pending', 'reattach_required']
-
-# Target for a public realtime channel.
-#
-# Two variants, one for each addressing mode:
-#
-# - `SessionTarget` — standalone sessions (no mob-member continuity). The
-#   session id is pinned for the channel's lifetime; when that session
-#   ends, the channel ends.
-#
-# - `MobMember` — mob-member continuity (W3-H / dogma #4). Identity is the
-#   canonical anchor, and the server resolves the current bridge session
-#   on every tick from the MobMachine's `member_session_bindings` map.
-#   Respawn atomically rotates the bridge session via the
-#   `MemberSessionBindingChanged { old: Some, new: Some }` effect; the
-#   channel survives without any SDK round-trip. A terminal
-#   `MemberSessionBindingChanged { old: Some, new: None }` closes the
-#   channel with `RealtimeErrorCode::BindingReleased`.
-class RealtimeChannelTargetSessionTarget(TypedDict, total=False):
-    session_id: Required[str]
-    type: Required[Literal['session_target']]
-
-class RealtimeChannelTargetMobMember(TypedDict, total=False):
-    agent_identity: Required[str]
-    mob_id: Required[str]
-    type: Required[Literal['mob_member']]
-
-RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | RealtimeChannelTargetMobMember
-
-# Opening role for a realtime channel.
-RealtimeChannelRole = Literal['primary', 'observer']
-
-# Turning mode for a realtime channel.
+# Turning mode for a provider realtime session.
 RealtimeTurningMode = Literal['provider_managed', 'explicit_commit']
 
-# Canonical wire protocol version for realtime channels.
-#
-# The version is bumped every time the on-the-wire shape of
-# [`RealtimeAudioChunk`], frame enums, or other load-bearing realtime
-# contracts changes in an incompatible way. Clients and servers handshake on
-# the string form; this enum is the single typed owner of the set.
-RealtimeProtocolVersion = Literal['2']
-
-# Input modality kind supported by a realtime channel.
+# Input modality kind.
 RealtimeInputKind = Literal['text', 'audio', 'video']
 
-# Output modality kind supported by a realtime channel.
+# Output modality kind.
 RealtimeOutputKind = Literal['text', 'audio', 'video']
 
-# Lifecycle state for a realtime channel.
-RealtimeChannelState = Literal['opening', 'ready', 'interrupted', 'reconnecting', 'closed', 'error']
-
-# Typed realtime channel error code. Replaces the prior freeform `String` on
-# [`RealtimeChannelErrorFrame`]; all paths that mint a channel error pick
-# exactly one variant so downstream SDKs can match without string folklore.
-RealtimeErrorCode = Literal['invalid_frame', 'expected_channel_open', 'invalid_open_token', 'open_token_expired', 'role_mismatch', 'turning_mode_mismatch', 'unsupported_turning_mode', 'target_busy', 'unsupported_protocol_version', 'audio_format_mismatch', 'unauthorized_realm', 'tool_call_timeout', 'internal_error', 'reconnect_exhausted', 'invalid_target', 'channel_not_bound', 'runtime_internal', 'runtime_not_ready', 'provider_session_closed', 'provider_session_failed', 'provider_session_unavailable', 'unsupported_input_kind', 'no_pending_turn', 'observer_read_only', 'unexpected_channel_open', 'commit_turn_unavailable', 'channel_reconnecting', 'binding_released', 'authentication_failed', 'content_filtered', 'model_not_found', 'invalid_request']
-
-# Structured typed context carried on a channel error frame. Each variant
-# corresponds to a specific [`RealtimeErrorCode`] and lets clients match
-# the reason without parsing the message string.
-class RealtimeErrorDetailsAudioFormatMismatch(TypedDict, total=False):
-    actual: Required[RealtimeAudioFormat]
-    expected: Required[RealtimeAudioFormat]
-    kind: Required[Literal['audio_format_mismatch']]
-
-class RealtimeErrorDetailsToolCallTimeout(TypedDict, total=False):
-    call_id: Required[str]
-    elapsed_ms: Required[int]
-    timeout_ms: Required[int]
-    kind: Required[Literal['tool_call_timeout']]
-
-class RealtimeErrorDetailsUnsupportedProtocolVersion(TypedDict, total=False):
-    kind: Required[Literal['unsupported_protocol_version']]
-    requested: Required[str]
-    supported: Required[list[RealtimeProtocolVersion]]
-
-RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion
-
-# Modality-neutral input chunk.
+# Modality-neutral provider input chunk.
 class RealtimeInputChunkTextChunk(TypedDict, total=False):
     text: Required[str]
     kind: Required[Literal['text_chunk']]
@@ -2414,149 +2754,40 @@ class RealtimeInputChunkVideoChunk(TypedDict, total=False):
 
 RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk
 
-# Modality-neutral output chunk.
-class RealtimeOutputChunkTextDelta(TypedDict, total=False):
-    delta: Required[str]
-    kind: Required[Literal['text_delta']]
-
-class RealtimeOutputChunkAudioChunk(TypedDict, total=False):
+# Modality-tagged input chunk for `live/send_input`.
+#
+# Audio / image / video-frame payloads are base64 strings (`data`); the
+# modality-specific metadata (`sample_rate_hz` / `channels` for audio,
+# `mime` for image, `codec` / `timestamp_ms` for video frames) lets the
+# adapter validate against the negotiated provider format.
+#
+# T11: `Image` and `VideoFrame` mirror the typed variants on
+# [`meerkat_core::live_adapter::LiveInputChunk`]. Adapters that do not
+# implement a variant must reject with a typed
+# `LiveAdapterErrorCode::ConfigRejected` rather than collapsing onto a
+# free-form provider error string.
+class LiveInputChunkWireAudio(TypedDict, total=False):
     channels: Required[int]
     data: Required[str]
-    mime_type: Required[str]
+    kind: Required[Literal['audio']]
     sample_rate_hz: Required[int]
-    kind: Required[Literal['audio_chunk']]
 
-class RealtimeOutputChunkVideoChunk(TypedDict, total=False):
+class LiveInputChunkWireText(TypedDict, total=False):
+    kind: Required[Literal['text']]
+    text: Required[str]
+
+class LiveInputChunkWireImage(TypedDict, total=False):
     data: Required[str]
-    mime_type: Required[str]
-    kind: Required[Literal['video_chunk']]
+    kind: Required[Literal['image']]
+    mime: Required[str]
 
-RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk
+class LiveInputChunkWireVideoFrame(TypedDict, total=False):
+    codec: Required[str]
+    data: Required[str]
+    kind: Required[Literal['video_frame']]
+    timestamp_ms: Required[int]
 
-# Normalized realtime event stream payload.
-class RealtimeEventInputTranscriptPartial(TypedDict, total=False):
-    text: Required[str]
-    type: Required[Literal['input_transcript_partial']]
-
-class RealtimeEventInputTranscriptFinal(TypedDict, total=False):
-    prosody_hint: NotRequired[str]
-    text: Required[str]
-    type: Required[Literal['input_transcript_final']]
-
-class RealtimeEventTurnStarted(TypedDict, total=False):
-    type: Required[Literal['turn_started']]
-
-class RealtimeEventTurnCommitted(TypedDict, total=False):
-    type: Required[Literal['turn_committed']]
-
-class RealtimeEventTurnCompleted(TypedDict, total=False):
-    type: Required[Literal['turn_completed']]
-
-class RealtimeEventOutputTextDelta(TypedDict, total=False):
-    delta: Required[str]
-    type: Required[Literal['output_text_delta']]
-
-class RealtimeEventOutputAudioChunk(TypedDict, total=False):
-    chunk: Required[RealtimeAudioChunk]
-    type: Required[Literal['output_audio_chunk']]
-
-class RealtimeEventOutputVideoChunk(TypedDict, total=False):
-    chunk: Required[RealtimeVideoChunk]
-    type: Required[Literal['output_video_chunk']]
-
-class RealtimeEventInterrupted(TypedDict, total=False):
-    type: Required[Literal['interrupted']]
-
-class RealtimeEventToolCallRequested(TypedDict, total=False):
-    call_id: Required[str]
-    tool_name: Required[str]
-    type: Required[Literal['tool_call_requested']]
-
-class RealtimeEventToolCallCompleted(TypedDict, total=False):
-    call_id: Required[str]
-    type: Required[Literal['tool_call_completed']]
-
-class RealtimeEventToolCallFailed(TypedDict, total=False):
-    call_id: Required[str]
-    error: Required[str]
-    type: Required[Literal['tool_call_failed']]
-
-class RealtimeEventToolCallTimedOut(TypedDict, total=False):
-    call_id: Required[str]
-    elapsed_ms: Required[int]
-    type: Required[Literal['tool_call_timed_out']]
-
-class RealtimeEventAssistantTranscriptTruncated(TypedDict, total=False):
-    audio_played_ms: Required[int]
-    item_id: Required[str]
-    truncated_text: NotRequired[str]
-    type: Required[Literal['assistant_transcript_truncated']]
-
-class RealtimeEventStatusChanged(TypedDict, total=False):
-    status: Required[RealtimeChannelStatus]
-    type: Required[Literal['status_changed']]
-
-class RealtimeEventNeedsReattach(TypedDict, total=False):
-    type: Required[Literal['needs_reattach']]
-
-RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscriptFinal | RealtimeEventTurnStarted | RealtimeEventTurnCommitted | RealtimeEventTurnCompleted | RealtimeEventOutputTextDelta | RealtimeEventOutputAudioChunk | RealtimeEventOutputVideoChunk | RealtimeEventInterrupted | RealtimeEventToolCallRequested | RealtimeEventToolCallCompleted | RealtimeEventToolCallFailed | RealtimeEventToolCallTimedOut | RealtimeEventAssistantTranscriptTruncated | RealtimeEventStatusChanged | RealtimeEventNeedsReattach
-
-# Client-to-server realtime frame.
-class RealtimeClientFrameChannelOpen(TypedDict, total=False):
-    open_token: Required[str]
-    protocol_version: Required[RealtimeProtocolVersion]
-    role: Required[RealtimeChannelRole]
-    turning_mode: Required[RealtimeTurningMode]
-    type: Required[Literal['channel.open']]
-
-class RealtimeClientFrameChannelInput(TypedDict, total=False):
-    chunk: Required[RealtimeInputChunk]
-    type: Required[Literal['channel.input']]
-
-class RealtimeClientFrameChannelCommitTurn(TypedDict, total=False):
-    type: Required[Literal['channel.commit_turn']]
-
-class RealtimeClientFrameChannelInterrupt(TypedDict, total=False):
-    type: Required[Literal['channel.interrupt']]
-
-class RealtimeClientFrameChannelBargeInTruncate(TypedDict, total=False):
-    audio_played_ms: Required[int]
-    content_index: Required[int]
-    item_id: Required[str]
-    type: Required[Literal['channel.barge_in_truncate']]
-
-class RealtimeClientFrameChannelClose(TypedDict, total=False):
-    type: Required[Literal['channel.close']]
-
-RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChannelInput | RealtimeClientFrameChannelCommitTurn | RealtimeClientFrameChannelInterrupt | RealtimeClientFrameChannelBargeInTruncate | RealtimeClientFrameChannelClose
-
-# Server-to-client realtime frame.
-class RealtimeServerFrameChannelOpened(TypedDict, total=False):
-    capabilities: Required[RealtimeCapabilities]
-    protocol_version: Required[RealtimeProtocolVersion]
-    role: Required[RealtimeChannelRole]
-    status: Required[RealtimeChannelStatus]
-    type: Required[Literal['channel.opened']]
-
-class RealtimeServerFrameChannelStatus(TypedDict, total=False):
-    status: Required[RealtimeChannelStatus]
-    type: Required[Literal['channel.status']]
-
-class RealtimeServerFrameChannelEvent(TypedDict, total=False):
-    event: Required[RealtimeEvent]
-    type: Required[Literal['channel.event']]
-
-class RealtimeServerFrameChannelError(TypedDict, total=False):
-    code: Required[RealtimeErrorCode]
-    details: NotRequired[RealtimeErrorDetails]
-    message: Required[str]
-    type: Required[Literal['channel.error']]
-
-class RealtimeServerFrameChannelClosed(TypedDict, total=False):
-    reason: NotRequired[str]
-    type: Required[Literal['channel.closed']]
-
-RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed
+LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText | LiveInputChunkWireImage | LiveInputChunkWireVideoFrame
 
 # Discriminator for runtime-backed input submission responses.
 RuntimeAcceptOutcomeType = Literal['accepted', 'deduplicated', 'rejected']
@@ -2570,36 +2801,106 @@ WireStopReason = Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 
 # Wire-safe tool result content that handles both legacy string and array formats.
 WireToolResultContent = str | list[WireContentBlock]
 
+# Wire-safe projection of [`meerkat_core::Provider`].
+#
+# The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
+# transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
+# `"openai"`. `WireProvider` pins the correct wire names with explicit
+# `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
+# `"anthropic"`, `"gemini"`, etc.
+#
+# Includes an `Unknown { debug: String }` variant for future-proofing per
+# the wire-mirror dogma used throughout this module.
+WireProvider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other'] | Literal['unknown']
+
+# Wire projection of `meerkat_core::TranscriptSource`. Lane provenance
+# for spoken-transcript blocks.
+#
+# R7-4 (P3 dogma): the previous shape used a wildcard arm in
+# `From<TranscriptSource>` that fell through to `Spoken`, silently
+# misattributing future core variants as user-spoken transcript. The
+# fix mirrors the live-wire pattern from R5-3 / R6-5 — future core
+# variants surface as `Unknown { debug }` (a fail-loud sentinel), and
+# the reverse direction is `TryFrom` returning
+# `WireConversionError::TranscriptSource { debug }` for the `Unknown`
+# case rather than fabricating a typed `Spoken`.
+class WireTranscriptSourceSpoken(TypedDict, total=False):
+    kind: Required[Literal['spoken']]
+
+class WireTranscriptSourceUnknown(TypedDict, total=False):
+    debug: Required[str]
+    kind: Required[Literal['unknown']]
+
+WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
+
 # Transcript block inside a block-assistant message.
 #
 # Not `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through
 # fidelity (core invariant — opaque from provider to dispatcher), and
 # `RawValue` does not derive equality. Equivalence checks should
 # round-trip through serialization and compare the serialized bytes.
+class WireAssistantBlockTextData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    text: Required[str]
+
 class WireAssistantBlockText(TypedDict, total=False):
     block_type: Required[Literal['text']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockTextData]
+
+class WireAssistantBlockTranscriptData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    source: Required[WireTranscriptSource]
+    text: Required[str]
+
+class WireAssistantBlockTranscript(TypedDict, total=False):
+    block_type: Required[Literal['transcript']]
+    data: Required[WireAssistantBlockTranscriptData]
+
+class WireAssistantBlockReasoningData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    text: NotRequired[str]
 
 class WireAssistantBlockReasoning(TypedDict, total=False):
     block_type: Required[Literal['reasoning']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockReasoningData]
+
+class WireAssistantBlockToolUseData(TypedDict, total=False):
+    args: Required[Any]
+    id: Required[str]
+    meta: NotRequired[dict[str, Any]]
+    name: Required[str]
 
 class WireAssistantBlockToolUse(TypedDict, total=False):
     block_type: Required[Literal['tool_use']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockToolUseData]
+
+class WireAssistantBlockServerToolContentData(TypedDict, total=False):
+    content: Required[Any]
+    id: NotRequired[str]
+    meta: NotRequired[dict[str, Any]]
+    name: Required[str]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockServerToolContentData]
+
+class WireAssistantBlockImageData(TypedDict, total=False):
+    blob_ref: Required[dict[str, Any]]
+    height: Required[int]
+    image_id: Required[str]
+    media_type: Required[str]
+    meta: Required[dict[str, Any]]
+    revised_prompt: Required[dict[str, Any]]
+    width: Required[int]
 
 class WireAssistantBlockImage(TypedDict, total=False):
     block_type: Required[Literal['image']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockImageData]
 
 class WireAssistantBlockUnknown(TypedDict, total=False):
     block_type: Required[Literal['unknown']]
 
-WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
+WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockTranscript | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown
 
 # Machine-owned image operation phase.
 class WireImageOperationPhaseRequested(TypedDict, total=False):
@@ -2678,6 +2979,7 @@ class CommsCommandPeerRequest(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsCommandPeerResponse(TypedDict, total=False):
+    blocks: NotRequired[list[ContentBlock]]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]
@@ -2942,6 +3244,7 @@ class CommsSendParamsPeerRequest(TypedDict, total=False):
     to: Required[PeerId]
 
 class CommsSendParamsPeerResponse(TypedDict, total=False):
+    blocks: NotRequired[list[ContentBlock]]
     handling_mode: NotRequired[HandlingMode]
     in_reply_to: Required[str]
     kind: Required[Literal['peer_response']]

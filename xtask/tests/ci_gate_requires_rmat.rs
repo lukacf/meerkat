@@ -32,8 +32,13 @@ fn ci_exposes_only_default_cargo_and_owner_gated_gcp_buildbuddy() {
 
     assert_eq!(
         defined,
-        vec!["cargo", "gcp-buildbuddy", "unauthorized-gcp-buildbuddy"],
-        "{} should expose only the default Cargo lane and the owner-gated GCP BuildBuddy lane",
+        vec![
+            "cargo",
+            "gate",
+            "gcp-buildbuddy",
+            "unauthorized-gcp-buildbuddy"
+        ],
+        "{} should expose only the default Cargo lane, the owner-gated GCP BuildBuddy lane, and the aggregating gate",
         ci_yml.display(),
     );
     assert!(ci.contains("github.actor == 'lukacf'"));
@@ -83,6 +88,8 @@ fn buildbuddy_workflow_is_gcp_only() {
             "gate",
             "governance-submit",
             "native-submit",
+            "prebuild-submit",
+            "static-submit",
             "wasm-feature-submit",
         ],
     );

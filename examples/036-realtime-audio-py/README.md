@@ -1,16 +1,16 @@
-# 036 - Realtime Audio (Python)
+# 036 - Live Audio (Python)
 
-Talk to a Meerkat realtime OpenAI mob member from the command line. The app
-streams microphone audio into a `gpt-realtime-1.5` channel, plays assistant
+Talk to a Meerkat live OpenAI mob member from the command line. The app
+streams microphone audio into a `gpt-realtime-2` channel, plays assistant
 audio back through your speakers, and prints transcript, tool, and mob activity
 as the conversation progresses.
 
 ## What This Shows
 
-- OpenAI realtime transport through the Meerkat Python SDK
-- `RealtimeChannel.mob_member(...)` identity-first routing
+- OpenAI live audio transport through the Meerkat Python SDK
+- `LiveChannel.session(...)` lifecycle wrapper
 - Inline Meerkat mob skills
-- Python callback tools invoked from a realtime turn
+- Python callback tools invoked from a live turn
 - Helper sub-agents spawned through a Meerkat mob
 
 ## Setup
@@ -42,8 +42,8 @@ Then run:
 OPENAI_API_KEY=sk-... python3 main.py
 ```
 
-The example asks `rkat-rpc` to start its realtime WebSocket host, creates an
-isolated realm by default, creates a mob, spawns a realtime `voice-host` member,
+The example asks `rkat-rpc` to start its live WebSocket host, creates an
+isolated realm by default, creates a mob, spawns a live `voice-host` member,
 and opens an audio channel to that member.
 
 ## Try It
@@ -65,18 +65,18 @@ python3 main.py --help
 python3 main.py --text-probe
 python3 main.py --input-device 1 --output-device 2
 python3 main.py --helper-model gpt-5.5
-python3 main.py --realm realtime-demo
+python3 main.py --realm live-demo
 ```
 
-`--text-probe` keeps the realtime WebSocket path but sends one text chunk
-instead of opening local audio devices. It waits for a realtime tool completion
+`--text-probe` keeps the live WebSocket path but sends one text chunk
+instead of opening local audio devices. It waits for a tool completion
 or turn completion event, so it is useful for checking runtime plumbing on
 machines without a microphone.
 
 ## Troubleshooting
 
-If startup reports that realtime audio input is unavailable, `rkat-rpc` started
-without an OpenAI realtime sideband factory. Check that `OPENAI_API_KEY` or your
+If startup reports that live audio input is unavailable, `rkat-rpc` started
+without an OpenAI live sideband factory. Check that `OPENAI_API_KEY` or your
 OpenAI auth binding is available to the runtime.
 
 If audio devices fail to open, run `python3 -m sounddevice` to list device names

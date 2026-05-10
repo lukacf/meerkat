@@ -73,46 +73,20 @@ use meerkat::{
 #[cfg(feature = "mcp")]
 use meerkat_core::ToolConfigChangeOperation;
 
-fn unknown_provider_message(provider: &str) -> String {
-    format!("unknown provider '{provider}' (expected anthropic, openai, gemini, or self_hosted)")
-}
-
-fn parse_provider_override(provider: &str) -> Result<meerkat_core::Provider, String> {
-    meerkat_core::Provider::parse_strict(provider).ok_or_else(|| unknown_provider_message(provider))
-}
-
-fn render_context_append_text(content: &CoreRenderable) -> String {
-    match content {
-        CoreRenderable::Text { text } => text.clone(),
-        CoreRenderable::Blocks { blocks } => meerkat_core::types::text_content(blocks),
-        CoreRenderable::Json { value } => {
-            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-        }
-        CoreRenderable::Reference { uri, label } => match label {
-            Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
-            _ => format!("[Reference] {uri}"),
-        },
-        _ => String::new(),
-    }
-}
-
-fn pending_system_context_appends(
-    appends: &[ConversationContextAppend],
-) -> Vec<PendingSystemContextAppend> {
-    let accepted_at = meerkat_core::time_compat::SystemTime::now();
-    appends
-        .iter()
-        .map(|append| PendingSystemContextAppend {
-            text: render_context_append_text(&append.content),
-            source: Some(append.key.clone()),
-            idempotency_key: Some(append.key.clone()),
-            accepted_at,
-        })
-        .collect()
-}
+use meerkat::session_runtime::recovery::{parse_provider_override, unknown_provider_message};
+use meerkat::session_runtime::staged_promotion::{
+    pending_system_context_appends, render_context_append_text,
+};
 
 const PENDING_SESSION_EVENT_CHANNEL_CAPACITY: usize = 128;
 const DEFAULT_RUNTIME_ARCHIVED_HISTORY_CAPACITY: usize = 1024;
+
+// W2-A: surface-agnostic LiveOpenPrecheckError + precheck_identity +
+// apply_precheck_gates moved to `meerkat::session_runtime::errors` and
+// `meerkat::session_runtime::live_orchestration`. RPC keeps a re-export
+// so existing handlers/tests resolve the same type.
+pub use meerkat::session_runtime::errors::LiveOpenPrecheckError;
+use meerkat::session_runtime::live_orchestration::{apply_precheck_gates, precheck_identity};
 
 #[cfg(test)]
 type ServiceStartTurnResultReceiver =
@@ -123,222 +97,92 @@ type RecoverableServiceApplyRuntimeTurnResultReceiver = tokio::sync::oneshot::Re
     Result<CoreApplyOutput, SessionError>,
     Option<ActiveCapacityGuard>,
 )>;
-type ActiveCapacityGuard = meerkat::RuntimeContextAdmissionGuard;
-type StagedCapacityAdmissions = Arc<StdMutex<HashMap<SessionId, ActiveCapacityGuard>>>;
+pub(crate) use meerkat::session_runtime::admission::{
+    ActiveCapacityGuard, StagedCapacityAdmissions, StagedCapacityCollision,
+    discard_staged_capacity_admission as admission_discard_staged_capacity,
+    has_staged_capacity_admission as admission_has_staged_capacity,
+    insert_staged_capacity_admission as admission_insert_staged_capacity,
+    restore_staged_capacity_admission,
+    take_staged_capacity_admission as admission_take_staged_capacity,
+};
 
-#[derive(Clone)]
-struct StagedAdmissionRestore {
-    admissions: StagedCapacityAdmissions,
-    session_id: SessionId,
+pub(crate) use meerkat::session_runtime::admission::{
+    RuntimePreAdmission, RuntimePreAdmissionEntry, RuntimePreAdmissionGuard,
+    RuntimePreAdmissionRegistration, RuntimePreAdmissionRestore, RuntimeRegistrationLockLease,
+    StagedAdmissionRestore, StagedArchiveRollbackGuard,
+};
+pub(crate) use meerkat::session_runtime::recovery::{
+    RecoveredCreateRequest, RecoveryRuntimeBindingMode,
+};
+
+pub(crate) use meerkat::session_runtime::runtime_state::{
+    ArchiveRuntimeCleanup, ArchiveRuntimeMcpState, ArchiveRuntimeMobState,
+    PendingSessionEventStreamDrop, PendingSessionEventStreams,
+};
+
+/// RPC-side adapter implementing [`ArchiveRuntimeMcpState`] for the
+/// per-session MCP adapter map. Cleanup removes the entry and shuts
+/// down the adapter, identical to the previous inlined logic.
+#[cfg(feature = "mcp")]
+struct RpcMcpStateAdapter {
+    sessions: Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>,
 }
 
-pub(crate) struct RuntimePreAdmission {
-    admission: Option<ActiveCapacityGuard>,
-    staged_restore: Option<StagedAdmissionRestore>,
-}
-
-#[derive(Debug)]
-struct RecoveredCreateRequest {
-    request: CreateSessionRequest,
-    runtime_was_registered: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum RecoveryRuntimeBindingMode {
-    Authoritative,
-    LocalResources,
-}
-
-#[derive(Clone)]
-struct PendingSessionEventStreams {
-    events: broadcast::Sender<EventEnvelope<AgentEvent>>,
-    receiver_dropped: Arc<Notify>,
-}
-
-#[derive(Clone)]
-struct ArchiveRuntimeCleanup {
-    runtime_adapter: Arc<MeerkatMachine>,
-    pending_session_event_streams:
-        Option<Arc<Mutex<HashMap<SessionId, PendingSessionEventStreams>>>>,
-    #[cfg(feature = "mcp")]
-    mcp_sessions: Option<Arc<RwLock<std::collections::HashMap<SessionId, SessionMcpState>>>>,
-    #[cfg(feature = "mob")]
-    mob_state: Option<Arc<meerkat_mob_mcp::MobMcpState>>,
-}
-
-impl ArchiveRuntimeCleanup {
-    async fn has_retained_mob_cleanup(&self, session_id: &SessionId) -> bool {
-        #[cfg(feature = "mob")]
-        if let Some(mob_state) = self.mob_state.as_ref()
-            && mob_state
-                .has_bridge_session_scoped_mobs(&session_id.to_string())
-                .await
-        {
-            return true;
-        }
-
-        #[cfg(not(feature = "mob"))]
-        let _ = session_id;
-
-        false
-    }
-
-    async fn archive_service(
-        &self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
-        session_id: &SessionId,
-    ) -> Result<(), SessionError> {
-        service
-            .archive_with_machine_protocol(
-                session_id,
-                MachineSessionArchiveProtocol::from_machine(self.runtime_adapter.as_ref()),
-            )
-            .await
-    }
-
-    async fn run(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        self.runtime_adapter.unregister_session(session_id).await;
-        if let Some(streams) = self.pending_session_event_streams.as_ref() {
-            streams.lock().await.remove(session_id);
-        }
-        #[cfg(feature = "mcp")]
-        if let Some(mcp_sessions) = self.mcp_sessions.as_ref()
-            && let Some(state) = mcp_sessions.write().await.remove(session_id)
-        {
+#[cfg(feature = "mcp")]
+#[async_trait::async_trait]
+impl ArchiveRuntimeMcpState for RpcMcpStateAdapter {
+    async fn cleanup(&self, session_id: &SessionId) {
+        if let Some(state) = self.sessions.write().await.remove(session_id) {
             state.adapter.shutdown().await;
         }
-        #[cfg(feature = "mob")]
-        if let Some(mob_state) = self.mob_state.as_ref() {
-            mob_state
-                .destroy_bridge_session_mobs(&session_id.to_string())
-                .await
-                .map_err(|error| {
-                    error.into_session_error("mob cleanup during archive incomplete")
-                })?;
-        }
-        #[cfg(feature = "comms")]
-        self.runtime_adapter.abort_comms_drain(session_id).await;
-        Ok(())
     }
 }
 
-struct PendingSessionEventStreamDrop {
-    receiver_dropped: Arc<Notify>,
+/// RPC-side adapter implementing [`ArchiveRuntimeMobState`] on top of
+/// `meerkat_mob_mcp::MobMcpState`. Mirrors the previous inlined logic.
+#[cfg(feature = "mob")]
+struct RpcMobStateAdapter {
+    state: Arc<meerkat_mob_mcp::MobMcpState>,
 }
 
-impl Drop for PendingSessionEventStreamDrop {
-    fn drop(&mut self) {
-        self.receiver_dropped.notify_one();
+#[cfg(feature = "mob")]
+#[async_trait::async_trait]
+impl ArchiveRuntimeMobState for RpcMobStateAdapter {
+    async fn cleanup(&self, session_id: &SessionId) -> Result<(), SessionError> {
+        self.state
+            .destroy_bridge_session_mobs(&session_id.to_string())
+            .await
+            .map_err(|error| error.into_session_error("mob cleanup during archive incomplete"))
+    }
+
+    async fn has_retained_cleanup(&self, session_id: &SessionId) -> bool {
+        self.state
+            .has_bridge_session_scoped_mobs(&session_id.to_string())
+            .await
     }
 }
 
-fn realtime_projection_root_system_message(session: &Session) -> Option<Message> {
-    let build_state = session.build_state().unwrap_or_default();
-    let mut content = build_state
-        .system_prompt
-        .or_else(|| {
-            session
-                .messages()
-                .first()
-                .and_then(|message| match message {
-                    Message::System(system) => Some(system.content.clone()),
-                    Message::SystemNotice(notice) => Some(notice.rendered_text()),
-                    _ => None,
-                })
-        })
-        .unwrap_or_default();
-
-    if let Some(additional_instructions) = build_state.additional_instructions
-        && !additional_instructions.is_empty()
-    {
-        if !content.trim().is_empty() {
-            content.push_str("\n\n");
-        }
-        content.push_str("[Session Build Instructions]");
-        for instruction in additional_instructions {
-            let instruction = instruction.trim();
-            if instruction.is_empty() {
-                continue;
-            }
-            content.push_str("\n- ");
-            content.push_str(instruction);
-        }
-    }
-
-    if content.trim().is_empty() {
-        None
-    } else {
-        Some(Message::System(SystemMessage::new(content)))
-    }
-}
-
-fn realtime_projection_messages(session: &Session) -> Vec<Message> {
-    let mut projected = session.messages().to_vec();
-    if let Some(root_system) = realtime_projection_root_system_message(session) {
-        match projected.first() {
-            Some(Message::System(_) | Message::SystemNotice(_)) => projected[0] = root_system,
-            _ => projected.insert(0, root_system),
-        }
-    }
-    projected
-}
-
-fn realtime_projection_runtime_system_context(
-    session: &Session,
-) -> Vec<PendingSystemContextAppend> {
-    let state = session.system_context_state().unwrap_or_default();
-    state.applied.into_iter().chain(state.pending).collect()
-}
-
+// W2-A: surface-agnostic live orchestration helpers moved to
+// `meerkat::session_runtime::live_orchestration`. Re-exported here so
+// the existing call-sites and tests resolve the same symbols.
+use meerkat::session_runtime::live_orchestration::{
+    build_live_projection_snapshot_for_runtime, extract_system_prompt_from_seed_messages_runtime,
+    live_channel_requires_close_for_identity_change, realtime_projection_messages,
+    realtime_projection_root_system_message, realtime_projection_runtime_system_context,
+};
 #[cfg(test)]
-#[allow(clippy::expect_used)]
-fn exported_tool_visibility_state(session: &Session) -> meerkat_core::SessionToolVisibilityState {
-    session
-        .tool_visibility_state()
-        .expect("exported visibility state should decode")
-        .unwrap_or_default()
-}
+use meerkat::session_runtime::live_orchestration::{
+    builtin_tool_visibility_witness, exported_tool_visibility_state,
+};
 
-#[cfg(test)]
-fn builtin_tool_visibility_witness() -> meerkat_core::ToolVisibilityWitness {
-    let provenance = meerkat_core::ToolProvenance {
-        kind: meerkat_core::ToolSourceKind::Builtin,
-        source_id: "builtin".into(),
-    };
-    meerkat_core::ToolVisibilityWitness {
-        stable_owner_key: Some(
-            meerkat_core::tool_catalog::stable_owner_key_from_provenance(&provenance),
-        ),
-        last_seen_provenance: Some(provenance),
+// W3-A: `RuntimePreAdmissionRegistration` lives in
+// `meerkat::session_runtime::admission` behind a
+// `RuntimePreAdmissionRestore` trait. RPC's `SessionRuntime` implements
+// the trait below.
+impl RuntimePreAdmissionRestore for SessionRuntime {
+    fn restore_or_release(&self, session_id: &SessionId, input_id: &InputId) {
+        self.restore_or_release_runtime_pre_admission(session_id, input_id);
     }
-}
-
-struct RuntimePreAdmissionGuard {
-    admission: Option<RuntimePreAdmission>,
-}
-
-struct RuntimePreAdmissionEntry {
-    input_id: InputId,
-    admission: RuntimePreAdmission,
-}
-
-struct RuntimePreAdmissionRegistration {
-    runtime: Arc<SessionRuntime>,
-    session_id: SessionId,
-    input_id: InputId,
-    release_on_drop: bool,
-}
-
-struct RuntimeRegistrationLockLease {
-    locks: Arc<StdMutex<HashMap<SessionId, Weak<Mutex<()>>>>>,
-    session_id: SessionId,
-    lock: Arc<Mutex<()>>,
-}
-
-struct StagedArchiveRollbackGuard {
-    staged_sessions: Arc<StagedSessionRegistry>,
-    session_id: SessionId,
-    restore_on_drop: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -353,155 +197,6 @@ struct PendingPromotionPreTurnHook {
     reached_flag: std::sync::atomic::AtomicBool,
     reached: Notify,
     release: Notify,
-}
-
-impl RuntimePreAdmissionGuard {
-    fn new(admission: impl Into<RuntimePreAdmission>) -> Self {
-        Self {
-            admission: Some(admission.into()),
-        }
-    }
-
-    fn take(&mut self) -> Option<RuntimePreAdmission> {
-        self.admission.take()
-    }
-}
-
-impl RuntimePreAdmissionRegistration {
-    fn new(runtime: Arc<SessionRuntime>, session_id: SessionId, input_id: InputId) -> Self {
-        Self {
-            runtime,
-            session_id,
-            input_id,
-            release_on_drop: true,
-        }
-    }
-
-    fn disarm(mut self) {
-        self.release_on_drop = false;
-    }
-}
-
-impl RuntimeRegistrationLockLease {
-    fn mutex(&self) -> &Mutex<()> {
-        &self.lock
-    }
-}
-
-impl Drop for RuntimePreAdmissionRegistration {
-    fn drop(&mut self) {
-        if self.release_on_drop {
-            self.runtime
-                .restore_or_release_runtime_pre_admission(&self.session_id, &self.input_id);
-        }
-    }
-}
-
-impl Drop for RuntimeRegistrationLockLease {
-    fn drop(&mut self) {
-        if Arc::strong_count(&self.lock) != 1 {
-            return;
-        }
-        let this_lock = Arc::downgrade(&self.lock);
-        let mut locks = self
-            .locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if locks
-            .get(&self.session_id)
-            .is_some_and(|registered| registered.ptr_eq(&this_lock))
-        {
-            locks.remove(&self.session_id);
-        }
-    }
-}
-
-impl StagedArchiveRollbackGuard {
-    fn new(staged_sessions: Arc<StagedSessionRegistry>, session_id: &SessionId) -> Self {
-        Self {
-            staged_sessions,
-            session_id: session_id.clone(),
-            restore_on_drop: true,
-        }
-    }
-
-    fn disarm(&mut self) {
-        self.restore_on_drop = false;
-    }
-}
-
-impl Drop for StagedArchiveRollbackGuard {
-    fn drop(&mut self) {
-        if !self.restore_on_drop {
-            return;
-        }
-        let staged_sessions = Arc::clone(&self.staged_sessions);
-        let session_id = self.session_id.clone();
-        tokio::spawn(async move {
-            let _ = staged_sessions.restore_archive(&session_id).await;
-        });
-    }
-}
-
-fn restore_staged_capacity_admission(
-    admissions: &StagedCapacityAdmissions,
-    session_id: SessionId,
-    admission: ActiveCapacityGuard,
-) {
-    let mut admissions = admissions
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    admissions.insert(session_id, admission);
-}
-
-impl RuntimePreAdmission {
-    fn fresh(admission: ActiveCapacityGuard) -> Self {
-        Self {
-            admission: Some(admission),
-            staged_restore: None,
-        }
-    }
-
-    fn staged(
-        session_id: SessionId,
-        admissions: StagedCapacityAdmissions,
-        admission: ActiveCapacityGuard,
-    ) -> Self {
-        Self {
-            admission: Some(admission),
-            staged_restore: Some(StagedAdmissionRestore {
-                admissions,
-                session_id,
-            }),
-        }
-    }
-
-    #[allow(clippy::expect_used)]
-    fn into_admission(mut self) -> ActiveCapacityGuard {
-        self.staged_restore = None;
-        self.admission
-            .take()
-            .expect("runtime pre-admission should not be consumed twice")
-    }
-}
-
-impl From<ActiveCapacityGuard> for RuntimePreAdmission {
-    fn from(admission: ActiveCapacityGuard) -> Self {
-        Self::fresh(admission)
-    }
-}
-
-impl Drop for RuntimePreAdmission {
-    fn drop(&mut self) {
-        let Some(admission) = self.admission.take() else {
-            return;
-        };
-        if let Some(restore) = self.staged_restore.take() {
-            restore_staged_capacity_admission(&restore.admissions, restore.session_id, admission);
-        } else {
-            drop(admission);
-        }
-    }
 }
 
 async fn await_guarded_session_cleanup(
@@ -649,309 +344,9 @@ async fn await_session_archive_with_runtime_cleanup(
     })?
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PendingPromotionCleanupMode {
-    Restore,
-    Finish,
-}
-
-struct PendingPromotionCleanup {
-    staged_sessions: Arc<StagedSessionRegistry>,
-    staged_capacity_admissions: StagedCapacityAdmissions,
-    session_id: SessionId,
-    staged_capacity_admission: Option<ActiveCapacityGuard>,
-    build_config: Option<AgentBuildConfig>,
-    effective_llm_identity: SessionLlmIdentity,
-    labels: Option<BTreeMap<String, String>>,
-    deferred_prompt: Option<ContentInput>,
-    created_at_secs: u64,
-    updated_at_secs: u64,
-    mode: PendingPromotionCleanupMode,
-    machine_archived_resume_authorized: bool,
-    armed: bool,
-}
-
-impl PendingPromotionCleanup {
-    fn new(
-        staged_sessions: Arc<StagedSessionRegistry>,
-        staged_capacity_admissions: StagedCapacityAdmissions,
-        session_id: &SessionId,
-        slot: &PromotingSlot,
-        staged_capacity_admission: Option<ActiveCapacityGuard>,
-    ) -> Self {
-        Self {
-            staged_sessions,
-            staged_capacity_admissions,
-            session_id: session_id.clone(),
-            staged_capacity_admission,
-            build_config: Some((*slot.build_config).clone()),
-            effective_llm_identity: slot.effective_llm_identity.clone(),
-            labels: slot.labels.clone(),
-            deferred_prompt: slot.deferred_prompt.clone(),
-            created_at_secs: slot.created_at_secs,
-            updated_at_secs: slot.updated_at_secs,
-            mode: PendingPromotionCleanupMode::Restore,
-            machine_archived_resume_authorized: slot.machine_archived_resume_authorized,
-            armed: true,
-        }
-    }
-
-    fn update_build_config(&mut self, build_config: &AgentBuildConfig) {
-        if self.armed {
-            self.build_config = Some(build_config.clone());
-        }
-    }
-
-    fn update_effective_llm_identity(&mut self, effective_llm_identity: SessionLlmIdentity) {
-        if self.armed {
-            self.effective_llm_identity = effective_llm_identity;
-        }
-    }
-
-    fn mark_materialized(&mut self) {
-        if self.armed {
-            self.mode = PendingPromotionCleanupMode::Finish;
-            self.staged_capacity_admission = None;
-        }
-    }
-
-    fn take_staged_capacity_admission(&mut self) -> Option<ActiveCapacityGuard> {
-        self.staged_capacity_admission.take()
-    }
-
-    async fn replenish_staged_capacity_admission(
-        &mut self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
-    ) -> Result<(), SessionError> {
-        if self.staged_capacity_admission.is_none() {
-            self.staged_capacity_admission =
-                Some(service.reserve_create_session_admission().await?);
-        }
-        Ok(())
-    }
-
-    async fn recover_materialized_staged_capacity_admission(
-        &mut self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
-    ) -> Result<(), SessionError> {
-        if self.staged_capacity_admission.is_none() {
-            self.staged_capacity_admission = Some(
-                service
-                    .reserve_runtime_turn_admission(&self.session_id)
-                    .await?,
-            );
-        }
-        Ok(())
-    }
-
-    async fn abort_restore_without_capacity(&mut self) {
-        tracing::warn!(
-            session_id = %self.session_id,
-            "aborting staged-session restore without a capacity admission"
-        );
-        let _ = self
-            .staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
-            .await;
-        self.armed = false;
-    }
-
-    async fn restore_after_materialized_failure(
-        &mut self,
-        service: &PersistentSessionService<FactoryAgentBuilder>,
-        protocol: MachineSessionArchiveProtocol<'_>,
-    ) -> Result<(), SessionError> {
-        if let Err(error) = self
-            .recover_materialized_staged_capacity_admission(service)
-            .await
-        {
-            self.abort_restore_without_capacity().await;
-            return Err(error);
-        }
-
-        if let Err(error) = service
-            .archive_with_machine_protocol(&self.session_id, protocol)
-            .await
-        {
-            let _ = service.discard_live_session(&self.session_id).await;
-            self.restore_now().await;
-            return Err(error);
-        }
-        self.finish_after_machine_archive().await;
-        Ok(())
-    }
-
-    async fn finish_after_machine_archive(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let _ = self
-            .staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
-            .await;
-        let _ = self.staged_sessions.abandon(&self.session_id).await;
-        self.build_config = None;
-        drop(self.staged_capacity_admission.take());
-        self.armed = false;
-    }
-
-    fn authorize_machine_archived_resume(&mut self) {
-        if !self.armed {
-            return;
-        }
-        self.machine_archived_resume_authorized = true;
-    }
-
-    async fn preserve_promoting_system_context_state(
-        staged_sessions: &StagedSessionRegistry,
-        session_id: &SessionId,
-        build_config: &mut AgentBuildConfig,
-    ) {
-        let Some((_starting_system_context_state, current_system_context_state)) = staged_sessions
-            .promoting_system_context_state(session_id)
-            .await
-        else {
-            return;
-        };
-        let session = build_config
-            .resume_session
-            .get_or_insert_with(|| Session::with_id(session_id.clone()));
-        if let Err(err) = session.set_system_context_state(current_system_context_state) {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %err,
-                "failed to preserve promoting system-context state while restoring staged session"
-            );
-        }
-    }
-
-    async fn restore_now(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let Some(mut build_config) = self.build_config.take() else {
-            self.armed = false;
-            return;
-        };
-        Self::preserve_promoting_system_context_state(
-            &self.staged_sessions,
-            &self.session_id,
-            &mut build_config,
-        )
-        .await;
-        let Some(admission) = self.staged_capacity_admission.take() else {
-            self.abort_restore_without_capacity().await;
-            return;
-        };
-        let restored = self
-            .staged_sessions
-            .abandon_promotion(
-                self.session_id.clone(),
-                build_config,
-                self.effective_llm_identity.clone(),
-                self.labels.clone(),
-                self.deferred_prompt.clone(),
-                self.created_at_secs,
-                self.updated_at_secs,
-                self.machine_archived_resume_authorized,
-            )
-            .await;
-        if restored {
-            restore_staged_capacity_admission(
-                &self.staged_capacity_admissions,
-                self.session_id.clone(),
-                admission,
-            );
-        }
-        self.armed = false;
-    }
-
-    async fn finish_now(
-        &mut self,
-    ) -> Option<(SessionSystemContextState, SessionSystemContextState)> {
-        if !self.armed || self.mode != PendingPromotionCleanupMode::Finish {
-            return None;
-        }
-        self.staged_sessions
-            .take_promoting_system_context_state(&self.session_id)
-            .await
-    }
-
-    fn disarm(&mut self) {
-        self.armed = false;
-        self.build_config = None;
-        self.staged_capacity_admission = None;
-    }
-}
-
-impl Drop for PendingPromotionCleanup {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let staged_sessions = Arc::clone(&self.staged_sessions);
-        let staged_capacity_admissions = Arc::clone(&self.staged_capacity_admissions);
-        let session_id = self.session_id.clone();
-        match self.mode {
-            PendingPromotionCleanupMode::Restore => {
-                let Some(mut build_config) = self.build_config.take() else {
-                    return;
-                };
-                let staged_capacity_admission = self.staged_capacity_admission.take();
-                let effective_llm_identity = self.effective_llm_identity.clone();
-                let labels = self.labels.clone();
-                let deferred_prompt = self.deferred_prompt.clone();
-                let created_at_secs = self.created_at_secs;
-                let updated_at_secs = self.updated_at_secs;
-                let machine_archived_resume_authorized = self.machine_archived_resume_authorized;
-                tokio::spawn(async move {
-                    let Some(admission) = staged_capacity_admission else {
-                        tracing::warn!(
-                            session_id = %session_id,
-                            "aborting staged-session drop restore without a capacity admission"
-                        );
-                        let _ = staged_sessions
-                            .take_promoting_system_context_state(&session_id)
-                            .await;
-                        return;
-                    };
-                    Self::preserve_promoting_system_context_state(
-                        staged_sessions.as_ref(),
-                        &session_id,
-                        &mut build_config,
-                    )
-                    .await;
-                    let restored = staged_sessions
-                        .abandon_promotion(
-                            session_id.clone(),
-                            build_config,
-                            effective_llm_identity,
-                            labels,
-                            deferred_prompt,
-                            created_at_secs,
-                            updated_at_secs,
-                            machine_archived_resume_authorized,
-                        )
-                        .await;
-                    if restored {
-                        restore_staged_capacity_admission(
-                            &staged_capacity_admissions,
-                            session_id,
-                            admission,
-                        );
-                    }
-                });
-            }
-            PendingPromotionCleanupMode::Finish => {
-                tokio::spawn(async move {
-                    let _ = staged_sessions
-                        .take_promoting_system_context_state(&session_id)
-                        .await;
-                });
-            }
-        }
-    }
-}
+pub(crate) use meerkat::session_runtime::staged_promotion::{
+    PendingPromotionCleanup, PendingPromotionCleanupMode,
+};
 
 #[cfg(feature = "mob")]
 struct RpcMobSessionService {
@@ -969,10 +364,17 @@ impl RpcMobSessionService {
         ArchiveRuntimeCleanup {
             runtime_adapter: Arc::clone(&self.runtime_adapter),
             pending_session_event_streams: None,
-            #[cfg(feature = "mcp")]
-            mcp_sessions: None,
+            mcp_state: None,
             #[cfg(feature = "mob")]
-            mob_state: self.mob_state.read().ok().and_then(|slot| slot.clone()),
+            mob_state: self.mob_state.read().ok().and_then(|slot| {
+                slot.as_ref().map(|state| {
+                    Arc::new(RpcMobStateAdapter {
+                        state: Arc::clone(state),
+                    }) as Arc<dyn ArchiveRuntimeMobState>
+                })
+            }),
+            #[cfg(not(feature = "mob"))]
+            mob_state: None,
         }
     }
 
@@ -1743,390 +1145,14 @@ fn profile_to_capability_surface(
     }
 }
 
-#[derive(Clone)]
-struct SessionRuntimeLlmReconfigureHost {
-    service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
-    staged_sessions: Arc<StagedSessionRegistry>,
-    factory: AgentFactory,
-    auth_lease: Arc<dyn meerkat_core::handles::AuthLeaseHandle>,
-    default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
-    agent_llm_client_decorator: Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
-    config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
-}
+// W2-C: surface-agnostic struct moved to
+// `meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost`.
+// RPC keeps a type alias so existing call sites still resolve.
+pub(crate) use meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureHost;
 
-impl SessionRuntimeLlmReconfigureHost {
-    async fn capability_surface_for_identity(
-        &self,
-        identity: &SessionLlmIdentity,
-    ) -> Result<
-        (
-            Option<SessionLlmCapabilitySurface>,
-            SessionLlmCapabilitySurfaceStatus,
-        ),
-        RuntimeDriverError,
-    > {
-        let registry = self.model_registry().await?;
-        Ok(
-            match registry.profile_for_provider(identity.provider, &identity.model) {
-                Some(profile) => (
-                    Some(profile_to_capability_surface(&profile)),
-                    SessionLlmCapabilitySurfaceStatus::Resolved,
-                ),
-                None => (None, SessionLlmCapabilitySurfaceStatus::Unresolved),
-            },
-        )
-    }
-
-    async fn hydrate_staged_session_llm_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<HydratedSessionLlmState>, RuntimeDriverError> {
-        let Some(current_identity) = self
-            .staged_sessions
-            .effective_llm_identity(session_id)
-            .await
-        else {
-            return Ok(None);
-        };
-        let (current_capability_surface, capability_surface_status) = self
-            .capability_surface_for_identity(&current_identity)
-            .await?;
-        Ok(Some(HydratedSessionLlmState {
-            current_identity,
-            current_visibility_state: Default::default(),
-            current_capability_surface,
-            capability_surface_status,
-            base_tool_names: std::collections::BTreeSet::new(),
-        }))
-    }
-
-    async fn model_registry(&self) -> Result<meerkat_core::ModelRegistry, RuntimeDriverError> {
-        let config_runtime = self
-            .config_runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let config = if let Some(runtime) = config_runtime {
-            runtime
-                .get()
-                .await
-                .map(|snapshot| snapshot.config)
-                .map_err(|e| RuntimeDriverError::Internal(format!("Failed to load config: {e}")))?
-        } else {
-            meerkat_core::Config::default()
-        };
-
-        config.model_registry().map_err(|e| {
-            RuntimeDriverError::Internal(format!("Failed to resolve model registry: {e}"))
-        })
-    }
-
-    async fn build_adapter_for_llm_identity(
-        &self,
-        identity: &SessionLlmIdentity,
-    ) -> Result<Arc<dyn meerkat_core::AgentLlmClient>, RuntimeDriverError> {
-        let default_llm_client = self
-            .default_llm_client
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        let raw_client = if let Some(default) = default_llm_client {
-            default
-        } else {
-            let config = self.load_config_for_hot_swap().await?;
-            self.factory
-                .build_llm_client_for_identity_with_auth_lease(
-                    &config,
-                    identity,
-                    Some(Arc::clone(&self.auth_lease)),
-                )
-                .await
-                .map_err(|e| {
-                    RuntimeDriverError::Internal(format!(
-                        "Failed to build LLM client for session identity hot-swap: {e}"
-                    ))
-                })?
-        };
-
-        let adapter = self
-            .factory
-            .build_llm_adapter(raw_client, identity.model.clone())
-            .await;
-        let adapter = Arc::new(adapter) as Arc<dyn meerkat_core::AgentLlmClient>;
-        let decorator = self
-            .agent_llm_client_decorator
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        Ok(AgentFactory::decorate_agent_llm_client(
-            adapter,
-            decorator.as_ref(),
-        ))
-    }
-
-    async fn load_config_for_hot_swap(&self) -> Result<Config, RuntimeDriverError> {
-        let config_runtime = self
-            .config_runtime
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Some(runtime) = config_runtime {
-            runtime
-                .get()
-                .await
-                .map(|snapshot| snapshot.config)
-                .map_err(|e| {
-                    RuntimeDriverError::Internal(format!("Failed to load config for hot-swap: {e}"))
-                })
-        } else {
-            Ok(meerkat_core::Config::default())
-        }
-    }
-
-    async fn build_request_policy_for_llm_identity(
-        &self,
-        session_id: &SessionId,
-        identity: &SessionLlmIdentity,
-    ) -> Result<meerkat_core::SessionLlmRequestPolicy, RuntimeDriverError> {
-        let config = self.load_config_for_hot_swap().await?;
-        self.factory
-            .request_policy_for_llm_identity(&config, identity)
-            .map_err(|e| {
-                RuntimeDriverError::Internal(format!(
-                    "Failed to build LLM request policy for session {session_id} identity hot-swap: {e}"
-                ))
-            })
-    }
-
-    async fn resolve_target_llm_identity(
-        &self,
-        current: &SessionLlmIdentity,
-        request: &SessionLlmReconfigureRequest,
-    ) -> Result<SessionLlmIdentity, RuntimeDriverError> {
-        if request.provider.is_some() && request.model.is_none() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "provider override requires model on an existing session".to_string(),
-            });
-        }
-        if request.clear_provider_params && request.provider_params.is_some() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "clear_provider_params cannot be combined with provider_params".to_string(),
-            });
-        }
-        if request.clear_auth_binding && request.auth_binding.is_some() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "clear_auth_binding cannot be combined with auth_binding".to_string(),
-            });
-        }
-
-        let registry = self.model_registry().await?;
-        let model = request
-            .model
-            .clone()
-            .unwrap_or_else(|| current.model.clone());
-        let provider = if let Some(provider_name) = request.provider.as_ref() {
-            parse_provider_override(provider_name)
-                .map_err(|reason| RuntimeDriverError::ValidationFailed { reason })?
-        } else {
-            current.provider
-        };
-        if (request.model.is_some() || request.provider.is_some())
-            && let Some(reason) =
-                registered_model_provider_mismatch_reason(&registry, provider, &model)
-        {
-            return Err(RuntimeDriverError::ValidationFailed { reason });
-        }
-        let provider_params = if request.clear_provider_params {
-            None
-        } else {
-            request
-                .provider_params
-                .clone()
-                .or_else(|| current.provider_params.clone())
-        };
-        let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
-            if request.model.is_none() {
-                current.self_hosted_server_id.clone().or_else(|| {
-                    registry
-                        .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
-                        .and_then(|entry| entry.self_hosted.as_ref())
-                        .map(|server| server.server_id.clone())
-                })
-            } else {
-                match registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model) {
-                    Some(entry) => entry
-                        .self_hosted
-                        .as_ref()
-                        .map(|server| server.server_id.clone()),
-                    None => {
-                        return Err(RuntimeDriverError::ValidationFailed {
-                            reason: format!(
-                                "self-hosted provider requires a registered model alias; '{model}' is not configured"
-                            ),
-                        });
-                    }
-                }
-            }
-        } else {
-            None
-        };
-
-        let auth_binding = if request.clear_auth_binding {
-            None
-        } else {
-            request
-                .auth_binding
-                .clone()
-                .or_else(|| current.auth_binding.clone())
-        };
-
-        Ok(SessionLlmIdentity {
-            model,
-            provider,
-            self_hosted_server_id,
-            provider_params,
-            auth_binding,
-        })
-    }
-}
-
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-impl SessionLlmReconfigureHost for SessionRuntimeLlmReconfigureHost {
-    async fn hydrate_session_llm_state(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<HydratedSessionLlmState, RuntimeDriverError> {
-        let current_identity = match self.service.live_session_llm_identity(session_id).await {
-            Ok(identity) => identity,
-            Err(err) => {
-                if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
-                    return Ok(hydrated);
-                }
-                return Err(session_error_to_runtime_driver(err));
-            }
-        };
-        let session = match self.service.export_live_session(session_id).await {
-            Ok(session) => session,
-            Err(err) => {
-                if let Some(hydrated) = self.hydrate_staged_session_llm_state(session_id).await? {
-                    return Ok(hydrated);
-                }
-                return Err(session_error_to_runtime_driver(err));
-            }
-        };
-        let current_visibility_state = session
-            .try_tool_visibility_state()
-            .map_err(|err| {
-                RuntimeDriverError::Internal(format!(
-                    "invalid canonical tool visibility state: {err}"
-                ))
-            })?
-            .unwrap_or_default();
-        let base_tool_names = self
-            .service
-            .tool_scope_snapshot(session_id)
-            .await
-            .map_err(session_error_to_runtime_driver)?
-            .ok_or_else(|| {
-                RuntimeDriverError::Internal(format!(
-                    "session {session_id} missing live tool scope snapshot during llm reconfiguration"
-                ))
-            })?
-            .known_base_names
-            .into_iter()
-            .collect();
-
-        let (current_capability_surface, capability_surface_status) = self
-            .capability_surface_for_identity(&current_identity)
-            .await?;
-
-        Ok(HydratedSessionLlmState {
-            current_identity,
-            current_visibility_state,
-            current_capability_surface,
-            capability_surface_status,
-            base_tool_names,
-        })
-    }
-
-    async fn resolve_target_session_llm_identity(
-        &self,
-        request: &SessionLlmReconfigureRequest,
-        current_identity: &SessionLlmIdentity,
-    ) -> Result<ResolvedSessionLlmReconfigure, RuntimeDriverError> {
-        let target_identity = self
-            .resolve_target_llm_identity(current_identity, request)
-            .await?;
-        let registry = self.model_registry().await?;
-        let profile = registry
-            .profile_for_provider(target_identity.provider, &target_identity.model)
-            .ok_or_else(|| RuntimeDriverError::ValidationFailed {
-                reason: format!(
-                    "no capability profile is registered for provider '{}' and model '{}'",
-                    target_identity.provider.as_str(),
-                    target_identity.model
-                ),
-            })?;
-
-        Ok(ResolvedSessionLlmReconfigure {
-            target_identity,
-            target_capability_surface: profile_to_capability_surface(&profile),
-        })
-    }
-
-    async fn apply_live_session_llm_identity(
-        &self,
-        session_id: &SessionId,
-        identity: &SessionLlmIdentity,
-    ) -> Result<(), RuntimeDriverError> {
-        let adapter = self.build_adapter_for_llm_identity(identity).await?;
-        let request_policy = self
-            .build_request_policy_for_llm_identity(session_id, identity)
-            .await?;
-        self.service
-            .apply_runtime_session_llm_identity(
-                session_id,
-                adapter,
-                identity.clone(),
-                request_policy,
-            )
-            .await
-            .map_err(session_error_to_runtime_driver)
-    }
-
-    async fn apply_live_session_tool_visibility_state(
-        &self,
-        session_id: &SessionId,
-        visibility_state: Option<meerkat_core::SessionToolVisibilityState>,
-    ) -> Result<(), RuntimeDriverError> {
-        self.service
-            .set_session_tool_visibility_state(session_id, visibility_state)
-            .await
-            .map_err(session_error_to_runtime_driver)
-    }
-
-    async fn persist_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
-        self.service
-            .persist_live_session_now(session_id)
-            .await
-            .map(|_| ())
-            .map_err(session_error_to_runtime_driver)
-    }
-
-    async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), RuntimeDriverError> {
-        self.service
-            .discard_live_session(session_id)
-            .await
-            .map_err(session_error_to_runtime_driver)
-    }
-}
-
-#[derive(Clone)]
-struct SkillIdentityRegistryState {
-    generation: u64,
-    registry: SourceIdentityRegistry,
-}
+// W3-A: `SkillIdentityRegistryState` and `build_skill_identity_registry`
+// moved to `meerkat::session_runtime::runtime_state`.
+pub(crate) use meerkat::session_runtime::runtime_state::SkillIdentityRegistryState;
 
 #[cfg(feature = "mcp")]
 struct SessionMcpState {
@@ -2141,36 +1167,7 @@ struct SessionMcpState {
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Observable state of a session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionState {
-    /// The session is idle and ready to accept a new turn.
-    Idle,
-    /// A turn is currently running.
-    Running,
-    /// The session is shutting down.
-    ShuttingDown,
-}
-
-impl SessionState {
-    /// Return a stable string representation matching the serde `rename_all` convention.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Running => "running",
-            Self::ShuttingDown => "shutting_down",
-        }
-    }
-}
-
-/// Summary information about a session.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionInfo {
-    pub session_id: SessionId,
-    pub state: SessionState,
-    pub labels: BTreeMap<String, String>,
-}
+pub use meerkat::session_runtime::runtime_state::{SessionInfo, SessionState};
 
 fn now_unix_secs() -> u64 {
     meerkat_core::time_compat::SystemTime::now()
@@ -2240,9 +1237,14 @@ pub struct SessionRuntime {
     default_llm_client: Arc<StdRwLock<Option<Arc<dyn LlmClient>>>>,
     /// Default wrapper applied after all session LLM clients reach the agent boundary.
     agent_llm_client_decorator: Arc<StdRwLock<Option<meerkat_core::AgentLlmClientDecorator>>>,
-    realm_id: Option<meerkat_core::connection::RealmId>,
-    instance_id: Option<String>,
-    backend: Option<String>,
+    /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
+    /// Reads / writes go through the slot rather than a write-mirrored
+    /// local copy.
+    realm_id: Arc<StdRwLock<Option<meerkat_core::connection::RealmId>>>,
+    /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
+    instance_id: Arc<StdRwLock<Option<String>>>,
+    /// Phase 4 R1: slot-shared with the inner [`MeerkatSessionRuntime`].
+    backend: Arc<StdRwLock<Option<String>>>,
     config_runtime: Arc<StdRwLock<Option<Arc<meerkat_core::ConfigRuntime>>>>,
     runtime_adapter: Arc<MeerkatMachine>,
     /// Notification sink for event forwarding to the RPC transport.
@@ -2286,6 +1288,21 @@ pub struct SessionRuntime {
     /// Runtime-owned approval records. Surfaces only project decisions into
     /// this service; approval status is service-owned.
     approval_service: meerkat_core::ApprovalService,
+    /// P1#5: live adapter host, attached when the surface wires
+    /// `with_live_ws`. Held as an interior-mutable slot so it can be set
+    /// after the runtime is wrapped in `Arc` (matches the
+    /// `callback_request_tx` / `mob_state` pattern). Used by
+    /// `propagate_config_to_live_channels` to fan out `Refresh` (or `Close`)
+    /// commands to active live channels when an upstream model/provider
+    /// resolution change requires a re-seed.
+    #[allow(clippy::type_complexity)]
+    live_adapter_host: Arc<StdRwLock<Option<Arc<meerkat_live::LiveAdapterHost>>>>,
+    /// W3-B: surface-agnostic core. RPC's `SessionRuntime` keeps its
+    /// own field copies (each one an `Arc` clone of the same shared
+    /// state) so existing callsites continue to compile unchanged; new
+    /// surface-agnostic accessors land on `MeerkatSessionRuntime` and
+    /// flow through `inner()`. Phase 4 R1 will collapse the duplication.
+    inner: Arc<meerkat::session_runtime::MeerkatSessionRuntime>,
 }
 
 #[cfg(test)]
@@ -2332,6 +1349,20 @@ fn approval_service_from_persistence(
             meerkat_core::ApprovalService::new()
         }
     }
+}
+
+/// Snapshot of the slot-shared realm/instance/backend triple.
+///
+/// Phase 4 R1: the realm context is held inside the inner
+/// `MeerkatSessionRuntime` behind `Arc<RwLock<Option<...>>>` slots so
+/// every surface observes the same value. `recovery_context()` and the
+/// `LiveOrchestrator<'a>` borrow shape both want
+/// `Option<&'a RealmId>` / `Option<&'a str>`, so callers stash the
+/// owned read into a local binding that lives for the borrow.
+struct RealmContextSnapshot {
+    realm_id: Option<meerkat_core::connection::RealmId>,
+    instance_id: Option<String>,
+    backend: Option<String>,
 }
 
 impl SessionRuntime {
@@ -2487,26 +1518,12 @@ impl SessionRuntime {
     }
 
     async fn live_session_is_stale(&self, session_id: &SessionId) -> Result<bool, RpcError> {
-        if self
-            .service
-            .synchronize_live_session_from_durable_authority_if_needed(session_id)
+        let snapshot = self.realm_context_snapshot();
+        let recovery_ctx = self.recovery_context(&snapshot);
+        self.runtime_state_ops()
+            .live_session_is_stale(session_id, &recovery_ctx)
             .await
-            .map_err(session_error_to_rpc)?
-        {
-            return Ok(false);
-        }
-
-        let live = match self.service.export_live_session(session_id).await {
-            Ok(session) => session,
-            Err(SessionError::NotFound { .. }) => {
-                return Ok(self.load_persisted_session(session_id).await?.is_some());
-            }
-            Err(err) => return Err(session_error_to_rpc(err)),
-        };
-        let Some(stored) = self.load_persisted_session(session_id).await? else {
-            return Ok(false);
-        };
-        Ok(stored.messages().len() > live.messages().len())
+            .map_err(session_error_to_rpc)
     }
 
     async fn archived_persisted_session_without_live(
@@ -2607,6 +1624,34 @@ impl SessionRuntime {
             },
         ));
 
+        let pending_session_event_streams = Arc::new(Mutex::new(HashMap::new()));
+        let staged_capacity_admissions = Arc::new(StdMutex::new(HashMap::new()));
+        let skill_identity_registry =
+            Arc::new(StdRwLock::new(SkillIdentityRegistryState::default()));
+        let skill_identity_context_root = Arc::new(StdRwLock::new(None));
+        let skill_identity_user_root = Arc::new(StdRwLock::new(None));
+        let live_adapter_host = Arc::new(StdRwLock::new(None));
+        let realm_id = Arc::new(StdRwLock::new(None));
+        let instance_id = Arc::new(StdRwLock::new(None));
+        let backend = Arc::new(StdRwLock::new(None));
+        let inner = Arc::new(
+            meerkat::session_runtime::SessionRuntimeBuilder::new(
+                Arc::clone(&service),
+                Arc::clone(&staged_sessions),
+                Arc::clone(&runtime_adapter),
+            )
+            .with_staged_capacity_admissions(Arc::clone(&staged_capacity_admissions))
+            .with_live_adapter_host_slot(Arc::clone(&live_adapter_host))
+            .with_config_runtime_slot(Arc::clone(&config_runtime))
+            .with_default_llm_client_slot(Arc::clone(&default_llm_client))
+            .with_realm_id_slot(Arc::clone(&realm_id))
+            .with_instance_id_slot(Arc::clone(&instance_id))
+            .with_backend_slot(Arc::clone(&backend))
+            .with_skill_identity_registry_slot(Arc::clone(&skill_identity_registry))
+            .with_skill_identity_context_root_slot(Arc::clone(&skill_identity_context_root))
+            .with_skill_identity_user_root_slot(Arc::clone(&skill_identity_user_root))
+            .build(),
+        );
         Self {
             factory: factory_clone,
             service,
@@ -2614,8 +1659,8 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
-            pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
-            staged_capacity_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            pending_session_event_streams,
+            staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -2631,18 +1676,15 @@ impl SessionRuntime {
             max_sessions,
             default_llm_client,
             agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
-            realm_id: None,
-            instance_id: None,
-            backend: None,
+            realm_id,
+            instance_id,
+            backend,
             config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
-            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
-                generation: 0,
-                registry: SourceIdentityRegistry::default(),
-            })),
-            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
-            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_registry,
+            skill_identity_context_root,
+            skill_identity_user_root,
             #[cfg(feature = "mob")]
             mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
@@ -2656,6 +1698,8 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host,
+            inner,
         }
     }
 
@@ -2708,6 +1752,34 @@ impl SessionRuntime {
             },
         ));
 
+        let pending_session_event_streams = Arc::new(Mutex::new(HashMap::new()));
+        let staged_capacity_admissions = Arc::new(StdMutex::new(HashMap::new()));
+        let skill_identity_registry =
+            Arc::new(StdRwLock::new(SkillIdentityRegistryState::default()));
+        let skill_identity_context_root = Arc::new(StdRwLock::new(None));
+        let skill_identity_user_root = Arc::new(StdRwLock::new(None));
+        let live_adapter_host = Arc::new(StdRwLock::new(None));
+        let realm_id = Arc::new(StdRwLock::new(None));
+        let instance_id = Arc::new(StdRwLock::new(None));
+        let backend = Arc::new(StdRwLock::new(None));
+        let inner = Arc::new(
+            meerkat::session_runtime::SessionRuntimeBuilder::new(
+                Arc::clone(&service),
+                Arc::clone(&staged_sessions),
+                Arc::clone(&runtime_adapter),
+            )
+            .with_staged_capacity_admissions(Arc::clone(&staged_capacity_admissions))
+            .with_live_adapter_host_slot(Arc::clone(&live_adapter_host))
+            .with_config_runtime_slot(Arc::clone(&config_runtime))
+            .with_default_llm_client_slot(Arc::clone(&default_llm_client))
+            .with_realm_id_slot(Arc::clone(&realm_id))
+            .with_instance_id_slot(Arc::clone(&instance_id))
+            .with_backend_slot(Arc::clone(&backend))
+            .with_skill_identity_registry_slot(Arc::clone(&skill_identity_registry))
+            .with_skill_identity_context_root_slot(Arc::clone(&skill_identity_context_root))
+            .with_skill_identity_user_root_slot(Arc::clone(&skill_identity_user_root))
+            .build(),
+        );
         Self {
             factory: factory_clone,
             service,
@@ -2715,8 +1787,8 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
-            pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
-            staged_capacity_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            pending_session_event_streams,
+            staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -2732,18 +1804,15 @@ impl SessionRuntime {
             max_sessions,
             default_llm_client,
             agent_llm_client_decorator: Arc::clone(&builder_agent_llm_client_decorator_slot),
-            realm_id: None,
-            instance_id: None,
-            backend: None,
+            realm_id,
+            instance_id,
+            backend,
             config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
-            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
-                generation: 0,
-                registry: SourceIdentityRegistry::default(),
-            })),
-            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
-            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_registry,
+            skill_identity_context_root,
+            skill_identity_user_root,
             #[cfg(feature = "mob")]
             mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
@@ -2757,19 +1826,23 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
+            live_adapter_host,
+            inner,
         }
     }
 
     /// Attach realm context defaults used for session metadata.
+    ///
+    /// Phase 4 R1: writes through the slot-shared inner runtime; both
+    /// the RPC SessionRuntime and `MeerkatSessionRuntime` observe the
+    /// same `Arc<RwLock<...>>` so a single write is enough.
     pub fn set_realm_context(
-        &mut self,
+        &self,
         realm_id: Option<meerkat_core::connection::RealmId>,
         instance_id: Option<String>,
         backend: Option<String>,
     ) {
-        self.realm_id = realm_id;
-        self.instance_id = instance_id;
-        self.backend = backend;
+        self.inner.set_realm_context(realm_id, instance_id, backend);
     }
 
     pub fn set_skill_identity_roots(
@@ -2811,9 +1884,31 @@ impl SessionRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(factory);
     }
 
+    /// Surface-agnostic core. Phase 4 R1 will collapse the duplicate
+    /// per-field copies on `SessionRuntime` and route every accessor
+    /// through `inner()`.
+    pub fn inner(&self) -> &Arc<meerkat::session_runtime::MeerkatSessionRuntime> {
+        &self.inner
+    }
+
     /// Active realm id for this runtime, if configured.
-    pub fn realm_id(&self) -> Option<&meerkat_core::connection::RealmId> {
-        self.realm_id.as_ref()
+    ///
+    /// Phase 4 R1: routed through the slot-shared inner runtime so the
+    /// RPC accessor and `MeerkatSessionRuntime::realm_id()` are
+    /// guaranteed to observe the same value. Returns the owned variant
+    /// because the slot read clones internally.
+    pub fn realm_id(&self) -> Option<meerkat_core::connection::RealmId> {
+        self.inner.realm_id()
+    }
+
+    /// Active instance id for this runtime, if configured.
+    pub fn instance_id(&self) -> Option<String> {
+        self.inner.instance_id()
+    }
+
+    /// Active backend label for this runtime, if configured.
+    pub fn backend(&self) -> Option<String> {
+        self.inner.backend()
     }
 
     /// Attach config runtime for generation stamping.
@@ -2836,10 +1931,10 @@ impl SessionRuntime {
         service: &PersistentSessionService<FactoryAgentBuilder>,
         session_id: &SessionId,
     ) -> bool {
-        service
-            .live_deferred_first_turn_pending(session_id)
-            .await
-            .unwrap_or(false)
+        meerkat::session_runtime::staged_promotion::pending_live_first_turn_is_still_deferred(
+            service, session_id,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -2904,40 +1999,27 @@ impl SessionRuntime {
         session_id: SessionId,
         admission: ActiveCapacityGuard,
     ) -> Result<(), RpcError> {
-        let mut admissions = self
-            .staged_capacity_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if admissions.contains_key(&session_id) {
-            return Err(RpcError {
+        admission_insert_staged_capacity(&self.staged_capacity_admissions, session_id, admission)
+            .map_err(|StagedCapacityCollision { session_id }| RpcError {
                 code: error::SESSION_BUSY,
                 message: format!("session {session_id} already has staged capacity"),
                 data: None,
-            });
-        }
-        admissions.insert(session_id, admission);
-        Ok(())
+            })
     }
 
     fn take_staged_capacity_admission(
         &self,
         session_id: &SessionId,
     ) -> Option<ActiveCapacityGuard> {
-        self.staged_capacity_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(session_id)
+        admission_take_staged_capacity(&self.staged_capacity_admissions, session_id)
     }
 
     fn has_staged_capacity_admission(&self, session_id: &SessionId) -> bool {
-        self.staged_capacity_admissions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains_key(session_id)
+        admission_has_staged_capacity(&self.staged_capacity_admissions, session_id)
     }
 
     fn discard_staged_capacity_admission(&self, session_id: &SessionId) {
-        drop(self.take_staged_capacity_admission(session_id));
+        admission_discard_staged_capacity(&self.staged_capacity_admissions, session_id);
     }
 
     pub(crate) fn take_runtime_pre_admission(
@@ -3005,7 +2087,7 @@ impl SessionRuntime {
     ) -> Result<RuntimePreAdmissionRegistration, RpcError> {
         self.insert_runtime_pre_admission(session_id.clone(), input_id.clone(), admission)?;
         Ok(RuntimePreAdmissionRegistration::new(
-            Arc::clone(self),
+            Arc::clone(self) as Arc<dyn RuntimePreAdmissionRestore>,
             session_id,
             input_id,
         ))
@@ -3215,19 +2297,11 @@ impl SessionRuntime {
     pub(crate) fn is_pre_run_apply_runtime_turn_failure(
         result: &Result<CoreApplyOutput, SessionError>,
     ) -> bool {
-        matches!(
-            result,
-            Err(SessionError::Agent(
-                meerkat_core::error::AgentError::NoPendingBoundary
-            ))
-        ) || matches!(
-            result,
-            Ok(output) if matches!(output.terminal, Some(CoreApplyTerminal::NoPendingBoundary))
-        )
+        meerkat::session_runtime::staged_promotion::is_pre_run_apply_runtime_turn_failure(result)
     }
 
     fn is_archived_create_rejection(error: &SessionError) -> bool {
-        matches!(error, SessionError::NotFound { .. })
+        meerkat::session_runtime::staged_promotion::is_archived_create_rejection(error)
     }
 
     #[cfg(test)]
@@ -3294,138 +2368,23 @@ impl SessionRuntime {
         session_id: SessionId,
         create_req: CreateSessionRequest,
         start_req: StartTurnRequest,
-        mut promotion_cleanup: PendingPromotionCleanup,
+        promotion_cleanup: PendingPromotionCleanup,
         machine_archived_resume_authorized: bool,
     ) -> ServiceStartTurnResultReceiver {
-        let service = Arc::clone(&self.service);
-        let staged_sessions = Arc::clone(&self.staged_sessions);
-        let runtime_adapter = Arc::clone(&self.runtime_adapter);
-        #[cfg(test)]
-        let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let create_result = match (
-                promotion_cleanup.take_staged_capacity_admission(),
-                machine_archived_resume_authorized,
-            ) {
-                (Some(admission), true) => {
-                    service
-                        .create_session_with_reserved_machine_archived_resume_admission(
-                            create_req,
-                            admission,
-                            runtime_adapter.session_control_authority(),
-                        )
-                        .await
-                }
-                (Some(admission), false) => {
-                    service
-                        .create_session_with_reserved_admission(create_req, admission)
-                        .await
-                }
-                (None, true) => Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
-                    )),
-                )),
-                (None, false) => service.create_session(create_req).await,
-            };
-            match create_result {
-                Ok(_) => {
-                    promotion_cleanup.mark_materialized();
-                }
-                Err(err) => {
-                    if Self::is_archived_create_rejection(&err) {
-                        let _ = service.discard_live_session(&session_id).await;
-                        runtime_adapter.unregister_session(&session_id).await;
-                        promotion_cleanup.mark_materialized();
-                        let _ = promotion_cleanup.finish_now().await;
-                        promotion_cleanup.disarm();
-                        let _ = result_tx.send(Err(err));
-                        return;
-                    }
-                    if Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
-                    {
-                        promotion_cleanup.mark_materialized();
-                        Self::finish_pending_promotion_after_service_turn(
-                            Arc::clone(&service),
-                            staged_sessions,
-                            &session_id,
-                            "create_session",
-                        )
-                        .await;
-                    } else {
-                        let materialized_after_error =
-                            service.has_live_session(&session_id).await.unwrap_or(false);
-                        if materialized_after_error {
-                            promotion_cleanup.mark_materialized();
-                            Self::finish_pending_promotion_after_service_turn(
-                                Arc::clone(&service),
-                                staged_sessions,
-                                &session_id,
-                                "create_session",
-                            )
-                            .await;
-                        } else {
-                            if let Err(error) = promotion_cleanup
-                                .replenish_staged_capacity_admission(&service)
-                                .await
-                            {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    error = %error,
-                                    "failed to replenish staged capacity after create_session error"
-                                );
-                            }
-                            promotion_cleanup.restore_now().await;
-                        }
-                    }
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(err));
-                    return;
-                }
-            }
-
-            #[cfg(test)]
-            Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
-
-            let result = match service.reserve_runtime_turn_admission(&session_id).await {
-                Ok(admission) => service
-                    .run_machine_committed_live_turn(
-                        MachineServiceTurnCommitProtocol::from_machine(runtime_adapter.as_ref()),
-                        &session_id,
-                        start_req,
-                        admission,
-                    )
-                    .await
-                    .map_err(|(error, _admission)| error),
-                Err(error) => Err(error),
-            };
-            if Self::should_restore_pending_after_start_turn(&service, &session_id, &result).await {
-                let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(
-                        &service,
-                        MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
-                    )
-                    .await;
-                promotion_cleanup.disarm();
-                let _ = result_tx.send(match restore_result {
-                    Ok(()) => result,
-                    Err(error) => Err(error),
-                });
-                return;
-            }
-
-            Self::finish_pending_promotion_after_service_turn(
-                Arc::clone(&service),
-                staged_sessions,
-                &session_id,
-                "start_turn",
-            )
-            .await;
-            promotion_cleanup.disarm();
-            let _ = result_tx.send(result);
-        });
-        result_rx
+        let replay = self.replay_promoted_system_context_callback();
+        let pre_turn_hook = self.pending_promotion_pre_turn_hook_callback();
+        meerkat::session_runtime::staged_promotion::spawn_pending_create_and_start_turn_with_admission_guard(
+            Arc::clone(&self.service),
+            Arc::clone(&self.staged_sessions),
+            Arc::clone(&self.runtime_adapter),
+            replay,
+            pre_turn_hook,
+            session_id,
+            create_req,
+            start_req,
+            promotion_cleanup,
+            machine_archived_resume_authorized,
+        )
     }
 
     #[cfg(test)]
@@ -3488,167 +2447,29 @@ impl SessionRuntime {
         req: StartTurnRequest,
         boundary: RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
-        mut promotion_cleanup: PendingPromotionCleanup,
+        promotion_cleanup: PendingPromotionCleanup,
         keep_alive: bool,
         machine_archived_resume_authorized: bool,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
-        let service = Arc::clone(&self.service);
-        let staged_sessions = Arc::clone(&self.staged_sessions);
-        let runtime_adapter = Arc::clone(&self.runtime_adapter);
-        #[cfg(test)]
-        let pending_promotion_pre_turn_hook = Arc::clone(&self.pending_promotion_pre_turn_hook);
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let create_result = match (
-                promotion_cleanup.take_staged_capacity_admission(),
-                machine_archived_resume_authorized,
-            ) {
-                (Some(admission), true) => {
-                    service
-                        .create_session_with_reserved_machine_archived_resume_admission(
-                            create_req,
-                            admission,
-                            runtime_adapter.session_control_authority(),
-                        )
-                        .await
-                }
-                (Some(admission), false) => {
-                    service
-                        .create_session_with_reserved_admission(create_req, admission)
-                        .await
-                }
-                (None, true) => Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "machine-authorized archived resume for session {session_id} is missing a reserved staged admission"
-                    )),
-                )),
-                (None, false) => service.create_session(create_req).await,
-            };
-            match create_result {
-                Ok(_) => {
-                    promotion_cleanup.mark_materialized();
-                }
-                Err(err) => {
-                    if Self::is_archived_create_rejection(&err) {
-                        let _ = service.discard_live_session(&session_id).await;
-                        runtime_adapter.unregister_session(&session_id).await;
-                        promotion_cleanup.mark_materialized();
-                        let _ = promotion_cleanup.finish_now().await;
-                        promotion_cleanup.disarm();
-                        let _ = result_tx.send(Err(err));
-                        return;
-                    }
-                    if Self::pending_live_first_turn_is_still_deferred(&service, &session_id).await
-                    {
-                        promotion_cleanup.mark_materialized();
-                        Self::finish_pending_promotion_after_service_turn(
-                            Arc::clone(&service),
-                            staged_sessions,
-                            &session_id,
-                            "create_session",
-                        )
-                        .await;
-                    } else {
-                        let materialized_after_error =
-                            service.has_live_session(&session_id).await.unwrap_or(false);
-                        if materialized_after_error {
-                            promotion_cleanup.mark_materialized();
-                            Self::finish_pending_promotion_after_service_turn(
-                                Arc::clone(&service),
-                                staged_sessions,
-                                &session_id,
-                                "create_session",
-                            )
-                            .await;
-                        } else {
-                            if let Err(error) = promotion_cleanup
-                                .replenish_staged_capacity_admission(&service)
-                                .await
-                            {
-                                tracing::warn!(
-                                    session_id = %session_id,
-                                    error = %error,
-                                    "failed to replenish staged capacity after create_session error"
-                                );
-                            }
-                            promotion_cleanup.restore_now().await;
-                        }
-                    }
-                    promotion_cleanup.disarm();
-                    let _ = result_tx.send(Err(err));
-                    return;
-                }
-            }
-
-            #[cfg(test)]
-            Self::wait_pending_promotion_pre_turn_hook(&pending_promotion_pre_turn_hook).await;
-
-            let (turn_result_tx, turn_result_rx) = tokio::sync::oneshot::channel();
-            let service_for_turn = Arc::clone(&service);
-            let session_for_turn = session_id.clone();
-            tokio::spawn(async move {
-                let result = service_for_turn
-                    .apply_runtime_turn(
-                        &session_for_turn,
-                        run_id,
-                        req,
-                        boundary,
-                        contributing_input_ids,
-                    )
-                    .await;
-                let _ = turn_result_tx.send(result);
-            });
-
-            #[cfg(feature = "comms")]
-            {
-                // W2-G: never reconfigure a mob-owned drain during runtime
-                // materialization. See `start_turn_via_runtime`.
-                let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
-                if !owner.is_mob_owned() {
-                    let comms_rt = service.comms_runtime(&session_id).await;
-                    let peer_ingress_enabled =
-                        keep_alive || runtime_adapter.session_has_comms(&session_id).await;
-                    runtime_adapter
-                        .update_peer_ingress_context(&session_id, peer_ingress_enabled, comms_rt)
-                        .await;
-                }
-            }
-
-            let result = turn_result_rx.await.unwrap_or_else(|_| {
-                Err(SessionError::Agent(
-                    meerkat_core::error::AgentError::InternalError(format!(
-                        "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-                    )),
-                ))
-            });
-            if Self::should_restore_pending_after_apply_runtime_turn(&service, &session_id, &result)
-                .await
-            {
-                let restore_result = promotion_cleanup
-                    .restore_after_materialized_failure(
-                        &service,
-                        MachineSessionArchiveProtocol::from_machine(runtime_adapter.as_ref()),
-                    )
-                    .await;
-                promotion_cleanup.disarm();
-                let _ = result_tx.send(match restore_result {
-                    Ok(()) => result,
-                    Err(error) => Err(error),
-                });
-                return;
-            }
-
-            Self::finish_pending_promotion_after_service_turn(
-                Arc::clone(&service),
-                staged_sessions,
-                &session_id,
-                "apply_runtime_turn",
-            )
-            .await;
-            promotion_cleanup.disarm();
-            let _ = result_tx.send(result);
-        });
-        result_rx
+        let replay = self.replay_promoted_system_context_callback();
+        let comms_refresh = self.comms_context_refresh_callback(keep_alive);
+        let pre_turn_hook = self.pending_promotion_pre_turn_hook_callback();
+        meerkat::session_runtime::staged_promotion::spawn_pending_create_and_apply_runtime_turn_with_admission_guard(
+            Arc::clone(&self.service),
+            Arc::clone(&self.staged_sessions),
+            Arc::clone(&self.runtime_adapter),
+            replay,
+            comms_refresh,
+            pre_turn_hook,
+            session_id,
+            create_req,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+            promotion_cleanup,
+            machine_archived_resume_authorized,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3664,81 +2485,20 @@ impl SessionRuntime {
         admission: ActiveCapacityGuard,
         keep_alive: bool,
     ) -> ServiceApplyRuntimeTurnResultReceiver {
-        #[cfg(not(feature = "comms"))]
-        let _ = keep_alive;
-        let service = Arc::clone(&self.service);
-        let runtime_adapter = Arc::clone(&self.runtime_adapter);
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let result = match service
-                .create_session_with_reserved_admission(create_req, admission)
-                .await
-            {
-                Ok(_) => {
-                    let (turn_result_tx, turn_result_rx) = tokio::sync::oneshot::channel();
-                    let service_for_turn = Arc::clone(&service);
-                    let session_for_turn = session_id.clone();
-                    tokio::spawn(async move {
-                        let result = service_for_turn
-                            .apply_runtime_turn(
-                                &session_for_turn,
-                                run_id,
-                                req,
-                                boundary,
-                                contributing_input_ids,
-                            )
-                            .await;
-                        let _ = turn_result_tx.send(result);
-                    });
-
-                    #[cfg(feature = "comms")]
-                    {
-                        // W2-G: never reconfigure a mob-owned drain during recovery
-                        // materialization. See `start_turn_via_runtime`.
-                        let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
-                        if !owner.is_mob_owned() {
-                            let comms_rt = service.comms_runtime(&session_id).await;
-                            let peer_ingress_enabled =
-                                keep_alive || runtime_adapter.session_has_comms(&session_id).await;
-                            runtime_adapter
-                                .update_peer_ingress_context(
-                                    &session_id,
-                                    peer_ingress_enabled,
-                                    comms_rt,
-                                )
-                                .await;
-                        }
-                    }
-
-                    let result = turn_result_rx.await.unwrap_or_else(|_| {
-                        Err(SessionError::Agent(
-                            meerkat_core::error::AgentError::InternalError(format!(
-                                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-                            )),
-                        ))
-                    });
-                    if Self::should_restore_pending_after_apply_runtime_turn(
-                        &service,
-                        &session_id,
-                        &result,
-                    )
-                    .await
-                    {
-                        let _ = service.discard_live_session(&session_id).await;
-                        runtime_adapter.unregister_session(&session_id).await;
-                    }
-                    result
-                }
-                Err(err) => {
-                    if !runtime_was_registered {
-                        runtime_adapter.unregister_session(&session_id).await;
-                    }
-                    Err(err)
-                }
-            };
-            let _ = result_tx.send(result);
-        });
-        result_rx
+        let comms_refresh = self.comms_context_refresh_callback(keep_alive);
+        meerkat::session_runtime::staged_promotion::spawn_recovered_create_and_apply_runtime_turn_with_admission_guard(
+            Arc::clone(&self.service),
+            Arc::clone(&self.runtime_adapter),
+            comms_refresh,
+            session_id,
+            create_req,
+            runtime_was_registered,
+            run_id,
+            req,
+            boundary,
+            contributing_input_ids,
+            admission,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3788,16 +2548,16 @@ impl SessionRuntime {
         session_id: &SessionId,
         result_rx: ServiceApplyRuntimeTurnResultReceiver,
     ) -> Result<CoreApplyOutput, RpcError> {
-        result_rx
-            .await
-            .map_err(|_| RpcError {
-                code: error::INTERNAL_ERROR,
-                message: format!(
-                    "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-                ),
-                data: None,
-            })?
-            .map_err(session_error_to_rpc)
+        meerkat::session_runtime::staged_promotion::await_service_apply_runtime_turn(
+            session_id, result_rx,
+        )
+        .await
+        .map_err(|err| RpcError {
+            code: error::INTERNAL_ERROR,
+            message: err.to_string(),
+            data: None,
+        })?
+        .map_err(session_error_to_rpc)
     }
 
     async fn await_service_apply_runtime_turn_with_recoverable_admission(
@@ -3810,11 +2570,13 @@ impl SessionRuntime {
         ),
         RpcError,
     > {
-        result_rx.await.map_err(|_| RpcError {
+        meerkat::session_runtime::staged_promotion::await_service_apply_runtime_turn_with_recoverable_admission(
+            session_id, result_rx,
+        )
+        .await
+        .map_err(|err| RpcError {
             code: error::INTERNAL_ERROR,
-            message: format!(
-                "session service apply_runtime_turn task ended before reporting a result for {session_id}"
-            ),
+            message: err.to_string(),
             data: None,
         })
     }
@@ -3825,27 +2587,23 @@ impl SessionRuntime {
         session_id: &SessionId,
         operation: &'static str,
     ) {
-        let Some((starting_system_context_state, current_system_context_state)) = staged_sessions
-            .take_promoting_system_context_state(session_id)
-            .await
-        else {
-            return;
-        };
-        if let Err(err) = Self::replay_promoted_system_context_on_service(
-            service,
+        let session_id_for_replay = session_id.clone();
+        meerkat::session_runtime::staged_promotion::finish_pending_promotion_after_service_turn(
+            staged_sessions.as_ref(),
             session_id,
-            &starting_system_context_state,
-            &current_system_context_state,
+            operation,
+            move |starting, current| async move {
+                Self::replay_promoted_system_context_on_service(
+                    service,
+                    &session_id_for_replay,
+                    &starting,
+                    &current,
+                )
+                .await
+                .map_err(|err| err.message)
+            },
         )
-        .await
-        {
-            tracing::warn!(
-                session_id = %session_id,
-                error = %err.message,
-                operation,
-                "failed to replay promoted system-context state after service turn"
-            );
-        }
+        .await;
     }
 
     /// Persistent TokenStore used by OAuth-backed bindings (shared with
@@ -3926,9 +2684,17 @@ impl SessionRuntime {
             runtime_adapter: Arc::clone(&self.runtime_adapter),
             pending_session_event_streams: Some(Arc::clone(&self.pending_session_event_streams)),
             #[cfg(feature = "mcp")]
-            mcp_sessions: Some(Arc::clone(&self.mcp_sessions)),
+            mcp_state: Some(Arc::new(RpcMcpStateAdapter {
+                sessions: Arc::clone(&self.mcp_sessions),
+            }) as Arc<dyn ArchiveRuntimeMcpState>),
+            #[cfg(not(feature = "mcp"))]
+            mcp_state: None,
             #[cfg(feature = "mob")]
-            mob_state: self.mob_state(),
+            mob_state: self.mob_state().map(|state| {
+                Arc::new(RpcMobStateAdapter { state }) as Arc<dyn ArchiveRuntimeMobState>
+            }),
+            #[cfg(not(feature = "mob"))]
+            mob_state: None,
         }
     }
 
@@ -3946,84 +2712,116 @@ impl SessionRuntime {
         self.approval_service.clone()
     }
 
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::materialize_staged_session_for_realtime_open`
+    /// in `meerkat::session_runtime::live_orchestration`.
+    async fn materialize_staged_session_for_realtime_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let host = self.llm_reconfigure_host();
+        self.live_orchestrator(&snapshot, cleanup, &host)
+            .materialize_staged_session_for_realtime_open(session_id)
+            .await
+    }
+
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::recover_live_session_for_realtime_open` in
+    /// `meerkat::session_runtime::live_orchestration`.
     async fn recover_live_session_for_realtime_open(
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
-        if self.service.has_live_session(session_id).await? {
-            return Ok(());
-        }
-
-        let session = self
-            .load_persisted_session(session_id)
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let host = self.llm_reconfigure_host();
+        self.live_orchestrator(&snapshot, cleanup, &host)
+            .recover_live_session_for_realtime_open(session_id)
             .await
-            .map_err(|err| rpc_error_to_session_error(err, session_id))?
-            .ok_or_else(|| SessionError::NotFound {
-                id: session_id.clone(),
-            })?;
-        let keep_alive = session
-            .session_metadata()
-            .map(|metadata| metadata.keep_alive)
-            .unwrap_or(false);
-        let recovery_overrides = self
-            .recovery_overrides_from_turn(None, keep_alive)
-            .map_err(|err| rpc_error_to_session_error(err, session_id))?;
-        let recovered = self
-            .recovered_create_request_with_runtime_binding_mode(
-                session_id,
-                session,
-                recovery_overrides,
-                RecoveryRuntimeBindingMode::LocalResources,
-            )
-            .await
-            .map_err(|err| rpc_error_to_session_error(err, session_id))?;
-        let runtime_was_registered = recovered.runtime_was_registered;
-        let admission = self.service.reserve_create_session_admission().await?;
-        if let Err(error) = self
-            .service
-            .create_session_with_reserved_admission(recovered.request, admission)
-            .await
-        {
-            self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
-                .await;
-            return Err(error);
-        }
-
-        Ok(())
     }
 
     /// Project the owning live session into the provider-backed realtime open seam.
+    ///
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::realtime_session_open_config`.
     pub async fn realtime_session_open_config(
         &self,
         session_id: &SessionId,
         turning_mode: meerkat_contracts::RealtimeTurningMode,
     ) -> Result<RealtimeSessionOpenConfig, SessionError> {
-        self.recover_live_session_for_realtime_open(session_id)
-            .await?;
-        let session = match self
-            .service
-            .export_realtime_open_session_snapshot(session_id)
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let host = self.llm_reconfigure_host();
+        self.live_orchestrator(&snapshot, cleanup, &host)
+            .realtime_session_open_config(session_id, turning_mode)
             .await
-        {
-            Ok(session) => session,
-            Err(SessionError::NotFound { .. }) => {
-                self.recover_live_session_for_realtime_open(session_id)
-                    .await?;
-                self.service
-                    .export_realtime_open_session_snapshot(session_id)
-                    .await?
-            }
-            Err(error) => return Err(error),
-        };
-        let llm_identity = self.service.live_session_llm_identity(session_id).await?;
-        let visible_tools = self.service.live_visible_tool_defs(session_id).await?;
-        Ok(RealtimeSessionOpenConfig::new(
-            turning_mode,
-            llm_identity,
-            visible_tools,
-            realtime_projection_messages(&session),
-        )
-        .with_runtime_system_context(realtime_projection_runtime_system_context(&session)))
+    }
+
+    /// Build a live open config for a session that may be deferred (no turns yet).
+    ///
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::live_open_config_for_session`.
+    pub async fn live_open_config_for_session(
+        &self,
+        session_id: &SessionId,
+        turning_mode: meerkat_contracts::RealtimeTurningMode,
+    ) -> Result<RealtimeSessionOpenConfig, SessionError> {
+        self.realtime_session_open_config(session_id, turning_mode)
+            .await
+    }
+
+    /// Pre-flight checks for `live/open` before any infra is minted.
+    ///
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::precheck_live_open`. The B18/B19 gates and
+    /// the deferred-session materialize-then-precheck dance live in
+    /// the surface-agnostic orchestrator.
+    pub async fn precheck_live_open(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), LiveOpenPrecheckError> {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let host = self.llm_reconfigure_host();
+        self.live_orchestrator(&snapshot, cleanup, &host)
+            .precheck_live_open(session_id)
+            .await
+    }
+
+    /// Phase 4 R1: build a [`LiveOrchestrator`] borrowing this
+    /// runtime's resolved state. Surface-private dependencies
+    /// (callback dispatcher, archive cleanup, hot-swap host) are
+    /// passed in by the caller so the orchestrator stays free of
+    /// RPC-private types.
+    fn live_orchestrator<'a>(
+        &'a self,
+        snapshot: &'a RealmContextSnapshot,
+        archive_runtime_cleanup: meerkat::session_runtime::runtime_state::ArchiveRuntimeCleanup,
+        llm_reconfigure_host: &'a SessionRuntimeLlmReconfigureHost,
+    ) -> meerkat::session_runtime::live_orchestration::LiveOrchestrator<'a> {
+        let agent_llm_client_decorator = self
+            .agent_llm_client_decorator
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        meerkat::session_runtime::live_orchestration::LiveOrchestrator {
+            service: &self.service,
+            staged_sessions: &self.staged_sessions,
+            staged_capacity_admissions: &self.staged_capacity_admissions,
+            runtime_adapter: &self.runtime_adapter,
+            host: self.live_adapter_host(),
+            config_runtime: self.config_runtime(),
+            default_llm_client: self.default_llm_client(),
+            agent_llm_client_decorator,
+            external_tools: self.recovery_external_tools(),
+            archive_runtime_cleanup,
+            llm_reconfigure_host,
+            realm_id: snapshot.realm_id.as_ref(),
+            instance_id: snapshot.instance_id.as_deref(),
+            backend: snapshot.backend.as_deref(),
+        }
     }
 
     fn recovery_overrides_from_turn(
@@ -4078,18 +2876,84 @@ impl SessionRuntime {
         )
     }
 
-    fn recovery_error_to_rpc(error: SurfaceSessionRecoveryError) -> RpcError {
+    /// Build a callback-backed tool dispatcher for the live-adapter host.
+    ///
+    /// Returns `None` until `set_callback_channel` has been called (which the
+    /// `RpcServer` constructor does). Callers (`MethodRouter::with_live_ws`)
+    /// invoke this after server construction and pass the dispatcher to
+    /// `LiveAdapterHost::set_tool_dispatcher` so live provider tool calls
+    /// route through Meerkat's callback-tool authority (A4/A5).
+    pub fn live_tool_dispatcher(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
+        self.recovery_external_tools()
+    }
+
+    /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
+    /// onto an RPC wire error. Stays in `meerkat-rpc` because the
+    /// destination type (`RpcError`) is RPC-private.
+    fn recovery_error_to_rpc(error: meerkat::session_runtime::errors::RecoveryError) -> RpcError {
+        use meerkat::session_runtime::errors::RecoveryError;
         match error {
-            SurfaceSessionRecoveryError::InvalidOverride(message) => RpcError {
-                code: error::INVALID_PARAMS,
-                message,
-                data: None,
-            },
-            other => RpcError {
+            RecoveryError::Recovery(SurfaceSessionRecoveryError::InvalidOverride(message)) => {
+                RpcError {
+                    code: error::INVALID_PARAMS,
+                    message,
+                    data: None,
+                }
+            }
+            RecoveryError::Recovery(other) => RpcError {
                 code: error::INTERNAL_ERROR,
                 message: other.to_string(),
                 data: None,
             },
+            RecoveryError::BindingPreparation { .. } => RpcError {
+                code: error::INTERNAL_ERROR,
+                message: error.to_string(),
+                data: None,
+            },
+            RecoveryError::Session(session_error) => session_error_to_rpc(session_error),
+        }
+    }
+
+    /// Snapshot of the slot-shared realm/instance/backend triple. The
+    /// `RecoveryContext` borrows from this scratch struct so the slot
+    /// reads happen once at the call site without the borrow checker
+    /// rejecting temporary owned values.
+    fn realm_context_snapshot(&self) -> RealmContextSnapshot {
+        RealmContextSnapshot {
+            realm_id: self.inner.realm_id(),
+            instance_id: self.inner.instance_id(),
+            backend: self.inner.backend(),
+        }
+    }
+
+    /// Build a [`RecoveryContext`] borrowing this runtime's resolved
+    /// state. Used by the `recovered_create_request*` shims and any
+    /// surface that wants direct access to the surface-agnostic
+    /// recovery flow without an RPC translation.
+    ///
+    /// Takes a `&RealmContextSnapshot` because the surface-agnostic
+    /// `RecoveryContext` borrows the realm triple; callers stash the
+    /// snapshot in a local binding that outlives the context.
+    fn recovery_context<'a>(
+        &'a self,
+        snapshot: &'a RealmContextSnapshot,
+    ) -> meerkat::session_runtime::recovery::RecoveryContext<'a> {
+        let agent_llm_client_decorator = {
+            self.agent_llm_client_decorator
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        };
+        meerkat::session_runtime::recovery::RecoveryContext {
+            service: &self.service,
+            runtime_adapter: &self.runtime_adapter,
+            realm_id: snapshot.realm_id.as_ref(),
+            instance_id: snapshot.instance_id.as_deref(),
+            backend: snapshot.backend.as_deref(),
+            default_llm_client: self.default_llm_client(),
+            agent_llm_client_decorator,
+            external_tools: self.recovery_external_tools(),
+            config_runtime: self.config_runtime(),
         }
     }
 
@@ -4099,13 +2963,11 @@ impl SessionRuntime {
         session: Session,
         overrides: SurfaceSessionRecoveryOverrides,
     ) -> Result<RecoveredCreateRequest, RpcError> {
-        self.recovered_create_request_with_runtime_binding_mode(
-            session_id,
-            session,
-            overrides,
-            RecoveryRuntimeBindingMode::Authoritative,
-        )
-        .await
+        let snapshot = self.realm_context_snapshot();
+        self.recovery_context(&snapshot)
+            .recovered_create_request(session_id, session, overrides)
+            .await
+            .map_err(Self::recovery_error_to_rpc)
     }
 
     async fn recovered_create_request_with_runtime_binding_mode(
@@ -4115,64 +2977,16 @@ impl SessionRuntime {
         overrides: SurfaceSessionRecoveryOverrides,
         binding_mode: RecoveryRuntimeBindingMode,
     ) -> Result<RecoveredCreateRequest, RpcError> {
-        let current_generation = match self.config_runtime() {
-            Some(runtime) => runtime.get().await.ok().map(|snapshot| snapshot.generation),
-            None => None,
-        };
-        let runtime_was_registered = self.runtime_adapter.contains_session(session_id).await;
-        let bindings = match binding_mode {
-            RecoveryRuntimeBindingMode::Authoritative => {
-                self.runtime_adapter
-                    .prepare_bindings(session_id.clone())
-                    .await
-            }
-            RecoveryRuntimeBindingMode::LocalResources => {
-                self.runtime_adapter
-                    .prepare_local_session_bindings(session_id.clone())
-                    .await
-            }
-        }
-        .map_err(|e| RpcError {
-            code: error::INTERNAL_ERROR,
-            message: format!("failed to prepare runtime bindings for session {session_id}: {e}"),
-            data: None,
-        })?;
-        let agent_llm_client_decorator = {
-            self.agent_llm_client_decorator
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-        };
-        let recovered = match build_recovered_session(
-            session,
-            &overrides,
-            SurfaceSessionRecoveryContext {
-                llm_client_override: self
-                    .default_llm_client()
-                    .map(encode_llm_client_override_for_service),
-                agent_llm_client_decorator,
-                external_tools: self.recovery_external_tools(),
-                checkpointer: None,
-                runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
-                require_runtime_build_mode: true,
-                realm_id: self.realm_id.as_ref().map(ToString::to_string),
-                instance_id: self.instance_id.clone(),
-                backend: self.backend.clone(),
-                config_generation: current_generation,
-            },
-        ) {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                if !runtime_was_registered {
-                    self.runtime_adapter.unregister_session(session_id).await;
-                }
-                return Err(Self::recovery_error_to_rpc(error));
-            }
-        };
-        Ok(RecoveredCreateRequest {
-            request: recovered.into_deferred_create_request(),
-            runtime_was_registered,
-        })
+        let snapshot = self.realm_context_snapshot();
+        self.recovery_context(&snapshot)
+            .recovered_create_request_with_runtime_binding_mode(
+                session_id,
+                session,
+                overrides,
+                binding_mode,
+            )
+            .await
+            .map_err(Self::recovery_error_to_rpc)
     }
 
     pub fn schedule_service(&self) -> ScheduleService {
@@ -4544,127 +3358,16 @@ impl SessionRuntime {
         }
     }
 
-    fn committed_visibility_allows(
-        base_tool_names: &std::collections::BTreeSet<String>,
-        visibility_state: &meerkat_core::SessionToolVisibilityState,
-        tool_name: &str,
-    ) -> bool {
-        if !base_tool_names.contains(tool_name) {
-            return false;
-        }
-
-        meerkat_core::ToolScope::compose(&[
-            visibility_state.capability_base_filter.clone(),
-            visibility_state.inherited_base_filter.clone(),
-            visibility_state.active_filter.clone(),
-        ])
-        .allows(tool_name)
-    }
-
-    fn derive_reconfigured_visibility_state(
-        current: &meerkat_core::SessionToolVisibilityState,
-        target_capability_surface: &SessionLlmCapabilitySurface,
-        base_tool_names: &std::collections::BTreeSet<String>,
-    ) -> meerkat_core::SessionToolVisibilityState {
-        let current_view_image_visible = Self::committed_visibility_allows(
-            base_tool_names,
-            current,
-            meerkat_core::VIEW_IMAGE_TOOL_NAME,
-        );
-
-        let mut next = current.clone();
-        next.capability_base_filter = meerkat_core::capability_base_filter_for_image_tool_results(
-            target_capability_surface.image_tool_results,
-        );
-
-        let next_view_image_visible = Self::committed_visibility_allows(
-            base_tool_names,
-            &next,
-            meerkat_core::VIEW_IMAGE_TOOL_NAME,
-        );
-        if current_view_image_visible != next_view_image_visible {
-            next.active_revision = current.active_revision.max(current.staged_revision) + 1;
-        }
-
-        next
-    }
-
-    async fn rollback_idle_hot_swap_failure(
-        &self,
-        host: &SessionRuntimeLlmReconfigureHost,
-        session_id: &SessionId,
-        previous_identity: &SessionLlmIdentity,
-        previous_visibility_state: &meerkat_core::SessionToolVisibilityState,
-        original_error: RuntimeDriverError,
-    ) -> Result<(), RuntimeDriverError> {
-        let rollback_result = async {
-            host.apply_live_session_llm_identity(session_id, previous_identity)
-                .await?;
-            host.apply_live_session_tool_visibility_state(
-                session_id,
-                Some(previous_visibility_state.clone()),
-            )
-            .await?;
-            Ok::<(), RuntimeDriverError>(())
-        }
-        .await;
-
-        match rollback_result {
-            Ok(()) => Err(original_error),
-            Err(rollback_error) => {
-                let _ = host.discard_live_session(session_id).await;
-                Err(RuntimeDriverError::Internal(format!(
-                    "failed to rollback idle live llm reconfiguration after error ({original_error}): {rollback_error}"
-                )))
-            }
-        }
-    }
-
     async fn hot_swap_llm_client_on_idle_session(
         &self,
         session_id: &SessionId,
         request: &SessionLlmReconfigureRequest,
     ) -> Result<(), RuntimeDriverError> {
         let host = self.llm_reconfigure_host();
-        let hydrated = host.hydrate_session_llm_state(session_id).await?;
-        let resolved = host
-            .resolve_target_session_llm_identity(request, &hydrated.current_identity)
-            .await?;
-        let next_visibility_state = Self::derive_reconfigured_visibility_state(
-            &hydrated.current_visibility_state,
-            &resolved.target_capability_surface,
-            &hydrated.base_tool_names,
-        );
-
-        host.apply_live_session_llm_identity(session_id, &resolved.target_identity)
-            .await?;
-        if let Err(error) = host
-            .apply_live_session_tool_visibility_state(session_id, Some(next_visibility_state))
-            .await
-        {
-            return self
-                .rollback_idle_hot_swap_failure(
-                    &host,
-                    session_id,
-                    &hydrated.current_identity,
-                    &hydrated.current_visibility_state,
-                    error,
-                )
-                .await;
-        }
-        if let Err(error) = host.persist_live_session(session_id).await {
-            return self
-                .rollback_idle_hot_swap_failure(
-                    &host,
-                    session_id,
-                    &hydrated.current_identity,
-                    &hydrated.current_visibility_state,
-                    error,
-                )
-                .await;
-        }
-
-        Ok(())
+        meerkat::session_runtime::llm_reconfigure::hot_swap_llm_client_on_idle_session(
+            &host, session_id, request,
+        )
+        .await
     }
 
     /// Hot-swap the LLM client on a materialized session.
@@ -4716,16 +3419,24 @@ impl SessionRuntime {
     }
 
     pub async fn discard_live_session(&self, session_id: &SessionId) -> Result<(), SessionError> {
-        let result = self.service.discard_live_session(session_id).await;
-        if result.is_ok() && !self.staged_sessions.contains(session_id).await {
-            self.discard_staged_capacity_admission(session_id);
-        }
-        result
+        self.runtime_state_ops()
+            .discard_live_session(session_id)
+            .await
     }
 
     async fn discard_stale_live_session(&self, session_id: &SessionId) {
-        let _ = self.discard_live_session(session_id).await;
-        self.runtime_adapter.unregister_session(session_id).await;
+        self.runtime_state_ops()
+            .discard_stale_live_session(session_id)
+            .await;
+    }
+
+    fn runtime_state_ops(&self) -> meerkat::session_runtime::runtime_state::RuntimeStateOps<'_> {
+        meerkat::session_runtime::runtime_state::RuntimeStateOps {
+            service: &self.service,
+            staged_sessions: &self.staged_sessions,
+            staged_capacity_admissions: &self.staged_capacity_admissions,
+            runtime_adapter: &self.runtime_adapter,
+        }
     }
 
     pub async fn dispatch_external_tool_call(
@@ -4782,6 +3493,21 @@ impl SessionRuntime {
         self.service
             .append_realtime_transcript_event(session_id, event)
             .await
+    }
+
+    /// Return distinct in-flight provider `response_id`s for the realtime
+    /// transcript state of `session_id`. CC4: lets the live projection sink
+    /// fan `AssistantTurnInterrupted` events to every staged response on
+    /// barge-in so deltas-in-flight do not survive into the next turn's
+    /// `AssistantTurnCompleted` materializer sweep.
+    pub async fn in_flight_realtime_assistant_response_ids(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<String>, SessionError> {
+        let Some(session) = self.service.load_authoritative_session(session_id).await? else {
+            return Ok(Vec::new());
+        };
+        Ok(session.in_flight_realtime_assistant_response_ids())
     }
 
     #[cfg(feature = "mob")]
@@ -4989,6 +3715,48 @@ impl SessionRuntime {
             .ok()
             .map(|g| g.clone())
             .unwrap_or_else(|| Arc::new(StdRwLock::new(Vec::new())))
+    }
+
+    /// P1#5: attach the live adapter host so the runtime can fan out
+    /// `Refresh`/`Close` commands to active live channels when an upstream
+    /// model/provider resolution change requires a re-seed.
+    ///
+    /// Takes `&self` so it can be called after the runtime is wrapped in
+    /// `Arc` (matches the `set_callback_channel` pattern). Called by
+    /// `RpcServer`/router construction immediately after `with_live_ws`.
+    pub fn set_live_adapter_host(&self, host: Arc<meerkat_live::LiveAdapterHost>) {
+        if let Ok(mut slot) = self.live_adapter_host.write() {
+            *slot = Some(host);
+        }
+    }
+
+    /// Read the current live adapter host, if attached.
+    pub fn live_adapter_host(&self) -> Option<Arc<meerkat_live::LiveAdapterHost>> {
+        self.live_adapter_host
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone())
+    }
+
+    /// Phase 4 R1: thin RPC shim — delegates to
+    /// `LiveOrchestrator::propagate_config_to_live_channels`.
+    ///
+    /// `prior_global_model` is retained on the signature for handler
+    /// compatibility but the orchestrator no longer consults it. The
+    /// hot-swap rule is now: skip when the session's current model
+    /// already equals the new global; otherwise propagate. See
+    /// `should_apply_global_model_hot_swap` for the rationale (s72
+    /// regression fix: a session that pinned a model at `session/create`
+    /// against a different global must still re-resolve when the global
+    /// is patched, so the next `live/open` precheck enforces B19 against
+    /// the new resolution).
+    pub async fn propagate_config_to_live_channels(&self, prior_global_model: Option<&str>) {
+        let snapshot = self.realm_context_snapshot();
+        let cleanup = self.archive_runtime_cleanup();
+        let host = self.llm_reconfigure_host();
+        self.live_orchestrator(&snapshot, cleanup, &host)
+            .propagate_config_to_live_channels(prior_global_model)
+            .await;
     }
 
     #[cfg(feature = "mob")]
@@ -6139,9 +4907,9 @@ impl SessionRuntime {
             let mut build = build_config.to_session_build_options();
             build.realm_id = build
                 .realm_id
-                .or_else(|| self.realm_id.as_ref().map(ToString::to_string));
-            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
-            build.backend = build.backend.or_else(|| self.backend.clone());
+                .or_else(|| self.inner.realm_id().map(|r| r.to_string()));
+            build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
+            build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);
             let event_tx = self
                 .pending_session_event_fanout_tx(session_id, event_tx)
@@ -6248,21 +5016,19 @@ impl SessionRuntime {
     }
 
     /// Build a source identity registry from runtime config.
+    ///
+    /// W3-A: thin RPC delegate to
+    /// [`meerkat::session_runtime::runtime_state::build_skill_identity_registry`].
     pub fn build_skill_identity_registry(
         config: &Config,
         context_root: Option<&std::path::Path>,
         user_root: Option<&std::path::Path>,
     ) -> Result<SourceIdentityRegistry, SkillError> {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let _ = (context_root, user_root);
-            config.skills.build_source_identity_registry()
-        }
-        #[cfg(target_arch = "wasm32")]
-        {
-            let _ = (context_root, user_root);
-            config.skills.build_source_identity_registry()
-        }
+        meerkat::session_runtime::runtime_state::build_skill_identity_registry(
+            config,
+            context_root,
+            user_root,
+        )
     }
 
     /// Create a new session with the given build configuration.
@@ -6537,9 +5303,9 @@ impl SessionRuntime {
             let mut build = build_config.to_session_build_options();
             build.realm_id = build
                 .realm_id
-                .or_else(|| self.realm_id.as_ref().map(ToString::to_string));
-            build.instance_id = build.instance_id.or_else(|| self.instance_id.clone());
-            build.backend = build.backend.or_else(|| self.backend.clone());
+                .or_else(|| self.inner.realm_id().map(|r| r.to_string()));
+            build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
+            build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);
             let initial_turn_provider_hint = build_config
                 .provider
@@ -6892,6 +5658,100 @@ impl SessionRuntime {
             current_state,
         )
         .await
+    }
+
+    /// Build the surface-agnostic replay callback the staged-promotion
+    /// helpers use to replay system-context state after a successful turn.
+    /// The closure clones the persistent session service and translates
+    /// the RPC error to a string (for tracing).
+    fn replay_promoted_system_context_callback(
+        &self,
+    ) -> meerkat::session_runtime::staged_promotion::ReplayPromotedSystemContextFn {
+        let service = Arc::clone(&self.service);
+        Arc::new(move |session_id, starting, current| {
+            let service = Arc::clone(&service);
+            Box::pin(async move {
+                Self::replay_promoted_system_context_on_service(
+                    service,
+                    &session_id,
+                    &starting,
+                    &current,
+                )
+                .await
+                .map_err(|err| err.message)
+            })
+        })
+    }
+
+    /// Build the comms-context refresh callback fired after a staged
+    /// promotion materializes the live session. With the `comms` feature
+    /// enabled this re-syncs `update_peer_ingress_context`; otherwise it
+    /// is a no-op (preserving the original `let _ = keep_alive` shape).
+    fn comms_context_refresh_callback(
+        &self,
+        keep_alive: bool,
+    ) -> meerkat::session_runtime::staged_promotion::CommsContextRefreshFn {
+        #[cfg(feature = "comms")]
+        {
+            let service = Arc::clone(&self.service);
+            let runtime_adapter = Arc::clone(&self.runtime_adapter);
+            Arc::new(move |session_id| {
+                let service = Arc::clone(&service);
+                let runtime_adapter = Arc::clone(&runtime_adapter);
+                Box::pin(async move {
+                    // W2-G: never reconfigure a mob-owned drain during runtime
+                    // materialization. See `start_turn_via_runtime`.
+                    let owner = runtime_adapter.peer_ingress_owner(&session_id).await;
+                    if !owner.is_mob_owned() {
+                        let comms_rt = service.comms_runtime(&session_id).await;
+                        let peer_ingress_enabled =
+                            keep_alive || runtime_adapter.session_has_comms(&session_id).await;
+                        runtime_adapter
+                            .update_peer_ingress_context(
+                                &session_id,
+                                peer_ingress_enabled,
+                                comms_rt,
+                            )
+                            .await;
+                    }
+                })
+            })
+        }
+        #[cfg(not(feature = "comms"))]
+        {
+            let _ = keep_alive;
+            Arc::new(move |_session_id| Box::pin(async move {}))
+        }
+    }
+
+    /// Build the test-only pre-turn hook callback fired by the staged-
+    /// promotion helpers immediately before the apply/start turn dispatch.
+    /// Returns `None` when no hook is currently armed (or when the
+    /// `cfg(test)` field is not present in the build).
+    fn pending_promotion_pre_turn_hook_callback(
+        &self,
+    ) -> Option<meerkat::session_runtime::staged_promotion::PreTurnHookFn> {
+        #[cfg(test)]
+        {
+            let hook_slot = Arc::clone(&self.pending_promotion_pre_turn_hook);
+            let hook = hook_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()?;
+            Some(Arc::new(move || {
+                let hook = Arc::clone(&hook);
+                Box::pin(async move {
+                    hook.reached_flag
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    hook.reached.notify_waiters();
+                    hook.release.notified().await;
+                })
+            }))
+        }
+        #[cfg(not(test))]
+        {
+            None
+        }
     }
 
     async fn replay_promoted_system_context_on_service(
@@ -7248,21 +6108,11 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<Session>, RpcError> {
-        let Some(session) = self
-            .service
-            .load_authoritative_session(session_id)
+        let snapshot = self.realm_context_snapshot();
+        self.recovery_context(&snapshot)
+            .load_persisted_session(session_id)
             .await
-            .map_err(session_error_to_rpc)?
-        else {
-            return Ok(None);
-        };
-        if self
-            .session_archived_by_authority(session_id, &session)
-            .await?
-        {
-            return Ok(None);
-        }
-        Ok(Some(session))
+            .map_err(session_error_to_rpc)
     }
 
     async fn session_archived_by_authority(
@@ -8531,6 +7381,52 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
+    #[test]
+    fn extract_system_prompt_runtime_returns_rendered_text_for_first_system_notice() {
+        // R10 (review-3 follow-up): the runtime-side extractor must accept a
+        // leading `Message::SystemNotice` because
+        // `realtime_projection_messages` (lines 435-444 in this file) only
+        // rewrites `seed_messages[0]` when the root-system helper returns
+        // `Some`; sessions whose only lead is a runtime-injected
+        // `SystemNotice` (e.g. an idle pre-prompt session with an
+        // `[MCP_PENDING]` notice) would otherwise see refresh `session.update`
+        // wipe the provider's instructions to empty. We surface
+        // `rendered_text()` (prefix-tagged) to match what the agent loop
+        // would project at line 405.
+        use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage, UserMessage};
+
+        let notice =
+            SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
+        let expected = notice.rendered_text();
+        let messages = vec![
+            Message::SystemNotice(notice),
+            Message::User(UserMessage::text("hi".to_string())),
+        ];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&messages),
+            Some(expected),
+        );
+
+        // Also pin the `System` arm and the empty/non-system arms so the
+        // contract is fully covered from the runtime side.
+        use meerkat_core::types::SystemMessage;
+        let sys = vec![Message::System(SystemMessage::new("you are a meerkat"))];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&sys),
+            Some("you are a meerkat".to_string()),
+        );
+        let user_only = vec![Message::User(UserMessage::text("hi"))];
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&user_only),
+            None,
+        );
+        let empty: Vec<Message> = Vec::new();
+        assert_eq!(
+            super::extract_system_prompt_from_seed_messages_runtime(&empty),
+            None,
+        );
+    }
+
     #[cfg(feature = "comms")]
     fn install_ephemeral_peer_request_response_authority(
         runtime: &Arc<meerkat::CommsRuntime>,
@@ -8562,6 +7458,155 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------
+    // R11: model/provider swap on `config/patch` must close the live
+    // channel cleanly instead of dispatching `Refresh` (which the OpenAI
+    // realtime adapter rejects via `ConfigRejected`). The decision lives
+    // in `live_channel_requires_close_for_identity_change`; the
+    // integration tests below pin the host-driven side of the wiring
+    // (`channel_llm_identity` setter/getter + `propagate_config_to_live_channels`
+    // routing the `host.send_command(Refresh)` vs `host.close_channel`).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn r11_close_required_when_model_id_swapped() {
+        let prev = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            model: "gpt-realtime-prior".to_string(),
+            ..prev.clone()
+        };
+        assert!(
+            live_channel_requires_close_for_identity_change(Some(&prev), &new),
+            "model_id swap on the same provider must require close+reopen"
+        );
+    }
+
+    #[test]
+    fn r11_close_required_when_provider_swapped() {
+        let prev = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            provider: meerkat_core::Provider::Gemini,
+            ..prev.clone()
+        };
+        assert!(
+            live_channel_requires_close_for_identity_change(Some(&prev), &new),
+            "provider swap must require close+reopen even at same model_id"
+        );
+    }
+
+    #[test]
+    fn r11_close_not_required_when_identity_unchanged() {
+        let id = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            // Other fields differ — provider_params change must NOT trigger a
+            // close-and-reopen. R11 scope is model + provider only.
+            provider_params: Some(serde_json::json!({"x": 1})),
+            auth_binding: None,
+        };
+        let new = SessionLlmIdentity {
+            provider_params: Some(serde_json::json!({"x": 2})),
+            ..id.clone()
+        };
+        assert!(
+            !live_channel_requires_close_for_identity_change(Some(&id), &new),
+            "provider_params drift is in-place-refreshable; only model/provider trigger close"
+        );
+    }
+
+    #[test]
+    fn r11_close_not_required_when_no_bound_identity_recorded() {
+        // Pre-R11 channels (or factory-less degraded test paths) have no
+        // recorded identity. The runtime must NOT assume a swap and force
+        // a close — the legacy Refresh fallthrough is correct.
+        let new = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        assert!(
+            !live_channel_requires_close_for_identity_change(None, &new),
+            "no bound identity must fall through to legacy Refresh, not force close"
+        );
+    }
+
+    /// R11: host-side accessor pair — `set_channel_llm_identity` records the
+    /// identity the channel was opened with, `channel_llm_identity` reads
+    /// it back. This is the seam the live/open handler stamps after
+    /// `attach_adapter` and the seam `propagate_config_to_live_channels`
+    /// reads. Without this round-trip the runtime cannot detect a swap.
+    #[tokio::test]
+    async fn r11_host_records_and_reads_back_bound_llm_identity() {
+        let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+        let session_id = SessionId::new();
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+
+        // Pre-set: channel exists but identity not recorded yet.
+        let initial = host
+            .channel_llm_identity(&channel_id)
+            .await
+            .expect("channel_llm_identity lookup");
+        assert!(
+            initial.is_none(),
+            "newly-opened channel must report None identity until live/open stamps it"
+        );
+
+        let identity = SessionLlmIdentity {
+            model: "gpt-realtime-2".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        host.set_channel_llm_identity(&channel_id, identity.clone())
+            .await
+            .expect("set_channel_llm_identity");
+
+        let recorded = host
+            .channel_llm_identity(&channel_id)
+            .await
+            .expect("channel_llm_identity lookup")
+            .expect("identity must be recorded after set");
+        assert_eq!(recorded.model, identity.model);
+        assert_eq!(recorded.provider, identity.provider);
+    }
+
+    /// R11: an unknown channel id surfaces `ChannelNotFound` from the
+    /// identity getter, not a silent `Ok(None)`. The runtime distinguishes
+    /// "channel disappeared mid-sweep" (skip) from "channel exists but
+    /// no identity recorded" (fall through to legacy Refresh).
+    #[tokio::test]
+    async fn r11_channel_llm_identity_reports_channel_not_found_for_missing_channel() {
+        let host = meerkat_live::LiveAdapterHost::new(Arc::new(meerkat_live::NoOpProjectionSink));
+        let bogus = meerkat_live::LiveChannelId::random_uuid();
+        let result = host.channel_llm_identity(&bogus).await;
+        assert!(
+            matches!(
+                result,
+                Err(meerkat_live::LiveAdapterHostError::ChannelNotFound(_))
+            ),
+            "missing channel must surface as ChannelNotFound, not silent None: {result:?}"
+        );
+    }
+
     #[test]
     fn turn_metadata_from_overrides_does_not_stamp_execution_kind() {
         let metadata = SessionRuntime::turn_metadata_from_overrides(
@@ -8590,6 +7635,118 @@ mod tests {
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
         );
+    }
+
+    /// B19 helper sanity: realtime capability lookup must round-trip the
+    /// catalogued `gpt-realtime*` rows as `realtime: true` and report any
+    /// non-realtime catalog entry as `realtime: false`. This guards the
+    /// `precheck_live_open` gate against silent catalog drift.
+    #[test]
+    fn realtime_capability_lookup_table() {
+        use meerkat_core::Provider;
+        use meerkat_core::model_profile::capabilities::capabilities_for;
+
+        let realtime = capabilities_for(Provider::OpenAI, "gpt-realtime-2")
+            .expect("gpt-realtime-2 should be present in the catalog");
+        assert!(
+            realtime.realtime,
+            "gpt-realtime-2 is the canonical realtime model; capability row must mark it realtime"
+        );
+        // Round-5 catalog cleanup retired `gpt-realtime` and
+        // `gpt-realtime-1.5`; gpt-realtime-2 is the only realtime row
+        // in the catalog now. The B18/B19 precheck and surface
+        // capability projections all flow through this single row.
+
+        // Pick an arbitrary non-realtime OpenAI model from the catalog to
+        // confirm the negative path: Codex/standard chat models are not
+        // realtime-capable and must fail the precheck.
+        let codex = capabilities_for(Provider::OpenAI, "gpt-5.3-codex")
+            .expect("gpt-5.3-codex should be present in the catalog");
+        assert!(
+            !codex.realtime,
+            "non-realtime catalog entries must report realtime=false"
+        );
+
+        // Unknown model must return None — callers must treat None as
+        // "not realtime-capable" (precheck_live_open does this via
+        // `unwrap_or(false)`).
+        assert!(capabilities_for(Provider::OpenAI, "no-such-model").is_none());
+    }
+
+    /// B18 contract pin (non-OpenAI rejection).
+    ///
+    /// The B18 branch in `apply_precheck_gates` rejects realtime-capable
+    /// sessions whose provider is not OpenAI (the only realtime factory
+    /// wired in Wave 1). The catalog cannot naturally produce a
+    /// realtime-capable non-OpenAI capability row — every Gemini and
+    /// Anthropic row in `meerkat_core::model_profile::capabilities` has
+    /// `realtime: false` — so e2e tests never reach this branch and M73
+    /// surfaces `ModelNotRealtime` instead of `ProviderHasNoLiveAdapter`
+    /// even when the test exercises a Gemini provider.
+    ///
+    /// This unit test pins the contract directly: with a synthesized
+    /// `realtime_capable: true` for Gemini, the gate must fire B18 and
+    /// return `ProviderHasNoLiveAdapter`. If a future Wave wires a Gemini
+    /// realtime factory and flips this expectation, this test forces the
+    /// owner to update the gate explicitly rather than have the change slip
+    /// through silently.
+    #[test]
+    fn apply_precheck_gates_rejects_non_openai_realtime() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-live-hypothetical",
+            // Synthesized: the catalog cannot produce this combination, so
+            // we set the bool directly to reach the B18 branch.
+            true,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ProviderHasNoLiveAdapter { provider }) => {
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "expected ProviderHasNoLiveAdapter for realtime-capable Gemini, got {other:?}"
+            ),
+        }
+    }
+
+    /// B19-before-B18 gate ordering pin.
+    ///
+    /// When both gates would reject (non-realtime AND non-OpenAI), B19
+    /// (the more specific "model lacks realtime capability" failure) must
+    /// fire first. Documenting the ordering here prevents a future refactor
+    /// from silently swapping the branches and changing the public error
+    /// code surface from `INVALID_PARAMS` to `INTERNAL_ERROR` on the same
+    /// inputs.
+    #[test]
+    fn apply_precheck_gates_b19_fires_before_b18() {
+        let result = apply_precheck_gates(
+            meerkat_core::Provider::Gemini,
+            "gemini-3-flash-preview",
+            // Synthesized: matches the catalog reality (Gemini chat models
+            // are realtime: false). Without the explicit ordering check,
+            // a refactor could plausibly choose to reject on provider
+            // first; this test pins the contract.
+            false,
+        );
+        match result {
+            Err(LiveOpenPrecheckError::ModelNotRealtime { model, provider }) => {
+                assert_eq!(model, "gemini-3-flash-preview");
+                assert_eq!(provider, "gemini");
+            }
+            other => panic!(
+                "B19 must fire before B18 — expected ModelNotRealtime for non-realtime Gemini, \
+                 got {other:?}"
+            ),
+        }
+    }
+
+    /// Positive control for the gate helper: realtime-capable OpenAI must
+    /// pass both gates. Catches a regression where the helper accidentally
+    /// rejects all inputs after a refactor.
+    #[test]
+    fn apply_precheck_gates_accepts_realtime_openai() {
+        apply_precheck_gates(meerkat_core::Provider::OpenAI, "gpt-realtime-2", true)
+            .expect("realtime-capable OpenAI must pass both gates");
     }
 
     #[test]
@@ -19141,7 +18298,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
-        let mut build = AgentBuildConfig::new("gpt-realtime");
+        let mut build = AgentBuildConfig::new("gpt-realtime-2");
         build.provider = Some(meerkat_core::Provider::OpenAI);
         build.llm_client_override = Some(Arc::new(MockLlmClient));
         let session_id = runtime.create_session(build, None, None).await.unwrap();
@@ -19153,12 +18310,103 @@ mod tests {
         let capabilities = info
             .resolved_capabilities
             .expect("realtime session should expose resolved capabilities");
-        assert_eq!(info.model, "gpt-realtime");
+        assert_eq!(info.model, "gpt-realtime-2");
         assert_eq!(info.provider, "openai");
         assert!(capabilities.realtime);
-        assert!(!capabilities.image_input);
+        // gpt-realtime-2 accepts text + audio + image input per
+        // OpenAI's model docs; the catalog row sets `vision: true`
+        // and the surface projection mirrors that as `image_input`.
+        assert!(capabilities.image_input);
         assert!(!capabilities.image_tool_results);
         assert!(!capabilities.web_search);
+    }
+
+    /// Wave-3 regression: a deferred session created with no first turn lives
+    /// in `staged_sessions` and is **not** in the live service map, **not** in
+    /// the persistent store. `precheck_live_open` must read identity directly
+    /// from staging in that case; otherwise the live-map miss surfaces as
+    /// `SessionLookup` (`INTERNAL_ERROR "session not found"`) before the B18
+    /// (provider) and B19 (realtime-capability) gates can fire — the
+    /// production-shape failure mode that the original Wave-3 fix didn't
+    /// catch (the early `recover_live_session_for_realtime_open` dance only
+    /// helped when the session was already persisted).
+    ///
+    /// To make sure this regression test exercises the production-shaped seam
+    /// rather than a `MemoryStore` happy path, we assert before the precheck
+    /// that the session is in `staged_sessions` and **not** yet in the live
+    /// service map. That mirrors how `rkat-rpc` lands a deferred session:
+    /// staged-only until the first turn promotes it.
+    #[tokio::test]
+    async fn precheck_live_open_recovers_deferred_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        let mut build = AgentBuildConfig::new("gpt-realtime-2");
+        build.provider = Some(meerkat_core::Provider::OpenAI);
+        build.llm_client_override = Some(Arc::new(MockLlmClient));
+        let session_id = runtime
+            .create_session(build, None, None)
+            .await
+            .expect("create_session for deferred OpenAI realtime build");
+
+        // Production-shape pre-assertion: deferred session must be staged-only.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet — \
+             otherwise the precheck staged-branch is not exercised"
+        );
+
+        runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect("deferred realtime session must pass precheck via staged branch");
+    }
+
+    #[tokio::test]
+    async fn precheck_live_open_rejects_deferred_non_realtime_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = make_runtime(temp_factory(&temp), 10);
+
+        // claude-sonnet-4-5 is catalogued with `realtime: false`. The
+        // staged branch of `precheck_live_open` must read the identity from
+        // staging and the B19 model-capability gate must reject it with a
+        // typed `ModelNotRealtime` — not `SessionLookup`. Asserting on the
+        // typed variant guards against a regression where the staged read
+        // silently swallows the gate error.
+        let session_id = runtime
+            .create_session(mock_build_config(), None, None)
+            .await
+            .expect("create_session for deferred non-realtime build");
+
+        // Production-shape pre-assertion: deferred non-realtime session must
+        // also be staged-only, so the gate test exercises the staged branch.
+        assert!(
+            runtime.staged_sessions.contains(&session_id).await,
+            "deferred session must land in staged_sessions"
+        );
+        assert!(
+            matches!(
+                runtime.service.live_session_llm_identity(&session_id).await,
+                Err(SessionError::NotFound { .. })
+            ),
+            "deferred session must NOT be in the live service map yet"
+        );
+
+        let err = runtime
+            .precheck_live_open(&session_id)
+            .await
+            .expect_err("non-realtime model must be rejected by precheck");
+        assert!(
+            matches!(err, LiveOpenPrecheckError::ModelNotRealtime { .. }),
+            "expected ModelNotRealtime, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -20591,6 +19839,368 @@ mod tests {
             error::PROVIDER_ERROR,
             "ALL BuildErrors must map to PROVIDER_ERROR regardless of message content, got code: {}",
             rpc_err.code,
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // R11 integration: drive `propagate_config_to_live_channels` end-to-end
+    // through a real `SessionRuntime` + `LiveAdapterHost` with a recording
+    // adapter and assert the model-swap branch closes the channel instead
+    // of dispatching `Refresh`.
+    //
+    // The session's underlying llm_identity is mutated *post-attach* by
+    // overwriting the host-recorded `bound_llm_identity` directly: that
+    // simulates "channel was opened with model A, but the new resolved
+    // identity is model B" without needing a full `config/patch` round-trip
+    // through `MeerkatMachine`. `propagate_config_to_live_channels` reads
+    // the new resolved identity from `live_open_config_for_session` (which
+    // returns the session's *current* identity) and compares against the
+    // host-recorded bound identity, which is exactly the comparison the
+    // production path performs.
+    // ---------------------------------------------------------------------
+
+    /// Recording adapter that captures every command the host forwards via
+    /// `send_command`. Used by R11 integration tests to assert that the
+    /// model-swap close path does NOT enqueue `Refresh`.
+    struct R11RecordingAdapter {
+        log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>>,
+    }
+
+    #[async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for R11RecordingAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            self.log.lock().await.push(command);
+            Ok(())
+        }
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    /// Build a deferred-session config whose resolved identity is
+    /// realtime-capable (B19) and uses OpenAI (B18). Without this, the
+    /// upstream `precheck_live_open` rejects the channel before
+    /// `propagate_config_to_live_channels` ever reaches the R11 model-swap
+    /// branch — making the swap-detection logic effectively dead code from
+    /// the perspective of the test. CC2: tests must drive the swap branch,
+    /// not the precheck-close fallback.
+    fn realtime_build_config(model: &str) -> AgentBuildConfig {
+        AgentBuildConfig {
+            llm_client_override: Some(Arc::new(MockLlmClient)),
+            provider: Some(meerkat_core::Provider::OpenAI),
+            ..AgentBuildConfig::new(model)
+        }
+    }
+
+    /// CC1: helper to drain every observation the host has queued for the
+    /// channel, including any synthetic terminal Error pushed via
+    /// `signal_terminal_error`. We loop on `next_observation_raw` rather
+    /// than `next_observation` so the synthetic obs is captured before
+    /// `apply_observation` clears it. The recording adapter's
+    /// `next_observation` returns `None`, so the only `Some` we see is the
+    /// pending synthetic.
+    async fn drain_pending_synthetic(
+        host: &meerkat_live::LiveAdapterHost,
+        channel_id: &meerkat_live::LiveChannelId,
+    ) -> Option<meerkat_core::live_adapter::LiveAdapterObservation> {
+        // adapter.next_observation returns None for the recording adapter, so
+        // a single read either returns the synthetic obs or the adapter's
+        // None terminal — there's no need to loop. Post-close, the host
+        // returns ChannelNotReady from `adapter_for` only when the pending
+        // slot is empty; treat that as "no synthetic obs queued."
+        host.next_observation_raw(channel_id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// R11/CC2: `propagate_config_to_live_channels` must enqueue a typed
+    /// `ConfigRejected` terminal observation (not `Refresh`) when the
+    /// host-recorded bound identity differs from the new resolved identity
+    /// for the channel's session.
+    ///
+    /// Session identity is realtime-capable (`gpt-realtime-2`) so
+    /// `precheck_live_open` returns OK and the flow reaches the R11
+    /// swap-detection branch. The bound identity uses a synthetic prior
+    /// model name (`gpt-realtime-prior`) — only the swap-detection
+    /// string compare reads it; the catalog is never consulted for the
+    /// bound side. The Round-5 catalog cleanup retired
+    /// `gpt-realtime-1.5`, so this test uses the synthetic name to keep
+    /// the swap-detection assertion exercising the correct branch.
+    #[tokio::test]
+    async fn r11_propagate_closes_channel_on_model_id_swap() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        // Session resolved identity: gpt-realtime-2 (realtime + OpenAI).
+        // We materialize the session via `start_turn` so
+        // `live_open_config_for_session` (called inside `propagate_config_to_live_channels`)
+        // can resolve a real open_config — staged sessions miss the live
+        // service map and would surface NotFound, causing the swap branch
+        // to be skipped entirely (the verifier's CC2 finding).
+        let session_id = runtime
+            .create_session(realtime_build_config("gpt-realtime-2"), None, None)
+            .await
+            .expect("create_session for live channel");
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for r11 swap test".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        runtime.set_live_adapter_host(Arc::clone(&host));
+        let runtime = Arc::new(runtime);
+
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Bound identity: synthetic `gpt-realtime-prior` (the *prior*
+        // model the channel was opened with). Different from the
+        // session's resolved identity (gpt-realtime-2), so the swap
+        // branch fires. The catalog isn't consulted for bound — only
+        // the model+provider string compare runs against it.
+        let stale_bound = SessionLlmIdentity {
+            model: "gpt-realtime-prior".to_string(),
+            provider: meerkat_core::Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+        host.set_channel_llm_identity(&channel_id, stale_bound)
+            .await
+            .expect("set_channel_llm_identity");
+
+        // G5 (P1): R11 exercises the host-side identity-swap detection
+        // (bound vs. resolved), not the global hot-swap path. Pass None
+        // so the global-hot-swap loop short-circuits and the model-swap
+        // close branch runs against the identity we just set.
+        runtime.propagate_config_to_live_channels(None).await;
+
+        // R11 assertion: NO Refresh command was dispatched on the
+        // model-swap path. The channel was closed instead.
+        let recorded = log.lock().await;
+        assert!(
+            recorded.is_empty(),
+            "R11: model-swap path must NOT enqueue Refresh, got: {recorded:?}"
+        );
+        drop(recorded);
+
+        let status = host
+            .channel_status(&channel_id)
+            .await
+            .expect("channel_status");
+        assert_eq!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "R11: model-swap path must close the channel; got status {status:?}"
+        );
+
+        // CC1: assert the typed `ConfigRejected` terminal Error observation
+        // is queued for the WS pump. The reason string carries both old +
+        // new model ids so the SDK can route on the typed code AND inspect
+        // the swap details. The pending obs is single-shot, so this also
+        // proves the swap branch ran (only `signal_terminal_error` enqueues
+        // a synthetic obs in this code path).
+        let synthetic = drain_pending_synthetic(&host, &channel_id)
+            .await
+            .expect("R11/CC1: model-swap branch must enqueue a synthetic terminal obs");
+        match synthetic {
+            meerkat_core::live_adapter::LiveAdapterObservation::Error { code, message } => {
+                match code {
+                    meerkat_core::live_adapter::LiveAdapterErrorCode::ConfigRejected { reason } => {
+                        // R5-2: identity-swap surfaces as the typed
+                        // `ChannelIdentitySwap { from_*, to_* }` variant.
+                        // The synthetic `Error.message` mirrors the reason's
+                        // `Display` projection (host.signal_terminal_error
+                        // contract), so the rendered text contains both model
+                        // ids and the `model_swap:` prefix.
+                        match &reason {
+                            meerkat_core::live_adapter::LiveConfigRejectionReason::ChannelIdentitySwap {
+                                from_model, to_model, ..
+                            } => {
+                                assert_eq!(
+                                    from_model, "gpt-realtime-prior",
+                                    "from_model must be the prior bound identity"
+                                );
+                                assert_eq!(
+                                    to_model, "gpt-realtime-2",
+                                    "to_model must be the resolved session identity"
+                                );
+                            }
+                            other => panic!(
+                                "R11/CC1: expected ChannelIdentitySwap reason, got {other:?}"
+                            ),
+                        }
+                        let rendered = reason.to_string();
+                        assert!(
+                            rendered.contains("model_swap")
+                                && rendered.contains("gpt-realtime-2")
+                                && rendered.contains("gpt-realtime-prior"),
+                            "Display projection must name swap + both model ids; got: {rendered}"
+                        );
+                        assert_eq!(
+                            message, rendered,
+                            "Error.message must mirror ConfigRejected.reason Display"
+                        );
+                    }
+                    other => {
+                        panic!("R11/CC1: expected ConfigRejected error code on swap, got {other:?}")
+                    }
+                }
+            }
+            other => panic!("R11/CC1: expected Error observation, got {other:?}"),
+        }
+    }
+
+    /// R11 sibling: when the recorded bound identity matches the session's
+    /// new resolved identity, propagation falls through to the legacy
+    /// Refresh path. The channel must NOT be closed AND no synthetic
+    /// terminal Error must be queued.
+    ///
+    /// CC2: the session is materialized with a realtime-capable model so
+    /// `precheck_live_open` returns OK and the flow reaches the R11
+    /// branch. The earlier shape of this test allowed the precheck-close
+    /// fallback to satisfy assertions — that masked any regression that
+    /// closed channels via the wrong gate. The assertions below now require
+    /// Refresh to land and the channel to remain open.
+    #[tokio::test]
+    async fn r11_propagate_dispatches_refresh_when_identity_unchanged() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut runtime = make_runtime(temp_factory(&temp), 10);
+        runtime.set_default_llm_client(Some(Arc::new(MockLlmClient)));
+
+        let session_id = runtime
+            .create_session(realtime_build_config("gpt-realtime-2"), None, None)
+            .await
+            .expect("create_session for live channel");
+
+        // Materialize the session so `live_open_config_for_session` can
+        // resolve the current llm identity (deferred sessions miss the
+        // live service map and would surface NotFound from the open-config
+        // build path).
+        let (event_tx, _rx) = mpsc::channel(100);
+        runtime
+            .start_turn(
+                &session_id,
+                "materialize for r11 sibling".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("materialize session via first turn");
+
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        runtime.set_live_adapter_host(Arc::clone(&host));
+        let runtime = Arc::new(runtime);
+
+        let channel_id = host
+            .open_channel(session_id.clone())
+            .await
+            .expect("open_channel");
+        let log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>> =
+            Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn meerkat_core::live_adapter::LiveAdapter> =
+            Arc::new(R11RecordingAdapter {
+                log: Arc::clone(&log),
+            });
+        host.attach_adapter(&channel_id, adapter)
+            .await
+            .expect("attach_adapter");
+
+        // Record the bound identity to match what `live_open_config_for_session`
+        // will return for this session — same model, same provider, so no
+        // swap. We read the current resolved identity off the runtime first
+        // so the test stays robust to changes in the default mock config.
+        let current_identity = runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live_open_config_for_session")
+            .llm_identity;
+        host.set_channel_llm_identity(&channel_id, current_identity)
+            .await
+            .expect("set_channel_llm_identity");
+
+        // G5 (P1): see sibling test for rationale. None preserves the
+        // pre-G5 behavior the R11 sibling assertion needs.
+        runtime.propagate_config_to_live_channels(None).await;
+
+        // CC2: precheck must succeed (gpt-realtime-2 is realtime + OpenAI),
+        // so the no-swap branch must dispatch exactly one Refresh and leave
+        // the channel open. The earlier "tolerate precheck close" allowance
+        // is gone — if status is Closed here, the R11 wiring is broken.
+        let recorded = log.lock().await;
+        let status = host
+            .channel_status(&channel_id)
+            .await
+            .expect("channel_status");
+        assert_ne!(
+            status,
+            meerkat_core::live_adapter::LiveAdapterStatus::Closed,
+            "no-swap propagation must NOT close the channel; \
+             a Closed status here means precheck rejected a realtime-capable \
+             model or the swap branch fired on matching identities"
+        );
+        assert_eq!(
+            recorded.len(),
+            1,
+            "expected exactly one Refresh dispatch on a no-swap propagation, got: {recorded:?}"
+        );
+        match &recorded[0] {
+            meerkat_core::live_adapter::LiveAdapterCommand::Refresh { .. } => {}
+            other => panic!("expected Refresh, got {other:?}"),
+        }
+        drop(recorded);
+
+        // CC1: no synthetic terminal Error may be queued on the no-swap
+        // path. `signal_terminal_error` is only called from the swap branch.
+        let synthetic = drain_pending_synthetic(&host, &channel_id).await;
+        assert!(
+            synthetic.is_none(),
+            "no-swap propagation must NOT enqueue a synthetic terminal Error, got: {synthetic:?}"
         );
     }
 }

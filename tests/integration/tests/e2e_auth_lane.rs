@@ -39,6 +39,14 @@ use meerkat_providers::ResolverEnvironment;
 use meerkat_providers::auth_store::{
     FileTokenStore, InMemoryCoordinator, PersistedTokens, RefreshCoordinator, TokenKey, TokenStore,
 };
+// RPC-host: this integration test directly drives the JSON-RPC dispatch surface
+// (MethodRouter::method_call with RpcRequest/RpcResponse) to exercise RPC method
+// behaviour end-to-end without TCP/stdio transport. Wire types
+// (RpcId/RpcRequest/RpcResponse/RpcNotification) are inherently RPC-shape;
+// SessionRuntime + NotificationSink back the dispatcher. Lifting these would
+// remove the test's reason for existing — it asserts the RPC method-call surface
+// (auth/login/start, auth/login/complete, auth/status/get, auth/logout), not
+// the upstream session_runtime semantics.
 use meerkat_rpc::protocol::{RpcId, RpcRequest};
 use meerkat_rpc::router::{MethodRouter, NotificationSink};
 use meerkat_rpc::session_runtime::SessionRuntime;

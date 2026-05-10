@@ -242,13 +242,13 @@ async fn build_agent_with_gpt_realtime_selects_realtime_text_adapter() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
+    let mut build = AgentBuildConfig::new("gpt-realtime-2");
     build.auth_binding = Some(conn_ref("default_openai"));
 
     let agent = factory
         .build_agent(build, &config)
         .await
-        .expect("gpt-realtime-1.5 routes through OpenAiRealtimeTextAdapter");
+        .expect("gpt-realtime-2 routes through OpenAiRealtimeTextAdapter");
     let metadata = agent
         .session()
         .session_metadata()
@@ -263,7 +263,7 @@ async fn build_agent_with_gpt_realtime_without_feature_returns_typed_error() {
     let factory = temp_factory(&temp);
     let config = config_with_realm();
 
-    let mut build = AgentBuildConfig::new("gpt-realtime-1.5");
+    let mut build = AgentBuildConfig::new("gpt-realtime-2");
     build.auth_binding = Some(conn_ref("default_openai"));
 
     let result = factory.build_agent(build, &config).await;

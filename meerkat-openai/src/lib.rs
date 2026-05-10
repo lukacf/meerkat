@@ -15,8 +15,6 @@ pub mod client_compatible;
 pub mod image_generation;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod live;
-#[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
-pub mod realtime_attachment;
 pub mod runtime;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
@@ -30,8 +28,6 @@ pub use image_generation::{
 };
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use live::OpenAiLiveClient;
-#[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
-pub use realtime_attachment::OpenAiRealtimeAttachmentOrchestrator;
 pub use runtime::{OpenAiAuthMethod, OpenAiBackendKind, OpenAiProviderRuntime};
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub use text_adapter::OpenAiRealtimeTextAdapter;

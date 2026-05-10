@@ -75,33 +75,52 @@ Short version:
 11. Derived projections are rebuildable, never authoritative.
 12. Surfaces are skins, not authorities.
 
-### Realtime attachment vocabulary (public noun)
+### Live audio/video adapter vocabulary (public noun)
 
-Public API surfaces describe `realtime`, not `voice`. Realtime
-transport is capability-driven: `ModelCapabilities.realtime: bool` on
-the session's resolved model decides attach/detach. There is no
-caller-initiated attach/detach RPC. Converged terms:
+Live (audio/video) channels are exposed through the live-adapter MVP
+surface. Capability detection still uses `ModelCapabilities.realtime`
+to decide whether a model can back a live channel; channel lifecycle
+is **caller-initiated** through the `live/*` JSON-RPC methods (and
+their typed SDK wrappers). The previous capability-driven attachment
+plane (`session/realtime_attachment_status`,
+`mob/member_status.realtime_attachment_status`, `realtime/open_info`,
+`RealtimeAttachmentStatus`, `MeerkatMachine::reconfigure_live_topology`
+and the realtime-binding DSL state) has been removed.
 
-- `ModelCapabilities.realtime` — the capability bit that drives transport
-- `session/realtime_attachment_status` — single-session status projection (no plural sibling exists; fan out per session)
-- `mob/member_status.realtime_attachment_status` — per-member projection
-- `realtime/open_info` / `realtime/status` / `realtime/capabilities` — product-layer bootstrap
+Public vocabulary:
 
-The `realtime_attachment_status` enum is the typed form surfaces
-present; audio-only backend behavior is one provider specialization,
-not the public capability name. Prior `mob/realtime_attach(detach)` and
-`attachMobMemberLive`/`detachMobMemberLive` surfaces have been deleted.
+- `ModelCapabilities.realtime` — capability bit that gates whether
+  `live/open` succeeds for a session.
+- `live/open` — open a live channel on a session; returns a typed
+  `LiveOpenResult` carrying transport bootstrap (e.g. WS URL for
+  `rkat-rpc --live-ws`'s `/live/ws` listener), `WireLiveChannelCapabilities`,
+  and `WireLiveContinuityMode`.
+- `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`,
+  `live/interrupt`, `live/truncate`, `live/close` — channel lifecycle.
+- The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket
+  listener. Without it the `live/*` methods are not registered (router
+  arms gated on `live_ws_state.is_some()`).
 
-Load `references/realtime-attachment.md` when touching realtime
-attachment state, the live-topology reconfigure flow, or the DSL
-authority epoch model.
+Wire types live in `meerkat-contracts/src/wire/live.rs`. Adapter
+internals live in `meerkat-core::live_adapter` (`LiveAdapterStatus`,
+`LiveChannelCapabilities`, `LiveContinuityMode`,
+`LiveTransportBootstrap`, `LiveAdapterObservation`, etc.). Provider
+implementations sit in `meerkat-openai::live` and adjacent
+provider crates.
+
+The DSL realtime-binding plane and `reconfigure_live_topology`
+orchestration were deleted, not renamed; there is no separate
+architectural reference for the new live-adapter surface. For a
+deeper internal reference, `meerkat-rpc/src/handlers/live.rs` plus
+`meerkat-contracts/src/wire/live.rs` are the authoritative surface;
+`docs/guides/live.mdx` (when present) is the user-facing companion.
 
 ## The 5-machine target
 
 Exactly five canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
-- **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification, **realtime attachment authority, live-topology reconfigure phase**.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent was removed — realtime is driven by each member's session-level `ModelCapabilities.realtime`.)
+- **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
+- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed in the live-adapter MVP — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 - **AuthMachine** — auth/session authorization state that must remain machine-owned.
@@ -129,9 +148,9 @@ Stable per-member identity is separate from per-runtime binding:
 - **`Generation`** — mob-member generation counter; increments on respawn.
 
 When adding state or effects keyed on member identity, choose
-`AgentIdentity` if the fact survives respawn (realtime attachment preferences,
-wiring preferences), `AgentRuntimeId` if it's per-binding (ops
-registry membership, live bridge).
+`AgentIdentity` if the fact survives respawn (wiring preferences,
+durable per-member configuration), `AgentRuntimeId` if it's
+per-binding (ops registry membership, live channel handles).
 
 ## Crate Ownership
 
@@ -148,7 +167,7 @@ registry membership, live bridge).
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router (routes to `ExternalToolSurfaceHandle`) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
-| `meerkat-runtime` | Runtime control plane, policy engine, detached wake, DSL handle impls, **`reconfigure_live_topology` orchestration, realtime attachment public methods** | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
+| `meerkat-runtime` | Runtime control plane, policy engine, detached wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims, pure peer data types | Implements `CommsRuntime` |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
@@ -161,7 +180,7 @@ registry membership, live bridge).
 | `meerkat-machine-schema` | Rust-native machine/composition catalog DSL — the formal authority | — |
 | `meerkat-machine-kernels` | Generated kernel interpreter for all machines/compositions | `GeneratedMachineKernel` |
 | `meerkat-machine-codegen` | TLA+ model generation, TLC verification, drift detection | — |
-| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports, **`SessionLlmReconfigureHost` wiring** | Wires everything together |
+| `meerkat` (facade) | `AgentFactory`, `FactoryAgentBuilder`, persistence helpers, re-exports | Wires everything together |
 
 **Rule: `meerkat-core` has zero I/O dependencies.** All I/O happens in satellite crates.
 
@@ -173,7 +192,6 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 - **`references/machine-system.md`** — load when touching DSL sources, catalog schemas, generated kernels, TLC verification, production bridge modules, parity gates, command classification, authority cutover, handle trait design, or any "where does this semantic state live" question. Covers the DSL → MachineSchema → kernel → TLA+ → runtime flow, the catalog/production parity ratchets, the field-driven design principle, signals vs inputs, and the `HandleDslAuthority` cross-crate pattern.
 - **`references/runtime-control-plane.md`** — load when working on `MeerkatMachine`, runtime drivers, session registration, policy resolution, `RuntimeBuildMode` / `SessionRuntimeBindings`, `OpsLifecycleRegistry`, session service lifecycle, persistence pairing, detached-op wake, or test harness ownership.
-- **`references/realtime-attachment.md`** — load when working on realtime attachment state, the capability-driven transport policy (`ModelCapabilities.realtime`), the live-topology reconfigure flow, provider callback authority epochs, or the peer-response-terminal context append path. Covers the DSL state fields, the `RealtimeAttachmentSignalAuthority` token, and the five CoreExecutor entry points that route context-only staged primitives.
 - **`references/agent-construction.md`** — load when touching `AgentFactory::build_agent()`, agent builder, multimodal content types, or runtime tool scoping.
 - **`references/mob-orchestration.md`** — load when working on mobs: creation, launch modes, spawn policies, delegation tools, lifecycle control, provisioning, wiring, flow/frame execution, mob persistence, or `MobActor` decomposition.
 - **`references/comms-model.md`** — load when working on peer trust, inter-agent messaging, comms drain lifecycle, envelope classification, or session identity claims.
@@ -188,7 +206,6 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter
-- `meerkat-runtime/src/meerkat_machine/llm_reconfigure.rs` — `reconfigure_live_topology` orchestration
 - `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
 - `meerkat-core/src/handles.rs` — DSL handle trait definitions
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
@@ -203,7 +220,6 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
 - `docs/architecture/meerkat-runtime-dogma.md` — full dogma
 - `docs/architecture/buildbuddy-bazel-poc.md` — BuildBuddy/Bazel developer and CI backend guide
-- `docs/architecture/identity-first-live-voice-proposal.md` — realtime + identity-first design notes
-- `docs/guides/realtime.mdx` — user-facing realtime voice guide (public vocabulary, state enum, reconfigure flow)
+- `docs/architecture/identity-first-live-voice-proposal.md` — live adapter + identity-first design notes
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog
 - `scripts/build-backend-env`, `scripts/run-build-backend-lane`, `scripts/buildbuddy-dev` — local build backend switch and BuildBuddy facade

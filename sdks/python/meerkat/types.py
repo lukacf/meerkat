@@ -60,40 +60,89 @@ from .generated.types import (
     MobTopologySpecInput as MobTopologySpecInput,
     MobTurnStartParams as MobTurnStartParams,
     MobWiringRulesInput as MobWiringRulesInput,
+    LiveChannelParams as LiveChannelParams,
+    LiveCommitInputParams as LiveCommitInputParams,
+    LiveInputChunkWire as LiveInputChunkWire,
+    # R5-10: re-export typed `LiveInputChunkWire` variants so SDK consumers
+    # can construct typed chunks at the `LiveSendInputParams.chunk` slot
+    # without dipping into `meerkat.generated.types`.
+    LiveInputChunkWireAudio as LiveInputChunkWireAudio,
+    LiveInputChunkWireText as LiveInputChunkWireText,
+    LiveInputChunkWireImage as LiveInputChunkWireImage,
+    LiveInputChunkWireVideoFrame as LiveInputChunkWireVideoFrame,
+    LiveOpenParams as LiveOpenParams,
+    LiveOpenResult as LiveOpenResult,
+    LiveSendInputParams as LiveSendInputParams,
+    LiveStatusResult as LiveStatusResult,
+    LiveTruncateParams as LiveTruncateParams,
+    # CC5/CC6: typed wire mirrors for the live `capabilities` + `continuity`
+    # shapes. Re-exported alongside `LiveOpenResult` so SDK consumers can
+    # reach the typed booleans (`image_in`, `video_in`, etc.) and the
+    # discriminated continuity-mode union without dipping into the
+    # `meerkat.generated.types` module.
+    WireLiveChannelCapabilities as WireLiveChannelCapabilities,
+    WireLiveContinuityMode as WireLiveContinuityMode,
+    WireLiveContinuityModeFresh as WireLiveContinuityModeFresh,
+    WireLiveContinuityModeTranscriptOnly as WireLiveContinuityModeTranscriptOnly,
+    WireLiveContinuityModeDegraded as WireLiveContinuityModeDegraded,
+    WireLiveContinuityModeProviderNativeResume as WireLiveContinuityModeProviderNativeResume,
+    # FIX-SDK-OBS: typed live-adapter observation discriminated union and
+    # its supporting wire mirrors. Browser/Python clients can type-narrow
+    # on the `observation` discriminator and read R5-4 identity fields
+    # (`item_id`, `response_id`, `content_index`) on
+    # `assistant_audio_chunk` plus the R5-9 `command_rejected` typed
+    # channel-survives error variant.
+    WireLiveAdapterObservation as WireLiveAdapterObservation,
+    WireLiveAdapterObservationReady as WireLiveAdapterObservationReady,
+    WireLiveAdapterObservationUserTranscriptFinal as WireLiveAdapterObservationUserTranscriptFinal,
+    WireLiveAdapterObservationAssistantTextDelta as WireLiveAdapterObservationAssistantTextDelta,
+    WireLiveAdapterObservationAssistantTranscriptDelta as WireLiveAdapterObservationAssistantTranscriptDelta,
+    WireLiveAdapterObservationAssistantAudioChunk as WireLiveAdapterObservationAssistantAudioChunk,
+    WireLiveAdapterObservationAssistantTranscriptFinal as WireLiveAdapterObservationAssistantTranscriptFinal,
+    WireLiveAdapterObservationAssistantTranscriptTruncated as WireLiveAdapterObservationAssistantTranscriptTruncated,
+    WireLiveAdapterObservationRealtimeTranscript as WireLiveAdapterObservationRealtimeTranscript,
+    WireLiveAdapterObservationToolCallRequested as WireLiveAdapterObservationToolCallRequested,
+    WireLiveAdapterObservationTurnInterrupted as WireLiveAdapterObservationTurnInterrupted,
+    WireLiveAdapterObservationTurnCompleted as WireLiveAdapterObservationTurnCompleted,
+    WireLiveAdapterObservationStatusChanged as WireLiveAdapterObservationStatusChanged,
+    WireLiveAdapterObservationError as WireLiveAdapterObservationError,
+    WireLiveAdapterObservationCommandRejected as WireLiveAdapterObservationCommandRejected,
+    WireLiveAdapterStatus as WireLiveAdapterStatus,
+    WireLiveAdapterErrorCode as WireLiveAdapterErrorCode,
+    WireLiveConfigRejectionReason as WireLiveConfigRejectionReason,
+    WireLiveConfigRejectionReasonChannelIdentitySwap as WireLiveConfigRejectionReasonChannelIdentitySwap,
+    WireLiveConfigRejectionReasonNonRealtimeResolution as WireLiveConfigRejectionReasonNonRealtimeResolution,
+    WireLiveConfigRejectionReasonImageInputNotImplemented as WireLiveConfigRejectionReasonImageInputNotImplemented,
+    WireLiveConfigRejectionReasonVideoFrameInputNotImplemented as WireLiveConfigRejectionReasonVideoFrameInputNotImplemented,
+    WireLiveConfigRejectionReasonUnsupportedInputChunkVariant as WireLiveConfigRejectionReasonUnsupportedInputChunkVariant,
+    WireLiveConfigRejectionReasonRefreshModelSwap as WireLiveConfigRejectionReasonRefreshModelSwap,
+    WireLiveConfigRejectionReasonRefreshProviderSwap as WireLiveConfigRejectionReasonRefreshProviderSwap,
+    WireLiveConfigRejectionReasonRefreshAudioConfigMismatch as WireLiveConfigRejectionReasonRefreshAudioConfigMismatch,
+    WireLiveConfigRejectionReasonAudioInputFormatMismatch as WireLiveConfigRejectionReasonAudioInputFormatMismatch,
+    WireLiveConfigRejectionReasonOther as WireLiveConfigRejectionReasonOther,
+    WireLiveConfigRejectionReasonUnknown as WireLiveConfigRejectionReasonUnknown,
+    WireAssistantBlock as WireAssistantBlock,
+    WireAssistantBlockText as WireAssistantBlockText,
+    WireAssistantBlockTranscript as WireAssistantBlockTranscript,
+    WireAssistantBlockReasoning as WireAssistantBlockReasoning,
+    WireAssistantBlockToolUse as WireAssistantBlockToolUse,
+    WireAssistantBlockServerToolContent as WireAssistantBlockServerToolContent,
+    WireAssistantBlockImage as WireAssistantBlockImage,
+    WireAssistantBlockUnknown as WireAssistantBlockUnknown,
+    WireTranscriptSource as WireTranscriptSource,
+    WireTranscriptSourceSpoken as WireTranscriptSourceSpoken,
+    WireTranscriptSourceUnknown as WireTranscriptSourceUnknown,
+    WireLiveDegradationReason as WireLiveDegradationReason,
+    WireProvider as WireProvider,
     RealtimeAudioChunk as RealtimeAudioChunk,
     RealtimeCapabilities as RealtimeCapabilities,
-    RealtimeCapabilitiesParams as RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult as RealtimeCapabilitiesResult,
-    RealtimeChannelClosedFrame as RealtimeChannelClosedFrame,
-    RealtimeChannelErrorFrame as RealtimeChannelErrorFrame,
-    RealtimeChannelEventFrame as RealtimeChannelEventFrame,
-    RealtimeChannelInputFrame as RealtimeChannelInputFrame,
-    RealtimeChannelOpenFrame as RealtimeChannelOpenFrame,
-    RealtimeChannelOpenedFrame as RealtimeChannelOpenedFrame,
-    RealtimeChannelRole as RealtimeChannelRole,
-    RealtimeChannelState as RealtimeChannelState,
-    RealtimeChannelStatus as RealtimeChannelStatus,
-    RealtimeChannelStatusFrame as RealtimeChannelStatusFrame,
-    RealtimeChannelTarget as RealtimeChannelTarget,
-    RealtimeClientFrame as RealtimeClientFrame,
-    RealtimeEvent as RealtimeEvent,
     RealtimeInputChunk as RealtimeInputChunk,
     RealtimeInputKind as RealtimeInputKind,
-    RealtimeOpenInfo as RealtimeOpenInfo,
-    RealtimeOpenRequest as RealtimeOpenRequest,
-    RealtimeOutputChunk as RealtimeOutputChunk,
     RealtimeOutputKind as RealtimeOutputKind,
-    RealtimeProtocolVersion as RealtimeProtocolVersion,
-    RealtimeReconnectPolicy as RealtimeReconnectPolicy,
-    RealtimeServerFrame as RealtimeServerFrame,
-    RealtimeStatusParams as RealtimeStatusParams,
-    RealtimeStatusResult as RealtimeStatusResult,
     RealtimeTextChunk as RealtimeTextChunk,
-    RealtimeTextDelta as RealtimeTextDelta,
     RealtimeTurningMode as RealtimeTurningMode,
     RealtimeVideoChunk as RealtimeVideoChunk,
     RuntimeAcceptResult as RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusResult as RuntimeRealtimeAttachmentStatusResult,
     RuntimeStateResult as RuntimeStateResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
@@ -485,7 +534,14 @@ class SessionToolResult:
 
 @dataclass(frozen=True, slots=True)
 class SessionAssistantBlock:
-    """Ordered block inside a block-assistant transcript message."""
+    """Ordered block inside a block-assistant transcript message.
+
+    `block_type` carries the lane discriminator (``text``, ``transcript``,
+    ``reasoning``, ``tool_use``, ``server_tool_content``, ``image``, ...).
+    For ``transcript`` blocks ``source`` records the originating lane
+    (today: ``spoken``); both ``text`` and ``transcript`` blocks expose
+    their rendered string in ``text``.
+    """
 
     block_type: str = ""
     text: str | None = None
@@ -499,6 +555,9 @@ class SessionAssistantBlock:
     height: int | None = None
     revised_prompt: dict[str, Any] | None = None
     meta: dict[str, Any] | None = None
+    # Lane provenance for ``transcript`` blocks (e.g. ``"spoken"``).
+    # ``None`` for non-transcript block types.
+    source: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

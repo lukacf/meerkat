@@ -672,3 +672,30 @@ async fn e2e_scenario_18_config_capabilities_errors() {
     drop(writer);
     server_handle.await.unwrap().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// G6 (P2) regression: production rkat-rpc must install
+// `DEFAULT_LIVE_TOOL_TIMEOUT` on the live-adapter host.
+// ---------------------------------------------------------------------------
+//
+// The constant exists in `meerkat-live` but the production binary
+// (`meerkat-rpc/src/main.rs`) historically constructed
+// `LiveAdapterHost::new().with_projection_sink(_)` without the timeout,
+// leaving the live channel open to indefinite tool stalls. This test pins
+// the wiring at the source level so future edits cannot silently regress.
+
+#[test]
+fn rkat_rpc_main_installs_default_live_tool_timeout() {
+    // `main.rs` is a binary (not a library), so it is not reachable as a
+    // function from tests. Reading the source via `include_str!` is a
+    // compile-time embed (no I/O at test runtime) and a reliable way to
+    // pin a one-line build-pattern invariant.
+    let main_rs = include_str!("../src/main.rs");
+    assert!(
+        main_rs.contains(".with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT)"),
+        "G6 regression: meerkat-rpc/src/main.rs must apply \
+         `.with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT)` on the \
+         production live host; without it, a stuck tool can hold the live \
+         provider's turn indefinitely."
+    );
+}

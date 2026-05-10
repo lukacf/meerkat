@@ -894,6 +894,113 @@ mod ordered_transcript_types {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // AssistantBlock::Transcript variant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_assistant_block_transcript_spoken_roundtrip() {
+        let block = AssistantBlock::Transcript {
+            text: "spoken response".to_string(),
+            source: TranscriptSource::Spoken,
+            meta: None,
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(block, parsed);
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["block_type"], "transcript");
+        assert_eq!(value["data"]["text"], "spoken response");
+        assert_eq!(value["data"]["source"], "spoken");
+    }
+
+    #[test]
+    fn test_assistant_block_transcript_with_provider_meta_roundtrip() {
+        let block = AssistantBlock::Transcript {
+            text: "with meta".to_string(),
+            source: TranscriptSource::Spoken,
+            meta: Some(Box::new(ProviderMeta::OpenAi {
+                id: "item_abc".to_string(),
+                encrypted_content: None,
+                phase: Some("response".to_string()),
+            })),
+        };
+
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: AssistantBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(block, parsed);
+    }
+
+    #[test]
+    fn test_message_block_assistant_mixed_text_transcript_roundtrip() {
+        // Mixed Text + Transcript + Text preserves order and lane provenance.
+        let message = Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![
+                AssistantBlock::Text {
+                    text: "display first".to_string(),
+                    meta: None,
+                },
+                AssistantBlock::Transcript {
+                    text: "spoken middle".to_string(),
+                    source: TranscriptSource::Spoken,
+                    meta: None,
+                },
+                AssistantBlock::Text {
+                    text: "display last".to_string(),
+                    meta: None,
+                },
+            ],
+            StopReason::EndTurn,
+        ));
+
+        let json = serde_json::to_string(&message).unwrap();
+        let parsed: Message = serde_json::from_str(&json).unwrap();
+
+        match &parsed {
+            Message::BlockAssistant(parsed_message) => {
+                assert_eq!(parsed_message.blocks.len(), 3);
+                assert!(matches!(
+                    &parsed_message.blocks[0],
+                    AssistantBlock::Text { text, .. } if text == "display first"
+                ));
+                match &parsed_message.blocks[1] {
+                    AssistantBlock::Transcript { text, source, .. } => {
+                        assert_eq!(text, "spoken middle");
+                        assert_eq!(*source, TranscriptSource::Spoken);
+                    }
+                    other => panic!("expected Transcript block, got {other:?}"),
+                }
+                assert!(matches!(
+                    &parsed_message.blocks[2],
+                    AssistantBlock::Text { text, .. } if text == "display last"
+                ));
+                // Display projects both lanes to the same text stream.
+                assert_eq!(
+                    parsed_message.to_string(),
+                    "display firstspoken middledisplay last"
+                );
+                // text_blocks() iterator includes Transcript text as well.
+                let collected: Vec<&str> = parsed_message.text_blocks().collect();
+                assert_eq!(
+                    collected,
+                    vec!["display first", "spoken middle", "display last"]
+                );
+            }
+            other => panic!("expected BlockAssistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_transcript_source_roundtrip_snake_case() {
+        let source = TranscriptSource::Spoken;
+        let json = serde_json::to_string(&source).unwrap();
+        assert_eq!(json, "\"spoken\"");
+        let parsed: TranscriptSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, TranscriptSource::Spoken);
+    }
+
     #[test]
     fn test_message_block_assistant_tool_use_roundtrip() {
         for (case_id, args_json) in [

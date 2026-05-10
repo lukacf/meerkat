@@ -104,6 +104,14 @@ fn project_gemini_assistant_blocks(blocks: &[AssistantBlock]) -> Vec<AssistantBl
         .filter_map(|block| match block {
             AssistantBlock::Text { text, .. } if text.is_empty() => None,
             AssistantBlock::Text { .. } | AssistantBlock::ToolUse { .. } => Some(block.clone()),
+            // Spoken transcripts replay to the provider as plain text
+            // (lane provenance is a Meerkat-side fact; Gemini sees the
+            // assistant's visible output).
+            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
+            AssistantBlock::Transcript { text, .. } => Some(AssistantBlock::Text {
+                text: text.clone(),
+                meta: None,
+            }),
             AssistantBlock::Reasoning { text, .. } if !text.is_empty() => {
                 Some(AssistantBlock::Text {
                     text: format!("[Reasoning: {text}]"),

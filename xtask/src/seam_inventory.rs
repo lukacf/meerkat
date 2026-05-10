@@ -430,18 +430,6 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         (
             "MeerkatMachine",
-            "RealtimeIntentProjected",
-            SeamClassification::OwnerRealizationOnly,
-            "External realtime-intent projection realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
-            "RealtimeBindingRotated",
-            SeamClassification::OwnerRealizationOnly,
-            "External realtime-binding rotation realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
             "McpServerStateChanged",
             SeamClassification::OwnerRealizationOnly,
             "External MCP server state change realized by the MCP router",
@@ -480,45 +468,13 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
             "MeerkatMachine",
             "InteractionStreamStateChanged",
             SeamClassification::OwnerRealizationOnly,
-            "External interaction-stream state delta realized by the realtime surface",
+            "External interaction-stream state delta realized by the comms surface",
         ),
         (
             "MeerkatMachine",
             "InteractionStreamCleanup",
             SeamClassification::OwnerRealizationOnly,
-            "External interaction-stream cleanup realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
-            "RealtimeProductTurnPhaseChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External realtime product-turn phase delta realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
-            "RealtimeProjectionFreshnessChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External realtime projection-freshness delta realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
-            "RealtimeReconnectPolicyChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External realtime reconnect-policy delta realized by the realtime surface",
-        ),
-        (
-            "MeerkatMachine",
-            "RealtimeReconnectProgressProjected",
-            SeamClassification::SurfaceResultAlignment,
-            "External realtime reconnect-progress projection must align with the realtime \
-             overlay's attempt-count + timestamp truth so `realtime/status` surfaces the \
-             actual reconnect state, not a hard-coded default",
-        ),
-        (
-            "MeerkatMachine",
-            "LiveTopologyPhaseChanged",
-            SeamClassification::OwnerRealizationOnly,
-            "External live-topology phase delta realized by the live-topology surface",
+            "External interaction-stream cleanup realized by the comms surface",
         ),
         (
             "MeerkatMachine",

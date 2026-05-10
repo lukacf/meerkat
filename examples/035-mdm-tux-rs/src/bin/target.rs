@@ -658,6 +658,10 @@ async fn main() -> anyhow::Result<()> {
     );
     let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
         Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+    // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
+    // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
+    // serve_tcp form the canonical RPC-host triad. Lifting these would require an
+    // alternate transport stack; this surface legitimately owns the RPC-host role.
     let rpc_runtime = Arc::new(meerkat_rpc::session_runtime::SessionRuntime::new(
         rpc_factory,
         rpc_config,
@@ -673,6 +677,8 @@ async fn main() -> anyhow::Result<()> {
 
     let addr = format!("0.0.0.0:{rpc_port}");
     eprintln!("[target] ready — serving RPC on {addr}\n");
+    // RPC-host: inline-hosted TCP JSON-RPC server entry point; pairs with the
+    // SessionRuntime + NotificationSink above to complete the RPC-host triad.
     meerkat_rpc::serve_tcp(&addr, rpc_runtime, rpc_config_store, None).await?;
     Ok(())
 }
@@ -1380,6 +1386,10 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         );
         let rpc_config_store: Arc<dyn meerkat_core::ConfigStore> =
             Arc::new(meerkat_core::MemoryConfigStore::new(rpc_config.clone()));
+        // RPC-host: this binary inline-hosts a TCP JSON-RPC server via meerkat_rpc::serve_tcp.
+        // SessionRuntime + NotificationSink (carrying RpcNotification mpsc::Sender) +
+        // serve_tcp form the canonical RPC-host triad. Lifting these would require an
+        // alternate transport stack; this surface legitimately owns the RPC-host role.
         let mut rpc_runtime = meerkat_rpc::session_runtime::SessionRuntime::new(
             rpc_factory,
             rpc_config,
@@ -1407,6 +1417,8 @@ async fn run_kennel_mode(args: &[String]) -> anyhow::Result<()> {
         let rpc_runtime_clone = Arc::clone(&rpc_runtime);
         tokio::spawn(async move {
             let addr = format!("0.0.0.0:{rpc_port}");
+            // RPC-host: inline-hosted TCP JSON-RPC server entry point; pairs with the
+            // SessionRuntime + NotificationSink above to complete the RPC-host triad.
             if let Err(e) =
                 meerkat_rpc::serve_tcp(&addr, rpc_runtime_clone, rpc_config_store_clone, None).await
             {

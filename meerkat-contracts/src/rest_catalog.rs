@@ -242,38 +242,10 @@ pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
             )],
         ),
         RestPathDescriptor::new(
-            "/realtime/open_info",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get bootstrap metadata for opening a realtime channel",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/realtime/status",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get product-layer realtime channel status for a target",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/realtime/capabilities",
-            vec![RestOperationDescriptor::new(
-                "post",
-                "Get product-layer realtime capabilities for a target",
-            )],
-        ),
-        RestPathDescriptor::new(
             "/sessions/{id}/status",
             vec![RestOperationDescriptor::new(
                 "get",
                 "Get a session's current runtime state",
-            )],
-        ),
-        RestPathDescriptor::new(
-            "/sessions/{id}/realtime-attachment-status",
-            vec![RestOperationDescriptor::new(
-                "get",
-                "Get a session's realtime attachment status",
             )],
         ),
         RestPathDescriptor::new(
@@ -423,7 +395,6 @@ mod tests {
             "/config",
             "/schedules",
             "/schedules/{id}/occurrences",
-            "/sessions/{id}/realtime-attachment-status",
             "/auth/bindings/{binding_id}",
             "/auth/bindings/{binding_id}/test",
             "/auth/login/complete",
@@ -438,6 +409,10 @@ mod tests {
             assert!(paths.iter().any(|path| path == &expected));
         }
         for retired in [
+            "/realtime/open_info",
+            "/realtime/status",
+            "/realtime/capabilities",
+            "/sessions/{id}/realtime-attachment-status",
             "/mob/{id}/members/{agent_identity}/realtime/attach",
             "/mob/{id}/members/{agent_identity}/realtime/detach",
             "/skills/{id}",

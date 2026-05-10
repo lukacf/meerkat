@@ -276,7 +276,11 @@ impl OpenAiCompatibleClient {
                     let mut tool_calls = Vec::new();
                     for block in &assistant.blocks {
                         match block {
-                            AssistantBlock::Text { text, .. } => {
+                            AssistantBlock::Text { text, .. }
+                            | AssistantBlock::Transcript { text, .. } => {
+                                // Display text and spoken transcripts both
+                                // replay as plain assistant text on the
+                                // Chat Completions–compatible surface.
                                 if !text.is_empty() {
                                     text_parts.push(text.clone());
                                 }

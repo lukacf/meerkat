@@ -2388,6 +2388,7 @@ dependencies = [
  "meerkat-core",
  "meerkat-gemini",
  "meerkat-hooks",
+ "meerkat-live",
  "meerkat-llm-core",
  "meerkat-mcp",
  "meerkat-memory",
@@ -2539,6 +2540,7 @@ dependencies = [
 name = "meerkat-contracts"
 version = "0.6.4"
 dependencies = [
+ "async-trait",
  "base64",
  "chrono",
  "inventory",
@@ -2559,6 +2561,7 @@ name = "meerkat-core"
 version = "0.6.4"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "dirs",
  "futures",
@@ -2655,6 +2658,27 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
+ "tokio-tungstenite 0.29.0",
+ "uuid",
+]
+
+[[package]]
+name = "meerkat-live"
+version = "0.6.4"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "futures",
+ "indexmap",
+ "meerkat-contracts",
+ "meerkat-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.29.0",
+ "tracing",
  "uuid",
 ]
 
@@ -2918,7 +2942,6 @@ dependencies = [
  "meerkat-contracts",
  "meerkat-core",
  "meerkat-llm-core",
- "meerkat-runtime",
  "oai-rt-rs",
  "reqwest",
  "serde",
@@ -2960,7 +2983,6 @@ dependencies = [
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-providers",
- "meerkat-rpc",
  "meerkat-runtime",
  "meerkat-store",
  "meerkat-tools",
@@ -2985,6 +3007,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "clap",
  "futures",
@@ -2994,6 +3017,7 @@ dependencies = [
  "meerkat-comms",
  "meerkat-contracts",
  "meerkat-core",
+ "meerkat-live",
  "meerkat-mob",
  "meerkat-mob-mcp",
  "meerkat-models",
@@ -3453,9 +3477,9 @@ dependencies = [
 
 [[package]]
 name = "oai-rt-rs"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bab7be1012ba2d97c87b79fa254342ea622d650faba3cd42bdae46251822a733"
+checksum = "ffa624202cb21ad8d10f56124160a83b425564a4951d04c07837a0d060cd242f"
 dependencies = [
  "async-trait",
  "base64",
@@ -5667,7 +5691,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

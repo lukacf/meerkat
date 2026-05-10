@@ -239,6 +239,14 @@ The RPC server speaks JSON-RPC 2.0 over newline-delimited JSON (JSONL) on stdin/
 | `config/get` | Read config |
 | `config/set` | Replace config |
 | `config/patch` | Merge-patch config |
+| `live/open` | Open a live audio/text channel (requires `--live-ws`) |
+| `live/status` | Get live channel status |
+| `live/close` | Close a live channel |
+| `live/send_input` | Send input chunk (audio/text) to a live channel |
+| `live/commit_input` | Commit buffered input (turn boundary) |
+| `live/interrupt` | Interrupt assistant turn (barge-in) |
+| `live/truncate` | Truncate assistant output at playback cursor |
+| `live/refresh` | Apply mutable session config to open channel |
 
 **Notifications** (server -> client): `session/event` with `AgentEvent` payload, emitted during turns. `comms/stream_event` for scoped comms event streams (comms feature).
 

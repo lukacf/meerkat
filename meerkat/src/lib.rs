@@ -223,6 +223,11 @@ pub use staged_sessions::{
     StagedSlot,
 };
 
+// Surface-agnostic session runtime. Empty during F2 — populated by
+// the W1/W2/W3 moves out of `meerkat-rpc::session_runtime`. See
+// `SESSION_RUNTIME_SPLIT_TODO.md`.
+pub mod session_runtime;
+
 // Session service
 pub use meerkat_core::service::InitialTurnPolicy;
 pub use meerkat_core::service::StartTurnRuntimeSemantics;
@@ -353,24 +358,13 @@ pub use meerkat_contracts::{
     self as contracts, CapabilitiesResponse, CapabilityHint, CapabilityId, CapabilityRegistration,
     CapabilityScope, CapabilityStatus, CommsParams, ContractVersion, CoreCreateParams,
     ErrorCategory, ErrorCode, HelpExecutionMode, HelpRequest, HelpResponse, HookParams, Protocol,
-    RealtimeCapabilities, RealtimeCapabilitiesParams, RealtimeCapabilitiesResult,
-    RealtimeChannelRole, RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelTarget,
-    RealtimeOpenInfo, RealtimeOpenRequest, RealtimeReconnectPolicy, RealtimeStatusParams,
-    RealtimeStatusResult, RealtimeTurningMode, SkillEntry, SkillInspectResponse, SkillListResponse,
-    SkillsParams, StructuredOutputParams, WireError, WireEvent, WireRunResult, WireSessionInfo,
-    WireSessionSummary, WireUsage, build_capabilities,
+    SkillEntry, SkillInspectResponse, SkillListResponse, SkillsParams, StructuredOutputParams,
+    WireError, WireEvent, WireRunResult, WireSessionInfo, WireSessionSummary, WireUsage,
+    build_capabilities,
 };
 
 // Surface infrastructure
 pub mod surface;
-
-mod realtime;
-pub use realtime::RealtimeChannel;
-#[cfg(not(target_arch = "wasm32"))]
-pub use realtime::{
-    RealtimeConnection, RealtimeConnectionError, RealtimeConnectionReceiver,
-    RealtimeConnectionSender,
-};
 
 // Prompt assembly (filesystem-dependent: reads AGENTS.md, system_prompt_file)
 #[cfg(not(target_arch = "wasm32"))]
@@ -431,8 +425,7 @@ pub use meerkat_llm_core::provider_runtime::{
 pub mod prelude {
     pub use super::{
         AgentConfig, AgentError, AgentEvent, AssistantMessage, Budget, BudgetLimits, BudgetType,
-        Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message, RealtimeChannel,
-        RealtimeChannelRole, RealtimeReconnectPolicy, RealtimeTurningMode, RetryPolicy, RunResult,
+        Config, LlmClient, LlmError, LlmEvent, LlmRequest, Message, RetryPolicy, RunResult,
         Session, SessionFilter, SessionId, SessionMeta, SessionStore, StopReason, SystemMessage,
         ToolCall, ToolDef, ToolResult, Usage, UserMessage,
     };

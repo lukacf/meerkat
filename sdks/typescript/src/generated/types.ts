@@ -496,7 +496,6 @@ export interface MobMemberStatusResult {
   kickoff?: unknown;
   output_preview?: string;
   peer_connectivity?: unknown;
-  realtime_attachment_status?: string;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;
@@ -938,26 +937,6 @@ export interface SessionStreamCloseResult {
   stream_id: string;
 }
 
-export interface RuntimeRealtimeAttachmentStatusParams {
-  session_id: string;
-}
-
-export interface RealtimeOpenRequest {
-  channel_config?: RealtimeChannelConfig;
-  reconnect_policy?: RealtimeReconnectPolicy;
-  role: RealtimeChannelRole;
-  target: RealtimeChannelTarget;
-  turning_mode: RealtimeTurningMode;
-}
-
-export interface RealtimeStatusParams {
-  target: RealtimeChannelTarget;
-}
-
-export interface RealtimeCapabilitiesParams {
-  target: RealtimeChannelTarget;
-}
-
 export interface ScheduleIdParams {
   schedule_id: string;
 }
@@ -1233,55 +1212,11 @@ export type WireRenderSalience = "background" | "normal" | "important" | "urgent
 
 export type WireRuntimeState = "initializing" | "idle" | "attached" | "running" | "retired" | "stopped" | "destroyed";
 
-export type WireRealtimeAttachmentStatus = "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
-
-export interface RealtimeChannelTargetSessionTarget {
-  session_id: string;
-  type: "session_target";
-}
-
-export interface RealtimeChannelTargetMobMember {
-  agent_identity: string;
-  mob_id: string;
-  type: "mob_member";
-}
-
-export type RealtimeChannelTarget = RealtimeChannelTargetSessionTarget | RealtimeChannelTargetMobMember;
-
-export type RealtimeChannelRole = "primary" | "observer";
-
 export type RealtimeTurningMode = "provider_managed" | "explicit_commit";
-
-export type RealtimeProtocolVersion = "2";
 
 export type RealtimeInputKind = "text" | "audio" | "video";
 
 export type RealtimeOutputKind = "text" | "audio" | "video";
-
-export type RealtimeChannelState = "opening" | "ready" | "interrupted" | "reconnecting" | "closed" | "error";
-
-export type RealtimeErrorCode = "invalid_frame" | "expected_channel_open" | "invalid_open_token" | "open_token_expired" | "role_mismatch" | "turning_mode_mismatch" | "unsupported_turning_mode" | "target_busy" | "unsupported_protocol_version" | "audio_format_mismatch" | "unauthorized_realm" | "tool_call_timeout" | "internal_error" | "reconnect_exhausted" | "invalid_target" | "channel_not_bound" | "runtime_internal" | "runtime_not_ready" | "provider_session_closed" | "provider_session_failed" | "provider_session_unavailable" | "unsupported_input_kind" | "no_pending_turn" | "observer_read_only" | "unexpected_channel_open" | "commit_turn_unavailable" | "channel_reconnecting" | "binding_released" | "authentication_failed" | "content_filtered" | "model_not_found" | "invalid_request";
-
-export interface RealtimeErrorDetailsAudioFormatMismatch {
-  actual: RealtimeAudioFormat;
-  expected: RealtimeAudioFormat;
-  kind: "audio_format_mismatch";
-}
-
-export interface RealtimeErrorDetailsToolCallTimeout {
-  call_id: string;
-  elapsed_ms: number;
-  timeout_ms: number;
-  kind: "tool_call_timeout";
-}
-
-export interface RealtimeErrorDetailsUnsupportedProtocolVersion {
-  kind: "unsupported_protocol_version";
-  requested: string;
-  supported: RealtimeProtocolVersion[];
-}
-
-export type RealtimeErrorDetails = RealtimeErrorDetailsAudioFormatMismatch | RealtimeErrorDetailsToolCallTimeout | RealtimeErrorDetailsUnsupportedProtocolVersion;
 
 export interface RealtimeInputChunkTextChunk {
   text: string;
@@ -1303,176 +1238,6 @@ export interface RealtimeInputChunkVideoChunk {
 }
 
 export type RealtimeInputChunk = RealtimeInputChunkTextChunk | RealtimeInputChunkAudioChunk | RealtimeInputChunkVideoChunk;
-
-export interface RealtimeOutputChunkTextDelta {
-  delta: string;
-  kind: "text_delta";
-}
-
-export interface RealtimeOutputChunkAudioChunk {
-  channels: number;
-  data: string;
-  mime_type: string;
-  sample_rate_hz: number;
-  kind: "audio_chunk";
-}
-
-export interface RealtimeOutputChunkVideoChunk {
-  data: string;
-  mime_type: string;
-  kind: "video_chunk";
-}
-
-export type RealtimeOutputChunk = RealtimeOutputChunkTextDelta | RealtimeOutputChunkAudioChunk | RealtimeOutputChunkVideoChunk;
-
-export interface RealtimeEventInputTranscriptPartial {
-  text: string;
-  type: "input_transcript_partial";
-}
-
-export interface RealtimeEventInputTranscriptFinal {
-  prosody_hint?: string;
-  text: string;
-  type: "input_transcript_final";
-}
-
-export interface RealtimeEventTurnStarted {
-  type: "turn_started";
-}
-
-export interface RealtimeEventTurnCommitted {
-  type: "turn_committed";
-}
-
-export interface RealtimeEventTurnCompleted {
-  type: "turn_completed";
-}
-
-export interface RealtimeEventOutputTextDelta {
-  delta: string;
-  type: "output_text_delta";
-}
-
-export interface RealtimeEventOutputAudioChunk {
-  chunk: RealtimeAudioChunk;
-  type: "output_audio_chunk";
-}
-
-export interface RealtimeEventOutputVideoChunk {
-  chunk: RealtimeVideoChunk;
-  type: "output_video_chunk";
-}
-
-export interface RealtimeEventInterrupted {
-  type: "interrupted";
-}
-
-export interface RealtimeEventToolCallRequested {
-  call_id: string;
-  tool_name: string;
-  type: "tool_call_requested";
-}
-
-export interface RealtimeEventToolCallCompleted {
-  call_id: string;
-  type: "tool_call_completed";
-}
-
-export interface RealtimeEventToolCallFailed {
-  call_id: string;
-  error: string;
-  type: "tool_call_failed";
-}
-
-export interface RealtimeEventToolCallTimedOut {
-  call_id: string;
-  elapsed_ms: number;
-  type: "tool_call_timed_out";
-}
-
-export interface RealtimeEventAssistantTranscriptTruncated {
-  audio_played_ms: number;
-  item_id: string;
-  truncated_text?: string;
-  type: "assistant_transcript_truncated";
-}
-
-export interface RealtimeEventStatusChanged {
-  status: RealtimeChannelStatus;
-  type: "status_changed";
-}
-
-export interface RealtimeEventNeedsReattach {
-  type: "needs_reattach";
-}
-
-export type RealtimeEvent = RealtimeEventInputTranscriptPartial | RealtimeEventInputTranscriptFinal | RealtimeEventTurnStarted | RealtimeEventTurnCommitted | RealtimeEventTurnCompleted | RealtimeEventOutputTextDelta | RealtimeEventOutputAudioChunk | RealtimeEventOutputVideoChunk | RealtimeEventInterrupted | RealtimeEventToolCallRequested | RealtimeEventToolCallCompleted | RealtimeEventToolCallFailed | RealtimeEventToolCallTimedOut | RealtimeEventAssistantTranscriptTruncated | RealtimeEventStatusChanged | RealtimeEventNeedsReattach;
-
-export interface RealtimeClientFrameChannelOpen {
-  open_token: string;
-  protocol_version: RealtimeProtocolVersion;
-  role: RealtimeChannelRole;
-  turning_mode: RealtimeTurningMode;
-  type: "channel.open";
-}
-
-export interface RealtimeClientFrameChannelInput {
-  chunk: RealtimeInputChunk;
-  type: "channel.input";
-}
-
-export interface RealtimeClientFrameChannelCommitTurn {
-  type: "channel.commit_turn";
-}
-
-export interface RealtimeClientFrameChannelInterrupt {
-  type: "channel.interrupt";
-}
-
-export interface RealtimeClientFrameChannelBargeInTruncate {
-  audio_played_ms: number;
-  content_index: number;
-  item_id: string;
-  type: "channel.barge_in_truncate";
-}
-
-export interface RealtimeClientFrameChannelClose {
-  type: "channel.close";
-}
-
-export type RealtimeClientFrame = RealtimeClientFrameChannelOpen | RealtimeClientFrameChannelInput | RealtimeClientFrameChannelCommitTurn | RealtimeClientFrameChannelInterrupt | RealtimeClientFrameChannelBargeInTruncate | RealtimeClientFrameChannelClose;
-
-export interface RealtimeServerFrameChannelOpened {
-  capabilities: RealtimeCapabilities;
-  protocol_version: RealtimeProtocolVersion;
-  role: RealtimeChannelRole;
-  status: RealtimeChannelStatus;
-  type: "channel.opened";
-}
-
-export interface RealtimeServerFrameChannelStatus {
-  status: RealtimeChannelStatus;
-  type: "channel.status";
-}
-
-export interface RealtimeServerFrameChannelEvent {
-  event: RealtimeEvent;
-  type: "channel.event";
-}
-
-export interface RealtimeServerFrameChannelError {
-  code: RealtimeErrorCode;
-  details?: RealtimeErrorDetails;
-  message: string;
-  type: "channel.error";
-}
-
-export interface RealtimeServerFrameChannelClosed {
-  reason?: string;
-  type: "channel.closed";
-}
-
-export type RealtimeServerFrame = RealtimeServerFrameChannelOpened | RealtimeServerFrameChannelStatus | RealtimeServerFrameChannelEvent | RealtimeServerFrameChannelError | RealtimeServerFrameChannelClosed;
 
 export type RuntimeAcceptOutcomeType = "accepted" | "deduplicated" | "rejected";
 
@@ -1520,6 +1285,7 @@ export interface CommsCommandPeerRequest {
 }
 
 export interface CommsCommandPeerResponse {
+  blocks?: ContentBlock[];
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -1777,6 +1543,7 @@ export interface CommsSendParamsPeerRequest {
 }
 
 export interface CommsSendParamsPeerResponse {
+  blocks?: ContentBlock[];
   handling_mode?: HandlingMode;
   in_reply_to: string;
   kind: "peer_response";
@@ -1867,36 +1634,6 @@ export interface RuntimeStateResult {
   state: WireRuntimeState;
 }
 
-export interface RuntimeRealtimeAttachmentStatusResult {
-  status: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
-}
-
-export interface RealtimeReconnectPolicy {
-  initial_backoff_ms: number;
-  max_attempts: number;
-  max_backoff_ms: number;
-  max_total_ms: number;
-}
-
-export interface RealtimeToolTimeoutPolicyDefault {
-  type: "default";
-}
-
-export interface RealtimeToolTimeoutPolicyDisabled {
-  type: "disabled";
-}
-
-export interface RealtimeToolTimeoutPolicyFinite {
-  timeout_ms: number;
-  type: "finite";
-}
-
-export type RealtimeToolTimeoutPolicy = RealtimeToolTimeoutPolicyDefault | RealtimeToolTimeoutPolicyDisabled | RealtimeToolTimeoutPolicyFinite;
-
-export interface RealtimeChannelConfig {
-  tool_timeout?: RealtimeToolTimeoutPolicy;
-}
-
 export interface RealtimeAudioFormat {
   channels: number;
   mime_type: string;
@@ -1915,38 +1652,8 @@ export interface RealtimeCapabilities {
   video_supported: boolean;
 }
 
-export interface RealtimeChannelStatus {
-  attempt_count?: number;
-  deadline_at?: string;
-  next_retry_at?: string;
-  reason?: string;
-  state: RealtimeChannelState;
-}
-
-export interface RealtimeOpenInfo {
-  capabilities: RealtimeCapabilities;
-  default_protocol_version: RealtimeProtocolVersion;
-  expires_at: string;
-  open_token: string;
-  supported_protocol_versions?: RealtimeProtocolVersion[];
-  target: RealtimeChannelTarget;
-  ws_url: string;
-}
-
-export interface RealtimeStatusResult {
-  status: RealtimeChannelStatus;
-}
-
-export interface RealtimeCapabilitiesResult {
-  capabilities: RealtimeCapabilities;
-}
-
 export interface RealtimeTextChunk {
   text: string;
-}
-
-export interface RealtimeTextDelta {
-  delta: string;
 }
 
 export interface RealtimeAudioChunk {
@@ -1961,58 +1668,480 @@ export interface RealtimeVideoChunk {
   mime_type: string;
 }
 
-export interface RealtimeBargeInTruncateFrame {
+export interface LiveOpenParams {
+  session_id: string;
+  turning_mode?: RealtimeTurningMode;
+}
+
+export interface WireLiveChannelCapabilities {
+  audio_in: boolean;
+  audio_out: boolean;
+  barge_in_supported: boolean;
+  image_in: boolean;
+  provider_native_resume: boolean;
+  text_in: boolean;
+  text_out: boolean;
+  transcript_supported: boolean;
+  video_in: boolean;
+}
+
+export interface WireLiveContinuityModeFresh {
+  mode: "fresh";
+}
+
+export interface WireLiveContinuityModeTranscriptOnly {
+  mode: "transcript_only";
+}
+
+export interface WireLiveContinuityModeDegraded {
+  mode: "degraded";
+}
+
+export interface WireLiveContinuityModeProviderNativeResume {
+  mode: "provider_native_resume";
+  provider_session_id: string;
+}
+
+export interface WireLiveContinuityModeUnknown {
+  debug: string;
+  mode: "unknown";
+}
+
+export type WireLiveContinuityMode = WireLiveContinuityModeFresh | WireLiveContinuityModeTranscriptOnly | WireLiveContinuityModeDegraded | WireLiveContinuityModeProviderNativeResume | WireLiveContinuityModeUnknown;
+
+export interface WireLiveTransportBootstrapWebsocket {
+  token: string;
+  transport: "websocket";
+  url: string;
+}
+
+export interface WireLiveTransportBootstrapUnknown {
+  debug: string;
+  transport: "unknown";
+}
+
+export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapUnknown;
+
+export interface LiveOpenResult {
+  capabilities: WireLiveChannelCapabilities;
+  channel_id: string;
+  continuity: WireLiveContinuityMode;
+  transport: WireLiveTransportBootstrap;
+}
+
+export interface LiveChannelParams {
+  channel_id: string;
+}
+
+export interface LiveStatusResult {
+  channel_id: string;
+  status: WireLiveAdapterStatus;
+}
+
+export interface LiveSendInputParams {
+  channel_id: string;
+  chunk: LiveInputChunkWire;
+}
+
+export interface LiveTruncateParams {
   audio_played_ms: number;
+  channel_id: string;
   content_index: number;
   item_id: string;
 }
 
-export interface AudioFormatMismatchContext {
-  actual: RealtimeAudioFormat;
-  expected: RealtimeAudioFormat;
+export interface WireLiveResponseModalityAudio {
+  modality: "audio";
 }
 
-export interface ToolCallTimeoutContext {
-  call_id: string;
-  elapsed_ms: number;
-  timeout_ms: number;
+export interface WireLiveResponseModalityText {
+  modality: "text";
 }
 
-export interface RealtimeChannelOpenFrame {
-  open_token: string;
-  protocol_version: RealtimeProtocolVersion;
-  role: RealtimeChannelRole;
-  turning_mode: RealtimeTurningMode;
+export interface WireLiveResponseModalityUnknown {
+  debug: string;
+  modality: "unknown";
 }
 
-export interface RealtimeChannelInputFrame {
-  chunk: RealtimeInputChunk;
+export type WireLiveResponseModality = WireLiveResponseModalityAudio | WireLiveResponseModalityText | WireLiveResponseModalityUnknown;
+
+export interface LiveCommitInputParams {
+  channel_id: string;
+  response_modality?: WireLiveResponseModality;
 }
 
-export interface RealtimeChannelOpenedFrame {
-  capabilities: RealtimeCapabilities;
-  protocol_version: RealtimeProtocolVersion;
-  role: RealtimeChannelRole;
-  status: RealtimeChannelStatus;
+export type LiveRefreshStatus = "queued";
+
+export interface LiveRefreshResult {
+  refresh_enqueued: boolean;
+  status: "queued";
 }
 
-export interface RealtimeChannelStatusFrame {
-  status: RealtimeChannelStatus;
+export interface LiveInputChunkWireAudio {
+  channels: number;
+  data: string;
+  kind: "audio";
+  sample_rate_hz: number;
 }
 
-export interface RealtimeChannelEventFrame {
-  event: RealtimeEvent;
+export interface LiveInputChunkWireText {
+  kind: "text";
+  text: string;
 }
 
-export interface RealtimeChannelErrorFrame {
-  code: RealtimeErrorCode;
-  details?: RealtimeErrorDetails;
+export interface LiveInputChunkWireImage {
+  data: string;
+  kind: "image";
+  mime: string;
+}
+
+export interface LiveInputChunkWireVideoFrame {
+  codec: string;
+  data: string;
+  kind: "video_frame";
+  timestamp_ms: number;
+}
+
+export type LiveInputChunkWire = LiveInputChunkWireAudio | LiveInputChunkWireText | LiveInputChunkWireImage | LiveInputChunkWireVideoFrame;
+
+export interface RealtimeTranscriptEventItemObserved {
+  item_id: string;
+  previous_item_id?: string;
+  response_id?: string;
+  role: RealtimeTranscriptRole;
+  type: "item_observed";
+}
+
+export interface RealtimeTranscriptEventItemSkipped {
+  item_id: string;
+  previous_item_id?: string;
+  type: "item_skipped";
+}
+
+export interface RealtimeTranscriptEventUserTranscriptFinal {
+  content_index: number;
+  item_id: string;
+  previous_item_id?: string;
+  text: string;
+  type: "user_transcript_final";
+}
+
+export interface RealtimeTranscriptEventAssistantTextDelta {
+  content_index: number;
+  delta: string;
+  delta_id: string;
+  item_id: string;
+  previous_item_id?: string;
+  response_id: string;
+  type: "assistant_text_delta";
+}
+
+export interface RealtimeTranscriptEventAssistantTranscriptDelta {
+  content_index: number;
+  delta: string;
+  delta_id: string;
+  item_id: string;
+  previous_item_id?: string;
+  response_id: string;
+  type: "assistant_transcript_delta";
+}
+
+export interface RealtimeTranscriptEventAssistantTranscriptTruncated {
+  content_index: number;
+  item_id: string;
+  response_id: string;
+  text: string;
+  type: "assistant_transcript_truncated";
+}
+
+export interface RealtimeTranscriptEventAssistantTranscriptFinalText {
+  content_index: number;
+  item_id: string;
+  response_id: string;
+  text: string;
+  type: "assistant_transcript_final_text";
+}
+
+export interface RealtimeTranscriptEventAssistantTurnCompleted {
+  response_id: string;
+  stop_reason: unknown;
+  type: "assistant_turn_completed";
+  usage: unknown;
+}
+
+export interface RealtimeTranscriptEventAssistantTurnInterrupted {
+  response_id: string;
+  type: "assistant_turn_interrupted";
+}
+
+export type RealtimeTranscriptEvent = RealtimeTranscriptEventItemObserved | RealtimeTranscriptEventItemSkipped | RealtimeTranscriptEventUserTranscriptFinal | RealtimeTranscriptEventAssistantTextDelta | RealtimeTranscriptEventAssistantTranscriptDelta | RealtimeTranscriptEventAssistantTranscriptTruncated | RealtimeTranscriptEventAssistantTranscriptFinalText | RealtimeTranscriptEventAssistantTurnCompleted | RealtimeTranscriptEventAssistantTurnInterrupted;
+
+export type RealtimeTranscriptRole = "user" | "assistant";
+
+export interface WireLiveDegradationReasonRateLimited {
+  kind: "rate_limited";
+}
+
+export interface WireLiveDegradationReasonProviderThrottled {
+  kind: "provider_throttled";
+}
+
+export interface WireLiveDegradationReasonNetworkUnstable {
+  kind: "network_unstable";
+}
+
+export interface WireLiveDegradationReasonOther {
+  detail: string;
+  kind: "other";
+}
+
+export interface WireLiveDegradationReasonUnknown {
+  debug: string;
+  kind: "unknown";
+}
+
+export type WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown;
+
+export interface WireLiveAdapterStatusIdle {
+  status: "idle";
+}
+
+export interface WireLiveAdapterStatusOpening {
+  status: "opening";
+}
+
+export interface WireLiveAdapterStatusReady {
+  status: "ready";
+}
+
+export interface WireLiveAdapterStatusDegraded {
+  reason: WireLiveDegradationReason;
+  status: "degraded";
+}
+
+export interface WireLiveAdapterStatusClosing {
+  status: "closing";
+}
+
+export interface WireLiveAdapterStatusClosed {
+  status: "closed";
+}
+
+export interface WireLiveAdapterStatusUnknown {
+  debug: string;
+  status: "unknown";
+}
+
+export type WireLiveAdapterStatus = WireLiveAdapterStatusIdle | WireLiveAdapterStatusOpening | WireLiveAdapterStatusReady | WireLiveAdapterStatusDegraded | WireLiveAdapterStatusClosing | WireLiveAdapterStatusClosed | WireLiveAdapterStatusUnknown;
+
+export interface WireLiveConfigRejectionReasonChannelIdentitySwap {
+  from_model: string;
+  from_provider: WireProvider;
+  kind: "channel_identity_swap";
+  to_model: string;
+  to_provider: WireProvider;
+}
+
+export interface WireLiveConfigRejectionReasonNonRealtimeResolution {
+  detail: string;
+  kind: "non_realtime_resolution";
+}
+
+export interface WireLiveConfigRejectionReasonImageInputNotImplemented {
+  kind: "image_input_not_implemented";
+}
+
+export interface WireLiveConfigRejectionReasonVideoFrameInputNotImplemented {
+  kind: "video_frame_input_not_implemented";
+}
+
+export interface WireLiveConfigRejectionReasonUnsupportedInputChunkVariant {
+  kind: "unsupported_input_chunk_variant";
+}
+
+export interface WireLiveConfigRejectionReasonRefreshModelSwap {
+  from_model: string;
+  kind: "refresh_model_swap";
+  to_model: string;
+}
+
+export interface WireLiveConfigRejectionReasonRefreshProviderSwap {
+  from_provider: string;
+  kind: "refresh_provider_swap";
+  to_provider: string;
+}
+
+export interface WireLiveConfigRejectionReasonRefreshAudioConfigMismatch {
+  detail: string;
+  kind: "refresh_audio_config_mismatch";
+}
+
+export interface WireLiveConfigRejectionReasonAudioInputFormatMismatch {
+  actual_channels: number;
+  actual_sample_rate_hz: number;
+  expected_channels: number;
+  expected_sample_rate_hz: number;
+  kind: "audio_input_format_mismatch";
+}
+
+export interface WireLiveConfigRejectionReasonOther {
+  detail: string;
+  kind: "other";
+}
+
+export interface WireLiveConfigRejectionReasonUnknown {
+  debug: string;
+  kind: "unknown";
+}
+
+export type WireLiveConfigRejectionReason = WireLiveConfigRejectionReasonChannelIdentitySwap | WireLiveConfigRejectionReasonNonRealtimeResolution | WireLiveConfigRejectionReasonImageInputNotImplemented | WireLiveConfigRejectionReasonVideoFrameInputNotImplemented | WireLiveConfigRejectionReasonUnsupportedInputChunkVariant | WireLiveConfigRejectionReasonRefreshModelSwap | WireLiveConfigRejectionReasonRefreshProviderSwap | WireLiveConfigRejectionReasonRefreshAudioConfigMismatch | WireLiveConfigRejectionReasonAudioInputFormatMismatch | WireLiveConfigRejectionReasonOther | WireLiveConfigRejectionReasonUnknown;
+
+export interface WireLiveAdapterErrorCodeConnectionFailed {
+  code: "connection_failed";
+}
+
+export interface WireLiveAdapterErrorCodeConnectionLost {
+  code: "connection_lost";
+}
+
+export interface WireLiveAdapterErrorCodeConfigRejected {
+  code: "config_rejected";
+  reason: WireLiveConfigRejectionReason;
+}
+
+export interface WireLiveAdapterErrorCodeProviderError {
+  code: "provider_error";
+}
+
+export interface WireLiveAdapterErrorCodeAuthenticationFailed {
+  code: "authentication_failed";
+}
+
+export interface WireLiveAdapterErrorCodeInternalError {
+  code: "internal_error";
+}
+
+export interface WireLiveAdapterErrorCodeOther {
+  code: "other";
+  raw: string;
+}
+
+export interface WireLiveAdapterErrorCodeUnknown {
+  code: "unknown";
+  debug: string;
+}
+
+export type WireLiveAdapterErrorCode = WireLiveAdapterErrorCodeConnectionFailed | WireLiveAdapterErrorCodeConnectionLost | WireLiveAdapterErrorCodeConfigRejected | WireLiveAdapterErrorCodeProviderError | WireLiveAdapterErrorCodeAuthenticationFailed | WireLiveAdapterErrorCodeInternalError | WireLiveAdapterErrorCodeOther | WireLiveAdapterErrorCodeUnknown;
+
+export interface WireLiveAdapterObservationReady {
+  observation: "ready";
+}
+
+export interface WireLiveAdapterObservationUserTranscriptFinal {
+  content_index?: number;
+  observation: "user_transcript_final";
+  previous_item_id?: string;
+  provider_item_id?: string;
+  text: string;
+}
+
+export interface WireLiveAdapterObservationAssistantTextDelta {
+  content_index?: number;
+  delta: string;
+  delta_id?: string;
+  observation: "assistant_text_delta";
+  previous_item_id?: string;
+  provider_item_id?: string;
+  response_id?: string;
+}
+
+export interface WireLiveAdapterObservationAssistantTranscriptDelta {
+  content_index?: number;
+  delta: string;
+  delta_id?: string;
+  observation: "assistant_transcript_delta";
+  previous_item_id?: string;
+  provider_item_id?: string;
+  response_id?: string;
+}
+
+export interface WireLiveAdapterObservationAssistantAudioChunk {
+  channels: number;
+  content_index?: number;
+  data: string;
+  item_id?: string;
+  observation: "assistant_audio_chunk";
+  response_id?: string;
+  sample_rate_hz: number;
+}
+
+export interface WireLiveAdapterObservationAssistantTranscriptFinal {
+  content_index?: number;
+  observation: "assistant_transcript_final";
+  previous_item_id?: string;
+  provider_item_id: string;
+  response_id?: string;
+  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+  text: string;
+  usage: Record<string, unknown>;
+}
+
+export interface WireLiveAdapterObservationAssistantTranscriptTruncated {
+  content_index?: number;
+  observation: "assistant_transcript_truncated";
+  previous_item_id?: string;
+  provider_item_id?: string;
+  response_id?: string;
+  text?: string;
+}
+
+export interface WireLiveAdapterObservationRealtimeTranscript {
+  event: RealtimeTranscriptEvent;
+  observation: "realtime_transcript";
+}
+
+export interface WireLiveAdapterObservationToolCallRequested {
+  arguments: unknown;
+  observation: "tool_call_requested";
+  provider_call_id: string;
+  tool_name: string;
+}
+
+export interface WireLiveAdapterObservationTurnInterrupted {
+  observation: "turn_interrupted";
+  response_id?: string;
+}
+
+export interface WireLiveAdapterObservationTurnCompleted {
+  observation: "turn_completed";
+  response_id?: string;
+  stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
+  usage: Record<string, unknown>;
+}
+
+export interface WireLiveAdapterObservationStatusChanged {
+  observation: "status_changed";
+  status: WireLiveAdapterStatus;
+}
+
+export interface WireLiveAdapterObservationError {
+  code: WireLiveAdapterErrorCode;
   message: string;
+  observation: "error";
 }
 
-export interface RealtimeChannelClosedFrame {
-  reason?: string;
+export interface WireLiveAdapterObservationCommandRejected {
+  code: WireLiveAdapterErrorCode;
+  message: string;
+  observation: "command_rejected";
 }
+
+export interface WireLiveAdapterObservationUnknown {
+  debug: string;
+  observation: "unknown";
+}
+
+export type WireLiveAdapterObservation = WireLiveAdapterObservationReady | WireLiveAdapterObservationUserTranscriptFinal | WireLiveAdapterObservationAssistantTextDelta | WireLiveAdapterObservationAssistantTranscriptDelta | WireLiveAdapterObservationAssistantAudioChunk | WireLiveAdapterObservationAssistantTranscriptFinal | WireLiveAdapterObservationAssistantTranscriptTruncated | WireLiveAdapterObservationRealtimeTranscript | WireLiveAdapterObservationToolCallRequested | WireLiveAdapterObservationTurnInterrupted | WireLiveAdapterObservationTurnCompleted | WireLiveAdapterObservationStatusChanged | WireLiveAdapterObservationError | WireLiveAdapterObservationCommandRejected | WireLiveAdapterObservationUnknown;
 
 export interface RuntimeAcceptResult {
   existing_id?: string;
@@ -2375,36 +2504,54 @@ export interface WireAuthErrorOther {
 
 export type WireAuthError = WireAuthErrorMissingSecret | WireAuthErrorUnsupportedCombination | WireAuthErrorMissingRequiredMetadata | WireAuthErrorWorkspaceMismatch | WireAuthErrorExpired | WireAuthErrorStaleCredential | WireAuthErrorRefreshRequired | WireAuthErrorLeaseAbsent | WireAuthErrorUserReauthRequired | WireAuthErrorRefreshFailed | WireAuthErrorInteractiveLoginRequired | WireAuthErrorHostOwnedUnavailable | WireAuthErrorIo | WireAuthErrorOther;
 
+export type WireProvider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other" | "unknown";
+
+export interface WireTranscriptSourceSpoken {
+  kind: "spoken";
+}
+
+export interface WireTranscriptSourceUnknown {
+  debug: string;
+  kind: "unknown";
+}
+
+export type WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown;
+
 export interface WireAssistantBlockText {
   block_type: "text";
-  data: Record<string, unknown>;
+  data: { meta?: Record<string, unknown>; text: string };
+}
+
+export interface WireAssistantBlockTranscript {
+  block_type: "transcript";
+  data: { meta?: Record<string, unknown>; source: WireTranscriptSource; text: string };
 }
 
 export interface WireAssistantBlockReasoning {
   block_type: "reasoning";
-  data: Record<string, unknown>;
+  data: { meta?: Record<string, unknown>; text?: string };
 }
 
 export interface WireAssistantBlockToolUse {
   block_type: "tool_use";
-  data: Record<string, unknown>;
+  data: { args: unknown; id: string; meta?: Record<string, unknown>; name: string };
 }
 
 export interface WireAssistantBlockServerToolContent {
   block_type: "server_tool_content";
-  data: Record<string, unknown>;
+  data: { content: unknown; id?: string; meta?: Record<string, unknown>; name: string };
 }
 
 export interface WireAssistantBlockImage {
   block_type: "image";
-  data: Record<string, unknown>;
+  data: { blob_ref: Record<string, unknown>; height: number; image_id: string; media_type: string; meta: Record<string, unknown>; revised_prompt: Record<string, unknown>; width: number };
 }
 
 export interface WireAssistantBlockUnknown {
   block_type: "unknown";
 }
 
-export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown;
+export type WireAssistantBlock = WireAssistantBlockText | WireAssistantBlockTranscript | WireAssistantBlockReasoning | WireAssistantBlockToolUse | WireAssistantBlockServerToolContent | WireAssistantBlockImage | WireAssistantBlockUnknown;
 
 export interface WireImageOperationPhaseRequested {
   phase: "requested";

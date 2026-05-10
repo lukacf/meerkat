@@ -146,6 +146,10 @@ summary_path="${lane_log_root}/summary.tsv"
 context_path="${lane_log_root}/context.txt"
 mkdir -p "${lane_log_root}"
 
+# Remove stale lane_done sentinel from a previous run so the batch
+# watchdog does not misread completion status when the log root is reused.
+rm -f "${lane_log_root}/lane_done"
+
 scripts/buildbuddy-write-context --mode "${mode}-${lane}" >"${context_path}"
 printf 'name\tstatus\twall_seconds\tlog\tcommand\n' >"${summary_path}"
 
@@ -334,6 +338,13 @@ case "${lane}" in
     exit 2
     ;;
 esac
+
+# Sentinel: marks that every substep finished and summary.tsv has its terminal
+# row. The batch watchdog (scripts/buildbuddy-ci-lane-batch) checks this before
+# blocking on `wait` so a multi-step lane (e.g. fmt-lint) whose first substep
+# wrote a 0 row is not mistaken for a fully-successful lane while later
+# substeps are still running.
+: >"${lane_log_root}/lane_done"
 
 printf 'logs: %s\n' "${lane_log_root}"
 printf 'summary: %s\n' "${summary_path}"

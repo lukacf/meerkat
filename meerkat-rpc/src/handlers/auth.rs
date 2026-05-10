@@ -154,13 +154,14 @@ async fn resolve_oauth_target(
         .map(meerkat_core::ProfileId::parse)
         .transpose()
         .map_err(|e| RpcResponse::error(None, error::INVALID_PARAMS, e.to_string()))?;
+    let runtime_realm = runtime.realm_id();
     meerkat_core::resolve_realm_binding_target_for_provider(
         &config,
         provider,
         explicit_realm.as_ref(),
         explicit_binding.as_ref(),
         explicit_profile.as_ref(),
-        runtime.realm_id(),
+        runtime_realm.as_ref(),
         false,
     )
     .map_err(target_error_response)

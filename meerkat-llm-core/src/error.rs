@@ -35,6 +35,23 @@ pub enum LlmError {
     #[error("Invalid request: {message}")]
     InvalidRequest { message: String },
 
+    /// Caller sent a request shape this provider does not support
+    /// (e.g. image / video-frame input on a realtime audio channel,
+    /// malformed audio chunk variant). Scoped, non-terminal: the
+    /// channel survives so the client can retry with a supported
+    /// shape. Distinct from `InvalidRequest` so consumers can branch
+    /// on it without matching error message strings.
+    #[error("Invalid input shape: {message}")]
+    InvalidInputShape { message: String },
+
+    /// Provider-config rejection (model swap, audio rate mismatch,
+    /// refresh-time invariant, voice/format incompatibility). Terminal
+    /// on this channel: the caller must close + reopen rather than
+    /// retry the same request. Distinct from `InvalidRequest` so the
+    /// classification is structural, not a string match.
+    #[error("Invalid provider config: {message}")]
+    InvalidConfig { message: String },
+
     #[error("Authentication failed: {message}")]
     AuthenticationFailed { message: String },
 
@@ -136,7 +153,9 @@ impl LlmError {
             },
             Self::AuthenticationFailed { .. } | Self::InvalidApiKey => LlmFailureReason::AuthError,
             Self::ModelNotFound { model } => LlmFailureReason::InvalidModel(model.clone()),
-            Self::InvalidRequest { message } => {
+            Self::InvalidRequest { message }
+            | Self::InvalidInputShape { message }
+            | Self::InvalidConfig { message } => {
                 LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
                     LlmProviderErrorKind::InvalidRequest,
                     json!({

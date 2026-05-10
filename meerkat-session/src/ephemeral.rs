@@ -3733,10 +3733,14 @@ async fn session_task<A: SessionAgent>(
                 usage,
                 reply_tx,
             } => {
+                // Project both `Text` (display) and `Transcript` (spoken)
+                // lanes to the rendered text stream — they share the same
+                // surface for end-user display.
                 let text_content = blocks
                     .iter()
                     .filter_map(|block| match block {
-                        meerkat_core::types::AssistantBlock::Text { text, .. } => {
+                        meerkat_core::types::AssistantBlock::Text { text, .. }
+                        | meerkat_core::types::AssistantBlock::Transcript { text, .. } => {
                             Some(text.as_str())
                         }
                         _ => None,

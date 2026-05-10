@@ -160,6 +160,16 @@ lane_summary_succeeded() {
   ' "${summary}"
 }
 
+# Returns 0 only if the lane wrapper finished cleanly. A missing sentinel
+# means at least one substep of a multi-step lane (e.g. fmt-lint) is still
+# running, even if summary.tsv already has a 0 row from an earlier substep.
+# Without this guard, the SLO watchdog would call blocking `wait` on a still
+# running lane and miss the CI deadline.
+lane_wrapper_done() {
+  local lane="$1"
+  [[ -f "${log_root}/${lane}/lane_done" ]]
+}
+
 reconcile_successful_active_lanes() {
   local reason="$1"
   local pids=("${active_pids[@]}")
@@ -169,6 +179,10 @@ reconcile_successful_active_lanes() {
     lane="${pid_lanes[${pid}]:-unknown}"
     lane_log="${pid_logs[${pid}]:-}"
     if ! lane_summary_succeeded "${lane}"; then
+      continue
+    fi
+    if ! lane_wrapper_done "${lane}"; then
+      echo "::warning::BuildBuddy lane ${lane} has a successful summary row but no lane_done sentinel before ${reason}; substeps may still be running, leaving it active for dump/kill." >&2
       continue
     fi
 

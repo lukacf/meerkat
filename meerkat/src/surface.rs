@@ -748,8 +748,14 @@ family = "gemma-4"
         assert!(gpt.supports_web_search);
         assert!(gpt.image_generation);
 
-        let realtime = find_profile("openai", "gpt-realtime");
-        assert!(!realtime.image_input);
+        let realtime = find_profile("openai", "gpt-realtime-2");
+        // gpt-realtime-2 accepts text + audio + image input per
+        // OpenAI's model docs (`developers.openai.com/api/docs/models/gpt-realtime-2`),
+        // so `image_input` is `true`. The previous expectation
+        // (`!image_input`) reflected the older `gpt-realtime` /
+        // `gpt-4o-realtime-preview` capability shape that the
+        // catalog cleanup retired.
+        assert!(realtime.image_input);
         assert!(realtime.realtime);
     }
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""036 - Realtime Audio (Python SDK)
+"""036 - Live Audio (Python SDK)
 
-Start a realtime OpenAI-backed Meerkat mob member, stream microphone audio into
+Start a live OpenAI-backed Meerkat mob member, stream microphone audio into
 it, play assistant audio, and print transcript/tool/mob activity as it happens.
 
 Run:
@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import json
 import os
 import signal
 import sys
@@ -23,10 +24,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from meerkat import MeerkatClient, RealtimeChannel
+from meerkat import MeerkatClient, LiveChannel
 
 
-DEFAULT_REALTIME_MODEL = "gpt-realtime-1.5"
+DEFAULT_LIVE_MODEL = "gpt-realtime-2"
 DEFAULT_HELPER_MODEL = "gpt-5.5"
 HOST_IDENTITY = "voice-host"
 
@@ -47,7 +48,7 @@ class AudioFormat:
     def from_wire(cls, value: Any, *, fallback: "AudioFormat | None" = None) -> "AudioFormat":
         if value is None:
             if fallback is None:
-                raise ValueError("missing realtime audio format")
+                raise ValueError("missing live audio format")
             return fallback
         return cls(
             mime_type=str(read_field(value, "mime_type", fallback.mime_type if fallback else "audio/pcm")),
@@ -59,11 +60,10 @@ class AudioFormat:
 
     def input_chunk(self, pcm_bytes: bytes) -> dict[str, Any]:
         return {
-            "kind": "audio_chunk",
-            "mime_type": self.mime_type,
+            "kind": "audio",
+            "data": base64.b64encode(pcm_bytes).decode("ascii"),
             "sample_rate_hz": self.sample_rate_hz,
             "channels": self.channels,
-            "data": base64.b64encode(pcm_bytes).decode("ascii"),
         }
 
 
@@ -129,12 +129,12 @@ class TranscriptPrinter:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Talk to a Meerkat realtime OpenAI mob member from your terminal.",
+        description="Talk to a Meerkat live OpenAI mob member from your terminal.",
     )
-    parser.add_argument("--model", default=os.environ.get("MEERKAT_REALTIME_MODEL", DEFAULT_REALTIME_MODEL))
+    parser.add_argument("--model", default=os.environ.get("MEERKAT_LIVE_MODEL", DEFAULT_LIVE_MODEL))
     parser.add_argument(
         "--helper-model",
-        default=os.environ.get("MEERKAT_REALTIME_HELPER_MODEL", DEFAULT_HELPER_MODEL),
+        default=os.environ.get("MEERKAT_LIVE_HELPER_MODEL", DEFAULT_HELPER_MODEL),
         help="Model used when the voice agent delegates work to a helper mob member.",
     )
     parser.add_argument("--realm", default=None, help="Optional existing Meerkat realm to use.")
@@ -147,15 +147,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--text-probe",
         action="store_true",
-        help="Send one text realtime turn instead of opening microphone devices.",
+        help="Send one text live turn instead of opening microphone devices.",
     )
     return parser
 
 
 def voice_host_skill() -> str:
-    return """# realtime-voice-host
+    return """# live-voice-host
 
-You are a concise spoken assistant running as a Meerkat realtime mob member.
+You are a concise spoken assistant running as a Meerkat live mob member.
 
 Rules:
 - Keep spoken replies short enough for a live conversation.
@@ -170,27 +170,27 @@ Rules:
 
 
 def helper_skill() -> str:
-    return """# realtime-helper
+    return """# live-helper
 
 You are a background helper in a Meerkat mob. Respond with a compact, useful
 answer for the voice host to read aloud. Prefer two bullets or less.
 """
 
 
-def build_mob_definition(*, mob_id: str, realtime_model: str, helper_model: str) -> dict[str, Any]:
+def build_mob_definition(*, mob_id: str, live_model: str, helper_model: str) -> dict[str, Any]:
     return {
         "id": mob_id,
         "orchestrator": {"profile": "host"},
         "profiles": {
             "host": {
-                "model": realtime_model,
+                "model": live_model,
                 "skills": ["voice-host"],
                 "tools": {
                     "builtins": True,
                     "comms": True,
                     "mob": True,
                 },
-                "peer_description": "Realtime voice host with callback tools and mob delegation.",
+                "peer_description": "Live voice host with callback tools and mob delegation.",
                 "external_addressable": True,
             },
             "helper": {
@@ -278,21 +278,21 @@ async def register_tools(client: MeerkatClient, state: SharedState, printer: Tra
         return "Queued the delegation for a helper mob member."
 
 
-async def wait_for_host_binding(mob: Any, printer: TranscriptPrinter, timeout_s: float = 45.0) -> None:
+async def wait_for_host_session(mob: Any, printer: TranscriptPrinter, timeout_s: float = 45.0) -> str:
+    """Poll until the host member has a session_id, then return it."""
     deadline = asyncio.get_running_loop().time() + timeout_s
-    last_status = ""
+    last_label = ""
     while True:
         status = await mob.member_status(HOST_IDENTITY)
-        realtime_status = str(status.get("realtime_attachment_status", "unknown"))
         current_session_id = status.get("current_session_id")
-        label = f"member={status.get('status')} realtime={realtime_status}"
-        if label != last_status:
+        label = f"member={status.get('status')}"
+        if label != last_label:
             printer.status(label)
-            last_status = label
-        if current_session_id and realtime_status in {"binding_ready", "intent_present_unbound", "binding_not_ready"}:
-            return
+            last_label = label
+        if current_session_id:
+            return str(current_session_id)
         if asyncio.get_running_loop().time() >= deadline:
-            raise TimeoutError(f"timed out waiting for realtime member binding; last status: {status}")
+            raise TimeoutError(f"timed out waiting for host member session; last status: {status}")
         await asyncio.sleep(0.5)
 
 
@@ -300,12 +300,13 @@ async def create_voice_mob(
     client: MeerkatClient,
     args: argparse.Namespace,
     printer: TranscriptPrinter,
-) -> Any:
-    mob_id = f"realtime-audio-{uuid4().hex[:8]}"
+) -> tuple[Any, str]:
+    """Create a mob with a voice host member and return (mob, host_session_id)."""
+    mob_id = f"live-audio-{uuid4().hex[:8]}"
     mob = await client.create_mob(
         definition=build_mob_definition(
             mob_id=mob_id,
-            realtime_model=args.model,
+            live_model=args.model,
             helper_model=args.helper_model,
         )
     )
@@ -314,14 +315,14 @@ async def create_voice_mob(
         profile="host",
         agent_identity=HOST_IDENTITY,
         initial_message=(
-            "Initialize as the realtime voice host. Do not answer at length yet; "
+            "Initialize as the live voice host. Do not answer at length yet; "
             "wait for live microphone input."
         ),
         runtime_mode="turn_driven",
     )
     printer.mob(f"spawned {HOST_IDENTITY}")
-    await wait_for_host_binding(mob, printer)
-    return mob
+    session_id = await wait_for_host_session(mob, printer)
+    return mob, session_id
 
 
 async def poll_helpers(state: SharedState, printer: TranscriptPrinter, stop_event: asyncio.Event) -> None:
@@ -442,7 +443,7 @@ async def speaker_player(
         ) from exc
 
     if audio_format is None:
-        raise RuntimeError("speaker playback requires realtime audio output capabilities")
+        raise RuntimeError("speaker playback requires live audio output capabilities")
 
     printer.status(f"speaker open: {audio_format.sample_rate_hz} Hz, {audio_format.channels} channel(s)")
     with sd.RawOutputStream(
@@ -458,77 +459,61 @@ async def speaker_player(
             await asyncio.to_thread(stream.write, chunk)
 
 
-async def realtime_receiver(
+async def live_receiver(
     connection: Any,
     output_queue: "asyncio.Queue[bytes | None]",
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     text_probe_signals: TextProbeSignals | None = None,
 ) -> None:
+    """Receive WireLiveAdapterObservation JSON from the WS and dispatch."""
     try:
         while not stop_event.is_set():
-            frame = await connection.recv()
-            if frame is None:
-                printer.status("realtime websocket closed")
+            obs = await connection.recv()
+            if obs is None:
+                printer.status("live websocket closed")
                 if text_probe_signals is not None:
                     text_probe_signals.channel_closed.set()
                 stop_event.set()
                 break
-            frame_type = frame.get("type")
-            if frame_type == "channel.closed":
-                printer.status(f"channel closed: {frame.get('reason', 'done')}")
-                if text_probe_signals is not None:
-                    text_probe_signals.channel_closed.set()
-                stop_event.set()
-                break
-            if frame_type == "channel.error":
-                code = frame.get("code", "unknown")
-                message = frame.get("message", "realtime channel error")
-                printer.status(f"channel error {code}: {message}")
-                stop_event.set()
-                raise RuntimeError(f"realtime channel error {code}: {message}")
-            if frame_type != "channel.event":
-                continue
 
-            event = frame.get("event", {})
-            event_type = event.get("type")
-            if event_type == "input_transcript_partial":
-                printer.user_partial(str(event.get("text", "")))
-            elif event_type == "input_transcript_final":
-                printer.user_final(str(event.get("text", "")))
-            elif event_type == "output_text_delta":
-                printer.assistant_delta(str(event.get("delta", "")))
-            elif event_type == "output_audio_chunk":
-                chunk = event.get("chunk", {})
-                data = read_field(chunk, "data", "")
+            kind = obs.get("observation")
+            if kind == "user_transcript_final":
+                printer.user_final(str(obs.get("text", "")))
+            elif kind == "assistant_text_delta":
+                printer.assistant_delta(str(obs.get("delta", "")))
+            elif kind == "assistant_transcript_delta":
+                printer.assistant_delta(str(obs.get("delta", "")))
+            elif kind == "assistant_audio_chunk":
+                data = obs.get("data", "")
                 if data:
                     await output_queue.put(base64.b64decode(data))
-            elif event_type == "turn_started":
-                printer.status("turn started")
-            elif event_type == "turn_committed":
-                printer.status("turn committed")
-            elif event_type == "turn_completed":
+            elif kind == "turn_completed":
                 printer.turn_completed()
                 printer.status("turn completed")
                 if text_probe_signals is not None:
                     text_probe_signals.turn_completed.set()
-            elif event_type == "interrupted":
+            elif kind == "turn_interrupted":
                 printer.status("interrupted")
-            elif event_type == "tool_call_requested":
-                printer.tool(f"requested {event.get('tool_name')} ({event.get('call_id')})")
-            elif event_type == "tool_call_completed":
-                printer.tool(f"completed {event.get('call_id')}")
+            elif kind == "tool_call_requested":
+                printer.tool(f"requested {obs.get('tool_name')} ({obs.get('provider_call_id')})")
                 if text_probe_signals is not None:
                     text_probe_signals.tool_completed.set()
-            elif event_type == "tool_call_failed":
-                printer.tool(f"failed {event.get('call_id')}: {event.get('error')}")
-            elif event_type == "tool_call_timed_out":
-                printer.tool(f"timed out {event.get('call_id')} after {event.get('elapsed_ms')} ms")
-            elif event_type == "status_changed":
-                status = event.get("status", {})
+            elif kind == "status_changed":
+                status = obs.get("status", {})
                 printer.status(f"channel {read_field(status, 'state', 'unknown')}")
-            elif event_type == "needs_reattach":
-                printer.status("channel needs reattach")
+            elif kind == "error":
+                code = obs.get("code", {})
+                message = obs.get("message", "live channel error")
+                printer.status(f"channel error {code}: {message}")
+                if text_probe_signals is not None:
+                    text_probe_signals.channel_closed.set()
+                stop_event.set()
+                raise RuntimeError(f"live channel error: {message}")
+            elif kind == "command_rejected":
+                printer.status(f"command rejected: {obs.get('message', '')}")
+            elif kind == "ready":
+                printer.status("adapter ready")
     finally:
         await output_queue.put(None)
 
@@ -562,6 +547,7 @@ async def wait_for_first_event(
 
 async def run_text_probe(
     connection: Any,
+    channel: LiveChannel,
     printer: TranscriptPrinter,
     stop_event: asyncio.Event,
     signals: TextProbeSignals,
@@ -569,14 +555,14 @@ async def run_text_probe(
 ) -> None:
     await connection.send_input(
         {
-            "kind": "text_chunk",
+            "kind": "text",
             "text": (
-                "This is a text probe for the realtime channel. Say one short sentence, "
+                "This is a text probe for the live channel. Say one short sentence, "
                 "then call voice_session_note with 'text probe completed'."
             ),
         }
     )
-    await connection.commit_turn()
+    await channel.commit_input(response_modality="text")
     printer.status("text probe sent; waiting for a tool or turn completion event")
     completed = await wait_for_first_event(
         {
@@ -633,40 +619,95 @@ async def wait_for_enter(stop_event: asyncio.Event) -> None:
         await asyncio.gather(stop_waiter, return_exceptions=True)
 
 
-def require_audio_capabilities(open_info: Any) -> tuple[AudioFormat, AudioFormat]:
-    capabilities = read_field(open_info, "capabilities", {})
-    input_format = read_field(capabilities, "audio_input_format")
-    output_format = read_field(capabilities, "audio_output_format")
-    if input_format is None:
+def require_audio_capabilities(open_result: dict[str, Any]) -> tuple[AudioFormat, AudioFormat]:
+    capabilities = read_field(open_result, "capabilities", {})
+    if not read_field(capabilities, "audio_in", False):
         raise RuntimeError(
-            "Realtime audio input is unavailable. Check OPENAI_API_KEY or your OpenAI "
-            "auth binding; without OpenAI realtime credentials rkat-rpc exposes a "
+            "Live audio input is unavailable. Check OPENAI_API_KEY or your OpenAI "
+            "auth binding; without OpenAI credentials rkat-rpc exposes a "
             "text-only fallback channel."
         )
+    input_format = read_field(capabilities, "audio_input_format")
+    output_format = read_field(capabilities, "audio_output_format")
     input_audio = AudioFormat.from_wire(input_format)
     output_audio = AudioFormat.from_wire(output_format, fallback=input_audio)
     return input_audio, output_audio
 
 
-def require_text_capabilities(open_info: Any) -> None:
-    capabilities = read_field(open_info, "capabilities", {})
-    input_kinds = set(read_field(capabilities, "input_kinds", []) or [])
-    if "text" not in input_kinds:
+def require_text_capabilities(open_result: dict[str, Any]) -> None:
+    capabilities = read_field(open_result, "capabilities", {})
+    if not read_field(capabilities, "text_in", False):
         raise RuntimeError(
-            "Realtime text input is unavailable for this channel. Check the realtime "
+            "Live text input is unavailable for this channel. Check the "
             "capabilities exposed by rkat-rpc before using --text-probe."
         )
 
 
-def build_realtime_channel(
+class LiveConnection:
+    """Thin WebSocket wrapper for the live channel transport.
+
+    The live WS transport is raw: the token is consumed from the URL query
+    string on connect (no handshake frame). Client sends ``LiveInputChunk``
+    JSON (``{"kind":"audio",...}``) or binary PCM. Server sends
+    ``WireLiveAdapterObservation`` JSON. Commit/interrupt go through the
+    ``LiveChannel`` RPC methods, not through the WS.
+    """
+
+    def __init__(self, websocket: Any):
+        self._websocket = websocket
+
+    @classmethod
+    async def connect(cls, open_result: dict[str, Any]) -> "LiveConnection":
+        try:
+            import websockets
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Install websockets: python3 -m pip install websockets"
+            ) from exc
+
+        transport = open_result.get("transport", {})
+        url = transport.get("url", "")
+        if not url:
+            raise RuntimeError("live/open did not return a websocket transport URL")
+
+        websocket = await websockets.connect(url)
+        return cls(websocket)
+
+    async def send_input(self, chunk: dict[str, Any]) -> None:
+        await self._websocket.send(json.dumps(chunk))
+
+    async def send_binary(self, data: bytes) -> None:
+        await self._websocket.send(data)
+
+    async def close(self) -> None:
+        await self._websocket.close()
+
+    async def recv(self) -> dict[str, Any] | None:
+        try:
+            message = await self._websocket.recv()
+        except Exception as exc:
+            try:
+                import websockets
+            except ModuleNotFoundError:
+                raise
+            if isinstance(exc, websockets.ConnectionClosed):
+                return None
+            raise
+        if message is None:
+            return None
+        if isinstance(message, bytes):
+            message = message.decode("utf-8")
+        return json.loads(message)
+
+
+def build_live_channel(
     client: MeerkatClient,
-    mob_id: str,
+    session_id: str,
     args: argparse.Namespace,
-) -> RealtimeChannel:
-    return RealtimeChannel.mob_member(
+) -> LiveChannel:
+    return LiveChannel.session(
         client,
-        mob_id,
-        HOST_IDENTITY,
+        session_id,
         turning_mode="explicit_commit" if args.text_probe else "provider_managed",
     )
 
@@ -740,6 +781,7 @@ async def async_main(argv: list[str] | None = None) -> int:
         "context_root": str(example_root),
         "realm_id": args.realm,
         "isolated": args.realm is None,
+        "live_ws": True,
     }
     output_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
     connection = None
@@ -749,26 +791,26 @@ async def async_main(argv: list[str] | None = None) -> int:
     try:
         await client.connect(**connect_kwargs)
         client.require_capability("mob")
-        state.mob = await create_voice_mob(client, args, printer)
+        state.mob, host_session_id = await create_voice_mob(client, args, printer)
 
-        channel = build_realtime_channel(client, state.mob.id, args)
-        open_info = await channel.open_info()
+        channel = build_live_channel(client, host_session_id, args)
+        open_result = await channel.open()
         input_audio: AudioFormat | None = None
         output_audio: AudioFormat | None = None
         if args.text_probe:
-            require_text_capabilities(open_info)
+            require_text_capabilities(open_result)
         else:
-            input_audio, output_audio = require_audio_capabilities(open_info)
-        connection = await channel.connect_with_open_info(open_info)
+            input_audio, output_audio = require_audio_capabilities(open_result)
+        connection = await LiveConnection.connect(open_result)
         if args.text_probe:
-            printer.status("realtime channel ready; running text probe")
+            printer.status("live channel ready; running text probe")
         else:
             printer.status("audio channel ready; start talking. Press Enter or Ctrl-C to stop.")
 
         tasks.append(
             asyncio.create_task(
-                realtime_receiver(connection, output_queue, printer, stop_event, text_probe_signals),
-                name="realtime receiver",
+                live_receiver(connection, output_queue, printer, stop_event, text_probe_signals),
+                name="live receiver",
             )
         )
         tasks.append(
@@ -786,13 +828,13 @@ async def async_main(argv: list[str] | None = None) -> int:
                 raise RuntimeError("text probe signals were not initialized")
             tasks.append(
                 asyncio.create_task(
-                    run_text_probe(connection, printer, stop_event, text_probe_signals),
+                    run_text_probe(connection, channel, printer, stop_event, text_probe_signals),
                     name="text probe",
                 )
             )
         else:
             if input_audio is None:
-                raise RuntimeError("microphone streaming requires realtime audio input capabilities")
+                raise RuntimeError("microphone streaming requires live audio input capabilities")
             tasks.append(
                 asyncio.create_task(
                     microphone_sender(connection, input_audio, args, printer, stop_event),
@@ -806,6 +848,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         if connection is not None:
             with contextlib.suppress(Exception):
                 await connection.close()
+        with contextlib.suppress(Exception):
+            await channel.close()
         await output_queue.put(None)
         for task in tasks:
             task.cancel()

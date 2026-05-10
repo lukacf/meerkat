@@ -5,10 +5,12 @@ mod artifact;
 mod auth;
 mod comms;
 mod connection;
+mod error;
 mod event;
 mod help;
 mod host;
 mod image_generation;
+mod live;
 mod mcp_live;
 mod mob;
 mod models;
@@ -57,6 +59,7 @@ pub use auth::{
     ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalId, PrincipalKind, PrincipalRef,
     VisibilityClass,
 };
+pub use error::WireConversionError;
 pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,
     EventReplayScope, EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
@@ -74,6 +77,14 @@ pub use image_generation::{
     WireImageGenerationToolResult, WireImageOperationPhase, WireModelRoutingApprovalPhase,
     WireModelRoutingApprovalRequest, WireScopedModelOverride, WireSessionModelRoutingStatus,
     WireSwitchTurnControlResult, WireSwitchTurnIntent, WireSwitchTurnPhase,
+};
+pub use live::{
+    LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
+    LiveRefreshResult, LiveRefreshStatus, LiveSendInputParams, LiveStatusResult,
+    LiveTruncateParams, WireLiveAdapterErrorCode, WireLiveAdapterObservation,
+    WireLiveAdapterStatus, WireLiveChannelCapabilities, WireLiveConfigRejectionReason,
+    WireLiveContinuityMode, WireLiveDegradationReason, WireLiveResponseModality,
+    WireLiveTransportBootstrap, WireProvider,
 };
 pub use mcp_live::{
     McpAddParams, McpLiveOpResponse, McpLiveOpStatus, McpLiveOperation, McpReloadParams,
@@ -121,26 +132,15 @@ pub use models::{
 };
 pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
 pub use realtime::{
-    AudioFormatMismatchContext, RealtimeActionResult, RealtimeAudioChunk, RealtimeAudioFormat,
-    RealtimeBargeInTruncateFrame, RealtimeCapabilities, RealtimeCapabilitiesParams,
-    RealtimeCapabilitiesResult, RealtimeChannelClosedFrame, RealtimeChannelConfig,
-    RealtimeChannelErrorFrame, RealtimeChannelEventFrame, RealtimeChannelInputFrame,
-    RealtimeChannelOpenFrame, RealtimeChannelOpenedFrame, RealtimeChannelRole,
-    RealtimeChannelState, RealtimeChannelStatus, RealtimeChannelStatusFrame, RealtimeChannelTarget,
-    RealtimeClientFrame, RealtimeErrorCode, RealtimeErrorDetails, RealtimeEvent,
-    RealtimeInputChunk, RealtimeInputKind, RealtimeOpenInfo, RealtimeOpenRequest,
-    RealtimeOutputChunk, RealtimeOutputKind, RealtimeProtocolVersion, RealtimeReconnectPolicy,
-    RealtimeServerFrame, RealtimeStatusParams, RealtimeStatusResult, RealtimeTextChunk,
-    RealtimeTextDelta, RealtimeToolTimeoutPolicy, RealtimeTurningMode, RealtimeVideoChunk,
-    ToolCallTimeoutContext,
+    RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
+    RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
+    RealtimeVideoChunk,
 };
 pub use result::WireRunResult;
 pub use runtime::{
     PeerResponseTerminalStatusWire,
     RuntimeAcceptOutcomeType,
     RuntimeAcceptResult,
-    RuntimeRealtimeAttachmentStatusParams,
-    RuntimeRealtimeAttachmentStatusResult,
     RuntimeStateResult,
     SessionExternalEventEnvelope,
     SessionPeerResponseTerminalParams,
@@ -150,7 +150,6 @@ pub use runtime::{
     WireInputLifecycleState,
     WireInputState,
     WireInputStateHistoryEntry,
-    WireRealtimeAttachmentStatus,
     WireRuntimeState,
 };
 pub use schedule::{
@@ -162,7 +161,7 @@ pub use session::{
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult, WireAssistantBlock,
     WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
     WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall, WireToolResult,
-    WireToolResultContent,
+    WireToolResultContent, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{

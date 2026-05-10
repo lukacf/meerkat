@@ -45,16 +45,39 @@ struct Cli {
     /// Example: --tcp 127.0.0.1:4800
     #[arg(long)]
     tcp: Option<String>,
-    /// Permit --tcp/--realtime-ws to bind non-loopback addresses.
+    /// Permit --tcp to bind non-loopback addresses.
     ///
     /// This is an explicit transport exposure opt-in, not an auth mechanism.
     #[arg(long)]
     allow_remote: bool,
-    /// Listen on a sibling WebSocket address for realtime channels.
+    /// Start a live WebSocket listener on this address.
     ///
-    /// Example: --realtime-ws 127.0.0.1:4900
+    /// Exposes the `/live/ws` endpoint for live audio/text channels.
+    /// Example: --live-ws 127.0.0.1:4900
     #[arg(long)]
-    realtime_ws: Option<String>,
+    live_ws: Option<String>,
+    /// Scheme advertised in the `live/open` bootstrap URL: `ws` or `wss`.
+    ///
+    /// Defaults to `ws`. Use `wss` when the live listener is fronted by a
+    /// TLS-terminating proxy. The scheme is purely advertisement; the
+    /// actual `--live-ws` listener accepts plain WebSocket bytes.
+    #[arg(long, value_enum, default_value_t = LiveWsScheme::Ws)]
+    live_ws_scheme: LiveWsScheme,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum LiveWsScheme {
+    Ws,
+    Wss,
+}
+
+impl LiveWsScheme {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ws => "ws",
+            Self::Wss => "wss",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -150,14 +173,6 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|err| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string())
             })?;
-    }
-    if let Some(ref realtime_ws_addr) = cli.realtime_ws {
-        meerkat_rpc::secure_rpc::validate_tcp_bind_policy(
-            "realtime_ws",
-            realtime_ws_addr,
-            tcp_bind_policy,
-        )
-        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
     }
     let selection = RealmConfig::selection_from_inputs(
         cli.realm.clone(),
@@ -261,16 +276,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
-    let realtime_openai_factory = match factory.build_openai_realtime_session_factory(&config).await
-    {
-        Ok(factory) => Some(factory),
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "OpenAI realtime sideband factory unavailable; realtime websocket host will expose text-only runtime attachment unless credentials are configured"
-            );
-            None
+    // N74: only build the OpenAI realtime factory when --live-ws is configured;
+    // otherwise live/* is not exposed at all and the factory work is wasted.
+    // B15: when --live-ws IS set, factory build failure must fail at startup
+    // rather than leaving live/open exposed with no provider wired.
+    let live_session_factory: Option<
+        Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
+    > = if cli.live_ws.is_some() {
+        match factory.build_openai_realtime_session_factory(&config).await {
+            Ok(f) => Some(f),
+            Err(err) => {
+                return Err(format!(
+                    "--live-ws is configured but the OpenAI realtime session factory \
+                     could not be built: {err}"
+                )
+                .into());
+            }
         }
+    } else {
+        None
     };
 
     let config_runtime = Arc::new(ConfigRuntime::new(
@@ -314,60 +338,72 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
-    let realtime_ws = if let Some(ref realtime_ws_addr) = cli.realtime_ws {
-        let listener = tokio::net::TcpListener::bind(realtime_ws_addr).await?;
-        let actual_realtime_ws_addr = listener.local_addr()?;
-        let actual_ws_url = format!(
-            "ws://{actual_realtime_ws_addr}{}",
-            meerkat_rpc::REALTIME_WS_PATH
+    let live_ws = if let Some(ref live_ws_addr) = cli.live_ws {
+        let listener = tokio::net::TcpListener::bind(live_ws_addr).await?;
+        let actual_addr = listener.local_addr()?;
+        eprintln!(
+            "rkat-rpc live-ws listening on ws://{actual_addr}{path} (advertised scheme: {scheme})",
+            path = meerkat_live::LIVE_WS_PATH,
+            scheme = cli.live_ws_scheme.as_str(),
         );
-        let mut host = meerkat_rpc::RealtimeWsHost::new(actual_ws_url.clone());
-        if let Some(session_factory) = realtime_openai_factory.clone() {
-            host = host.with_session_factory(session_factory);
-        }
-        let host = Arc::new(host);
-        eprintln!("rkat-rpc listening on {actual_ws_url}");
-        let rt = Arc::clone(&runtime);
-        let cs = Arc::clone(&config_store);
-        let ws_host = Arc::clone(&host);
-        Some((
-            host,
-            tokio::spawn(async move {
-                meerkat_rpc::serve_realtime_ws_listener(listener, ws_host, rt, cs).await
-            }),
-        ))
+        // Wave-3: install the surface projection sink so adapter observations
+        // become canonical Meerkat semantic facts (A1-A6, A14). Without the
+        // sink, `apply_observation` only updates host status and projection
+        // becomes a silent no-op.
+        let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
+            std::sync::Arc::new(
+                meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &runtime,
+                )),
+            );
+        // G6 (P2): every production live channel runs with the canonical
+        // per-tool-call dispatch deadline. Without this, a stuck tool can
+        // hold a live provider's turn indefinitely (dogma: the adapter
+        // cannot stall canonical session lifecycle).
+        let host = std::sync::Arc::new(
+            meerkat_live::LiveAdapterHost::new(projection_sink)
+                .with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT),
+        );
+        let ws_state = std::sync::Arc::new(meerkat_live::LiveWsState::new(host));
+        let ws_state_clone = std::sync::Arc::clone(&ws_state);
+        let handle = tokio::spawn(async move {
+            meerkat_live::serve_live_ws_listener(listener, ws_state_clone).await
+        });
+        Some((ws_state, actual_addr, handle))
     } else {
         None
     };
 
+    // N82: scheme is configurable via --live-ws-scheme (default `ws`).
+    // The actual listener is plaintext WebSocket; `wss` is for advertisement
+    // when a TLS-terminating proxy fronts the live listener.
+    let live_ws_scheme = cli.live_ws_scheme.as_str();
+    let live_ws_config = live_ws
+        .as_ref()
+        .map(|(state, addr, _)| meerkat_rpc::LiveWsConfig {
+            state: std::sync::Arc::clone(state),
+            base_url: format!("{live_ws_scheme}://{addr}"),
+            session_factory: live_session_factory.clone(),
+        });
+
     let serve_result = if let Some(ref tcp_addr) = cli.tcp {
         eprintln!("rkat-rpc listening on tcp://{tcp_addr}");
-        if let Some((realtime_ws_host, _)) = &realtime_ws {
-            meerkat_rpc::serve_tcp_with_realtime_ws_host(
-                tcp_addr,
-                runtime,
-                config_store,
-                skill_runtime,
-                Some(Arc::clone(realtime_ws_host)),
-            )
-            .await
-        } else {
-            meerkat_rpc::serve_tcp(tcp_addr, runtime, config_store, skill_runtime).await
-        }
-    } else if let Some((realtime_ws_host, _)) = &realtime_ws {
-        meerkat_rpc::serve_stdio_with_skill_runtime_and_realtime_ws_host(
+        meerkat_rpc::serve_tcp_with_options(
+            tcp_addr,
             runtime,
             config_store,
             skill_runtime,
-            Some(Arc::clone(realtime_ws_host)),
+            live_ws_config,
         )
         .await
     } else {
-        meerkat_rpc::serve_stdio_with_skill_runtime(runtime, config_store, skill_runtime).await
+        meerkat_rpc::serve_stdio_with_options(runtime, config_store, skill_runtime, live_ws_config)
+            .await
     };
-    if let Some((_, realtime_ws_handle)) = realtime_ws {
-        realtime_ws_handle.abort();
-        let _ = realtime_ws_handle.await;
+
+    if let Some((_, _, handle)) = live_ws {
+        handle.abort();
+        let _ = handle.await;
     }
     lease.shutdown().await;
     serve_result?;

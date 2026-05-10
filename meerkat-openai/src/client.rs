@@ -156,6 +156,17 @@ fn project_openai_assistant_blocks(
                 has_output_item = true;
                 Some(block.clone())
             }
+            // Spoken transcripts replay back to the provider as plain text;
+            // OpenAI Responses API sees the assistant's visible output
+            // regardless of capture lane.
+            AssistantBlock::Transcript { text, .. } if text.is_empty() => None,
+            AssistantBlock::Transcript { text, .. } => {
+                has_output_item = true;
+                Some(AssistantBlock::Text {
+                    text: text.clone(),
+                    meta: None,
+                })
+            }
             AssistantBlock::Reasoning { meta, .. } if openai_reasoning_replayable(mode, meta) => {
                 Some(block.clone())
             }
@@ -2989,7 +3000,7 @@ mod tests {
     fn test_request_includes_temperature_for_supported_model() {
         let client = OpenAiClient::new("test-key".to_string());
         let request = LlmRequest::new(
-            "gpt-realtime",
+            "gpt-realtime-2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
         .with_temperature(0.3);

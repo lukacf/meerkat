@@ -429,6 +429,7 @@ rust_test(
         "//meerkat-core:package_runfiles",
         "//meerkat-gemini:package_runfiles",
         "//meerkat-hooks:package_runfiles",
+        "//meerkat-live:package_runfiles",
         "//meerkat-llm-core:package_runfiles",
         "//meerkat-machine-codegen:package_runfiles",
         "//meerkat-machine-derive:package_runfiles",

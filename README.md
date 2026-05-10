@@ -27,7 +27,7 @@
 
 Meerkat is a **library-first, high-performance, modular agent harness** -- composable Rust crates that handle the hard parts of building agentic systems: state machines, retries, budgets, streaming, tool execution, MCP integration, and multi-agent coordination.
 
-That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, realtime attachments, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
+That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, live channels, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
 It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formald state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
 
@@ -224,7 +224,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Realtime audio.** Choose a realtime-capable model such as `gpt-realtime-1.5` and the runtime attaches the OpenAI Realtime transport automatically. Surfaces expose attachment status, `realtime/open_info`, and SDK helpers; JSON-RPC hosts need the realtime WebSocket listener enabled for audio bootstrap. `gpt-realtime` remains a compatibility alias.
+**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the live-adapter MVP surface (`live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close`) on JSON-RPC and the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 
@@ -246,7 +246,7 @@ All surfaces share the same session lifecycle and runtime-backed contracts.
 | **Web SDK (`@rkat/web`)** | Browser/WASM sessions, mobs, subscriptions, JS tools, provider proxy/auth resolver | [Web/WASM](https://docs.rkat.ai/examples/wasm) |
 | **CLI (`rkat`)** | Terminal, CI/CD, cron jobs, shell scripts | [CLI guide](https://docs.rkat.ai/cli/commands) |
 | **REST API** | HTTP integration for web services | [REST guide](https://docs.rkat.ai/api/rest) |
-| **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional realtime WebSocket bootstrap | [RPC guide](https://docs.rkat.ai/api/rpc) |
+| **JSON-RPC (`rkat-rpc`)** | SDK backend and IDE/desktop integration over stdio or TCP, with optional live audio WebSocket (`--live-ws`) | [RPC guide](https://docs.rkat.ai/api/rpc) |
 | **MCP Server (`rkat-mcp`)** | Expose Meerkat as tools to other AI agents | [MCP guide](https://docs.rkat.ai/api/mcp) |
 
 ## Architecture
@@ -454,8 +454,8 @@ Full documentation at **[docs.rkat.ai](https://docs.rkat.ai)**.
 | Section | Topics |
 |---------|--------|
 | [Getting Started](https://docs.rkat.ai/introduction) | Introduction, quickstart |
-| [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, realms, auth and bindings, tools, providers, scheduling, mobs, comms, realtime |
-| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, realtime, image generation, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
+| [Core Concepts](https://docs.rkat.ai/concepts/sessions) | Sessions, realms, auth and bindings, tools, providers, scheduling, mobs, comms, live |
+| [Guides](https://docs.rkat.ai/guides/hooks) | Auth, scheduling, live audio, image generation, Web/WASM, hooks, skills, memory, mobs, CD/distribution |
 | [CLI & APIs](https://docs.rkat.ai/cli/commands) | CLI, REST, JSON-RPC, MCP |
 | [SDKs](https://docs.rkat.ai/rust/overview) | Rust, Python, TypeScript, Web |
 | [Reference](https://docs.rkat.ai/reference/architecture) | Architecture, capability matrix, builtin tools, session contracts |

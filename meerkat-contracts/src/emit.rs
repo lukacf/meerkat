@@ -112,36 +112,54 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
         "PeerResponseTerminalStatusWire": schema_for!(crate::wire::PeerResponseTerminalStatusWire),
         "SessionExternalEventEnvelope": schema_for!(crate::wire::SessionExternalEventEnvelope),
-        "WireRealtimeAttachmentStatus": schema_for!(crate::wire::WireRealtimeAttachmentStatus),
-        "RuntimeRealtimeAttachmentStatusResult": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusResult),
-        "RealtimeChannelTarget": schema_for!(crate::wire::RealtimeChannelTarget),
-        "RealtimeChannelRole": schema_for!(crate::wire::RealtimeChannelRole),
         "RealtimeTurningMode": schema_for!(crate::wire::RealtimeTurningMode),
         "RealtimeInputKind": schema_for!(crate::wire::RealtimeInputKind),
         "RealtimeOutputKind": schema_for!(crate::wire::RealtimeOutputKind),
-        "RealtimeReconnectPolicy": schema_for!(crate::wire::RealtimeReconnectPolicy),
         "RealtimeCapabilities": schema_for!(crate::wire::RealtimeCapabilities),
-        "RealtimeChannelState": schema_for!(crate::wire::RealtimeChannelState),
-        "RealtimeChannelStatus": schema_for!(crate::wire::RealtimeChannelStatus),
-        "RealtimeOpenInfo": schema_for!(crate::wire::RealtimeOpenInfo),
-        "RealtimeStatusResult": schema_for!(crate::wire::RealtimeStatusResult),
-        "RealtimeCapabilitiesResult": schema_for!(crate::wire::RealtimeCapabilitiesResult),
         "RealtimeTextChunk": schema_for!(crate::wire::RealtimeTextChunk),
-        "RealtimeTextDelta": schema_for!(crate::wire::RealtimeTextDelta),
         "RealtimeAudioChunk": schema_for!(crate::wire::RealtimeAudioChunk),
         "RealtimeVideoChunk": schema_for!(crate::wire::RealtimeVideoChunk),
         "RealtimeInputChunk": schema_for!(crate::wire::RealtimeInputChunk),
-        "RealtimeOutputChunk": schema_for!(crate::wire::RealtimeOutputChunk),
-        "RealtimeEvent": schema_for!(crate::wire::RealtimeEvent),
-        "RealtimeChannelOpenFrame": schema_for!(crate::wire::RealtimeChannelOpenFrame),
-        "RealtimeChannelInputFrame": schema_for!(crate::wire::RealtimeChannelInputFrame),
-        "RealtimeChannelOpenedFrame": schema_for!(crate::wire::RealtimeChannelOpenedFrame),
-        "RealtimeChannelStatusFrame": schema_for!(crate::wire::RealtimeChannelStatusFrame),
-        "RealtimeChannelEventFrame": schema_for!(crate::wire::RealtimeChannelEventFrame),
-        "RealtimeChannelErrorFrame": schema_for!(crate::wire::RealtimeChannelErrorFrame),
-        "RealtimeChannelClosedFrame": schema_for!(crate::wire::RealtimeChannelClosedFrame),
-        "RealtimeClientFrame": schema_for!(crate::wire::RealtimeClientFrame),
-        "RealtimeServerFrame": schema_for!(crate::wire::RealtimeServerFrame),
+        "LiveOpenParams": schema_for!(crate::wire::LiveOpenParams),
+        "LiveOpenResult": schema_for!(crate::wire::LiveOpenResult),
+        "LiveChannelParams": schema_for!(crate::wire::LiveChannelParams),
+        "LiveStatusResult": schema_for!(crate::wire::LiveStatusResult),
+        "LiveSendInputParams": schema_for!(crate::wire::LiveSendInputParams),
+        "LiveInputChunkWire": schema_for!(crate::wire::LiveInputChunkWire),
+        "LiveTruncateParams": schema_for!(crate::wire::LiveTruncateParams),
+        // G9 (P2): emit `LiveCommitInputParams` and `WireLiveResponseModality`
+        // at the top level so SDK codegen produces typed shapes (param
+        // struct + discriminated modality union) for `live/commit_input`
+        // instead of falling back to the opaque `LiveChannelParams` shape.
+        "LiveCommitInputParams": schema_for!(crate::wire::LiveCommitInputParams),
+        "WireLiveResponseModality": schema_for!(crate::wire::WireLiveResponseModality),
+        // R4-5 (P3): emit the typed `live/refresh` result so SDK codegen
+        // produces a typed shape (TypedDict / interface) carrying both the
+        // typed `LiveRefreshStatus` discriminator and the legacy
+        // `refresh_enqueued: true` back-compat field, instead of falling
+        // back to opaque `Value` / `Any` / `unknown`.
+        "LiveRefreshResult": schema_for!(crate::wire::LiveRefreshResult),
+        "LiveRefreshStatus": schema_for!(crate::wire::LiveRefreshStatus),
+        // CC5/CC6: emit the typed wire mirrors at the top level so SDK
+        // codegen produces named typed shapes (TypedDict / interface /
+        // discriminated union) instead of inlining them as anonymous `Any`
+        // / `unknown` blobs inside `LiveOpenResult`.
+        "WireLiveChannelCapabilities": schema_for!(crate::wire::WireLiveChannelCapabilities),
+        "WireLiveContinuityMode": schema_for!(crate::wire::WireLiveContinuityMode),
+        // G8 (P2): emit `WireLiveTransportBootstrap` at the top level so
+        // SDK codegen produces a typed discriminated union (TS) /
+        // tagged-variant TypedDict (Python) for `LiveOpenResult.transport`
+        // instead of `unknown` / `Any`.
+        "WireLiveTransportBootstrap": schema_for!(crate::wire::WireLiveTransportBootstrap),
+        // FIX-SDK-OBS: emit `WireLiveAdapterObservation` and its supporting
+        // typed wire mirrors so SDK codegen sees the discriminated union of
+        // adapter observations (R5-4 identity fields on
+        // `assistant_audio_chunk`, R5-9 `command_rejected` typed channel
+        // survives error) rather than treating them as opaque blobs.
+        "WireLiveAdapterObservation": schema_for!(crate::wire::WireLiveAdapterObservation),
+        "WireLiveAdapterStatus": schema_for!(crate::wire::WireLiveAdapterStatus),
+        "WireLiveDegradationReason": schema_for!(crate::wire::WireLiveDegradationReason),
+        "WireLiveAdapterErrorCode": schema_for!(crate::wire::WireLiveAdapterErrorCode),
         "RuntimeAcceptOutcomeType": schema_for!(crate::wire::RuntimeAcceptOutcomeType),
         "WireInputLifecycleState": schema_for!(crate::wire::WireInputLifecycleState),
         "WireInputStateHistoryEntry": schema_for!(crate::wire::WireInputStateHistoryEntry),
@@ -299,11 +317,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "DeviceStartParams": schema_for!(crate::wire::DeviceStartParams),
         "DeviceCompleteParams": schema_for!(crate::wire::DeviceCompleteParams),
         "ProvisionApiKeyParams": schema_for!(crate::wire::ProvisionApiKeyParams),
-        "RealtimeOpenRequest": schema_for!(crate::wire::RealtimeOpenRequest),
-        "RealtimeStatusParams": schema_for!(crate::wire::RealtimeStatusParams),
-        "RealtimeCapabilitiesParams": schema_for!(crate::wire::RealtimeCapabilitiesParams),
         "SessionPeerResponseTerminalParams": schema_for!(crate::wire::SessionPeerResponseTerminalParams),
-        "RuntimeRealtimeAttachmentStatusParams": schema_for!(crate::wire::RuntimeRealtimeAttachmentStatusParams),
         "SessionStreamOpenParams": schema_for!(crate::wire::SessionStreamOpenParams),
         "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
         "ForkSessionAtParams": schema_for!(crate::wire::ForkSessionAtParams),
@@ -1056,9 +1070,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 RestOperationContract::event_stream("SseEventStream")
             }
             ("/sessions/{id}/status", "get") => RestOperationContract::json("RuntimeStateResult"),
-            ("/sessions/{id}/realtime-attachment-status", "get") => {
-                RestOperationContract::json("RuntimeRealtimeAttachmentStatusResult")
-            }
             ("/schedule/call", "post") => {
                 RestOperationContract::with_json_request("RestScheduleToolCallRequest", "JsonValue")
             }
@@ -1095,17 +1106,6 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             }
             ("/runtime/health", "get") => RestOperationContract::json("RuntimeHostHealth"),
             ("/models/catalog", "get") => RestOperationContract::json("ModelsCatalogResponse"),
-            ("/realtime/open_info", "post") => {
-                RestOperationContract::with_json_request("RealtimeOpenRequest", "RealtimeOpenInfo")
-            }
-            ("/realtime/status", "post") => RestOperationContract::with_json_request(
-                "RealtimeStatusParams",
-                "RealtimeStatusResult",
-            ),
-            ("/realtime/capabilities", "post") => RestOperationContract::with_json_request(
-                "RealtimeCapabilitiesParams",
-                "RealtimeCapabilitiesResult",
-            ),
             ("/mob/{id}/spawn-helper", "post") => {
                 RestOperationContract::with_json_request("RestMobHelperRequest", "JsonValue")
             }

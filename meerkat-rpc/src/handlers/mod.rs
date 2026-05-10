@@ -12,11 +12,11 @@ pub mod config;
 pub mod event;
 pub mod help;
 pub mod initialize;
+pub mod live;
 pub mod mcp;
 #[cfg(feature = "mob")]
 pub mod mob;
 pub mod models;
-pub mod realtime;
 pub mod runtime;
 pub mod runtime_host;
 pub mod schedule;
@@ -80,18 +80,22 @@ pub(crate) fn parse_session_id_for_runtime(
             ));
         }
     };
-    if let Some(locator_realm) = locator.realm_id.as_ref()
-        && runtime.realm_id() != Some(locator_realm)
-    {
-        return Err(RpcResponse::error(
-            id,
-            error::INVALID_PARAMS,
-            format!(
-                "Session locator realm '{}' does not match active runtime realm '{}'",
-                locator_realm.as_str(),
-                runtime.realm_id().map(|r| r.as_str()).unwrap_or("<none>")
-            ),
-        ));
+    if let Some(locator_realm) = locator.realm_id.as_ref() {
+        let runtime_realm = runtime.realm_id();
+        if runtime_realm.as_ref() != Some(locator_realm) {
+            return Err(RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "Session locator realm '{}' does not match active runtime realm '{}'",
+                    locator_realm.as_str(),
+                    runtime_realm
+                        .as_ref()
+                        .map(|r| r.as_str())
+                        .unwrap_or("<none>")
+                ),
+            ));
+        }
     }
     Ok(locator.session_id)
 }

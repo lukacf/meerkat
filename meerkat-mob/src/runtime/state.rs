@@ -310,15 +310,6 @@ pub(super) enum MobCommand {
         agent_identity: crate::ids::AgentIdentity,
         reply_tx: oneshot::Sender<MobMemberMachineProjection>,
     },
-    /// W3-H: query the current realtime binding for an identity. Returns
-    /// the bridge session id currently bound (projected from the canonical
-    /// `member_session_bindings` map) or `None` if the identity has no
-    /// binding. Used by the realtime WS surface at open time to initialize
-    /// the task-local `current_session_id` for a `MobMember` target.
-    CurrentRealtimeBinding {
-        agent_identity: crate::ids::AgentIdentity,
-        reply_tx: oneshot::Sender<Option<meerkat_core::types::SessionId>>,
-    },
     Stop {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
     },

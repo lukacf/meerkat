@@ -60,7 +60,6 @@ export interface MobMemberStatusResult {
   kickoff?: unknown;
   output_preview?: string;
   peer_connectivity?: unknown;
-  realtime_attachment_status?: string;
   resolved_capabilities?: WireResolvedModelCapabilities;
   status: WireMobMemberStatus;
   tokens_used: number;

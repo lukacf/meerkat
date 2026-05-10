@@ -83,6 +83,8 @@ fn buildbuddy_workflow_is_gcp_only() {
             "gate",
             "governance-submit",
             "native-submit",
+            "prebuild-submit",
+            "static-submit",
             "wasm-feature-submit",
         ],
     );

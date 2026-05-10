@@ -2935,6 +2935,111 @@ def test_generated_wire_live_adapter_observation_is_typed_union():
     assert rejected_hints["code"] == WireLiveAdapterErrorCode
 
 
+def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():
+    """R7-1 Python lift: each inline-object variant payload on
+    ``WireAssistantBlock`` must surface as a named ``TypedDict`` — not as
+    opaque ``dict[str, Any]`` — closing the TS/Python codegen asymmetry
+    that R7-1+2 opened (TS already narrows the `data` shape to a typed
+    structural object; Python now mirrors with a named TypedDict per
+    variant payload).
+
+    Pins both:
+
+    * the *shape*: ``data`` on each variant references a per-variant
+      ``WireAssistantBlock*Data`` TypedDict, with the same field set the
+      TS path emits;
+    * the *required/optional* discipline: e.g. ``WireTranscriptSource``
+      is ``Required`` on ``WireAssistantBlockTranscriptData`` and
+      ``meta`` is ``NotRequired`` (matches the JSON-schema `required`
+      list and prevents regression to the pre-R7-1 opaque-dict shape).
+    """
+    from typing import get_type_hints
+
+    from meerkat.generated.types import (
+        WireAssistantBlockImage,
+        WireAssistantBlockImageData,
+        WireAssistantBlockReasoning,
+        WireAssistantBlockReasoningData,
+        WireAssistantBlockServerToolContent,
+        WireAssistantBlockServerToolContentData,
+        WireAssistantBlockText,
+        WireAssistantBlockTextData,
+        WireAssistantBlockToolUse,
+        WireAssistantBlockToolUseData,
+        WireAssistantBlockTranscript,
+        WireAssistantBlockTranscriptData,
+        WireTranscriptSource,
+        WireTranscriptSourceSpoken,
+        WireTranscriptSourceUnknown,
+    )
+
+    # Every typed-payload variant binds `data` to its named TypedDict —
+    # NOT `dict[str, Any]`. The string check pins the typed reference so
+    # a regression to the opaque shape fails this test loudly.
+    variants_with_data = [
+        (WireAssistantBlockText, WireAssistantBlockTextData, "WireAssistantBlockTextData"),
+        (WireAssistantBlockTranscript, WireAssistantBlockTranscriptData, "WireAssistantBlockTranscriptData"),
+        (WireAssistantBlockReasoning, WireAssistantBlockReasoningData, "WireAssistantBlockReasoningData"),
+        (WireAssistantBlockToolUse, WireAssistantBlockToolUseData, "WireAssistantBlockToolUseData"),
+        (WireAssistantBlockServerToolContent, WireAssistantBlockServerToolContentData, "WireAssistantBlockServerToolContentData"),
+        (WireAssistantBlockImage, WireAssistantBlockImageData, "WireAssistantBlockImageData"),
+    ]
+    for variant_td, data_td, data_name in variants_with_data:
+        hints = get_type_hints(variant_td, include_extras=True)
+        assert "data" in hints, f"{variant_td.__name__} missing `data` field"
+        rendered = str(hints["data"])
+        assert data_name in rendered, (
+            f"{variant_td.__name__}.data should reference {data_name}, got {rendered!r}"
+        )
+        assert "dict[str, Any]" not in rendered, (
+            f"{variant_td.__name__}.data regressed to opaque dict[str, Any]"
+        )
+
+    # Field-level shape pinning on the Transcript payload (R7-1 closes
+    # WireAssistantBlock::Transcript first; the rest follow the same
+    # mechanical pattern).
+    transcript_data_hints = get_type_hints(
+        WireAssistantBlockTranscriptData, include_extras=True
+    )
+    assert "text" in transcript_data_hints
+    assert "source" in transcript_data_hints
+    assert "meta" in transcript_data_hints
+    # `source` is typed against the discriminated `WireTranscriptSource`
+    # union (a PEP-604 `Spoken | Unknown` alias). It must NOT be a
+    # free-form dict — callers must be able to type-narrow on
+    # `source["kind"]`. The annotation comes through as the unwrapped
+    # union (TypedDict alias inlining), so we check by string contents.
+    rendered_source = str(transcript_data_hints["source"])
+    assert "WireTranscriptSourceSpoken" in rendered_source
+    assert "WireTranscriptSourceUnknown" in rendered_source
+    assert "dict[str, Any]" not in rendered_source
+    # Reference `WireTranscriptSource` so the import isn't unused — the
+    # union alias is the public name the SDK exports, even though the
+    # resolved TypedDict annotation inlines its members.
+    assert set(get_args(WireTranscriptSource)) == {
+        WireTranscriptSourceSpoken,
+        WireTranscriptSourceUnknown,
+    }
+    # Required/Optional discipline matches the JSON-schema `required`
+    # list: `text` + `source` Required, `meta` NotRequired. Inspect raw
+    # annotations because the generated TypedDict is declared with
+    # `total=False` + explicit `Required[...]`/`NotRequired[...]`
+    # wrappers — Python's runtime `__required_keys__` flips everything
+    # to optional under `total=False`, so the source of truth for
+    # required-ness is the annotation string itself.
+    raw_annotations = WireAssistantBlockTranscriptData.__annotations__
+    assert "Required" in str(raw_annotations["text"])
+    assert "Required" in str(raw_annotations["source"])
+    assert "NotRequired" in str(raw_annotations["meta"])
+    # Constructing a typed value through the named TypedDict succeeds —
+    # this is the ergonomic surface the R7-1 deferral note flagged.
+    sample: WireAssistantBlockTranscriptData = {
+        "text": "hello world",
+        "source": {"kind": "spoken"},
+    }
+    assert sample["text"] == "hello world"
+
+
 @pytest.mark.asyncio
 async def test_client_live_refresh_returns_typed_result():
     """R4-5 (P3): `live_refresh` must return a typed

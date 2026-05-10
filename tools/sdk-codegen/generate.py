@@ -390,6 +390,34 @@ def _typed_dict_variant_name(alias_name: str, discriminator_value: str) -> str:
     return f"{_variant_type_prefix(alias_name)}{_pascal_case(discriminator_value)}"
 
 
+def _is_inline_object_payload(field_schema: Any) -> bool:
+    """Detect inline (anonymous) object-shaped variant payload schemas.
+
+    Mirrors the TS `inline_objects=True` admission rule in
+    `_typescript_type_from_schema`: the schema must be a JSON-Schema object
+    with `properties` and NOT a `$ref`, NOT a discriminated union
+    (`oneOf`/`anyOf`), and NOT a singleton `const`. This is the same shape
+    that the TS path inlines as `{ field: type; ... }` instead of widening
+    to `Record<string, unknown>`; the Python path promotes it to a named
+    TypedDict to preserve `mypy`/`pyright` narrowing on variant payloads.
+    """
+    if not isinstance(field_schema, dict):
+        return False
+    if "$ref" in field_schema:
+        return False
+    if "oneOf" in field_schema or "anyOf" in field_schema:
+        return False
+    if "const" in field_schema:
+        return False
+    properties = field_schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return False
+    schema_type = field_schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        return False
+    return True
+
+
 def _const_variants(variants: list[Any]) -> list[Any] | None:
     values: list[Any] = []
     for variant in variants:
@@ -858,13 +886,60 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
                 variant_names.append(variant_name)
                 required = set(variant.get("required", []))
                 local_variant_defs = set(variant.get("$defs", {}).keys()) | local_defs
+                # R7-1 Python lift: mirror the TS `inline_objects=True` path.
+                # For each variant property whose schema is an anonymous
+                # inline object (has `properties`, no `$ref`/`oneOf`/`anyOf`),
+                # emit a named TypedDict for the payload BEFORE the variant
+                # class and reference it from the variant. This restores the
+                # TS/Python codegen symmetry that R7-1+2 (TS) opened up — every
+                # inline-object variant payload now gets a typed Python shape
+                # instead of widening to `dict[str, Any]`. Only the immediate
+                # variant-field level is promoted; nested anonymous objects
+                # inside the inlined shape still widen (matches the TS
+                # `inline_objects=True`-only-at-the-immediate-level bound).
+                inline_payload_blocks: list[str] = []
+                inline_field_overrides: dict[str, str] = {}
+                for field_name, field_schema in properties.items():
+                    if not _is_inline_object_payload(field_schema):
+                        continue
+                    payload_name = (
+                        f"{variant_name}{_pascal_case(field_name)}"
+                    )
+                    payload_required = set(field_schema.get("required", []) or [])
+                    payload_props = field_schema.get("properties", {})
+                    payload_lines = [
+                        f"class {payload_name}(TypedDict, total=False):\n"
+                    ]
+                    for inline_field, inline_schema in payload_props.items():
+                        inline_type, _ = _python_type_from_schema(
+                            schema_root,
+                            inline_schema,
+                            local_variant_defs,
+                        )
+                        wrapper = (
+                            "Required"
+                            if inline_field in payload_required
+                            else "NotRequired"
+                        )
+                        payload_lines.append(
+                            f"    {_python_identifier(inline_field)}: "
+                            f"{wrapper}[{inline_type}]\n"
+                        )
+                    payload_lines.append("\n")
+                    inline_payload_blocks.append("".join(payload_lines))
+                    inline_field_overrides[field_name] = payload_name
+                for block in inline_payload_blocks:
+                    types_content += block
                 types_content += f"class {variant_name}(TypedDict, total=False):\n"
                 for field_name, field_schema in properties.items():
-                    field_type, _ = _python_type_from_schema(
-                        schema_root,
-                        field_schema,
-                        local_variant_defs,
-                    )
+                    if field_name in inline_field_overrides:
+                        field_type = inline_field_overrides[field_name]
+                    else:
+                        field_type, _ = _python_type_from_schema(
+                            schema_root,
+                            field_schema,
+                            local_variant_defs,
+                        )
                     wrapper = "Required" if field_name in required else "NotRequired"
                     types_content += (
                         f"    {_python_identifier(field_name)}: {wrapper}[{field_type}]\n"

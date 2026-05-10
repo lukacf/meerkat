@@ -2823,29 +2823,63 @@ WireTranscriptSource = WireTranscriptSourceSpoken | WireTranscriptSourceUnknown
 # fidelity (core invariant — opaque from provider to dispatcher), and
 # `RawValue` does not derive equality. Equivalence checks should
 # round-trip through serialization and compare the serialized bytes.
+class WireAssistantBlockTextData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    text: Required[str]
+
 class WireAssistantBlockText(TypedDict, total=False):
     block_type: Required[Literal['text']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockTextData]
+
+class WireAssistantBlockTranscriptData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    source: Required[WireTranscriptSource]
+    text: Required[str]
 
 class WireAssistantBlockTranscript(TypedDict, total=False):
     block_type: Required[Literal['transcript']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockTranscriptData]
+
+class WireAssistantBlockReasoningData(TypedDict, total=False):
+    meta: NotRequired[dict[str, Any]]
+    text: NotRequired[str]
 
 class WireAssistantBlockReasoning(TypedDict, total=False):
     block_type: Required[Literal['reasoning']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockReasoningData]
+
+class WireAssistantBlockToolUseData(TypedDict, total=False):
+    args: Required[Any]
+    id: Required[str]
+    meta: NotRequired[dict[str, Any]]
+    name: Required[str]
 
 class WireAssistantBlockToolUse(TypedDict, total=False):
     block_type: Required[Literal['tool_use']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockToolUseData]
+
+class WireAssistantBlockServerToolContentData(TypedDict, total=False):
+    content: Required[Any]
+    id: NotRequired[str]
+    meta: NotRequired[dict[str, Any]]
+    name: Required[str]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockServerToolContentData]
+
+class WireAssistantBlockImageData(TypedDict, total=False):
+    blob_ref: Required[dict[str, Any]]
+    height: Required[int]
+    image_id: Required[str]
+    media_type: Required[str]
+    meta: Required[dict[str, Any]]
+    revised_prompt: Required[dict[str, Any]]
+    width: Required[int]
 
 class WireAssistantBlockImage(TypedDict, total=False):
     block_type: Required[Literal['image']]
-    data: Required[dict[str, Any]]
+    data: Required[WireAssistantBlockImageData]
 
 class WireAssistantBlockUnknown(TypedDict, total=False):
     block_type: Required[Literal['unknown']]

@@ -1585,7 +1585,8 @@ impl LiveAdapterHost {
         inner
             .channels
             .iter()
-            .filter_map(|(id, ch)| ch.retire_at.is_none().then(|| id.clone()))
+            .filter(|(_, ch)| ch.retire_at.is_none())
+            .map(|(id, _)| id.clone())
             .collect()
     }
 

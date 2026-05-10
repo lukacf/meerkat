@@ -2673,7 +2673,6 @@ dependencies = [
  "indexmap",
  "meerkat-contracts",
  "meerkat-core",
- "meerkat-llm-core",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

@@ -16,7 +16,6 @@ categories.workspace = true
 async-trait = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true }
-meerkat-llm-core = { workspace = true }
 axum = { workspace = true, features = ["ws"] }
 tokio = { workspace = true }
 serde = { workspace = true }

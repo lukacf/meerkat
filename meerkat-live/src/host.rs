@@ -1574,7 +1574,19 @@ impl LiveAdapterHost {
     pub async fn active_channels(&self) -> Vec<LiveChannelId> {
         let mut inner = self.inner.lock().await;
         Self::reap_retired_locked(&mut inner);
-        inner.channels.keys().cloned().collect()
+        // G7 (P2): exclude channels in their post-close TTL retention
+        // window. Retained-closed entries remain in `channels` so the
+        // reap path (G1) and post-close status reads (G42) keep working,
+        // but they no longer accept input — callers like
+        // `propagate_config_to_live_channels` and UI listings must not
+        // see them as active. `retire_at == Some(_)` is the canonical
+        // discriminator (already gated on in `open_channel` rebind and
+        // `attach_adapter`).
+        inner
+            .channels
+            .iter()
+            .filter_map(|(id, ch)| ch.retire_at.is_none().then(|| id.clone()))
+            .collect()
     }
 
     /// Reap channels whose post-close TTL has elapsed.
@@ -1795,6 +1807,70 @@ mod tests {
             "after reap, third open for session must still see B as bound"
         );
         assert_eq!(host.active_channels().await.len(), 1);
+    }
+
+    /// G7 (P2) regression: a channel inside its post-close TTL retention
+    /// window must not appear in `active_channels()`. Closed-but-retained
+    /// entries stay in the underlying map (so the reaper and post-close
+    /// status reads keep working) but the public `active_channels()`
+    /// accessor must not advertise them — callers like
+    /// `propagate_config_to_live_channels` would otherwise fan config
+    /// swaps out at retired channels. Post-reap, the channel is gone
+    /// from the map entirely, so it must still not appear.
+    #[tokio::test]
+    async fn active_channels_excludes_retained_closed_channels() {
+        let host = LiveAdapterHost::new();
+        let s1 = test_session_id();
+        let s2 = test_session_id();
+
+        let live = host.open_channel(s1).await.unwrap();
+        let closing = host.open_channel(s2).await.unwrap();
+
+        // Both freshly opened — both should be active.
+        let active_pre = host.active_channels().await;
+        assert!(active_pre.contains(&live));
+        assert!(active_pre.contains(&closing));
+        assert_eq!(active_pre.len(), 2);
+
+        // Close one. It enters the TTL retention window
+        // (`retire_at = Some(now + CLOSED_CHANNEL_TTL)`); the reaper
+        // does NOT drop it yet.
+        host.close_channel(&closing).await.unwrap();
+
+        // G7: the retained-closed channel must NOT appear in
+        // `active_channels()`, even though it's still in the underlying
+        // map. The live channel must still appear.
+        let active_during_ttl = host.active_channels().await;
+        assert_eq!(
+            active_during_ttl,
+            vec![live.clone()],
+            "retained-closed channel must not appear in active_channels()"
+        );
+        // Post-close status reads still succeed (channel is in the map).
+        assert_eq!(
+            host.channel_status(&closing).await.unwrap(),
+            LiveAdapterStatus::Closed,
+        );
+
+        // Force-expire the TTL and drive the reap; the closed channel
+        // is dropped from the map. Still must not appear in
+        // `active_channels()`.
+        {
+            let mut inner = host.inner.lock().await;
+            if let Some(channel) = inner.channels.get_mut(&closing) {
+                channel.retire_at =
+                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+            }
+        }
+        let active_post_reap = host.active_channels().await;
+        assert_eq!(active_post_reap, vec![live.clone()]);
+        {
+            let inner = host.inner.lock().await;
+            assert!(
+                !inner.channels.contains_key(&closing),
+                "post-reap, retired channel must be dropped from the map"
+            );
+        }
     }
 
     #[tokio::test]

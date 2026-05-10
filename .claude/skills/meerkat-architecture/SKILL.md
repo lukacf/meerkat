@@ -108,13 +108,12 @@ internals live in `meerkat-core::live_adapter` (`LiveAdapterStatus`,
 implementations sit in `meerkat-openai::live` and adjacent
 provider crates.
 
-There is no equivalent of the old `realtime-attachment.md`
-architectural reference — the DSL realtime-binding plane and
-`reconfigure_live_topology` orchestration were deleted, not renamed.
-For a deeper internal reference, `meerkat-rpc/src/handlers/live.rs`
-plus `meerkat-contracts/src/wire/live.rs` are the authoritative
-surface; `docs/guides/live.mdx` (when present) is the user-facing
-companion.
+The DSL realtime-binding plane and `reconfigure_live_topology`
+orchestration were deleted, not renamed; there is no separate
+architectural reference for the new live-adapter surface. For a
+deeper internal reference, `meerkat-rpc/src/handlers/live.rs` plus
+`meerkat-contracts/src/wire/live.rs` are the authoritative surface;
+`docs/guides/live.mdx` (when present) is the user-facing companion.
 
 ## The 5-machine target
 

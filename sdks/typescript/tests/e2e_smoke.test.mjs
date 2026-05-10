@@ -206,10 +206,11 @@ async function assertFetchableImageBlob(client, block) {
 
 describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
   let MeerkatClient;
+  let MeerkatError;
   const clients = [];
 
   before(async () => {
-    ({ MeerkatClient } = await import("../dist/index.js"));
+    ({ MeerkatClient, MeerkatError } = await import("../dist/index.js"));
   });
 
   afterEach(async () => {
@@ -596,16 +597,90 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
 
   if (includeScenario(59)) {
     // The TypeScript SDK's `RealtimeChannel` was removed in the live-adapter
-    // MVP (PR #659). The replacement is the `live/*` RPC surface
-    // (`liveOpen`/`liveSendInput`/`liveClose`/`liveStatus`/`liveCommitInput`/
-    // `liveInterrupt`/`liveTruncate`/`liveRefresh`) plus a caller-managed WS
-    // transport returned by `live/open`. A typed TS helper that wraps the WS
-    // transport is not yet shipped — see I53 in LIVE_ADAPTER_MVP_TODO.md (the
-    // Python SDK skips scenarios 57/58/64 with the same rationale).
+    // MVP (PR #659). The replacement is the typed `live/*` RPC surface that
+    // ships in `MeerkatClient` (see I53 in LIVE_ADAPTER_MVP_TODO.md):
+    // `liveOpen`, `liveStatus`, `liveClose`, `liveSendInput`,
+    // `liveSendInputImage`, `liveSendInputVideoFrame`, `liveCommitInput`,
+    // `liveInterrupt`, `liveTruncate`, `liveRefresh`. The original
+    // `RealtimeChannel.session().connect()` WS-connection wrapper has no 1:1
+    // typed analogue — `live/open` returns a transport bootstrap (URL/token)
+    // and the WS itself is caller-managed (`MeerkatClient.parseLiveObservation`
+    // type-narrows inbound frames but does not own the socket). The smoke
+    // harness does not pass `liveWs: true` in `connectClient`, so the rkat-rpc
+    // subprocess starts without `--live-ws`; the router has no live-transport
+    // state and the `live/*` arms fall through to METHOD_NOT_FOUND. This test
+    // exercises that the typed helpers serialize to the right JSON-RPC method
+    // names and surface the typed error end-to-end (SDK -> rkat-rpc subprocess).
+    // Mirrors the Python smoke pattern in scenarios 57/58/64.
     it(
-      "Scenario 59: realtime channel session exchange through the packaged SDK",
-      { skip: "RealtimeChannel removed in live-adapter MVP; replacement TS live_* WS helper pending I53" },
-      async () => {},
+      "Scenario 59: live channel typed-helper coverage through the packaged SDK",
+      { skip: !hasAnthropicKey() },
+      async () => {
+        const scenario = "Scenario 59";
+        const client = await withStepTimeout(
+          scenario,
+          "connect client",
+          connectClient({ realmId: "env_default" }),
+        );
+
+        const session = await withStepTimeout(
+          scenario,
+          "create live-helper smoke session",
+          client.createSession(
+            "Reply with TS-LIVE-59-OK and nothing else.",
+            {
+              model: anthropicModel(),
+              provider: "anthropic",
+            },
+          ),
+        );
+        assert.ok(session.id);
+
+        const expectMethodNotFound = async (label, op) => {
+          await assert.rejects(
+            () => withStepTimeout(scenario, label, op()),
+            (error) => {
+              assert.ok(
+                error instanceof MeerkatError,
+                `${label} should reject with MeerkatError, got ${error?.constructor?.name ?? typeof error}`,
+              );
+              assert.ok(
+                error.code === "METHOD_NOT_FOUND" || error.code === "-32601",
+                `${label} expected METHOD_NOT_FOUND/-32601, got ${error.code}`,
+              );
+              return true;
+            },
+          );
+        };
+
+        await expectMethodNotFound(
+          "liveOpen without --live-ws",
+          () => client.liveOpen({ session_id: session.id }),
+        );
+        await expectMethodNotFound(
+          "liveStatus without --live-ws",
+          () => client.liveStatus({ channel_id: "nonexistent-channel-59" }),
+        );
+        await expectMethodNotFound(
+          "liveClose without --live-ws",
+          () => client.liveClose({ channel_id: "nonexistent-channel-59" }),
+        );
+        await expectMethodNotFound(
+          "liveSendInput without --live-ws",
+          () => client.liveSendInput({
+            channel_id: "nonexistent-channel-59",
+            chunk: { kind: "text", text: "hello" },
+          }),
+        );
+        await expectMethodNotFound(
+          "liveCommitInput without --live-ws",
+          () => client.liveCommitInput({ channel_id: "nonexistent-channel-59" }),
+        );
+        await expectMethodNotFound(
+          "liveInterrupt without --live-ws",
+          () => client.liveInterrupt({ channel_id: "nonexistent-channel-59" }),
+        );
+      },
     );
   }
 

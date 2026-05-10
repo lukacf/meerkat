@@ -1748,7 +1748,11 @@ class WireLiveDegradationReasonOther(TypedDict, total=False):
     detail: Required[str]
     kind: Required[Literal['other']]
 
-WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther
+class WireLiveDegradationReasonUnknown(TypedDict, total=False):
+    debug: Required[str]
+    kind: Required[Literal['unknown']]
+
+WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown
 
 # Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].
 #
@@ -1958,7 +1962,7 @@ class WireLiveAdapterObservationAssistantTranscriptFinal(TypedDict, total=False)
     response_id: NotRequired[str]
     stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
     text: Required[str]
-    usage: Required[Any]
+    usage: Required[dict[str, Any]]
 
 class WireLiveAdapterObservationAssistantTranscriptTruncated(TypedDict, total=False):
     content_index: NotRequired[int]
@@ -1986,7 +1990,7 @@ class WireLiveAdapterObservationTurnCompleted(TypedDict, total=False):
     observation: Required[Literal['turn_completed']]
     response_id: NotRequired[str]
     stop_reason: Required[Literal['end_turn', 'tool_use', 'max_tokens', 'stop_sequence', 'content_filter', 'cancelled']]
-    usage: Required[Any]
+    usage: Required[dict[str, Any]]
 
 class WireLiveAdapterObservationStatusChanged(TypedDict, total=False):
     observation: Required[Literal['status_changed']]

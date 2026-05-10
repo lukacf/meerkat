@@ -1895,7 +1895,12 @@ export interface WireLiveDegradationReasonOther {
   kind: "other";
 }
 
-export type WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther;
+export interface WireLiveDegradationReasonUnknown {
+  debug: string;
+  kind: "unknown";
+}
+
+export type WireLiveDegradationReason = WireLiveDegradationReasonRateLimited | WireLiveDegradationReasonProviderThrottled | WireLiveDegradationReasonNetworkUnstable | WireLiveDegradationReasonOther | WireLiveDegradationReasonUnknown;
 
 export interface WireLiveAdapterStatusIdle {
   status: "idle";
@@ -2078,7 +2083,7 @@ export interface WireLiveAdapterObservationAssistantTranscriptFinal {
   response_id?: string;
   stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
   text: string;
-  usage: unknown;
+  usage: Record<string, unknown>;
 }
 
 export interface WireLiveAdapterObservationAssistantTranscriptTruncated {
@@ -2111,7 +2116,7 @@ export interface WireLiveAdapterObservationTurnCompleted {
   observation: "turn_completed";
   response_id?: string;
   stop_reason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "content_filter" | "cancelled";
-  usage: unknown;
+  usage: Record<string, unknown>;
 }
 
 export interface WireLiveAdapterObservationStatusChanged {

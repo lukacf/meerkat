@@ -51,6 +51,14 @@ pub const LIVE_WS_PATH: &str = "/live/ws";
 /// Time-to-live for a minted but unconsumed token.
 pub const TOKEN_TTL: Duration = Duration::from_secs(60);
 
+/// Typed WS error frame sent to clients on transport-level failures.
+#[derive(Debug, serde::Serialize)]
+struct WsErrorFrame {
+    error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
 /// Negotiated binary frame format for the WS upgrade query string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryFormat {
@@ -311,8 +319,11 @@ async fn handle_live_socket(
     let channel_id = match state.consume_token(&token, &expected_channel).await {
         Ok(id) => id,
         Err(err) => {
-            let err_json = serde_json::json!({"error": "invalid_token", "reason": err.to_string()})
-                .to_string();
+            let err_json = serde_json::to_string(&WsErrorFrame {
+                error: "invalid_token".into(),
+                reason: Some(err.to_string()),
+            })
+            .unwrap_or_default();
             let _ = socket.send(WsMessage::Text(err_json.into())).await;
             close_with(&mut socket, close_code::POLICY, "invalid_token").await;
             return;
@@ -342,7 +353,10 @@ async fn handle_live_socket(
                             Ok(chunk) => {
                                 if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                                     tracing::warn!(channel = %channel_id, error = %err, "send_input failed");
-                                    let err_json = serde_json::json!({"error": err.to_string()}).to_string();
+                                    let err_json = serde_json::to_string(&WsErrorFrame {
+                                        error: err.to_string(),
+                                        reason: None,
+                                    }).unwrap_or_default();
                                     let _ = socket.send(WsMessage::Text(err_json.into())).await;
                                 }
                             }
@@ -377,7 +391,10 @@ async fn handle_live_socket(
                         };
                         if let Err(err) = state.host.send_input(&channel_id, chunk).await {
                             tracing::warn!(channel = %channel_id, error = %err, "binary send_input failed");
-                            let err_json = serde_json::json!({"error": err.to_string()}).to_string();
+                            let err_json = serde_json::to_string(&WsErrorFrame {
+                                error: err.to_string(),
+                                reason: None,
+                            }).unwrap_or_default();
                             let _ = socket.send(WsMessage::Text(err_json.into())).await;
                         }
                     }

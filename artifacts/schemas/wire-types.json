@@ -9513,6 +9513,22 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
           }
         ]
       }
@@ -24239,6 +24255,22 @@
               "detail"
             ],
             "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
           }
         ]
       },
@@ -24273,6 +24305,48 @@
           "cancelled"
         ],
         "type": "string"
+      },
+      "WireUsage": {
+        "description": "Canonical token usage for wire protocol.",
+        "properties": {
+          "cache_creation_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "cache_read_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "input_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "output_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "total_tokens": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "total_tokens"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -24508,7 +24582,9 @@
           "text": {
             "type": "string"
           },
-          "usage": true
+          "usage": {
+            "$ref": "#/$defs/WireUsage"
+          }
         },
         "required": [
           "observation",
@@ -24636,7 +24712,9 @@
           "stop_reason": {
             "$ref": "#/$defs/WireStopReason"
           },
-          "usage": true
+          "usage": {
+            "$ref": "#/$defs/WireUsage"
+          }
         },
         "required": [
           "observation",
@@ -24776,6 +24854,22 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -25069,6 +25163,22 @@
         "required": [
           "kind",
           "detail"
+        ],
+        "type": "object"
+      },
+      {
+        "properties": {
+          "debug": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "unknown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "debug"
         ],
         "type": "object"
       }

@@ -22,7 +22,6 @@ use meerkat_core::live_adapter::{
     LiveTransportBootstrap,
 };
 use meerkat_core::realtime_transcript::RealtimeTranscriptEvent;
-use meerkat_core::types::Usage;
 
 use crate::wire::realtime::RealtimeTurningMode;
 use crate::wire::session::WireStopReason;
@@ -1251,14 +1250,7 @@ pub enum WireLiveAdapterObservation {
         response_id: Option<String>,
         text: String,
         stop_reason: WireStopReason,
-        // Core `Usage` does not have a registered schema mirror that the
-        // SDK codegen promotes; expose as opaque JSON in the schema layer
-        // (matches the `LiveOpenResult.transport: LiveTransportBootstrap`
-        // pattern). Real shape is `{input_tokens, output_tokens,
-        // cache_creation_tokens?, cache_read_tokens?}` per
-        // `meerkat_core::types::Usage`.
-        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-        usage: Usage,
+        usage: crate::wire::WireUsage,
     },
     AssistantTranscriptTruncated {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1299,8 +1291,7 @@ pub enum WireLiveAdapterObservation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response_id: Option<String>,
         stop_reason: WireStopReason,
-        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-        usage: Usage,
+        usage: crate::wire::WireUsage,
     },
     StatusChanged {
         status: WireLiveAdapterStatus,
@@ -1414,7 +1405,7 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
                 response_id,
                 text,
                 stop_reason: WireStopReason::from(stop_reason),
-                usage,
+                usage: usage.into(),
             },
             LiveAdapterObservation::AssistantTranscriptTruncated {
                 provider_item_id,
@@ -1451,7 +1442,7 @@ impl From<LiveAdapterObservation> for WireLiveAdapterObservation {
             } => Self::TurnCompleted {
                 response_id,
                 stop_reason: WireStopReason::from(stop_reason),
-                usage,
+                usage: usage.into(),
             },
             LiveAdapterObservation::StatusChanged { status } => Self::StatusChanged {
                 status: status.into(),
@@ -1872,9 +1863,10 @@ mod tests {
                 response_id: Some("resp_final".into()),
                 text: "all done".into(),
                 stop_reason: WireStopReason::EndTurn,
-                usage: Usage {
+                usage: crate::wire::WireUsage {
                     input_tokens: 5,
                     output_tokens: 7,
+                    total_tokens: 12,
                     cache_creation_tokens: None,
                     cache_read_tokens: None,
                 },
@@ -1897,9 +1889,10 @@ mod tests {
             WireLiveAdapterObservation::TurnCompleted {
                 response_id: Some("resp_done".into()),
                 stop_reason: WireStopReason::EndTurn,
-                usage: Usage {
+                usage: crate::wire::WireUsage {
                     input_tokens: 12,
                     output_tokens: 34,
+                    total_tokens: 46,
                     cache_creation_tokens: Some(1),
                     cache_read_tokens: Some(2),
                 },

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Canonical token usage for wire protocol.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireUsage {
     pub input_tokens: u64,

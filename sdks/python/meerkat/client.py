@@ -2453,7 +2453,11 @@ class MeerkatClient:
     # validate field access via the regenerated types in
     # `meerkat.generated.types`.
 
-    async def live_open(self, session_id: str) -> dict[str, Any]:
+    async def live_open(
+        self,
+        session_id: str,
+        turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+    ) -> dict[str, Any]:
         """Open a live audio/text channel for a session. Wraps `live/open`.
 
         Returns a dict shaped like `meerkat.types.LiveOpenResult` with keys
@@ -2466,8 +2470,21 @@ class MeerkatClient:
         `meerkat.types.WireLiveContinuityMode` (tagged on `mode`; the
         `provider_native_resume` variant additionally carries
         `provider_session_id`). CC5/CC6.
+
+        R4-2 (P2): the optional ``turning_mode`` argument selects between
+        the provider-managed flow (server VAD owns commits) and the
+        explicit-commit flow (client owns commits). The G9 typed text-only
+        ``live_commit_input(channel_id, response_modality="text")`` path
+        requires ``"explicit_commit"`` because the OpenAI realtime API
+        rejects ``input_audio_buffer.commit`` unless the session was
+        opened with explicit-commit semantics. Defaults to ``None``,
+        which omits the field on the wire — the server treats omitted as
+        ``"provider_managed"`` for back-compat.
         """
-        return await self._request("live/open", {"session_id": session_id})
+        params: dict[str, Any] = {"session_id": session_id}
+        if turning_mode is not None:
+            params["turning_mode"] = turning_mode
+        return await self._request("live/open", params)
 
     async def live_status(self, channel_id: str) -> dict[str, Any]:
         """Get the status of a live channel. Wraps `live/status`.

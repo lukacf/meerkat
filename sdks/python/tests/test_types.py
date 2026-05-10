@@ -2999,3 +2999,128 @@ async def test_client_live_refresh_preserves_unknown_status():
     assert isinstance(result, LiveRefreshResult)
     assert result.status == "applied_sync"  # type: ignore[comparison-overlap]
     assert result.refresh_enqueued is True
+
+
+@pytest.mark.asyncio
+async def test_client_live_open_omits_turning_mode_when_default():
+    """R4-2 (P2): when the caller does not pass ``turning_mode``, the
+    Python SDK must omit the field on the wire — the server's
+    ``LiveOpenParams.turning_mode`` is ``Option<RealtimeTurningMode>``
+    with ``#[serde(skip_serializing_if = "Option::is_none")]`` and treats
+    omitted as ``ProviderManaged`` for back-compat with R3-1-era clients.
+    """
+    client = MeerkatClient()
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        return {
+            "channel_id": "live_42",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {
+                "audio_in": True,
+                "audio_out": True,
+                "text_in": True,
+                "text_out": True,
+                "image_in": False,
+                "video_in": False,
+                "transcript_supported": True,
+                "barge_in_supported": True,
+                "provider_native_resume": False,
+            },
+            "continuity": {"mode": "fresh"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.live_open("session-42")
+
+    assert captured == [("live/open", {"session_id": "session-42"})]
+    assert "turning_mode" not in captured[0][1]
+
+
+@pytest.mark.asyncio
+async def test_client_live_open_passes_explicit_commit_turning_mode():
+    """R4-2 (P2): explicit-commit on the wire so the G9 typed text-only
+    ``live_commit_input(response_modality="text")`` path is reachable.
+    Without R4-2, the Python SDK had no path to open a channel in
+    ``ExplicitCommit`` mode — callers saw the modality knob on
+    ``live_commit_input`` but couldn't actually open in the matching
+    turning mode.
+    """
+    client = MeerkatClient()
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        return {
+            "channel_id": "live_43",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {
+                "audio_in": True,
+                "audio_out": True,
+                "text_in": True,
+                "text_out": True,
+                "image_in": False,
+                "video_in": False,
+                "transcript_supported": True,
+                "barge_in_supported": True,
+                "provider_native_resume": False,
+            },
+            "continuity": {"mode": "fresh"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.live_open("session-43", turning_mode="explicit_commit")
+
+    assert captured == [
+        (
+            "live/open",
+            {"session_id": "session-43", "turning_mode": "explicit_commit"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_client_live_open_passes_provider_managed_turning_mode():
+    """R4-2 (P2): explicit ``provider_managed`` matches the server-side
+    default but lets callers pin the wire shape rather than relying on
+    the omitted-field default. Useful for callers that want their request
+    log to carry the explicit decision.
+    """
+    client = MeerkatClient()
+
+    captured: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_request(method, params):
+        captured.append((method, params))
+        return {
+            "channel_id": "live_44",
+            "transport": {"transport": "websocket", "url": "ws://x", "token": "t"},
+            "capabilities": {
+                "audio_in": True,
+                "audio_out": True,
+                "text_in": True,
+                "text_out": True,
+                "image_in": False,
+                "video_in": False,
+                "transcript_supported": True,
+                "barge_in_supported": True,
+                "provider_native_resume": False,
+            },
+            "continuity": {"mode": "fresh"},
+        }
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    await client.live_open("session-44", turning_mode="provider_managed")
+
+    assert captured == [
+        (
+            "live/open",
+            {"session_id": "session-44", "turning_mode": "provider_managed"},
+        )
+    ]

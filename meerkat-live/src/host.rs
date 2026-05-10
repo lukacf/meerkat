@@ -384,16 +384,16 @@ pub trait LiveProjectionSink: Send + Sync {
     /// runtime's idempotent ordering / staging machinery — the same path that
     /// already handles streaming assistant deltas.
     ///
-    /// A default `Ok(())` body is provided so existing implementations stay
-    /// compilable while production sinks (`SessionServiceProjectionSink`)
-    /// gain a real implementation. Tests should override to assert routing.
+    /// R6-6 (P3 dogma): no default body. Every sink — production, no-op, and
+    /// test fakes alike — must explicitly handle realtime transcript events.
+    /// A default `Ok(())` would let a forgetful "mandatory" sink silently
+    /// drop `ItemObserved` / `AssistantTurnCompleted` / etc., which is the
+    /// same fail-open shape R5-1 closed at construction time.
     async fn append_realtime_transcript(
         &self,
-        _session_id: &SessionId,
-        _event: &RealtimeTranscriptEvent,
-    ) -> Result<(), LiveProjectionError> {
-        Ok(())
-    }
+        session_id: &SessionId,
+        event: &RealtimeTranscriptEvent,
+    ) -> Result<(), LiveProjectionError>;
 }
 
 /// Errors returned by [`LiveProjectionSink`] implementations.
@@ -514,6 +514,19 @@ impl LiveProjectionSink for NoOpProjectionSink {
         _session_id: &SessionId,
         _code: LiveAdapterErrorCode,
         _message: &str,
+    ) -> Result<(), LiveProjectionError> {
+        Ok(())
+    }
+
+    /// R6-6 (P3 dogma): explicit no-op. The whole point of [`NoOpProjectionSink`]
+    /// is that no canonical projection happens — making this an explicit body
+    /// (rather than relying on a trait default) means the dogma is visible at
+    /// the implementation site, not hidden in a default that future fakes
+    /// could silently inherit.
+    async fn append_realtime_transcript(
+        &self,
+        _session_id: &SessionId,
+        _event: &RealtimeTranscriptEvent,
     ) -> Result<(), LiveProjectionError> {
         Ok(())
     }
@@ -2861,6 +2874,47 @@ mod tests {
         assert!(sink.user_transcripts.lock().unwrap().is_empty());
         assert!(sink.turn_completed.lock().unwrap().is_empty());
         assert!(sink.interrupts.lock().unwrap().is_empty());
+    }
+
+    // R6-6 (P3 dogma): `LiveProjectionSink::append_realtime_transcript` is a
+    // *required* trait method — there is no default body. This test pins the
+    // path through `NoOpProjectionSink` (the explicit-opt-out sink) so that
+    // a future refactor cannot reintroduce a silent default that drops
+    // realtime events on the floor for "mandatory" sinks that forgot to
+    // override the method.
+    #[tokio::test]
+    async fn noop_projection_sink_explicitly_accepts_realtime_transcript() {
+        use meerkat_core::RealtimeTranscriptRole;
+        let sink: Arc<dyn LiveProjectionSink> = Arc::new(NoOpProjectionSink);
+        let host = LiveAdapterHost::new(Arc::clone(&sink));
+        let session_id = test_session_id();
+        let ch = host.open_channel(session_id.clone()).await.unwrap();
+
+        let event = RealtimeTranscriptEvent::ItemObserved {
+            item_id: "item_noop".into(),
+            previous_item_id: None,
+            role: RealtimeTranscriptRole::Assistant,
+            response_id: Some("resp_noop".into()),
+        };
+        let obs = LiveAdapterObservation::RealtimeTranscript {
+            event: event.clone(),
+        };
+
+        // The host-side route must treat NoOpProjectionSink as a real owner
+        // (TranscriptAppended), not a silent fallthrough — that is exactly
+        // what the explicit `Ok(())` body on the impl guarantees once the
+        // trait default is removed.
+        let outcome = host.apply_observation(&ch, &obs).await.unwrap();
+        assert!(
+            matches!(outcome, ObservationOutcome::TranscriptAppended),
+            "NoOpProjectionSink must accept RealtimeTranscript explicitly, got {outcome:?}"
+        );
+
+        // And the direct trait call also has to compile + succeed — proving
+        // the impl exists at the impl site, not via a trait default.
+        sink.append_realtime_transcript(&session_id, &event)
+            .await
+            .expect("NoOpProjectionSink::append_realtime_transcript must be explicit Ok");
     }
 
     #[tokio::test]

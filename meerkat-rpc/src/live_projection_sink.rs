@@ -856,6 +856,20 @@ mod tests {
                 .push((session_id.clone(), code));
             Ok(())
         }
+
+        // R6-6 (P3 dogma): explicit no-op. These rpc tests assert the
+        // production `SessionServiceProjectionSink` wiring against the
+        // captured `SessionRuntime` calls (`CapturedRuntimeCall::Realtime
+        // Transcript`), not against this sink — so no recording is needed
+        // here. We still spell it out instead of relying on a trait default
+        // so the no-op is visible at this implementation site.
+        async fn append_realtime_transcript(
+            &self,
+            _session_id: &SessionId,
+            _event: &RealtimeTranscriptEvent,
+        ) -> Result<(), LiveProjectionError> {
+            Ok(())
+        }
     }
 
     /// Adapter that records SubmitToolResult/SubmitToolError commands and

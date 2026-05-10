@@ -3440,21 +3440,22 @@ async fn openai_live_pump(
                             // R12 + R5-9 (FIX-OPENAI follow-up): classify the local
                             // guard rejection by *variant*, not by reason
                             // string. The producer now distinguishes:
+                            //   * Refresh-class rejections (model swap,
+                            //     provider swap, audio config mismatch) —
+                            //     typed `OpenAiLiveCommandError::Refresh*`
+                            //     variants from R5-2 followup. Terminal on
+                            //     this channel: surface as `Error` so the
+                            //     close-and-reopen requirement is honored.
                             //   * `InvalidInputShape` — caller sent a
                             //     request shape this provider does not
                             //     support (image, video frame, unsupported
                             //     chunk variant). Scoped, non-terminal:
                             //     surface as `CommandRejected` so the
                             //     channel survives and the client can retry.
-                            //   * `InvalidConfig` — provider-config
-                            //     rejection (model swap, provider swap,
-                            //     audio rate mismatch). Terminal on this
-                            //     channel: surface as `Error` so the
-                            //     close-and-reopen requirement is honored.
-                            //   * `InvalidRequest` (catch-all) — unknown
-                            //     `LiveAdapterCommand` variants etc.
-                            //     Surface as terminal `Error` (default to
-                            //     close-and-reopen for the unknown).
+                            //   * `InvalidConfig` / `InvalidRequest` (no
+                            //     longer used for refresh rejections) —
+                            //     surface as terminal `Error` with
+                            //     `ConfigRejected { Other { detail } }`.
                             //   * everything else — terminal `Error` with
                             //     `ProviderError` code (real provider
                             //     outage / network / etc.).
@@ -3462,44 +3463,19 @@ async fn openai_live_pump(
                             // message that incidentally contains
                             // "image_input" cannot leak across the
                             // scoped/terminal boundary.
-                            // R5-2 (P2 dogma): `ConfigRejected.reason` is a
-                            // typed `LiveConfigRejectionReason`. The
-                            // `InvalidInputShape` arm classifies on the
-                            // closed token set the producer emits via
-                            // `classify_invalid_input_shape` (exact equality,
-                            // not substring). The `InvalidConfig`/
-                            // `InvalidRequest` arms collapse onto
-                            // `Other { detail }` since no caller routes on
-                            // their text today; lifting them onto typed
-                            // variants is left to follow-up work that
-                            // restructures the producer side.
-                            let code = match &err {
-                                LlmError::InvalidInputShape { message } => {
-                                    LiveAdapterErrorCode::ConfigRejected {
-                                        reason: classify_invalid_input_shape(message),
-                                    }
-                                }
-                                LlmError::InvalidConfig { message }
-                                | LlmError::InvalidRequest { message } => {
-                                    LiveAdapterErrorCode::ConfigRejected {
-                                        reason: LiveConfigRejectionReason::Other {
-                                            detail: message.clone(),
-                                        },
-                                    }
-                                }
-                                _ => LiveAdapterErrorCode::ProviderError,
-                            };
-                            let obs = match &err {
-                                LlmError::InvalidInputShape { .. } => {
-                                    LiveAdapterObservation::CommandRejected {
-                                        code,
-                                        message: err.to_string(),
-                                    }
-                                }
-                                _ => LiveAdapterObservation::Error {
-                                    code,
-                                    message: err.to_string(),
-                                },
+                            // R5-2 followup (Shape A): refresh-class
+                            // rejections are now typed end-to-end. The
+                            // `OpenAiLiveCommandError::Refresh*` variants
+                            // map directly onto the corresponding
+                            // `LiveConfigRejectionReason::Refresh*` typed
+                            // variants — no more `Other { detail }` for
+                            // refresh-class errors.
+                            let message = err.to_string();
+                            let (code, scoped) = classify_command_error(&err);
+                            let obs = if scoped {
+                                LiveAdapterObservation::CommandRejected { code, message }
+                            } else {
+                                LiveAdapterObservation::Error { code, message }
                             };
                             // Command rejections / errors are control-lane;
                             // never drop. If the consumer has gone away,
@@ -3545,6 +3521,143 @@ fn classify_invalid_input_shape(message: &str) -> LiveConfigRejectionReason {
     }
 }
 
+/// R5-2 followup (Shape A): typed error from
+/// `execute_openai_live_command` that distinguishes the refresh-class
+/// rejections (model swap, provider swap, audio config mismatch) from
+/// every other underlying `LlmError`. The pump caller maps each typed
+/// variant directly onto the corresponding
+/// [`LiveConfigRejectionReason`] variant, removing the previous
+/// indirection through `LlmError::InvalidConfig { message: String }` →
+/// `LiveConfigRejectionReason::Other { detail }` for refresh-class
+/// errors. New refresh-class rejections must add a typed variant here
+/// rather than reach for [`Self::Llm`].
+#[derive(Debug)]
+enum OpenAiLiveCommandError {
+    /// Refresh rejected: snapshot's `model_id` differs from the bound
+    /// model. OpenAI Realtime `session.update` cannot rebind model in
+    /// place; the channel must close + reopen.
+    RefreshModelSwap {
+        from_model: String,
+        to_model: String,
+    },
+    /// Refresh rejected: snapshot's `provider_id` differs from the bound
+    /// provider; close + reopen required.
+    RefreshProviderSwap {
+        from_provider: String,
+        to_provider: String,
+    },
+    /// Refresh rejected: snapshot's `audio_config` cannot be applied in
+    /// place (OpenAI Realtime is fixed to pcm/24kHz mono). `detail`
+    /// carries the offending rate/channel projection for logs.
+    RefreshAudioConfigMismatch { detail: String },
+    /// Catch-all for every other underlying [`LlmError`] (input-shape
+    /// rejections, provider outages, network timeouts, etc.). The pump
+    /// caller continues to classify these via the existing `LlmError`
+    /// variant match.
+    Llm(LlmError),
+}
+
+impl From<LlmError> for OpenAiLiveCommandError {
+    fn from(err: LlmError) -> Self {
+        OpenAiLiveCommandError::Llm(err)
+    }
+}
+
+impl std::fmt::Display for OpenAiLiveCommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RefreshModelSwap {
+                from_model,
+                to_model,
+            } => write!(
+                f,
+                "live adapter refresh: model swap from `{from_model}` to `{to_model}` requires close + reopen \
+                 (OpenAI Realtime does not accept a mutable `model` on session.update)"
+            ),
+            Self::RefreshProviderSwap {
+                from_provider,
+                to_provider,
+            } => write!(
+                f,
+                "live adapter refresh: provider swap from `{from_provider}` to `{to_provider}` requires close + reopen"
+            ),
+            Self::RefreshAudioConfigMismatch { detail } => {
+                write!(f, "live adapter refresh: audio config mismatch ({detail})")
+            }
+            Self::Llm(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+/// R5-2 followup (Shape A): pump-side classification that maps an
+/// [`OpenAiLiveCommandError`] returned from
+/// [`execute_openai_live_command`] onto the typed
+/// [`LiveAdapterErrorCode`] used in
+/// [`LiveAdapterObservation::Error`]/[`LiveAdapterObservation::CommandRejected`].
+///
+/// The boolean second component (`scoped`) signals whether the
+/// rejection is non-terminal (`CommandRejected`, channel survives) or
+/// terminal (`Error`, channel must close + reopen). Refresh-class
+/// rejections are terminal; input-shape rejections are scoped.
+///
+/// Lifted into a free function so the routing invariants can be
+/// unit-tested directly without driving the full async pump.
+fn classify_command_error(
+    err: &OpenAiLiveCommandError,
+) -> (LiveAdapterErrorCode, /* scoped */ bool) {
+    match err {
+        OpenAiLiveCommandError::RefreshModelSwap {
+            from_model,
+            to_model,
+        } => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::RefreshModelSwap {
+                    from_model: from_model.clone(),
+                    to_model: to_model.clone(),
+                },
+            },
+            false,
+        ),
+        OpenAiLiveCommandError::RefreshProviderSwap {
+            from_provider,
+            to_provider,
+        } => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::RefreshProviderSwap {
+                    from_provider: from_provider.clone(),
+                    to_provider: to_provider.clone(),
+                },
+            },
+            false,
+        ),
+        OpenAiLiveCommandError::RefreshAudioConfigMismatch { detail } => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::RefreshAudioConfigMismatch {
+                    detail: detail.clone(),
+                },
+            },
+            false,
+        ),
+        OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: classify_invalid_input_shape(message),
+            },
+            true,
+        ),
+        OpenAiLiveCommandError::Llm(
+            LlmError::InvalidConfig { message } | LlmError::InvalidRequest { message },
+        ) => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::Other {
+                    detail: message.clone(),
+                },
+            },
+            false,
+        ),
+        OpenAiLiveCommandError::Llm(_) => (LiveAdapterErrorCode::ProviderError, false),
+    }
+}
+
 /// Execute a `LiveAdapterCommand` against the inner realtime session.
 ///
 /// A9: the `Open { snapshot }` arm seeds the OpenAI conversation with
@@ -3557,7 +3670,7 @@ fn classify_invalid_input_shape(message: &str) -> LiveConfigRejectionReason {
 async fn execute_openai_live_command(
     session: &mut OpenAiRealtimeSession,
     command: LiveAdapterCommand,
-) -> Result<(), LlmError> {
+) -> Result<(), OpenAiLiveCommandError> {
     match command {
         LiveAdapterCommand::Open { snapshot } => {
             // A9 + R3: drive the canonical seed path directly from the
@@ -3572,7 +3685,8 @@ async fn execute_openai_live_command(
             // are emitted alongside seed history.
             session
                 .seed_history_projection(&snapshot.seed_messages, &snapshot.runtime_system_context)
-                .await
+                .await?;
+            Ok(())
         }
         LiveAdapterCommand::Refresh { snapshot } => {
             // R1 + R9: a snapshot-driven refresh applies the mutable
@@ -3609,22 +3723,17 @@ async fn execute_openai_live_command(
             if let Some(current_model) = session.current_model_id.as_deref()
                 && current_model != snapshot.model_id
             {
-                return Err(LlmError::InvalidConfig {
-                    message: format!(
-                        "live adapter refresh: model swap from `{current_model}` to `{}` requires close + reopen \
-                         (OpenAI Realtime does not accept a mutable `model` on session.update)",
-                        snapshot.model_id
-                    ),
+                return Err(OpenAiLiveCommandError::RefreshModelSwap {
+                    from_model: current_model.to_string(),
+                    to_model: snapshot.model_id.clone(),
                 });
             }
             if let Some(current_provider) = session.current_provider_id.as_deref()
                 && current_provider != snapshot.provider_id
             {
-                return Err(LlmError::InvalidConfig {
-                    message: format!(
-                        "live adapter refresh: provider swap from `{current_provider}` to `{}` requires close + reopen",
-                        snapshot.provider_id
-                    ),
+                return Err(OpenAiLiveCommandError::RefreshProviderSwap {
+                    from_provider: current_provider.to_string(),
+                    to_provider: snapshot.provider_id.clone(),
                 });
             }
             if let Some(audio_cfg) = snapshot.audio_config.as_ref()
@@ -3633,9 +3742,9 @@ async fn execute_openai_live_command(
                     || audio_cfg.input_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS)
                     || audio_cfg.output_channels != u16::from(OPENAI_REALTIME_AUDIO_CHANNELS))
             {
-                return Err(LlmError::InvalidConfig {
-                    message: format!(
-                        "live adapter refresh: audio config rate={}/{} ch={}/{} cannot be applied in place \
+                return Err(OpenAiLiveCommandError::RefreshAudioConfigMismatch {
+                    detail: format!(
+                        "rate={}/{} ch={}/{} cannot be applied in place \
                          (OpenAI Realtime live session is fixed to pcm/{}Hz mono); close + reopen required",
                         audio_cfg.input_sample_rate_hz,
                         audio_cfg.output_sample_rate_hz,
@@ -3647,7 +3756,8 @@ async fn execute_openai_live_command(
             }
             session
                 .apply_refresh_session_update_from_snapshot(&snapshot)
-                .await
+                .await?;
+            Ok(())
         }
         LiveAdapterCommand::SendInput { chunk } => {
             let input = match chunk {
@@ -3678,31 +3788,36 @@ async fn execute_openai_live_command(
                 // path. The classification is now structural — the pump
                 // never inspects the reason string.
                 LiveInputChunk::Image { .. } => {
-                    return Err(LlmError::InvalidInputShape {
+                    return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
                         message: "image_input_not_implemented".to_string(),
-                    });
+                    }));
                 }
                 LiveInputChunk::VideoFrame { .. } => {
-                    return Err(LlmError::InvalidInputShape {
+                    return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
                         message: "video_frame_input_not_implemented".to_string(),
-                    });
+                    }));
                 }
                 // `LiveInputChunk` is `#[non_exhaustive]`. Future variants
                 // are unsupported here until OpenAI Realtime grows the
                 // capability; mirror the typed-rejection pattern with a
                 // generic reason rather than panicking.
                 _ => {
-                    return Err(LlmError::InvalidInputShape {
+                    return Err(OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
                         message: "unsupported_input_chunk_variant".to_string(),
-                    });
+                    }));
                 }
             };
-            session.send_input(input).await
+            session.send_input(input).await?;
+            Ok(())
         }
         LiveAdapterCommand::CommitInput { response_modality } => {
-            session.commit_turn_with_modality(response_modality).await
+            session.commit_turn_with_modality(response_modality).await?;
+            Ok(())
         }
-        LiveAdapterCommand::Interrupt => session.interrupt().await,
+        LiveAdapterCommand::Interrupt => {
+            session.interrupt().await?;
+            Ok(())
+        }
         LiveAdapterCommand::TruncateAssistantOutput {
             item_id,
             content_index,
@@ -3710,7 +3825,8 @@ async fn execute_openai_live_command(
         } => {
             session
                 .truncate_assistant_output(item_id, content_index, audio_played_ms)
-                .await
+                .await?;
+            Ok(())
         }
         LiveAdapterCommand::SubmitToolResult { result } => {
             let tool_result = CoreToolResult {
@@ -3718,15 +3834,17 @@ async fn execute_openai_live_command(
                 content: result.content,
                 is_error: result.is_error,
             };
-            session.submit_tool_result(tool_result).await
+            session.submit_tool_result(tool_result).await?;
+            Ok(())
         }
         LiveAdapterCommand::SubmitToolError { call_id, error } => {
-            session.submit_tool_error(call_id, error).await
+            session.submit_tool_error(call_id, error).await?;
+            Ok(())
         }
         LiveAdapterCommand::Close => Ok(()),
-        _unsupported => Err(LlmError::InvalidRequest {
+        _unsupported => Err(OpenAiLiveCommandError::Llm(LlmError::InvalidRequest {
             message: "live adapter received unsupported LiveAdapterCommand variant".to_string(),
-        }),
+        })),
     }
 }
 
@@ -7779,26 +7897,21 @@ mod tests {
             Some(LiveAdapterObservation::Error { code, message }) => {
                 match code {
                     LiveAdapterErrorCode::ConfigRejected { reason } => {
-                        // R5-2: refresh-time model-swap surfaces through
-                        // `LlmError::InvalidConfig`, which the pump bins
-                        // into `Other { detail }`. The detail preserves the
-                        // human-readable swap text the producer emits, so
-                        // SDK consumers that observe `Other` still see the
-                        // swap target in `detail` for diagnostics.
+                        // R5-2 followup (Shape A): refresh-time model-swap
+                        // is now typed end-to-end via
+                        // `OpenAiLiveCommandError::RefreshModelSwap` →
+                        // `LiveConfigRejectionReason::RefreshModelSwap`.
                         match &reason {
-                            LiveConfigRejectionReason::Other { detail } => {
-                                assert!(
-                                    detail.contains("model swap")
-                                        && detail.contains("gpt-realtime-mini-v2")
-                                        && detail.contains("close + reopen"),
-                                    "ConfigRejected.Other.detail must name the swap \
-                                     target and direct the caller to close + reopen, \
-                                     got: {detail}"
-                                );
+                            LiveConfigRejectionReason::RefreshModelSwap {
+                                from_model,
+                                to_model,
+                            } => {
+                                assert_eq!(from_model, "gpt-realtime-2");
+                                assert_eq!(to_model, "gpt-realtime-mini-v2");
                             }
                             other => panic!(
-                                "refresh-time model swap must currently bin to \
-                                 LiveConfigRejectionReason::Other, got: {other:?}"
+                                "refresh-time model swap must surface as typed \
+                                 LiveConfigRejectionReason::RefreshModelSwap, got: {other:?}"
                             ),
                         }
                     }
@@ -7829,6 +7942,305 @@ mod tests {
         );
 
         adapter.close().await.expect("close must succeed");
+    }
+
+    /// R5-2 followup (Shape A): a `Refresh { snapshot }` whose
+    /// `model_id` differs from the bound model must surface as a typed
+    /// [`LiveConfigRejectionReason::RefreshModelSwap`] variant —
+    /// produced end-to-end by
+    /// [`OpenAiLiveCommandError::RefreshModelSwap`] in
+    /// `execute_openai_live_command`, not by `Other { detail }`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_model_swap_emits_typed_refresh_model_swap_variant() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 7,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: "gpt-realtime-mini-v2".to_string(),
+            provider_id: Provider::OpenAI.as_str().to_string(),
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+        };
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .expect("Refresh must dispatch");
+
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+
+        match observation {
+            Some(LiveAdapterObservation::Error {
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+                ..
+            }) => match reason {
+                LiveConfigRejectionReason::RefreshModelSwap {
+                    from_model,
+                    to_model,
+                } => {
+                    assert_eq!(from_model, "gpt-realtime-2");
+                    assert_eq!(to_model, "gpt-realtime-mini-v2");
+                }
+                other => panic!("expected RefreshModelSwap typed variant, got {other:?}"),
+            },
+            other => panic!("expected ConfigRejected Error, got {other:?}"),
+        }
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R5-2 followup (Shape A): a `Refresh { snapshot }` whose
+    /// `provider_id` differs from the bound provider must surface as a
+    /// typed [`LiveConfigRejectionReason::RefreshProviderSwap`].
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_provider_swap_emits_typed_refresh_provider_swap_variant() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveProjectionSnapshot;
+        use meerkat_core::types::SessionId;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 8,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: "gpt-realtime-2".to_string(),
+            // Mutated provider — must be rejected as RefreshProviderSwap.
+            provider_id: "anthropic".to_string(),
+            audio_config: None,
+            runtime_system_context: Vec::new(),
+        };
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .expect("Refresh must dispatch");
+
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+
+        match observation {
+            Some(LiveAdapterObservation::Error {
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+                ..
+            }) => match reason {
+                LiveConfigRejectionReason::RefreshProviderSwap {
+                    from_provider,
+                    to_provider,
+                } => {
+                    assert_eq!(from_provider, Provider::OpenAI.as_str());
+                    assert_eq!(to_provider, "anthropic");
+                }
+                other => panic!("expected RefreshProviderSwap typed variant, got {other:?}"),
+            },
+            other => panic!("expected ConfigRejected Error, got {other:?}"),
+        }
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R5-2 followup (Shape A): a `Refresh { snapshot }` whose
+    /// `audio_config` rate or channel count diverges from OpenAI
+    /// Realtime's fixed pcm/24kHz mono surface must surface as a typed
+    /// [`LiveConfigRejectionReason::RefreshAudioConfigMismatch`]; the
+    /// `detail` carries the offending rate/channel projection.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_audio_config_mismatch_emits_typed_audio_mismatch_variant() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::{LiveAudioConfig, LiveProjectionSnapshot};
+        use meerkat_core::types::SessionId;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        let snapshot = LiveProjectionSnapshot {
+            session_id: SessionId::new(),
+            snapshot_version: 9,
+            seed_messages: Vec::new(),
+            visible_tools: Vec::new(),
+            system_prompt: None,
+            model_id: "gpt-realtime-2".to_string(),
+            provider_id: Provider::OpenAI.as_str().to_string(),
+            // 48kHz / stereo — incompatible with OpenAI Realtime's fixed
+            // pcm/24kHz mono surface; must surface as
+            // RefreshAudioConfigMismatch.
+            audio_config: Some(LiveAudioConfig {
+                input_sample_rate_hz: 48_000,
+                output_sample_rate_hz: 48_000,
+                input_channels: 2,
+                output_channels: 2,
+            }),
+            runtime_system_context: Vec::new(),
+        };
+        adapter
+            .send_command(LiveAdapterCommand::Refresh { snapshot })
+            .await
+            .expect("Refresh must dispatch");
+
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+
+        match observation {
+            Some(LiveAdapterObservation::Error {
+                code: LiveAdapterErrorCode::ConfigRejected { reason },
+                ..
+            }) => match reason {
+                LiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
+                    assert!(
+                        detail.contains("48000") && detail.contains("close + reopen"),
+                        "RefreshAudioConfigMismatch.detail must name the offending rate \
+                         and direct the caller to close + reopen, got: {detail}"
+                    );
+                }
+                other => panic!("expected RefreshAudioConfigMismatch typed variant, got {other:?}"),
+            },
+            other => panic!("expected ConfigRejected Error, got {other:?}"),
+        }
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R5-2 followup (Shape A): non-refresh `LlmError` variants must
+    /// continue to route to [`LiveConfigRejectionReason::Other`] (for
+    /// `InvalidConfig` / `InvalidRequest`) or `ProviderError` (for
+    /// network / outage / etc.). This is the negative test that
+    /// guarantees the typed Refresh* variants do not steal the
+    /// catch-all paths. We drive `classify_command_error` directly so
+    /// the routing invariants are tested without racing the async pump.
+    #[test]
+    fn non_refresh_other_error_still_routes_to_other() {
+        // `Llm(InvalidConfig)` (non-refresh): must bin to Other, not any
+        // typed Refresh* variant.
+        let invalid_config_err = OpenAiLiveCommandError::Llm(LlmError::InvalidConfig {
+            message: "synthetic non-refresh transport error".to_string(),
+        });
+        let (code, scoped) = classify_command_error(&invalid_config_err);
+        assert!(
+            !scoped,
+            "InvalidConfig must surface as terminal Error, not scoped CommandRejected"
+        );
+        match code {
+            LiveAdapterErrorCode::ConfigRejected { reason } => match reason {
+                LiveConfigRejectionReason::Other { detail } => {
+                    assert_eq!(detail, "synthetic non-refresh transport error");
+                }
+                other => panic!(
+                    "non-refresh InvalidConfig must bin to Other, not refresh-class \
+                     typed variants; got: {other:?}"
+                ),
+            },
+            other => panic!("expected ConfigRejected, got {other:?}"),
+        }
+
+        // `Llm(InvalidRequest)` (catch-all): also Other, terminal.
+        let invalid_request_err = OpenAiLiveCommandError::Llm(LlmError::InvalidRequest {
+            message: "unknown command".to_string(),
+        });
+        let (code, scoped) = classify_command_error(&invalid_request_err);
+        assert!(!scoped);
+        assert!(matches!(
+            code,
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::Other { .. }
+            }
+        ));
+
+        // `Llm(NetworkTimeout)` (real provider outage): must bin to
+        // ProviderError, not ConfigRejected of any kind.
+        let timeout_err =
+            OpenAiLiveCommandError::Llm(LlmError::NetworkTimeout { duration_ms: 1_000 });
+        let (code, scoped) = classify_command_error(&timeout_err);
+        assert!(!scoped);
+        assert!(matches!(code, LiveAdapterErrorCode::ProviderError));
+
+        // `Llm(InvalidInputShape)` with image token: scoped (channel
+        // survives) and binds to typed ImageInputNotImplemented — never
+        // to any Refresh* variant.
+        let image_err = OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape {
+            message: "image_input_not_implemented".to_string(),
+        });
+        let (code, scoped) = classify_command_error(&image_err);
+        assert!(scoped);
+        assert!(matches!(
+            code,
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::ImageInputNotImplemented
+            }
+        ));
     }
 
     /// T11: a `SendInput { LiveInputChunk::Image }` must be rejected with

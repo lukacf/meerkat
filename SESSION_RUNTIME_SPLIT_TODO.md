@@ -266,7 +266,7 @@ self-verify.
 
 ### Phase 2 — Wave 2: surface-agnostic methods (parallel by area)
 
-- [x] fix · [ ] verify · **W2-A.** Move live-channel orchestration
+- [x] fix · [x] verify · **W2-A.** Move live-channel orchestration
   methods (`precheck_identity`, `apply_precheck_gates`,
   `precheck_live_open`, `recover_live_session_for_realtime_open`,
   `materialize_staged_session_for_realtime_open`,
@@ -277,7 +277,7 @@ self-verify.
   `#[cfg(feature = "live")]`. The `LiveAdapterHost` parameter remains
   injected; the orchestrator does not own it.
 
-- [x] fix · [ ] verify · **W2-B.** Move session-recovery helpers
+- [x] fix · [x] verify · **W2-B.** Move session-recovery helpers
   (`load_persisted_session`, `recovered_create_request`,
   `recovered_create_request_with_runtime_binding_mode`,
   `recovery_overrides_from_turn`, `recovery_external_tools`,
@@ -301,7 +301,7 @@ self-verify.
   shims remain RPC-typed (RpcError) and translate via a new
   `recovery_error_to_rpc` adapter.
 
-- [x] fix · [ ] verify · **W2-C.** Move LLM hot-swap surface
+- [x] fix · [x] verify · **W2-C.** Move LLM hot-swap surface
   (`hot_swap_llm_client_on_idle_session`, `hot_swap_llm_client`
   minus its `TurnOverrides` parameter shim,
   `derive_reconfigured_visibility_state`, `rollback_idle_hot_swap_failure`,
@@ -309,7 +309,7 @@ self-verify.
   `meerkat::session_runtime::live_orchestration`. The `TurnOverrides`
   shim stays in `meerkat-rpc` (it's the RPC surface adapter).
 
-- [x] fix · [ ] verify · **W2-D.** Move staged-session lifecycle
+- [x] fix · [x] verify · **W2-D.** Move staged-session lifecycle
   helpers (`spawn_pending_create_and_apply_runtime_turn_with_admission_guard`,
   `await_service_apply_runtime_turn`,
   `await_service_apply_runtime_turn_with_recoverable_admission`,
@@ -323,7 +323,7 @@ self-verify.
   callsites remain identical; verify the spawned tasks have the same
   cancellation semantics in the new crate.
 
-- [x] fix · [ ] verify · **W2-E.** Move `SessionInfo`, `SessionState`
+- [x] fix · [x] verify · **W2-E.** Move `SessionInfo`, `SessionState`
   enums and `archived_persisted_session_without_live`,
   `live_session_is_stale`, `try_recover_persisted_session`,
   `discard_live_session`, `discard_stale_live_session` to

@@ -356,20 +356,62 @@ self-verify.
   (`session_runtime_runtime_state.rs`,
   `session_runtime_admission.rs`).
 
-- [ ] fix · [ ] verify · **W3-B.** Move `config_runtime`, `realm_id`,
-  `instance_id`, `backend`, `default_llm_client`,
-  `live_adapter_host`, `set_live_adapter_host`,
-  `set_default_llm_client`, `live_tool_dispatcher` accessors to
-  `MeerkatSessionRuntime`. The setters that take `Arc<…>` from
-  shared crates do not need to leak through `meerkat-rpc`.
+- [x] fix · [ ] verify · **W3-B.** `MeerkatSessionRuntime` is now a
+  populated struct holding the `service`, `staged_sessions`,
+  `staged_capacity_admissions`, `runtime_adapter`, `live_adapter_host`,
+  `config_runtime`, `default_llm_client`, `realm_id`, `instance_id`,
+  `backend`, and `skill_identity_registry` slots. Accessors
+  (`config_runtime`, `realm_id`, `instance_id`, `backend`,
+  `default_llm_client`, `live_adapter_host`, `skill_identity_registry`)
+  and setters (`set_realm_context`, `set_default_llm_client`,
+  `set_live_adapter_host`, `set_skill_identity_registry`,
+  `set_skill_identity_registry_for_generation`, `set_config_runtime`)
+  live on `MeerkatSessionRuntime`. RPC's `SessionRuntime` keeps its
+  duplicate field copies (each an `Arc` clone of the same shared
+  state) plus an `inner: Arc<MeerkatSessionRuntime>` field, exposes an
+  `inner()` accessor, and updates `set_realm_context` to mirror the
+  change into the inner. Phase 4 R1 will collapse the duplicates.
+  *Deviation:* the W2-A "deferred load-bearing methods"
+  (`precheck_live_open`,
+  `recover_live_session_for_realtime_open`,
+  `materialize_staged_session_for_realtime_open`,
+  `realtime_session_open_config`, `live_open_config_for_session`,
+  `propagate_config_to_live_channels`) stay in `meerkat-rpc`. They
+  call into RPC-private helpers (`recovery_overrides_from_turn`
+  consumes `crate::handlers::turn::TurnOverrides`,
+  `recovery_external_tools` builds a `CallbackToolDispatcher`,
+  `cleanup_recovered_runtime_if_new` builds an `ArchiveRuntimeCleanup`
+  populated with RPC-private MCP/mob hooks), so moving them onto
+  `LiveOrchestrator<'a>` would require either (a) duplicating the
+  helpers upstream, (b) changing their parameter shape, or (c)
+  smuggling an `Arc<dyn …>` per RPC-private dependency through the
+  orchestrator. The R11 "live-channel close on identity change" gate
+  passes (8/8) without the move, confirming the s71/s72 e2e fix is
+  preserved in `meerkat-rpc`. The move is properly tracked as Phase
+  4 R1 work.
 
-- [ ] fix · [ ] verify · **W3-C.** Build a `SessionRuntimeBuilder`
-  with `with_live_adapter_host`, `with_config_runtime`,
-  `with_default_llm_client`, `with_realm_id`, `with_instance_id`,
-  `with_backend`, `with_skill_identity_registry`. Replace the
-  ad-hoc `SessionRuntime::new`/`new_with_config_store` constructors
-  in `meerkat-rpc` with a wrapper that delegates to the builder.
-  Update CLI / examples / tests to use the builder.
+- [x] fix · [ ] verify · **W3-C.** `SessionRuntimeBuilder` now
+  implements `new(service, staged_sessions, runtime_adapter)` plus
+  `with_live_adapter_host`, `with_live_adapter_host_slot`,
+  `with_config_runtime`, `with_config_runtime_slot`,
+  `with_default_llm_client`, `with_default_llm_client_slot`,
+  `with_realm_id`, `with_realm_id_slot`, `with_instance_id`,
+  `with_instance_id_slot`, `with_backend`, `with_backend_slot`,
+  `with_skill_identity_registry`,
+  `with_skill_identity_registry_slot`,
+  `with_skill_identity_context_root_slot`,
+  `with_skill_identity_user_root_slot`,
+  `with_staged_capacity_admissions`, and `build`. RPC's
+  `SessionRuntime::new` and `new_with_config_store` both delegate
+  through `SessionRuntimeBuilder::new(...)` to construct the inner
+  `MeerkatSessionRuntime`. The CLI / examples /
+  `meerkat-rpc/tests/*` paths that go through
+  `meerkat_rpc::session_runtime::SessionRuntime::new(...)` continue
+  to compile unchanged. Four regression tests in
+  `meerkat/tests/session_runtime_builder.rs` exercise empty-builder
+  defaults, `set_realm_context` propagation, the
+  generation-guard skill registry write path, and `with_realm_id`
+  / `with_instance_id` / `with_backend` pre-population.
 
 ### Phase 4 — Rewire (sequential, gates on all waves)
 

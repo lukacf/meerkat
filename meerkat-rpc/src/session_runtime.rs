@@ -1292,6 +1292,12 @@ pub struct SessionRuntime {
     /// resolution change requires a re-seed.
     #[allow(clippy::type_complexity)]
     live_adapter_host: Arc<StdRwLock<Option<Arc<meerkat_live::LiveAdapterHost>>>>,
+    /// W3-B: surface-agnostic core. RPC's `SessionRuntime` keeps its
+    /// own field copies (each one an `Arc` clone of the same shared
+    /// state) so existing callsites continue to compile unchanged; new
+    /// surface-agnostic accessors land on `MeerkatSessionRuntime` and
+    /// flow through `inner()`. Phase 4 R1 will collapse the duplication.
+    inner: Arc<meerkat::session_runtime::MeerkatSessionRuntime>,
 }
 
 #[cfg(test)]
@@ -1598,6 +1604,28 @@ impl SessionRuntime {
             },
         ));
 
+        let pending_session_event_streams = Arc::new(Mutex::new(HashMap::new()));
+        let staged_capacity_admissions = Arc::new(StdMutex::new(HashMap::new()));
+        let skill_identity_registry =
+            Arc::new(StdRwLock::new(SkillIdentityRegistryState::default()));
+        let skill_identity_context_root = Arc::new(StdRwLock::new(None));
+        let skill_identity_user_root = Arc::new(StdRwLock::new(None));
+        let live_adapter_host = Arc::new(StdRwLock::new(None));
+        let inner = Arc::new(
+            meerkat::session_runtime::SessionRuntimeBuilder::new(
+                Arc::clone(&service),
+                Arc::clone(&staged_sessions),
+                Arc::clone(&runtime_adapter),
+            )
+            .with_staged_capacity_admissions(Arc::clone(&staged_capacity_admissions))
+            .with_live_adapter_host_slot(Arc::clone(&live_adapter_host))
+            .with_config_runtime_slot(Arc::clone(&config_runtime))
+            .with_default_llm_client_slot(Arc::clone(&default_llm_client))
+            .with_skill_identity_registry_slot(Arc::clone(&skill_identity_registry))
+            .with_skill_identity_context_root_slot(Arc::clone(&skill_identity_context_root))
+            .with_skill_identity_user_root_slot(Arc::clone(&skill_identity_user_root))
+            .build(),
+        );
         Self {
             factory: factory_clone,
             service,
@@ -1605,8 +1633,8 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
-            pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
-            staged_capacity_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            pending_session_event_streams,
+            staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -1628,12 +1656,9 @@ impl SessionRuntime {
             config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
-            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
-                generation: 0,
-                registry: SourceIdentityRegistry::default(),
-            })),
-            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
-            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_registry,
+            skill_identity_context_root,
+            skill_identity_user_root,
             #[cfg(feature = "mob")]
             mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
@@ -1647,7 +1672,8 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
-            live_adapter_host: Arc::new(StdRwLock::new(None)),
+            live_adapter_host,
+            inner,
         }
     }
 
@@ -1700,6 +1726,28 @@ impl SessionRuntime {
             },
         ));
 
+        let pending_session_event_streams = Arc::new(Mutex::new(HashMap::new()));
+        let staged_capacity_admissions = Arc::new(StdMutex::new(HashMap::new()));
+        let skill_identity_registry =
+            Arc::new(StdRwLock::new(SkillIdentityRegistryState::default()));
+        let skill_identity_context_root = Arc::new(StdRwLock::new(None));
+        let skill_identity_user_root = Arc::new(StdRwLock::new(None));
+        let live_adapter_host = Arc::new(StdRwLock::new(None));
+        let inner = Arc::new(
+            meerkat::session_runtime::SessionRuntimeBuilder::new(
+                Arc::clone(&service),
+                Arc::clone(&staged_sessions),
+                Arc::clone(&runtime_adapter),
+            )
+            .with_staged_capacity_admissions(Arc::clone(&staged_capacity_admissions))
+            .with_live_adapter_host_slot(Arc::clone(&live_adapter_host))
+            .with_config_runtime_slot(Arc::clone(&config_runtime))
+            .with_default_llm_client_slot(Arc::clone(&default_llm_client))
+            .with_skill_identity_registry_slot(Arc::clone(&skill_identity_registry))
+            .with_skill_identity_context_root_slot(Arc::clone(&skill_identity_context_root))
+            .with_skill_identity_user_root_slot(Arc::clone(&skill_identity_user_root))
+            .build(),
+        );
         Self {
             factory: factory_clone,
             service,
@@ -1707,8 +1755,8 @@ impl SessionRuntime {
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
-            pending_session_event_streams: Arc::new(Mutex::new(HashMap::new())),
-            staged_capacity_admissions: Arc::new(StdMutex::new(HashMap::new())),
+            pending_session_event_streams,
+            staged_capacity_admissions,
             runtime_pre_admissions: Arc::new(StdMutex::new(HashMap::new())),
             runtime_registration_locks: Arc::new(StdMutex::new(HashMap::new())),
             #[cfg(test)]
@@ -1730,12 +1778,9 @@ impl SessionRuntime {
             config_runtime,
             runtime_adapter,
             notification_sink: StdRwLock::new(notification_sink),
-            skill_identity_registry: Arc::new(StdRwLock::new(SkillIdentityRegistryState {
-                generation: 0,
-                registry: SourceIdentityRegistry::default(),
-            })),
-            skill_identity_context_root: Arc::new(StdRwLock::new(None)),
-            skill_identity_user_root: Arc::new(StdRwLock::new(None)),
+            skill_identity_registry,
+            skill_identity_context_root,
+            skill_identity_user_root,
             #[cfg(feature = "mob")]
             mob_state: Arc::new(StdRwLock::new(None)),
             #[cfg(feature = "mcp")]
@@ -1749,7 +1794,8 @@ impl SessionRuntime {
             builder_schedule_tools_slot,
             builder_agent_llm_client_decorator_slot,
             approval_service,
-            live_adapter_host: Arc::new(StdRwLock::new(None)),
+            live_adapter_host,
+            inner,
         }
     }
 
@@ -1760,9 +1806,10 @@ impl SessionRuntime {
         instance_id: Option<String>,
         backend: Option<String>,
     ) {
-        self.realm_id = realm_id;
-        self.instance_id = instance_id;
-        self.backend = backend;
+        self.realm_id = realm_id.clone();
+        self.instance_id = instance_id.clone();
+        self.backend = backend.clone();
+        self.inner.set_realm_context(realm_id, instance_id, backend);
     }
 
     pub fn set_skill_identity_roots(
@@ -1802,6 +1849,13 @@ impl SessionRuntime {
             .builder_mob_tools_slot
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(factory);
+    }
+
+    /// Surface-agnostic core. Phase 4 R1 will collapse the duplicate
+    /// per-field copies on `SessionRuntime` and route every accessor
+    /// through `inner()`.
+    pub fn inner(&self) -> &Arc<meerkat::session_runtime::MeerkatSessionRuntime> {
+        &self.inner
     }
 
     /// Active realm id for this runtime, if configured.

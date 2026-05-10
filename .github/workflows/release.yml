@@ -953,7 +953,13 @@ jobs:
           fi
           npm install --ignore-scripts
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
-          npm run build
+          npm run build &
+          build_pid=$!
+          while kill -0 "$build_pid" 2>/dev/null; do
+            echo "Web SDK build still running..."
+            sleep 60
+          done
+          wait "$build_pid"
           if [[ "$DRY_RUN" == "true" ]]; then
             npm publish --access public --dry-run --ignore-scripts
           else
@@ -1016,7 +1022,13 @@ jobs:
           fi
           npm install --ignore-scripts
           npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
-          npm run build
+          npm run build &
+          build_pid=$!
+          while kill -0 "$build_pid" 2>/dev/null; do
+            echo "Web SDK build still running..."
+            sleep 60
+          done
+          wait "$build_pid"
           if [[ "$DRY_RUN" == "true" ]]; then
             npm publish --access public --dry-run --ignore-scripts
           else

@@ -11,8 +11,8 @@ use std::sync::Arc;
 use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
-    LiveChannelParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult, LiveSendInputParams,
-    LiveStatusResult, LiveTruncateParams, RealtimeTurningMode,
+    LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
+    LiveSendInputParams, LiveStatusResult, LiveTruncateParams, RealtimeTurningMode,
 };
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
@@ -682,19 +682,27 @@ pub async fn handle_live_send_input(
 
 /// I50: `live/commit_input` — flush any buffered uncommitted input on the
 /// channel. Maps to `LiveAdapterCommand::CommitInput`.
+///
+/// G9 (P2): the optional `response_modality` param lets the caller request
+/// a text-only response on an audio-first channel without flipping the
+/// channel-wide modality.
 pub async fn handle_live_commit_input(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
 ) -> RpcResponse {
-    let parsed: LiveChannelParams = match super::parse_params(params) {
+    let parsed: LiveCommitInputParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+    let response_modality = parsed.response_modality.map(Into::into);
 
     match host
-        .send_command(&channel_id, LiveAdapterCommand::CommitInput)
+        .send_command(
+            &channel_id,
+            LiveAdapterCommand::CommitInput { response_modality },
+        )
         .await
     {
         Ok(()) => RpcResponse::success(id, serde_json::json!({"committed": true})),

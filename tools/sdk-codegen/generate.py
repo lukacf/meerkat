@@ -325,6 +325,10 @@ def _promote_nested_schema_def(name: str) -> bool:
         # carries the typed discriminated-union shape into SDK codegen instead
         # of falling back to `Record<string, unknown>` / `dict[str, Any]`.
         "WireLiveTransportBootstrap",
+        # G9 (P2): promote `WireLiveResponseModality` so
+        # `LiveCommitInputParams.response_modality` carries the typed
+        # `audio | text` discriminated union into SDK codegen.
+        "WireLiveResponseModality",
         # R5-10: promote `LiveInputChunkWire` so `LiveSendInputParams.chunk`
         # carries the typed discriminated-union shape into SDK codegen instead
         # of falling back to opaque `dict[str, Any]` / `Record<string, unknown>`.
@@ -897,10 +901,22 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Wire projection of LiveTransportBootstrap (internally-tagged on `transport`).",
     )
     append_python_dataclass("LiveOpenResult", wire_schema, "Response payload for live/open.")
-    append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,commit_input,interrupt}.")
+    append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,interrupt}.")
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
     append_python_dataclass("LiveSendInputParams", wire_schema, "Request payload for live/send_input.")
     append_python_dataclass("LiveTruncateParams", wire_schema, "Request payload for live/truncate.")
+    # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`,
+    # then the params dataclass that references it.
+    append_python_alias(
+        "WireLiveResponseModality",
+        wire_schema,
+        "Wire projection of LiveResponseModality (internally-tagged on `modality`).",
+    )
+    append_python_dataclass(
+        "LiveCommitInputParams",
+        wire_schema,
+        "Request payload for live/commit_input with optional response_modality override.",
+    )
     # FIX-SDK-OBS: typed wire mirrors for adapter observations and their
     # tagged-payload helpers. Aliases (not dataclasses) because each is a
     # discriminated union (internally tagged on `observation` / `status` /
@@ -1294,6 +1310,11 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     append_typescript_interface("LiveStatusResult", wire_schema)
     append_typescript_interface("LiveSendInputParams", wire_schema)
     append_typescript_interface("LiveTruncateParams", wire_schema)
+    # G9 (P2): typed wire mirror for `LiveCommitInputParams.response_modality`
+    # (discriminated union on `modality`), then the params interface that
+    # references it.
+    append_typescript_alias("WireLiveResponseModality", wire_schema)
+    append_typescript_interface("LiveCommitInputParams", wire_schema)
     append_typescript_alias("LiveInputChunkWire", wire_schema)
     # FIX-SDK-OBS: typed adapter observation discriminated unions. Aliases
     # because each is a serde-tagged enum. `RealtimeTranscriptEvent` is

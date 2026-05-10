@@ -475,7 +475,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             RpcMethodDescriptor::typed(
                 "live/commit_input",
                 "Commit any buffered input on a live channel",
-                "LiveChannelParams",
+                "LiveCommitInputParams",
                 "Value",
             ),
             RpcMethodDescriptor::typed(

@@ -1739,6 +1739,21 @@ export interface LiveTruncateParams {
   item_id: string;
 }
 
+export interface WireLiveResponseModalityAudio {
+  modality: "audio";
+}
+
+export interface WireLiveResponseModalityText {
+  modality: "text";
+}
+
+export type WireLiveResponseModality = WireLiveResponseModalityAudio | WireLiveResponseModalityText;
+
+export interface LiveCommitInputParams {
+  channel_id: string;
+  response_modality?: WireLiveResponseModality;
+}
+
 export interface LiveInputChunkWireAudio {
   channels: number;
   data: string;

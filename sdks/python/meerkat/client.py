@@ -2584,11 +2584,23 @@ class MeerkatClient:
             },
         )
 
-    async def live_commit_input(self, channel_id: str) -> dict[str, Any]:
-        """Commit any buffered input on a live channel. Wraps `live/commit_input`."""
-        return await self._request(
-            "live/commit_input", {"channel_id": channel_id}
-        )
+    async def live_commit_input(
+        self,
+        channel_id: str,
+        response_modality: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit any buffered input on a live channel. Wraps `live/commit_input`.
+
+        G9 (P2): the optional ``response_modality`` argument lets the caller
+        request a text-only response on an audio-first channel without
+        flipping the channel-wide modality. Pass ``"audio"`` (channel
+        default for OpenAI realtime) or ``"text"`` to suppress audio output
+        for this single response. ``None`` keeps the channel default.
+        """
+        params: dict[str, Any] = {"channel_id": channel_id}
+        if response_modality is not None:
+            params["response_modality"] = {"modality": response_modality}
+        return await self._request("live/commit_input", params)
 
     async def live_interrupt(self, channel_id: str) -> dict[str, Any]:
         """Interrupt the in-progress assistant turn on a live channel.

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use meerkat_core::live_adapter::{
     LiveAdapterErrorCode, LiveAdapterObservation, LiveAdapterStatus, LiveChannelCapabilities,
-    LiveContinuityMode, LiveDegradationReason, LiveTransportBootstrap,
+    LiveContinuityMode, LiveDegradationReason, LiveResponseModality, LiveTransportBootstrap,
 };
 use meerkat_core::realtime_transcript::RealtimeTranscriptEvent;
 use meerkat_core::types::Usage;
@@ -287,13 +287,81 @@ impl From<WireLiveContinuityMode> for LiveContinuityMode {
     }
 }
 
-/// Request payload for `live/status`, `live/close`, `live/commit_input`, and
-/// `live/interrupt`. They all take the same `{channel_id}` shape; this
-/// struct is the typed name for it.
+/// Request payload for `live/status`, `live/close`, and `live/interrupt`.
+/// They all take the same `{channel_id}` shape; this struct is the typed
+/// name for it.
+///
+/// `live/commit_input` no longer uses this shape — it carries an optional
+/// `response_modality` override (G9) so callers can request a text-only
+/// response on an audio-first channel without flipping the channel
+/// modality. See [`LiveCommitInputParams`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveChannelParams {
     pub channel_id: String,
+}
+
+/// Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
+///
+/// Internally-tagged on `modality` (snake_case) — matches the core enum's
+/// serde shape exactly so the wire payload is byte-identical. G9: closes
+/// the typed-surface gap so SDK clients can pick `audio` vs `text` on a
+/// per-response basis without round-tripping through a free-form string.
+///
+/// The core enum is `#[non_exhaustive]`; new modalities (e.g. structured
+/// output, image) appear here as additional typed variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "modality", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WireLiveResponseModality {
+    /// Spoken-audio plus the audio-derived transcript.
+    Audio,
+    /// Display text only — no audio output, no transcript.
+    Text,
+}
+
+impl From<LiveResponseModality> for WireLiveResponseModality {
+    fn from(value: LiveResponseModality) -> Self {
+        match value {
+            LiveResponseModality::Audio => Self::Audio,
+            LiveResponseModality::Text => Self::Text,
+            // Core enum is `#[non_exhaustive]`. Debug-assert on unmapped
+            // variants and fall back to the audio-first default.
+            _ => {
+                debug_assert!(
+                    false,
+                    "WireLiveResponseModality::from saw an unmapped \
+                     LiveResponseModality variant; add an explicit arm in \
+                     meerkat-contracts/src/wire/live.rs."
+                );
+                Self::Audio
+            }
+        }
+    }
+}
+
+impl From<WireLiveResponseModality> for LiveResponseModality {
+    fn from(value: WireLiveResponseModality) -> Self {
+        match value {
+            WireLiveResponseModality::Audio => Self::Audio,
+            WireLiveResponseModality::Text => Self::Text,
+        }
+    }
+}
+
+/// Request payload for `live/commit_input`.
+///
+/// G9: optional `response_modality` lets the caller request a text-only
+/// response on an otherwise-audio channel without flipping the channel
+/// modality. `None` keeps the channel default (`audio` for the OpenAI
+/// realtime adapter today).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveCommitInputParams {
+    pub channel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_modality: Option<WireLiveResponseModality>,
 }
 
 /// Response payload for `live/status`. See `LiveOpenResult` for the
@@ -1343,6 +1411,69 @@ mod tests {
         };
         let core: LiveTransportBootstrap = v.clone().into();
         let back: WireLiveTransportBootstrap = core.into();
+        assert_eq!(v, back);
+    }
+
+    // G9 (P2) — typed `LiveResponseModality` wire mirror + commit-input
+    // params shape.
+
+    #[test]
+    fn wire_live_response_modality_payload_less_variants_round_trip() {
+        for v in [
+            WireLiveResponseModality::Audio,
+            WireLiveResponseModality::Text,
+        ] {
+            let j = serde_json::to_value(v).expect("round-trip should succeed");
+            assert!(
+                j.get("modality").is_some(),
+                "missing `modality` discriminator"
+            );
+            let back: WireLiveResponseModality =
+                serde_json::from_value(j).expect("round-trip should succeed");
+            assert_eq!(v, back);
+        }
+    }
+
+    #[test]
+    fn wire_live_response_modality_byte_compatible_with_core() {
+        for core in [LiveResponseModality::Audio, LiveResponseModality::Text] {
+            let wire: WireLiveResponseModality = core.into();
+            let core_json = serde_json::to_value(core).expect("round-trip should succeed");
+            let wire_json = serde_json::to_value(wire).expect("round-trip should succeed");
+            assert_eq!(core_json, wire_json);
+        }
+    }
+
+    #[test]
+    fn live_commit_input_params_default_modality_round_trip() {
+        // Omitted `response_modality` keeps the channel default — the JSON
+        // payload elides the field entirely (skip_serializing_if).
+        let v = LiveCommitInputParams {
+            channel_id: "live_1".into(),
+            response_modality: None,
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["channel_id"], "live_1");
+        assert!(
+            j.get("response_modality").is_none(),
+            "default-modality params must elide the field"
+        );
+        let back: LiveCommitInputParams =
+            serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_commit_input_params_text_modality_round_trip() {
+        let v = LiveCommitInputParams {
+            channel_id: "live_1".into(),
+            response_modality: Some(WireLiveResponseModality::Text),
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["channel_id"], "live_1");
+        assert_eq!(j["response_modality"]["modality"], "text");
+        let back: LiveCommitInputParams =
+            serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }
 }

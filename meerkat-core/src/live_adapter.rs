@@ -84,6 +84,34 @@ pub struct LiveToolResult {
 // Commands — Meerkat runtime → adapter
 // ---------------------------------------------------------------------------
 
+/// G9: per-response output modality override for `LiveAdapterCommand::CommitInput`.
+///
+/// Live channels run with a session-level modality (`Audio` for the OpenAI
+/// realtime adapter — see `session_update_with_audio_text_modality`). The
+/// OpenAI realtime API supports per-response overrides via `response.create`'s
+/// `output_modalities` field, so a caller that wants a single text-only
+/// response on an otherwise-audio channel can pass `Some(LiveResponseModality::Text)`
+/// without tearing down and reopening the channel.
+///
+/// Adapters that cannot honor a particular modality (e.g. a hypothetical
+/// audio-only provider) must surface a typed `ConfigRejected` rejection
+/// rather than silently dropping the override.
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "modality", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveResponseModality {
+    /// Spoken-audio plus the audio-derived transcript. The default on
+    /// audio-first live channels (e.g. OpenAI realtime).
+    Audio,
+    /// Display text only — no audio output, no transcript. The OpenAI
+    /// realtime adapter maps this to `output_modalities=Text` on
+    /// `response.create`. Callers that want to suppress audio for a single
+    /// response (e.g. an interstitial summary) without flipping the
+    /// channel modality use this variant.
+    Text,
+}
+
 /// Commands sent from the Meerkat runtime to a live provider adapter.
 ///
 /// The adapter host gates these through semantic authority checks before
@@ -137,7 +165,21 @@ pub enum LiveAdapterCommand {
     SendInput {
         chunk: LiveInputChunk,
     },
-    CommitInput,
+    /// G9: commit any buffered input and request a response. Optional
+    /// `response_modality` lets the caller pick between the channel's
+    /// default modality (`None`) and an explicit override (`Text` for a
+    /// text-only response, `Audio` for spoken+transcript). On the OpenAI
+    /// realtime surface the override flows into `response.create`'s
+    /// `output_modalities` field, which the provider honors per-response
+    /// even when the session-level modality is `Audio`.
+    ///
+    /// Adapters that do not honor a particular modality must surface a
+    /// typed `ConfigRejected` rejection rather than silently dropping the
+    /// override.
+    CommitInput {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        response_modality: Option<LiveResponseModality>,
+    },
     Interrupt,
     TruncateAssistantOutput {
         item_id: String,

@@ -61,6 +61,7 @@ from .generated.types import (
     MobTurnStartParams as MobTurnStartParams,
     MobWiringRulesInput as MobWiringRulesInput,
     LiveChannelParams as LiveChannelParams,
+    LiveCommitInputParams as LiveCommitInputParams,
     LiveInputChunkWire as LiveInputChunkWire,
     # R5-10: re-export typed `LiveInputChunkWire` variants so SDK consumers
     # can construct typed chunks at the `LiveSendInputParams.chunk` slot

@@ -905,6 +905,26 @@ fn openai_realtime_language_label(code: &str) -> String {
     }
 }
 
+/// G9: per-response config for a text-only `response.create`.
+///
+/// gpt-realtime-2 honors a per-response `output_modalities=Text` override
+/// even when the session-level modality is `Audio`. Suppresses the audio
+/// channel for a single response without flipping the channel-wide
+/// modality (which would require close + reopen). No `audio` config is
+/// emitted so the provider does not allocate output-audio resources for
+/// this turn.
+fn openai_text_only_response_config() -> ResponseConfig {
+    ResponseConfig {
+        conversation: Some(ConversationMode::Auto),
+        output_modalities: Some(OutputModalities::Text),
+        // No `audio` block: a text-only response has no output-audio shape
+        // to negotiate. Voice / format are session-level concerns; per-
+        // response overrides only matter when audio is being emitted.
+        audio: None,
+        ..ResponseConfig::default()
+    }
+}
+
 fn openai_audio_response_config() -> ResponseConfig {
     // Text-first reconstruction still relies on OpenAI holding an in-memory
     // conversation cache between turns. When we have to reconstruct or nudge a
@@ -2156,6 +2176,62 @@ impl OpenAiRealtimeSession {
             }
         }
     }
+
+    /// G9: commit the staged turn with an optional per-response modality
+    /// override. `None` keeps the channel default (audio-first); `Some`
+    /// swaps in a modality-specific `response.create` config so the
+    /// provider returns text-only (or future modalities) for this turn
+    /// without re-flipping the channel-wide modality.
+    ///
+    /// The provider-neutral `RealtimeSession::commit_turn` trait method
+    /// delegates here with `None`. Live-adapter callers that originate
+    /// from `LiveAdapterCommand::CommitInput { response_modality }` go
+    /// through this method directly so the typed override survives.
+    pub async fn commit_turn_with_modality(
+        &mut self,
+        response_modality: Option<LiveResponseModality>,
+    ) -> Result<(), LlmError> {
+        if self.turning_mode != RealtimeTurningMode::ExplicitCommit {
+            return Err(LlmError::InvalidRequest {
+                message: "realtime commit_turn is only valid for explicit_commit sessions"
+                    .to_string(),
+            });
+        }
+        if !self.has_staged_input {
+            return Err(LlmError::InvalidRequest {
+                message: "realtime commit_turn requires staged input".to_string(),
+            });
+        }
+        if self.has_staged_audio {
+            self.raw_mut()?
+                .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
+                .await?;
+        }
+        // `LiveResponseModality` is `#[non_exhaustive]`; future variants
+        // the OpenAI realtime adapter does not yet honor must surface a
+        // typed `InvalidRequest` rejection rather than silently dropping
+        // the override.
+        let response_config = match response_modality {
+            None | Some(LiveResponseModality::Audio) => openai_audio_response_config(),
+            Some(LiveResponseModality::Text) => openai_text_only_response_config(),
+            Some(_) => {
+                return Err(LlmError::InvalidRequest {
+                    message: "openai realtime adapter does not honor the requested \
+                              live response modality; supported: audio, text"
+                        .to_string(),
+                });
+            }
+        };
+        self.raw_mut()?
+            .send_raw(ClientEvent::ResponseCreate {
+                event_id: None,
+                response: Some(Box::new(response_config)),
+            })
+            .await?;
+        self.has_staged_input = false;
+        self.has_staged_audio = false;
+        Ok(())
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -2252,31 +2328,12 @@ impl RealtimeSession for OpenAiRealtimeSession {
     }
 
     async fn commit_turn(&mut self) -> Result<(), LlmError> {
-        if self.turning_mode != RealtimeTurningMode::ExplicitCommit {
-            return Err(LlmError::InvalidRequest {
-                message: "realtime commit_turn is only valid for explicit_commit sessions"
-                    .to_string(),
-            });
-        }
-        if !self.has_staged_input {
-            return Err(LlmError::InvalidRequest {
-                message: "realtime commit_turn requires staged input".to_string(),
-            });
-        }
-        if self.has_staged_audio {
-            self.raw_mut()?
-                .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
-                .await?;
-        }
-        self.raw_mut()?
-            .send_raw(ClientEvent::ResponseCreate {
-                event_id: None,
-                response: Some(Box::new(openai_audio_response_config())),
-            })
-            .await?;
-        self.has_staged_input = false;
-        self.has_staged_audio = false;
-        Ok(())
+        // Trait surface: the provider-neutral `RealtimeSession` does not
+        // model live-channel modality overrides. Live callers go through
+        // `commit_turn_with_modality` (inherent method below) so they can
+        // pass a typed `LiveResponseModality`. `commit_turn` (trait) keeps
+        // the channel-default modality.
+        self.commit_turn_with_modality(None).await
     }
 
     async fn interrupt(&mut self) -> Result<(), LlmError> {
@@ -2834,6 +2891,7 @@ fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveChannelCapabilities, LiveInputChunk,
+    LiveResponseModality,
 };
 use meerkat_core::types::ToolResult as CoreToolResult;
 use std::sync::Mutex as StdMutex;
@@ -3460,7 +3518,9 @@ async fn execute_openai_live_command(
             };
             session.send_input(input).await
         }
-        LiveAdapterCommand::CommitInput => session.commit_turn().await,
+        LiveAdapterCommand::CommitInput { response_modality } => {
+            session.commit_turn_with_modality(response_modality).await
+        }
         LiveAdapterCommand::Interrupt => session.interrupt().await,
         LiveAdapterCommand::TruncateAssistantOutput {
             item_id,
@@ -3862,6 +3922,28 @@ mod tests {
                 );
             }
             other => panic!("expected audio response.create event, got {other:?}"),
+        }
+    }
+
+    /// G9: a text-only commit must produce `output_modalities=Text` and no
+    /// `audio` block on `response.create`. The provider then emits text-only
+    /// output for that single turn even though the channel modality stays
+    /// `Audio`.
+    fn assert_response_create_requests_text_only(event: &ClientEvent) {
+        match event {
+            ClientEvent::ResponseCreate {
+                response: Some(response),
+                ..
+            } => {
+                assert_eq!(response.conversation, Some(ConversationMode::Auto));
+                assert_eq!(response.output_modalities, Some(OutputModalities::Text));
+                assert!(
+                    response.audio.is_none(),
+                    "text-only response.create must not allocate output-audio resources, \
+                     got {response:?}"
+                );
+            }
+            other => panic!("expected text-only response.create event, got {other:?}"),
         }
     }
 
@@ -4675,6 +4757,43 @@ mod tests {
             seen.iter()
                 .any(|event| matches!(event, ClientEvent::ResponseCancel { .. }))
         );
+    }
+
+    /// G9 (P2) regression: explicit-commit with `LiveResponseModality::Text`
+    /// emits `response.create` with `output_modalities=Text` and zero
+    /// `audio` block, so the provider returns text-only for this single
+    /// turn. Default-modality (`None`) is exercised in
+    /// `provider_neutral_session_sends_chunks_commits_and_interrupts` —
+    /// this is the typed text-only response path the channel's
+    /// `text_out=true` capability advertises.
+    #[tokio::test]
+    async fn provider_neutral_session_text_only_commit_emits_text_modality_response_create() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+
+        session
+            .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                text: "summarize the last paragraph in writing".to_string(),
+            }))
+            .await
+            .expect("text chunk should send");
+        session
+            .commit_turn_with_modality(Some(LiveResponseModality::Text))
+            .await
+            .expect("text-only commit should succeed");
+
+        let seen = seen.lock().await;
+        let response_create = seen
+            .iter()
+            .find(|event| matches!(event, ClientEvent::ResponseCreate { .. }))
+            .expect("expected response.create event during text-only commit");
+        assert_response_create_requests_text_only(response_create);
     }
 
     #[tokio::test]

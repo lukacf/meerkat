@@ -44,6 +44,7 @@ import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js"
 import {
   CONTRACT_VERSION,
   type LiveChannelParams,
+  type LiveCommitInputParams,
   type LiveOpenParams,
   type LiveOpenResult,
   type LiveSendInputParams,
@@ -2353,7 +2354,7 @@ export class MeerkatClient {
     });
   }
 
-  async liveCommitInput(params: LiveChannelParams): Promise<void> {
+  async liveCommitInput(params: LiveCommitInputParams): Promise<void> {
     await this.request("live/commit_input", params as unknown as Record<string, unknown>);
   }
 

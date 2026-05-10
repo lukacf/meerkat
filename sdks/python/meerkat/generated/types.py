@@ -1513,9 +1513,14 @@ follow-up); G8 (P2): `transport` typed-mirror."""
 
 @dataclass
 class LiveChannelParams:
-    """Request payload for `live/status`, `live/close`, `live/commit_input`, and
-`live/interrupt`. They all take the same `{channel_id}` shape; this
-struct is the typed name for it."""
+    """Request payload for `live/status`, `live/close`, and `live/interrupt`.
+They all take the same `{channel_id}` shape; this struct is the typed
+name for it.
+
+`live/commit_input` no longer uses this shape — it carries an optional
+`response_modality` override (G9) so callers can request a text-only
+response on an audio-first channel without flipping the channel
+modality. See [`LiveCommitInputParams`]."""
     channel_id: str
 
 
@@ -1551,6 +1556,35 @@ cursor in here when they want to truncate."""
     channel_id: str
     content_index: int
     item_id: str
+
+
+# Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].
+#
+# Internally-tagged on `modality` (snake_case) — matches the core enum's
+# serde shape exactly so the wire payload is byte-identical. G9: closes
+# the typed-surface gap so SDK clients can pick `audio` vs `text` on a
+# per-response basis without round-tripping through a free-form string.
+#
+# The core enum is `#[non_exhaustive]`; new modalities (e.g. structured
+# output, image) appear here as additional typed variants.
+class WireLiveResponseModalityAudio(TypedDict, total=False):
+    modality: Required[Literal['audio']]
+
+class WireLiveResponseModalityText(TypedDict, total=False):
+    modality: Required[Literal['text']]
+
+WireLiveResponseModality = WireLiveResponseModalityAudio | WireLiveResponseModalityText
+
+@dataclass
+class LiveCommitInputParams:
+    """Request payload for `live/commit_input`.
+
+G9: optional `response_modality` lets the caller request a text-only
+response on an otherwise-audio channel without flipping the channel
+modality. `None` keeps the channel default (`audio` for the OpenAI
+realtime adapter today)."""
+    channel_id: str
+    response_modality: Optional[WireLiveResponseModality] = None
 
 
 # A typed, identity-bearing realtime transcript event consumed by the session.

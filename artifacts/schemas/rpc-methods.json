@@ -363,7 +363,7 @@
     {
       "description": "Commit any buffered input on a live channel",
       "name": "live/commit_input",
-      "params_type": "LiveChannelParams",
+      "params_type": "LiveCommitInputParams",
       "result_type": "Value"
     },
     {

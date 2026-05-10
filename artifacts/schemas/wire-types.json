@@ -8779,7 +8779,7 @@
   },
   "LiveChannelParams": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Request payload for `live/status`, `live/close`, `live/commit_input`, and\n`live/interrupt`. They all take the same `{channel_id}` shape; this\nstruct is the typed name for it.",
+    "description": "Request payload for `live/status`, `live/close`, and `live/interrupt`.\nThey all take the same `{channel_id}` shape; this struct is the typed\nname for it.\n\n`live/commit_input` no longer uses this shape — it carries an optional\n`response_modality` override (G9) so callers can request a text-only\nresponse on an audio-first channel without flipping the channel\nmodality. See [`LiveCommitInputParams`].",
     "properties": {
       "channel_id": {
         "type": "string"
@@ -8789,6 +8789,63 @@
       "channel_id"
     ],
     "title": "LiveChannelParams",
+    "type": "object"
+  },
+  "LiveCommitInputParams": {
+    "$defs": {
+      "WireLiveResponseModality": {
+        "description": "Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].\n\nInternally-tagged on `modality` (snake_case) — matches the core enum's\nserde shape exactly so the wire payload is byte-identical. G9: closes\nthe typed-surface gap so SDK clients can pick `audio` vs `text` on a\nper-response basis without round-tripping through a free-form string.\n\nThe core enum is `#[non_exhaustive]`; new modalities (e.g. structured\noutput, image) appear here as additional typed variants.",
+        "oneOf": [
+          {
+            "description": "Spoken-audio plus the audio-derived transcript.",
+            "properties": {
+              "modality": {
+                "const": "audio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "modality"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Display text only — no audio output, no transcript.",
+            "properties": {
+              "modality": {
+                "const": "text",
+                "type": "string"
+              }
+            },
+            "required": [
+              "modality"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `live/commit_input`.\n\nG9: optional `response_modality` lets the caller request a text-only\nresponse on an otherwise-audio channel without flipping the channel\nmodality. `None` keeps the channel default (`audio` for the OpenAI\nrealtime adapter today).",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "response_modality": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireLiveResponseModality"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "channel_id"
+    ],
+    "title": "LiveCommitInputParams",
     "type": "object"
   },
   "LiveInputChunkWire": {
@@ -24146,6 +24203,39 @@
       }
     ],
     "title": "WireLiveDegradationReason"
+  },
+  "WireLiveResponseModality": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Wire projection of [`meerkat_core::live_adapter::LiveResponseModality`].\n\nInternally-tagged on `modality` (snake_case) — matches the core enum's\nserde shape exactly so the wire payload is byte-identical. G9: closes\nthe typed-surface gap so SDK clients can pick `audio` vs `text` on a\nper-response basis without round-tripping through a free-form string.\n\nThe core enum is `#[non_exhaustive]`; new modalities (e.g. structured\noutput, image) appear here as additional typed variants.",
+    "oneOf": [
+      {
+        "description": "Spoken-audio plus the audio-derived transcript.",
+        "properties": {
+          "modality": {
+            "const": "audio",
+            "type": "string"
+          }
+        },
+        "required": [
+          "modality"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "Display text only — no audio output, no transcript.",
+        "properties": {
+          "modality": {
+            "const": "text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "modality"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WireLiveResponseModality"
   },
   "WireLiveTransportBootstrap": {
     "$schema": "https://json-schema.org/draft/2020-12/schema",

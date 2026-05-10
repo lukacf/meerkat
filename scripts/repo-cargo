@@ -35,6 +35,7 @@ toolchain_rustc=""
 toolchain_rustdoc=""
 toolchain_rustfmt=""
 resolved_toolchain_bin=""
+toolchain_wrappers_supported=true
 
 if [[ -n "${RUSTUP_TOOLCHAIN:-}" ]]; then
   toolchain_spec="${RUSTUP_TOOLCHAIN}"
@@ -90,6 +91,14 @@ else
   cache_root="${XDG_CACHE_HOME:-${HOME}/.cache}/rust-workspaces"
 fi
 
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    # Cargo executes RUSTC directly on Windows; a bash wrapper is not a valid
+    # Win32 executable and fails before rustup can dispatch the pinned toolchain.
+    toolchain_wrappers_supported=false
+    ;;
+esac
+
 target_dir_was_set=false
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   target_dir_was_set=true
@@ -117,7 +126,7 @@ if [[ "${GITHUB_ACTIONS:-}" == "true" && "${target_dir_was_set}" == "false" ]]; 
   fi
 fi
 
-if [[ -n "${toolchain_spec}" ]] && command -v rustup >/dev/null 2>&1; then
+if [[ "${toolchain_wrappers_supported}" == "true" ]] && [[ -n "${toolchain_spec}" ]] && command -v rustup >/dev/null 2>&1; then
   toolchain_bin="${CARGO_HOME}/.repo-cargo-toolchain-bin/${toolchain_key}"
   mkdir -p "${toolchain_bin}"
   for tool in cargo rustc rustdoc rustfmt; do

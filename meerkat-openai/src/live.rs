@@ -1196,6 +1196,19 @@ pub struct OpenAiRealtimeSession {
     turning_mode: RealtimeTurningMode,
     has_staged_input: bool,
     has_staged_audio: bool,
+    /// R4-1 (P1): text items staged via `send_input` while
+    /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
+    /// Each entry is the `(synthetic_item_id, text)` pair sent to the
+    /// provider via `ConversationItemCreate`. On commit the canonical
+    /// user-turn synthesis path drains this and emits the same
+    /// `TurnStarted` / `InputTranscriptPartial` / `InputTranscriptFinalForItem`
+    /// / `TurnCommitted` sequence the `ProviderManaged` text-input path
+    /// emits inline — so explicit-commit text turns enter canonical
+    /// history, just like `ProviderManaged` text turns. The only
+    /// semantic difference between the two modes for text input is when
+    /// `response.create` fires (caller-driven vs server-driven), not
+    /// whether the user turn is recorded.
+    pending_explicit_commit_text_items: Vec<(String, String)>,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1273,6 +1286,7 @@ impl OpenAiRealtimeSession {
             turning_mode,
             has_staged_input: false,
             has_staged_audio: false,
+            pending_explicit_commit_text_items: Vec::new(),
             pending_events: VecDeque::new(),
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
@@ -2278,6 +2292,21 @@ impl OpenAiRealtimeSession {
                 .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
                 .await?;
         }
+        // R4-1 (P1): drain text items staged via `send_input` while the
+        // turn was open and synthesize the canonical user-turn
+        // observation sequence BEFORE clearing staged input. Each text
+        // item gets its own TurnStarted / InputTranscriptPartial /
+        // InputTranscriptFinalForItem / TurnCommitted block — same shape
+        // ProviderManaged emits inline per text chunk — so explicit-commit
+        // text turns are projected into canonical history identically
+        // to provider-managed text turns. Audio commits do not need this
+        // synthesis: OpenAI's `input_audio_buffer.committed` server event
+        // drives the TurnCommitted observation through the normal mapping
+        // path (see `map_server_event`).
+        let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
+        for (item_id, text) in &pending_text_items {
+            Self::synthesize_text_turn_observations(&mut self.pending_events, item_id, text);
+        }
         // `LiveResponseModality` is `#[non_exhaustive]`; future variants
         // the OpenAI realtime adapter does not yet honor must surface a
         // typed `InvalidRequest` rejection rather than silently dropping
@@ -2302,6 +2331,37 @@ impl OpenAiRealtimeSession {
         self.has_staged_input = false;
         self.has_staged_audio = false;
         Ok(())
+    }
+
+    /// R4-1 (P1): shared canonical-history synthesis for a single text
+    /// turn. Pushes the four observations a text turn must surface —
+    /// `TurnStarted`, `InputTranscriptPartial`,
+    /// `InputTranscriptFinalForItem`, `TurnCommitted` — into
+    /// `pending_events` in order. The synthetic item id is the same one
+    /// sent to the provider via `ConversationItemCreate`, so canonical
+    /// session append stays keyed and idempotent across modes.
+    ///
+    /// Used by the `ProviderManaged` text-input path (synthesis fires
+    /// inline on `send_input`) AND the `ExplicitCommit` text-input path
+    /// (synthesis fires on `commit_turn_with_modality`, draining the
+    /// staged queue). Both modes produce equivalent canonical
+    /// projection for text input.
+    fn synthesize_text_turn_observations(
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        item_id: &str,
+        text: &str,
+    ) {
+        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
     }
 }
 
@@ -2363,31 +2423,34 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // audio. The synthetic item id is sent to OpenAI as the item id
                 // and then reused on the typed transcript seam so canonical
                 // session append remains keyed and idempotent.
-                if matches!(self.turning_mode, RealtimeTurningMode::ProviderManaged) {
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::TurnStarted);
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::InputTranscriptPartial {
-                            text: text.clone(),
-                        });
-                    self.pending_events.push_back(
-                        RealtimeSessionEvent::InputTranscriptFinalForItem {
-                            item_id: synthetic_item_id,
-                            previous_item_id: None,
-                            content_index: 0,
-                            text,
-                        },
-                    );
-                    self.pending_events
-                        .push_back(RealtimeSessionEvent::TurnCommitted);
-                    self.raw_mut()?
-                        .send_raw(ClientEvent::ResponseCreate {
-                            event_id: None,
-                            response: Some(Box::new(openai_audio_response_config())),
-                        })
-                        .await?;
-                    self.has_staged_input = false;
-                    self.awaiting_provider_response_after_commit = true;
+                match self.turning_mode {
+                    RealtimeTurningMode::ProviderManaged => {
+                        Self::synthesize_text_turn_observations(
+                            &mut self.pending_events,
+                            &synthetic_item_id,
+                            &text,
+                        );
+                        self.raw_mut()?
+                            .send_raw(ClientEvent::ResponseCreate {
+                                event_id: None,
+                                response: Some(Box::new(openai_audio_response_config())),
+                            })
+                            .await?;
+                        self.has_staged_input = false;
+                        self.awaiting_provider_response_after_commit = true;
+                    }
+                    RealtimeTurningMode::ExplicitCommit => {
+                        // R4-1 (P1): defer canonical-history synthesis until
+                        // commit. The provider has accepted the
+                        // `conversation.item.create` for this text item and
+                        // assigned it `synthetic_item_id`; on
+                        // `commit_turn_with_modality` we drain the staged
+                        // queue and emit the same observation sequence
+                        // ProviderManaged emits inline so explicit-commit
+                        // text turns reach canonical history.
+                        self.pending_explicit_commit_text_items
+                            .push((synthetic_item_id, text));
+                    }
                 }
                 Ok(())
             }
@@ -2649,6 +2712,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.raw.take();
         self.has_staged_input = false;
         self.has_staged_audio = false;
+        self.pending_explicit_commit_text_items.clear();
         self.pending_events.clear();
         self.pending_mcp_calls.clear();
         self.pending_text_suppressions.clear();
@@ -4866,6 +4930,154 @@ mod tests {
             .find(|event| matches!(event, ClientEvent::ResponseCreate { .. }))
             .expect("expected response.create event during text-only commit");
         assert_response_create_requests_text_only(response_create);
+    }
+
+    /// R4-1 (P1): explicit-commit text input must enter canonical history.
+    /// Open with `ExplicitCommit`, send a text chunk, commit; the
+    /// session must surface the same canonical user-turn observation
+    /// sequence as `ProviderManaged` (TurnStarted →
+    /// InputTranscriptPartial → InputTranscriptFinalForItem →
+    /// TurnCommitted) carrying the input text BEFORE any
+    /// assistant-response observation drains. Pre-R4-1 this synthesis
+    /// was gated on `turning_mode == ProviderManaged`, so
+    /// explicit-commit text turns reached `response.create` without
+    /// ever projecting the user turn into canonical history — the
+    /// architectural hole this regression test guards.
+    #[tokio::test]
+    async fn provider_neutral_session_explicit_commit_text_input_projects_canonical_user_turn() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::clone(&seen),
+                next_events: Arc::new(Mutex::new(VecDeque::new())),
+            }),
+            RealtimeTurningMode::ExplicitCommit,
+        );
+
+        let user_text = "explicit commit user turn".to_string();
+        session
+            .send_input(RealtimeInputChunk::TextChunk(RealtimeTextChunk {
+                text: user_text.clone(),
+            }))
+            .await
+            .expect("text chunk should send");
+
+        // Pre-commit: nothing should be queued yet — synthesis is
+        // deferred until the caller drives `commit_turn_with_modality`.
+        // (ProviderManaged would have synthesized inline by now; the
+        // whole point of ExplicitCommit is caller-driven commit timing.)
+        assert!(
+            session
+                .next_event()
+                .await
+                .expect("pre-commit poll")
+                .is_none(),
+            "explicit-commit text staging must not surface canonical \
+             observations before commit"
+        );
+
+        session
+            .commit_turn_with_modality(Some(LiveResponseModality::Text))
+            .await
+            .expect("text-only commit should succeed");
+
+        // Drain the four canonical user-turn observations in order.
+        // Each must carry the input text where applicable, and the
+        // synthetic item id used on InputTranscriptFinalForItem must
+        // match the one sent to the provider via ConversationItemCreate
+        // so canonical session append stays keyed.
+        let provider_item_id = {
+            let seen = seen.lock().await;
+            seen.iter()
+                .find_map(|event| match event {
+                    ClientEvent::ConversationItemCreate { item, .. } => match item.as_ref() {
+                        Item::Message {
+                            id: Some(id),
+                            role: Role::User,
+                            ..
+                        } => Some(id.clone()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .expect("conversation.item.create must carry a user item id")
+        };
+
+        let turn_started = session
+            .next_event()
+            .await
+            .expect("turn started poll")
+            .expect("turn started must be queued by commit synthesis");
+        assert!(
+            matches!(turn_started, RealtimeSessionEvent::TurnStarted),
+            "first canonical observation must be TurnStarted, got {turn_started:?}"
+        );
+
+        let partial = session
+            .next_event()
+            .await
+            .expect("partial poll")
+            .expect("InputTranscriptPartial must be queued by commit synthesis");
+        match partial {
+            RealtimeSessionEvent::InputTranscriptPartial { text } => {
+                assert_eq!(text, user_text, "partial must carry the staged text");
+            }
+            other => panic!("expected InputTranscriptPartial, got {other:?}"),
+        }
+
+        let final_for_item = session
+            .next_event()
+            .await
+            .expect("final-for-item poll")
+            .expect("InputTranscriptFinalForItem must be queued by commit synthesis");
+        match final_for_item {
+            RealtimeSessionEvent::InputTranscriptFinalForItem {
+                item_id,
+                previous_item_id,
+                content_index,
+                text,
+            } => {
+                assert_eq!(
+                    item_id, provider_item_id,
+                    "synthesized final must reuse the synthetic item id sent to the provider"
+                );
+                assert_eq!(previous_item_id, None);
+                assert_eq!(content_index, 0);
+                assert_eq!(text, user_text);
+            }
+            other => panic!("expected InputTranscriptFinalForItem, got {other:?}"),
+        }
+
+        let committed = session
+            .next_event()
+            .await
+            .expect("committed poll")
+            .expect("TurnCommitted must be queued by commit synthesis");
+        assert!(
+            matches!(committed, RealtimeSessionEvent::TurnCommitted),
+            "fourth canonical observation must be TurnCommitted, got {committed:?}"
+        );
+
+        // The provider event stream is empty (no assistant response
+        // events queued in the fake), so any further drain returns
+        // None — confirming the synthesis path emits nothing extra.
+        assert!(
+            session
+                .next_event()
+                .await
+                .expect("post-canonical poll")
+                .is_none(),
+            "no further canonical observations should be queued"
+        );
+
+        // Sanity: commit still drives a `response.create` (caller-driven
+        // semantics), so the text turn flows through to the provider.
+        let seen = seen.lock().await;
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, ClientEvent::ResponseCreate { .. })),
+            "commit must still fire response.create after canonical synthesis"
+        );
     }
 
     #[tokio::test]

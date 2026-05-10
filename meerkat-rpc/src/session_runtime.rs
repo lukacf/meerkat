@@ -6069,7 +6069,7 @@ impl SessionRuntime {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()?;
-            return Some(Arc::new(move || {
+            Some(Arc::new(move || {
                 let hook = Arc::clone(&hook);
                 Box::pin(async move {
                     hook.reached_flag
@@ -6077,7 +6077,7 @@ impl SessionRuntime {
                     hook.reached.notify_waiters();
                     hook.release.notified().await;
                 })
-            }));
+            }))
         }
         #[cfg(not(test))]
         {

@@ -7,6 +7,7 @@
 //! `Mode` enum's discriminants compile and Copy/PartialEq hold.
 
 #![cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use meerkat::session_runtime::staged_promotion::{
     PendingPromotionCleanupMode, StagedTaskJoinError, await_service_apply_runtime_turn,

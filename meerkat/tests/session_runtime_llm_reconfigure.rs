@@ -7,6 +7,7 @@
 //! happy path and the rollback-on-persist-failure path.
 
 #![cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 
 use std::sync::Mutex;
 

@@ -23,6 +23,8 @@
 //! upstream, those methods land on `LiveOrchestrator<'a>` and gain
 //! direct coverage here.
 
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+
 use meerkat::session_runtime::errors::LiveOpenPrecheckError;
 use meerkat::session_runtime::live_orchestration::{
     apply_precheck_gates, extract_system_prompt_from_seed_messages_runtime,

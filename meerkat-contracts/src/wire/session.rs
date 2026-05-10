@@ -627,21 +627,26 @@ fn wire_provider_meta_to_core(value: WireProviderMeta) -> Option<ProviderMeta> {
     }
 }
 
-/// CC1 (FIX-A): inverse of `From<AssistantBlock> for WireAssistantBlock`.
+/// CC1 (FIX-A) / R7-5 (P3 dogma): inverse of
+/// `From<AssistantBlock> for WireAssistantBlock`.
 ///
 /// Mirrors the forward direction arm-for-arm. `WireAssistantBlock::Unknown`
 /// is the wire-side sink for future core variants we don't yet recognize;
-/// the inverse cannot fabricate a typed `AssistantBlock` from it, so it
-/// degrades to an empty `AssistantBlock::Text` with no meta. This is the
-/// symmetric counterpart of the forward direction's `_ => Self::Unknown`
-/// fallback. Pre-1.0 dogma: when a new `AssistantBlock` variant lands,
-/// add an explicit arm both here and in the forward direction.
+/// the inverse cannot fabricate a typed `AssistantBlock` from it.
 ///
-/// R7-4 (P3 dogma): promoted from `From` to `TryFrom` so the inner
+/// R7-4 (P3 dogma) promoted this from `From` to `TryFrom` so the inner
 /// `WireTranscriptSource::Unknown` can propagate via `?` instead of
-/// silently fabricating a `Spoken` provenance. The
-/// `WireAssistantBlock::Unknown` arm is unchanged in R7-4 (still degrades
-/// to empty-text); R7-5 hardens it to return a typed error.
+/// silently fabricating a `Spoken` provenance.
+///
+/// R7-5 (P3 dogma) replaced the previous fabrication of an empty
+/// `AssistantBlock::Text { "" }` for the `Unknown` arm with a typed
+/// [`WireConversionError::AssistantBlock`] error. SDK consumers and
+/// upstream callers now see a typed conversion failure rather than a
+/// zero-length text block silently injected into the canonical
+/// transcript.
+///
+/// Pre-1.0 dogma: when a new `AssistantBlock` variant lands, add an
+/// explicit arm both here and in the forward direction.
 impl TryFrom<WireAssistantBlock> for AssistantBlock {
     type Error = crate::wire::live::WireConversionError;
 
@@ -701,10 +706,11 @@ impl TryFrom<WireAssistantBlock> for AssistantBlock {
                 revised_prompt,
                 meta,
             },
-            WireAssistantBlock::Unknown => Self::Text {
-                text: String::new(),
-                meta: None,
-            },
+            WireAssistantBlock::Unknown => {
+                return Err(crate::wire::live::WireConversionError::AssistantBlock {
+                    debug: "WireAssistantBlock::Unknown".to_string(),
+                });
+            }
         })
     }
 }
@@ -1649,5 +1655,24 @@ mod tests {
         assert!(matches!(wire, WireTranscriptSource::Spoken));
         let back = TranscriptSource::try_from(wire).unwrap();
         assert!(matches!(back, TranscriptSource::Spoken));
+    }
+
+    /// R7-5 (P3 dogma): the reverse `WireAssistantBlock::Unknown -> core`
+    /// path must surface a typed [`WireConversionError::AssistantBlock`]
+    /// rather than fabricating an empty `AssistantBlock::Text { "" }`.
+    /// Closes the silent zero-length-text injection regression that the
+    /// previous `From` impl exhibited for unknown future wire variants.
+    #[test]
+    fn wire_to_core_assistant_block_unknown_returns_typed_error() {
+        let wire = WireAssistantBlock::Unknown;
+        let err = AssistantBlock::try_from(wire).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::wire::live::WireConversionError::AssistantBlock { ref debug }
+                    if debug == "WireAssistantBlock::Unknown"
+            ),
+            "expected WireConversionError::AssistantBlock, got {err:?}"
+        );
     }
 }

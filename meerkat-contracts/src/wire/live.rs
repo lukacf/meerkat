@@ -176,6 +176,14 @@ pub enum WireConversionError {
     /// misattributed as `Spoken`.
     #[error("unknown wire transcript-source variant: {debug}")]
     TranscriptSource { debug: String },
+    /// Wire assistant-block is the explicit-Unknown sentinel; no inverse
+    /// mapping exists. Carries the original debug payload for server logs.
+    /// R7-5 (P3 dogma): the reverse direction previously fabricated an
+    /// empty `AssistantBlock::Text` from `WireAssistantBlock::Unknown`,
+    /// silently producing a zero-length text block on the canonical
+    /// transcript. Now surfaces as a typed error.
+    #[error("unknown wire assistant-block variant: {debug}")]
+    AssistantBlock { debug: String },
 }
 
 impl TryFrom<WireLiveTransportBootstrap> for LiveTransportBootstrap {

@@ -9360,13 +9360,172 @@
     "type": "object"
   },
   "LiveStatusResult": {
+    "$defs": {
+      "WireLiveAdapterStatus": {
+        "description": "Wire mirror of [`meerkat_core::live_adapter::LiveAdapterStatus`].\n\nInternally-tagged on `status` (snake_case). The `degraded` variant\nreferences [`WireLiveDegradationReason`] so the typed reason is visible at\nthe SDK boundary.",
+        "oneOf": [
+          {
+            "properties": {
+              "status": {
+                "const": "idle",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "const": "opening",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "const": "ready",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WireLiveDegradationReason"
+              },
+              "status": {
+                "const": "degraded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "const": "closing",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "status": {
+                "const": "closed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R5-3 (P3): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveAdapterStatus`] enum is `#[non_exhaustive]`. When a\nfuture status lands without an explicit arm in the wire `From`\nimpl, the conversion surfaces as `Unknown { debug }` rather than\nsilently coercing to `Closed` — a \"plausible lie\" that would tell\nSDK consumers a healthy channel was torn down. SDK consumers route\non the `status: \"unknown\"` discriminator and treat it as an\nunrecognized status — never as `Closed`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "status": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireLiveDegradationReason": {
+        "description": "Wire mirror of [`meerkat_core::live_adapter::LiveDegradationReason`].\n\nInternally-tagged on `kind` (snake_case) — matches the core enum's serde\nshape exactly. SDK consumers route on `kind` to distinguish the\nnon-payload variants from the typed `other { detail }` payload.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "rate_limited",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "provider_throttled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "network_unstable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "detail": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "other",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "description": "Response payload for `live/status`. See `LiveOpenResult` for the\nrationale on the schema-side opaque projection of the core type.",
+    "description": "Response payload for `live/status`.\n\nR6-3 (P2): `status` is now the typed [`WireLiveAdapterStatus`] mirror\n(with R5-3's `Unknown { debug }` floor) instead of the core\n[`LiveAdapterStatus`] under a `schemars(with = \"serde_json::Value\")`\nshroud. SDK codegen emits the typed discriminated union (TS) / typed\ndict union (Python) for `live/status` instead of `unknown` / `Any`.\nThe runtime handler converts core → wire at the boundary; clients\nthat fully understood the previous JSON shape see byte-identical\npayloads (the wire mirror serializes byte-compatible with the core\nenum — see `wire_live_adapter_status_byte_compatible_with_core`).",
     "properties": {
       "channel_id": {
         "type": "string"
       },
-      "status": true
+      "status": {
+        "$ref": "#/$defs/WireLiveAdapterStatus"
+      }
     },
     "required": [
       "channel_id",
@@ -22876,7 +23035,7 @@
         "type": "string"
       },
       "WireLiveConfigRejectionReason": {
-        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.",
+        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.\n\nR6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The\nprevious wildcard fallback collapsed future core variants into\n`Other { detail: \"unknown_live_config_rejection_reason\" }`, which SDK\nconsumers had to pattern-match on the English `detail` to route — the\nexact \"typed route becomes detail string\" antipattern R3-6 + R5-3\nclosed for transport / observation / continuity / modality / status /\nerror_code. Future core variants now surface as `Unknown { debug }`\nwith the `{:?}` projection of the source variant preserved for\nserver-side observability.",
         "oneOf": [
           {
             "properties": {
@@ -23027,6 +23186,23 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R6-5 (P3 dogma): explicit fail-loud variant for unknown core\nvariants.\n\nThe core [`LiveConfigRejectionReason`] enum is `#[non_exhaustive]`.\nWhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Other { detail:\n\"unknown_live_config_rejection_reason\" }` — a \"typed route becomes\ndetail string\" antipattern that forces SDK consumers to parse\nEnglish from `detail` to recover the missing route. SDK consumers\nroute on the `kind: \"unknown\"` discriminator and treat it as an\nunrecognized rejection reason — never as `Other`. The `debug`\npayload carries the `{:?}` projection of the source variant so\nserver logs name the real shape that needs to be promoted.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }
@@ -23733,7 +23909,7 @@
         ]
       },
       "WireLiveConfigRejectionReason": {
-        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.",
+        "description": "Wire mirror of\n[`meerkat_core::live_adapter::LiveConfigRejectionReason`]. R5-2 (P2\ndogma): pins the typed semantic-routing variants on the wire so SDKs\ncan distinguish a runtime-side identity swap from an adapter-side\ninput-modality rejection without string parsing.\n\nR6-5 (P3 dogma): closes the last typed-route-as-detail-string gap. The\nprevious wildcard fallback collapsed future core variants into\n`Other { detail: \"unknown_live_config_rejection_reason\" }`, which SDK\nconsumers had to pattern-match on the English `detail` to route — the\nexact \"typed route becomes detail string\" antipattern R3-6 + R5-3\nclosed for transport / observation / continuity / modality / status /\nerror_code. Future core variants now surface as `Unknown { debug }`\nwith the `{:?}` projection of the source variant preserved for\nserver-side observability.",
         "oneOf": [
           {
             "properties": {
@@ -23884,6 +24060,23 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R6-5 (P3 dogma): explicit fail-loud variant for unknown core\nvariants.\n\nThe core [`LiveConfigRejectionReason`] enum is `#[non_exhaustive]`.\nWhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Other { detail:\n\"unknown_live_config_rejection_reason\" }` — a \"typed route becomes\ndetail string\" antipattern that forces SDK consumers to parse\nEnglish from `detail` to recover the missing route. SDK consumers\nroute on the `kind: \"unknown\"` discriminator and treat it as an\nunrecognized rejection reason — never as `Other`. The `debug`\npayload carries the `{:?}` projection of the source variant so\nserver logs name the real shape that needs to be promoted.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
             ],
             "type": "object"
           }

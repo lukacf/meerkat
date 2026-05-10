@@ -1735,7 +1735,7 @@ export interface LiveChannelParams {
 
 export interface LiveStatusResult {
   channel_id: string;
-  status: unknown;
+  status: WireLiveAdapterStatus;
 }
 
 export interface LiveSendInputParams {

@@ -13,7 +13,7 @@ use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
     LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
     LiveRefreshResult, LiveSendInputParams, LiveStatusResult, LiveTruncateParams,
-    RealtimeTurningMode,
+    RealtimeTurningMode, WireLiveAdapterStatus,
 };
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
@@ -435,9 +435,12 @@ pub async fn handle_live_status(
 
     match host.channel_status(&channel_id).await {
         Ok(status) => {
+            // R6-3 (P2): convert core → typed wire mirror so SDK codegen
+            // emits a discriminated union for `status` instead of an
+            // opaque `Value`/`Any`.
             let result = LiveStatusResult {
                 channel_id: parsed.channel_id,
-                status,
+                status: WireLiveAdapterStatus::from(status),
             };
             // N75: see `handle_live_open` — same INTERNAL_ERROR fallback for
             // a serialization failure that should never happen in practice.
@@ -1054,7 +1057,7 @@ mod tests {
     fn live_status_result_roundtrip_idle() {
         let v = LiveStatusResult {
             channel_id: "live_1".into(),
-            status: LiveAdapterStatus::Idle,
+            status: WireLiveAdapterStatus::from(LiveAdapterStatus::Idle),
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -1063,9 +1066,35 @@ mod tests {
     fn live_status_result_roundtrip_ready() {
         let v = LiveStatusResult {
             channel_id: "live_1".into(),
-            status: LiveAdapterStatus::Ready,
+            status: WireLiveAdapterStatus::from(LiveAdapterStatus::Ready),
         };
         assert_eq!(round_trip(&v), v);
+    }
+
+    /// R6-3 (P2): the wire payload carries a typed `status` discriminator
+    /// (string for payload-less variants, internally-tagged on `status`
+    /// for the `degraded { reason }` payload variant), not an opaque
+    /// nested `Value`. Asserts the schema-shape contract that SDK
+    /// codegen now emits typed dict / discriminated-union variants
+    /// instead of `Any` / `unknown`.
+    #[test]
+    fn live_status_result_serializes_typed_status_discriminator() {
+        let ready = LiveStatusResult {
+            channel_id: "live_1".into(),
+            status: WireLiveAdapterStatus::from(LiveAdapterStatus::Ready),
+        };
+        let j = serde_json::to_value(&ready).expect("round-trip should succeed");
+        // The wire mirror is internally-tagged on `status`; payload-less
+        // variants surface as `{ "status": "ready" }`.
+        assert_eq!(j["status"]["status"], "ready");
+        assert_eq!(j["channel_id"], "live_1");
+
+        // The byte-shape stays compatible with the previous untyped
+        // `core::LiveAdapterStatus` projection — clients that parsed the
+        // old shape still see the same discriminator.
+        let core_only =
+            serde_json::to_value(LiveAdapterStatus::Ready).expect("core serialize should succeed");
+        assert_eq!(j["status"], core_only);
     }
 
     #[test]

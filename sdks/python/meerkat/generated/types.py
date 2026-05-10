@@ -1548,10 +1548,19 @@ modality. See [`LiveCommitInputParams`]."""
 
 @dataclass
 class LiveStatusResult:
-    """Response payload for `live/status`. See `LiveOpenResult` for the
-rationale on the schema-side opaque projection of the core type."""
+    """Response payload for `live/status`.
+
+R6-3 (P2): `status` is now the typed [`WireLiveAdapterStatus`] mirror
+(with R5-3's `Unknown { debug }` floor) instead of the core
+[`LiveAdapterStatus`] under a `schemars(with = "serde_json::Value")`
+shroud. SDK codegen emits the typed discriminated union (TS) / typed
+dict union (Python) for `live/status` instead of `unknown` / `Any`.
+The runtime handler converts core → wire at the boundary; clients
+that fully understood the previous JSON shape see byte-identical
+payloads (the wire mirror serializes byte-compatible with the core
+enum — see `wire_live_adapter_status_byte_compatible_with_core`)."""
     channel_id: str
-    status: Any
+    status: WireLiveAdapterStatus
 
 
 @dataclass

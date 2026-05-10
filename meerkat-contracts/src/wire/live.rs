@@ -500,14 +500,22 @@ pub struct LiveCommitInputParams {
     pub response_modality: Option<WireLiveResponseModality>,
 }
 
-/// Response payload for `live/status`. See `LiveOpenResult` for the
-/// rationale on the schema-side opaque projection of the core type.
+/// Response payload for `live/status`.
+///
+/// R6-3 (P2): `status` is now the typed [`WireLiveAdapterStatus`] mirror
+/// (with R5-3's `Unknown { debug }` floor) instead of the core
+/// [`LiveAdapterStatus`] under a `schemars(with = "serde_json::Value")`
+/// shroud. SDK codegen emits the typed discriminated union (TS) / typed
+/// dict union (Python) for `live/status` instead of `unknown` / `Any`.
+/// The runtime handler converts core → wire at the boundary; clients
+/// that fully understood the previous JSON shape see byte-identical
+/// payloads (the wire mirror serializes byte-compatible with the core
+/// enum — see `wire_live_adapter_status_byte_compatible_with_core`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LiveStatusResult {
     pub channel_id: String,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
-    pub status: LiveAdapterStatus,
+    pub status: WireLiveAdapterStatus,
 }
 
 /// Status of a `live/refresh` request relative to the adapter pump.
@@ -846,6 +854,21 @@ pub enum WireLiveConfigRejectionReason {
     },
     RefreshAudioConfigMismatch {
         detail: String,
+    },
+    /// R6-4 (P2): typed mirror of
+    /// [`LiveConfigRejectionReason::AudioInputFormatMismatch`]. The
+    /// bound provider session has a fixed input audio format (OpenAI
+    /// Realtime: PCM 24 kHz mono); a `live/send_input` chunk that
+    /// declares a divergent `sample_rate_hz` / `channels` is rejected
+    /// at the adapter boundary BEFORE bytes hit the provider buffer.
+    /// SDK consumers route on this typed discriminator to surface a
+    /// precise format-mismatch error rather than parsing English from
+    /// `Other.detail`.
+    AudioInputFormatMismatch {
+        expected_sample_rate_hz: u32,
+        expected_channels: u16,
+        actual_sample_rate_hz: u32,
+        actual_channels: u16,
     },
     Other {
         detail: String,

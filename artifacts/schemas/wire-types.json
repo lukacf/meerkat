@@ -23174,6 +23174,45 @@
             "type": "object"
           },
           {
+            "description": "R6-4 (P2): typed mirror of\n[`LiveConfigRejectionReason::AudioInputFormatMismatch`]. The\nbound provider session has a fixed input audio format (OpenAI\nRealtime: PCM 24 kHz mono); a `live/send_input` chunk that\ndeclares a divergent `sample_rate_hz` / `channels` is rejected\nat the adapter boundary BEFORE bytes hit the provider buffer.\nSDK consumers route on this typed discriminator to surface a\nprecise format-mismatch error rather than parsing English from\n`Other.detail`.",
+            "properties": {
+              "actual_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "actual_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "audio_input_format_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "expected_sample_rate_hz",
+              "expected_channels",
+              "actual_sample_rate_hz",
+              "actual_channels"
+            ],
+            "type": "object"
+          },
+          {
             "properties": {
               "detail": {
                 "type": "string"
@@ -24044,6 +24083,45 @@
             "required": [
               "kind",
               "detail"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R6-4 (P2): typed mirror of\n[`LiveConfigRejectionReason::AudioInputFormatMismatch`]. The\nbound provider session has a fixed input audio format (OpenAI\nRealtime: PCM 24 kHz mono); a `live/send_input` chunk that\ndeclares a divergent `sample_rate_hz` / `channels` is rejected\nat the adapter boundary BEFORE bytes hit the provider buffer.\nSDK consumers route on this typed discriminator to surface a\nprecise format-mismatch error rather than parsing English from\n`Other.detail`.",
+            "properties": {
+              "actual_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "actual_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_channels": {
+                "format": "uint16",
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "expected_sample_rate_hz": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "kind": {
+                "const": "audio_input_format_mismatch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "expected_sample_rate_hz",
+              "expected_channels",
+              "actual_sample_rate_hz",
+              "actual_channels"
             ],
             "type": "object"
           },

@@ -3601,6 +3601,20 @@ enum OpenAiLiveCommandError {
     /// place (OpenAI Realtime is fixed to pcm/24kHz mono). `detail`
     /// carries the offending rate/channel projection for logs.
     RefreshAudioConfigMismatch { detail: String },
+    /// R6-4 (P2): `SendInput` rejected because the audio chunk's
+    /// declared `sample_rate_hz` / `channels` diverges from the bound
+    /// OpenAI Realtime session's fixed PCM 24 kHz mono format. Without
+    /// this gate the chunk's bytes would be appended to the provider
+    /// input buffer and the server would interpret them at 24 kHz mono
+    /// regardless of the chunk's declared shape — silent semantic
+    /// loss. Classified as a SCOPED rejection (`CommandRejected`,
+    /// channel survives) — the chunk is invalid, not the session.
+    AudioInputFormatMismatch {
+        expected_sample_rate_hz: u32,
+        expected_channels: u16,
+        actual_sample_rate_hz: u32,
+        actual_channels: u16,
+    },
     /// Catch-all for every other underlying [`LlmError`] (input-shape
     /// rejections, provider outages, network timeouts, etc.). The pump
     /// caller continues to classify these via the existing `LlmError`
@@ -3635,6 +3649,17 @@ impl std::fmt::Display for OpenAiLiveCommandError {
             Self::RefreshAudioConfigMismatch { detail } => {
                 write!(f, "live adapter refresh: audio config mismatch ({detail})")
             }
+            Self::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            } => write!(
+                f,
+                "live adapter send_input: audio chunk declared rate={actual_sample_rate_hz}Hz \
+                 ch={actual_channels} but OpenAI Realtime session is fixed at \
+                 rate={expected_sample_rate_hz}Hz ch={expected_channels} (PCM mono)"
+            ),
             Self::Llm(err) => write!(f, "{err}"),
         }
     }
@@ -3688,6 +3713,25 @@ fn classify_command_error(
                 },
             },
             false,
+        ),
+        // R6-4 (P2): scoped rejection — the chunk is invalid but the
+        // live channel itself remains healthy. Routes to `CommandRejected`
+        // (mirrors image / video-frame rejection shape from R5-9).
+        OpenAiLiveCommandError::AudioInputFormatMismatch {
+            expected_sample_rate_hz,
+            expected_channels,
+            actual_sample_rate_hz,
+            actual_channels,
+        } => (
+            LiveAdapterErrorCode::ConfigRejected {
+                reason: LiveConfigRejectionReason::AudioInputFormatMismatch {
+                    expected_sample_rate_hz: *expected_sample_rate_hz,
+                    expected_channels: *expected_channels,
+                    actual_sample_rate_hz: *actual_sample_rate_hz,
+                    actual_channels: *actual_channels,
+                },
+            },
+            true,
         ),
         OpenAiLiveCommandError::Llm(LlmError::InvalidInputShape { message }) => (
             LiveAdapterErrorCode::ConfigRejected {
@@ -3817,6 +3861,30 @@ async fn execute_openai_live_command(
                     sample_rate_hz,
                     channels,
                 } => {
+                    // R6-4 (P2): typed format gate. The OpenAI Realtime
+                    // session is fixed at PCM 24 kHz mono (per the
+                    // `format=pcm_24k_mono` channel transport URL
+                    // params). A chunk whose declared rate/channels
+                    // diverge would otherwise be appended into the
+                    // provider input buffer and be (mis)interpreted at
+                    // the session's actual format — silent semantic
+                    // loss with a "sent" success returned to the
+                    // caller. Reject at the boundary BEFORE append
+                    // with a typed `AudioInputFormatMismatch` so SDK
+                    // consumers route on the discriminator instead of
+                    // parsing English from `Other.detail`. Scoped
+                    // (channel survives) — the chunk is the bug, not
+                    // the session.
+                    let expected_rate = OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ;
+                    let expected_channels = u16::from(OPENAI_REALTIME_AUDIO_CHANNELS);
+                    if sample_rate_hz != expected_rate || channels != expected_channels {
+                        return Err(OpenAiLiveCommandError::AudioInputFormatMismatch {
+                            expected_sample_rate_hz: expected_rate,
+                            expected_channels,
+                            actual_sample_rate_hz: sample_rate_hz,
+                            actual_channels: channels,
+                        });
+                    }
                     use base64::Engine;
                     RealtimeInputChunk::AudioChunk(RealtimeAudioChunk {
                         mime_type: "audio/pcm".to_string(),
@@ -8438,6 +8506,238 @@ mod tests {
                 panic!("expected CommandRejected observation for video-frame input, got {other:?}")
             }
         }
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R6-4 (P2): a `SendInput { LiveInputChunk::Audio }` whose declared
+    /// `sample_rate_hz` differs from the bound OpenAI Realtime session's
+    /// fixed PCM 24 kHz mono format must be rejected at the boundary
+    /// BEFORE bytes hit the provider buffer, with a typed
+    /// `LiveConfigRejectionReason::AudioInputFormatMismatch`. Without
+    /// this gate the chunk would be appended and the server would
+    /// (mis)interpret the bytes at 24 kHz — silent semantic loss while
+    /// returning "sent" success to the caller.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_input_rejects_mismatched_sample_rate_with_typed_format_mismatch() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveInputChunk;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Audio {
+                    data: vec![0u8, 1, 2, 3, 4, 5, 6, 7],
+                    sample_rate_hz: 16_000,
+                    channels: 1,
+                },
+            })
+            .await
+            .expect("SendInput must dispatch to the pump");
+
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+        match observation {
+            // Scoped (channel survives) — the chunk is invalid, not the session.
+            Some(LiveAdapterObservation::CommandRejected { code, message }) => match code {
+                LiveAdapterErrorCode::ConfigRejected { reason } => match reason {
+                    LiveConfigRejectionReason::AudioInputFormatMismatch {
+                        expected_sample_rate_hz,
+                        expected_channels,
+                        actual_sample_rate_hz,
+                        actual_channels,
+                    } => {
+                        assert_eq!(expected_sample_rate_hz, 24_000);
+                        assert_eq!(expected_channels, 1);
+                        assert_eq!(actual_sample_rate_hz, 16_000);
+                        assert_eq!(actual_channels, 1);
+                        assert!(
+                            message.contains("audio_input_format_mismatch")
+                                || message.contains("16000"),
+                            "CommandRejected.message must mirror the typed reason, got {message}"
+                        );
+                    }
+                    other => {
+                        panic!("expected AudioInputFormatMismatch typed variant, got {other:?}")
+                    }
+                },
+                other => {
+                    panic!("audio rate-mismatch must surface as ConfigRejected, got code {other:?}")
+                }
+            },
+            other => panic!("expected CommandRejected observation, got {other:?}"),
+        }
+
+        // Critical: bytes must NOT have been appended to the provider buffer.
+        let seen_guard = seen.lock().await;
+        assert!(
+            !seen_guard
+                .iter()
+                .any(|event| matches!(event, ClientEvent::InputAudioBufferAppend { .. })),
+            "rejected chunk must NOT be appended to the provider input buffer"
+        );
+        drop(seen_guard);
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R6-4 (P2): same shape as the rate-mismatch test — a chunk that
+    /// declares stereo (or any non-mono channel count) must be rejected
+    /// with the typed `AudioInputFormatMismatch` variant.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_input_rejects_mismatched_channels_with_typed_format_mismatch() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveInputChunk;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Audio {
+                    data: vec![0u8, 1, 2, 3],
+                    sample_rate_hz: 24_000,
+                    channels: 2,
+                },
+            })
+            .await
+            .expect("SendInput must dispatch to the pump");
+
+        let observation = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("error observation must arrive within 1s")
+        .expect("adapter must yield Ok");
+        match observation {
+            Some(LiveAdapterObservation::CommandRejected { code, .. }) => match code {
+                LiveAdapterErrorCode::ConfigRejected { reason } => match reason {
+                    LiveConfigRejectionReason::AudioInputFormatMismatch {
+                        expected_sample_rate_hz,
+                        expected_channels,
+                        actual_sample_rate_hz,
+                        actual_channels,
+                    } => {
+                        assert_eq!(expected_sample_rate_hz, 24_000);
+                        assert_eq!(expected_channels, 1);
+                        assert_eq!(actual_sample_rate_hz, 24_000);
+                        assert_eq!(actual_channels, 2);
+                    }
+                    other => {
+                        panic!("expected AudioInputFormatMismatch typed variant, got {other:?}")
+                    }
+                },
+                other => {
+                    panic!("channel-mismatch must surface as ConfigRejected, got code {other:?}")
+                }
+            },
+            other => panic!("expected CommandRejected observation, got {other:?}"),
+        }
+
+        let seen_guard = seen.lock().await;
+        assert!(
+            !seen_guard
+                .iter()
+                .any(|event| matches!(event, ClientEvent::InputAudioBufferAppend { .. })),
+            "rejected chunk must NOT be appended to the provider input buffer"
+        );
+        drop(seen_guard);
+
+        adapter.close().await.expect("close must succeed");
+    }
+
+    /// R6-4 (P2) negative: a chunk that matches the bound session's
+    /// fixed PCM 24 kHz mono format must pass the gate and be appended
+    /// to the provider input buffer — the gate must not over-reject the
+    /// happy path.
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_input_accepts_pcm_24k_mono_unchanged() {
+        use meerkat_core::Provider;
+        use meerkat_core::live_adapter::LiveInputChunk;
+
+        let ack_queue: VecDeque<Result<Option<ServerEvent>, LlmError>> = VecDeque::new();
+        let seen: Arc<Mutex<Vec<ClientEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let raw = Box::new(ParkingOpenAiLiveSession {
+            seen: Arc::clone(&seen),
+            next_events: Arc::new(Mutex::new(ack_queue)),
+        });
+        let mut session = OpenAiRealtimeSession::new(raw, RealtimeTurningMode::ExplicitCommit);
+        session.set_current_identity("gpt-realtime-2", Provider::OpenAI.as_str());
+        let adapter = OpenAiLiveAdapter::new(session);
+
+        let first = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            adapter.next_observation(),
+        )
+        .await
+        .expect("Ready must arrive within 1s")
+        .expect("adapter must yield Ok");
+        assert!(matches!(first, Some(LiveAdapterObservation::Ready)));
+
+        adapter
+            .send_command(LiveAdapterCommand::SendInput {
+                chunk: LiveInputChunk::Audio {
+                    data: vec![0u8, 1, 2, 3, 4, 5, 6, 7],
+                    sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                    channels: u16::from(OPENAI_REALTIME_AUDIO_CHANNELS),
+                },
+            })
+            .await
+            .expect("SendInput must dispatch to the pump");
+
+        // Allow the pump to process the command; no observation is
+        // expected on the happy path so a short bounded sleep gives the
+        // append a chance to land in `seen` before we assert.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let seen_guard = seen.lock().await;
+        assert!(
+            seen_guard
+                .iter()
+                .any(|event| matches!(event, ClientEvent::InputAudioBufferAppend { .. })),
+            "matching PCM 24 kHz mono chunk must be appended to the provider input buffer"
+        );
+        drop(seen_guard);
 
         adapter.close().await.expect("close must succeed");
     }

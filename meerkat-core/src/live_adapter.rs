@@ -458,7 +458,8 @@ pub enum LiveAdapterErrorCode {
 ///   `session.update`-style refresh because the snapshot mutated a field
 ///   the provider session cannot rebind in place):
 ///   [`Self::RefreshModelSwap`], [`Self::RefreshProviderSwap`],
-///   [`Self::RefreshAudioConfigMismatch`].
+///   [`Self::RefreshAudioConfigMismatch`],
+///   [`Self::AudioInputFormatMismatch`].
 /// * **Diagnostic catch-all**: [`Self::Other`] for one-off explanations
 ///   not yet worth typing. New routing-relevant cases must add a typed
 ///   variant rather than leaning on [`Self::Other`].
@@ -517,6 +518,22 @@ pub enum LiveConfigRejectionReason {
     /// is fixed to pcm/24kHz mono). `detail` carries the offending
     /// rate/channel projection for logs.
     RefreshAudioConfigMismatch { detail: String },
+    /// R6-4 (P2): adapter rejected a `SendInput { LiveInputChunk::Audio }`
+    /// chunk whose declared `sample_rate_hz` / `channels` diverge from
+    /// the bound provider session's fixed audio format (e.g. OpenAI
+    /// Realtime is fixed to PCM 24 kHz mono). Without this typed gate
+    /// the chunk's bytes would be appended into the provider buffer
+    /// under the session's actual format and the caller would get a
+    /// "sent" success while the server interpreted the bytes at the
+    /// wrong rate/channel count — silent semantic loss. SDK consumers
+    /// route on the typed variant to surface a precise format-mismatch
+    /// diagnostic instead of parsing English from `Other.detail`.
+    AudioInputFormatMismatch {
+        expected_sample_rate_hz: u32,
+        expected_channels: u16,
+        actual_sample_rate_hz: u32,
+        actual_channels: u16,
+    },
     /// Diagnostic catch-all for free-form explanations not yet worth
     /// typing. Add a typed variant before reaching for this; callers
     /// must not pattern-match on `detail` for routing.
@@ -561,6 +578,17 @@ impl std::fmt::Display for LiveConfigRejectionReason {
             Self::RefreshAudioConfigMismatch { detail } => {
                 write!(f, "live adapter refresh: audio config mismatch ({detail})")
             }
+            Self::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            } => write!(
+                f,
+                "audio_input_format_mismatch: chunk declared rate={actual_sample_rate_hz}Hz \
+                 ch={actual_channels} but bound provider session is fixed at \
+                 rate={expected_sample_rate_hz}Hz ch={expected_channels}"
+            ),
             Self::Other { detail } => f.write_str(detail),
         }
     }
@@ -1944,6 +1972,12 @@ mod tests {
             },
             LiveConfigRejectionReason::RefreshAudioConfigMismatch {
                 detail: "rate=16000/16000 ch=1/1 cannot be applied in place".into(),
+            },
+            LiveConfigRejectionReason::AudioInputFormatMismatch {
+                expected_sample_rate_hz: 24_000,
+                expected_channels: 1,
+                actual_sample_rate_hz: 16_000,
+                actual_channels: 2,
             },
             LiveConfigRejectionReason::Other {
                 detail: "diagnostic catch-all".into(),

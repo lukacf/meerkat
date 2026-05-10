@@ -937,6 +937,17 @@ impl From<LiveConfigRejectionReason> for WireLiveConfigRejectionReason {
             LiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Self::RefreshAudioConfigMismatch { detail }
             }
+            LiveConfigRejectionReason::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            } => Self::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            },
             LiveConfigRejectionReason::Other { detail } => Self::Other { detail },
             // Core enum is `#[non_exhaustive]`. R6-5 (P3 dogma): surface
             // unknown variants explicitly via `Unknown { debug }` rather
@@ -1011,6 +1022,17 @@ impl TryFrom<WireLiveConfigRejectionReason> for LiveConfigRejectionReason {
             WireLiveConfigRejectionReason::RefreshAudioConfigMismatch { detail } => {
                 Ok(Self::RefreshAudioConfigMismatch { detail })
             }
+            WireLiveConfigRejectionReason::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            } => Ok(Self::AudioInputFormatMismatch {
+                expected_sample_rate_hz,
+                expected_channels,
+                actual_sample_rate_hz,
+                actual_channels,
+            }),
             WireLiveConfigRejectionReason::Other { detail } => Ok(Self::Other { detail }),
             WireLiveConfigRejectionReason::Unknown { debug } => {
                 Err(WireConversionError::ConfigRejectionReason { debug })
@@ -2355,6 +2377,12 @@ mod tests {
             WireLiveConfigRejectionReason::RefreshModelSwap {
                 from_model: "a".into(),
                 to_model: "b".into(),
+            },
+            WireLiveConfigRejectionReason::AudioInputFormatMismatch {
+                expected_sample_rate_hz: 24_000,
+                expected_channels: 1,
+                actual_sample_rate_hz: 16_000,
+                actual_channels: 2,
             },
             WireLiveConfigRejectionReason::Other {
                 detail: "anything".into(),

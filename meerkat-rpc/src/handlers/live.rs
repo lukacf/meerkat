@@ -480,18 +480,33 @@ pub async fn handle_live_close(
     }
 }
 
-/// P1#5: `live/refresh` — enqueue a freshly-built [`LiveProjectionSnapshot`]
-/// into an *already-open* live adapter so it can re-seed its provider session
-/// against the latest canonical state without tearing the channel down.
+/// P1#5: `live/refresh` — enqueue a mutable live-config update against the
+/// active live session.
 ///
-/// Triggered by upstream session-state changes (model switch via
-/// `config/patch`, snapshot drift after a session edit, etc.). Maps to
+/// **Does NOT replay canonical history.** Mutable session config
+/// (instructions / tools / audio settings) is applied via a single
+/// `session.update` carrying the latest projection snapshot's config fields.
+/// History is the responsibility of `live/open`'s seed step; refresh is
+/// config-only by design. See R1+R9 in
+/// `meerkat-openai/src/live.rs::execute_openai_live_command` for why
+/// re-seeding history on refresh is unsafe (compounds the provider
+/// transcript by N+1 every refresh).
+///
+/// **Identity changes require close + reopen.** Refresh validates that
+/// `model_id` and `provider_id` match the channel's currently-open identity
+/// and rejects swaps with a typed `InvalidConfig` error — the OpenAI Realtime
+/// API does not accept a mutable `model` on `session.update`, and provider
+/// identity is bound at WebSocket handshake time.
+///
+/// Triggered by upstream session-state changes (mutable-config edits via
+/// `config/patch`, instructions drift after a session edit, etc.). Maps to
 /// [`LiveAdapterCommand::Refresh { snapshot }`].
 ///
 /// The adapter does not decide whether the refresh is legal — the runtime
 /// builds a snapshot from the same `live_open_config_for_session` helper
 /// `live/open` uses, so the projection stays canonical. Adapters that cannot
-/// re-seed live should either no-op or surface a typed error observation.
+/// apply mutable config live should either no-op or surface a typed error
+/// observation.
 ///
 /// **R7 — honest response shape.** The reply field is `refresh_enqueued`,
 /// not `refreshed`. `LiveAdapterHost::send_command` queues the command on

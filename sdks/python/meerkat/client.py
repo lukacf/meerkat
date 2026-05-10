@@ -2630,8 +2630,26 @@ class MeerkatClient:
         )
 
     async def live_refresh(self, channel_id: str) -> dict[str, Any]:
-        """Re-seed an open live channel against the latest canonical session
-        state without tearing the channel down. Wraps ``live/refresh``.
+        """Apply mutable session config (instructions / tools / audio) to an
+        open live channel. Wraps ``live/refresh``.
+
+        **Does NOT replay canonical history.** Refresh enqueues a single
+        ``session.update`` carrying the latest projection snapshot's mutable
+        config fields. History seeding is owned by ``live/open``; refresh is
+        config-only by design — re-seeding the transcript on every refresh
+        would compound the provider conversation by N+1 every call.
+
+        **Identity changes require close + reopen.** Refresh validates that
+        ``model_id`` and ``provider_id`` match the channel's currently-open
+        identity and rejects swaps with a typed adapter-level error — the
+        OpenAI Realtime API does not accept a mutable ``model`` on
+        ``session.update``.
+
+        Returns a dict with a ``refresh_enqueued: bool`` field. Refresh
+        completion is asynchronous (the adapter pump applies the
+        ``session.update`` after the host accepts the queued command); the
+        realtime stream is the source of truth for the actual outcome
+        (failures surface as ``LiveAdapterObservation::Error``).
         """
         return await self._request(
             "live/refresh",

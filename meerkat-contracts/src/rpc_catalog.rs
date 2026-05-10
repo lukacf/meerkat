@@ -492,7 +492,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             ),
             RpcMethodDescriptor::typed(
                 "live/refresh",
-                "Re-seed an open live channel against the latest canonical session state without tearing the channel down",
+                "Apply mutable session config (instructions/tools/audio) to an open live channel via a single session.update; does NOT replay history. Identity swaps (model/provider) require close + reopen.",
                 "LiveChannelParams",
                 "Value",
             ),

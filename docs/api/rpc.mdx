@@ -110,7 +110,7 @@ subset.
 | `live/commit_input` | Live | Commit pending input on a live channel (turn boundary) |
 | `live/interrupt` | Live | Interrupt the assistant turn on a live channel (barge-in) |
 | `live/truncate` | Live | Truncate assistant output at a client-tracked playback cursor |
-| `live/refresh` | Live | Re-seed an open live channel against the latest canonical session state |
+| `live/refresh` | Live | Apply mutable session config (instructions/tools/audio) to an open live channel; config-only, does not replay history; identity swaps (model/provider) require close + reopen |
 | `mob/create` | Mob | Create a mob from a definition (mob feature) |
 | `mob/list` | Mob | List mobs (mob feature) |
 | `mob/status` | Mob | Get mob status (mob feature) |

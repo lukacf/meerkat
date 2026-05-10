@@ -253,6 +253,8 @@ export type {
   // transcript `text` / `source` and route on `block_type` without parsing
   // raw JSON.
   WireAssistantBlock,
+  WireProvider,
+  WireTranscriptSource,
   ProviderCatalog,
   RealtimeAudioChunk,
   RealtimeCapabilities,

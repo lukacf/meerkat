@@ -224,7 +224,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the live-adapter MVP surface (`live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close`) on JSON-RPC and the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`. `gpt-realtime` remains a compatibility alias.
+**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the live-adapter MVP surface (`live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close`) on JSON-RPC and the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 

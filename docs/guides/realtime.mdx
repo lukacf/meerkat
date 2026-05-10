@@ -50,7 +50,7 @@ Key invariants:
 
 `ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`). Capability is derived from the model family:
 
-- **OpenAI**: any model whose name contains `realtime` (currently **`gpt-realtime-2`** as the canonical realtime model; `gpt-realtime` remains a legacy compatibility alias).
+- **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog.
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.
 - **Anthropic**: no realtime-capable models today.
 - **Self-hosted**: `realtime = false` by default.
@@ -191,7 +191,7 @@ Open a live channel against the member's session after the member is spawned.
 
 ## Limitations and known gaps
 
-- **OpenAI Realtime API only.** The shipped provider integration is OpenAI's Realtime API (`gpt-realtime-2`; `gpt-realtime` kept as a compatibility alias). Other providers are not yet wired into the live transport layer.
+- **OpenAI Realtime API only.** The shipped provider integration is OpenAI's Realtime API (`gpt-realtime-2`). Other providers are not yet wired into the live transport layer.
 - **One live channel per session.** A session has at most one live channel at a time. For per-member live channels in mobs, open channels against individual member sessions.
 - **Idle sessions cannot host a channel.** Start a turn or spawn the member first.
 - **Identity swaps require close/reopen.** `live/refresh` applies config-only changes (instructions, tools, audio format); model or provider swaps require `live/close` + `live/open`.

@@ -497,6 +497,8 @@ async def live_receiver(
                 printer.status("interrupted")
             elif kind == "tool_call_requested":
                 printer.tool(f"requested {obs.get('tool_name')} ({obs.get('provider_call_id')})")
+                if text_probe_signals is not None:
+                    text_probe_signals.tool_completed.set()
             elif kind == "status_changed":
                 status = obs.get("status", {})
                 printer.status(f"channel {read_field(status, 'state', 'unknown')}")
@@ -846,6 +848,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         if connection is not None:
             with contextlib.suppress(Exception):
                 await connection.close()
+        with contextlib.suppress(Exception):
+            await channel.close()
         await output_queue.put(None)
         for task in tasks:
             task.cancel()

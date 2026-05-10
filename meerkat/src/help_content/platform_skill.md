@@ -122,7 +122,7 @@ Notes:
 - Live (audio/video) channels are exposed through the live-adapter MVP surface, not the previous attachment-status family. Capability detection still uses `ModelCapabilities.realtime` to decide whether a model can back a live channel; channel lifecycle is caller-initiated through the `live/*` JSON-RPC methods (and SDK equivalents) below. The previous `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`, `realtime/open_info`, and `RealtimeAttachmentStatus` enum have been removed.
 ### Live channels (audio/video)
 
-Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (today `gpt-realtime-2`; `gpt-realtime` remains a compatibility alias) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
+Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (`gpt-realtime-2`) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
 
 | Surface | Open channel | Observe / control |
 |---------|--------------|-------------------|

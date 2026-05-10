@@ -133,6 +133,7 @@ from .generated.types import (
     WireTranscriptSourceSpoken as WireTranscriptSourceSpoken,
     WireTranscriptSourceUnknown as WireTranscriptSourceUnknown,
     WireLiveDegradationReason as WireLiveDegradationReason,
+    WireProvider as WireProvider,
     RealtimeAudioChunk as RealtimeAudioChunk,
     RealtimeCapabilities as RealtimeCapabilities,
     RealtimeInputChunk as RealtimeInputChunk,

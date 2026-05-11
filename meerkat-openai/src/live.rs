@@ -1280,6 +1280,110 @@ impl OpenAiResponseNudgeAuthority {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenAiStagedTextTurn {
+    item_id: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenAiUserTurnCommitPlan {
+    commit_audio: bool,
+}
+
+/// Provider-owned authority for OpenAI user-turn staging.
+///
+/// The session adapter sends provider transport events. This authority owns
+/// the semantic staging facts that decide whether a turn can be committed,
+/// whether an audio-buffer commit is required, and how staged text items become
+/// canonical realtime user-turn observations.
+#[derive(Debug, Clone, Default)]
+struct OpenAiUserTurnStagingAuthority {
+    has_staged_input: bool,
+    has_staged_audio: bool,
+    explicit_commit_text_turns: Vec<OpenAiStagedTextTurn>,
+}
+
+impl OpenAiUserTurnStagingAuthority {
+    fn stage_audio_chunk(&mut self) {
+        self.has_staged_input = true;
+        self.has_staged_audio = true;
+    }
+
+    fn record_provider_managed_text_input(
+        &mut self,
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        item_id: &str,
+        text: &str,
+    ) {
+        self.has_staged_input = true;
+        Self::push_text_turn_observations(pending_events, item_id, text);
+    }
+
+    fn complete_provider_managed_text_response(&mut self) {
+        self.has_staged_input = false;
+    }
+
+    fn stage_explicit_commit_text_input(&mut self, item_id: String, text: String) {
+        self.has_staged_input = true;
+        self.explicit_commit_text_turns
+            .push(OpenAiStagedTextTurn { item_id, text });
+    }
+
+    fn admit_explicit_commit(&self) -> Result<OpenAiUserTurnCommitPlan, LlmError> {
+        if !self.has_staged_input {
+            return Err(LlmError::InvalidRequest {
+                message: "realtime commit_turn requires staged input".to_string(),
+            });
+        }
+        Ok(OpenAiUserTurnCommitPlan {
+            commit_audio: self.has_staged_audio,
+        })
+    }
+
+    fn project_explicit_commit_text_inputs(
+        &mut self,
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+    ) {
+        for turn in self.explicit_commit_text_turns.drain(..) {
+            Self::push_text_turn_observations(pending_events, &turn.item_id, &turn.text);
+        }
+    }
+
+    fn clear_after_commit(&mut self) {
+        self.has_staged_input = false;
+        self.has_staged_audio = false;
+    }
+
+    fn clear(&mut self) {
+        self.has_staged_input = false;
+        self.has_staged_audio = false;
+        self.explicit_commit_text_turns.clear();
+    }
+
+    /// R4-1 (P1): shared canonical-history synthesis for a single text
+    /// turn. Pushes the four observations a text turn must surface:
+    /// `TurnStarted`, `InputTranscriptPartial`,
+    /// `InputTranscriptFinalForItem`, `TurnCommitted`.
+    fn push_text_turn_observations(
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        item_id: &str,
+        text: &str,
+    ) {
+        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
+    }
+}
+
 fn trace_openai_active_response_error(
     source: &str,
     message: &str,
@@ -1336,21 +1440,7 @@ pub struct OpenAiRealtimeSession {
     raw: Option<Box<dyn OpenAiLiveSession>>,
     capabilities: RealtimeCapabilities,
     turning_mode: RealtimeTurningMode,
-    has_staged_input: bool,
-    has_staged_audio: bool,
-    /// R4-1 (P1): text items staged via `send_input` while
-    /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-    /// Each entry is the `(synthetic_item_id, text)` pair sent to the
-    /// provider via `ConversationItemCreate`. On commit the canonical
-    /// user-turn synthesis path drains this and emits the same
-    /// `TurnStarted` / `InputTranscriptPartial` / `InputTranscriptFinalForItem`
-    /// / `TurnCommitted` sequence the `ProviderManaged` text-input path
-    /// emits inline — so explicit-commit text turns enter canonical
-    /// history, just like `ProviderManaged` text turns. The only
-    /// semantic difference between the two modes for text input is when
-    /// `response.create` fires (caller-driven vs server-driven), not
-    /// whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<(String, String)>,
+    turn_staging: OpenAiUserTurnStagingAuthority,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1417,9 +1507,7 @@ impl OpenAiRealtimeSession {
             raw: Some(raw),
             capabilities: openai_realtime_capabilities(),
             turning_mode,
-            has_staged_input: false,
-            has_staged_audio: false,
-            pending_explicit_commit_text_items: Vec::new(),
+            turn_staging: OpenAiUserTurnStagingAuthority::default(),
             pending_events: VecDeque::new(),
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
@@ -2390,31 +2478,14 @@ impl OpenAiRealtimeSession {
                     .to_string(),
             });
         }
-        if !self.has_staged_input {
-            return Err(LlmError::InvalidRequest {
-                message: "realtime commit_turn requires staged input".to_string(),
-            });
-        }
-        if self.has_staged_audio {
+        let commit_plan = self.turn_staging.admit_explicit_commit()?;
+        if commit_plan.commit_audio {
             self.raw_mut()?
                 .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
                 .await?;
         }
-        // R4-1 (P1): drain text items staged via `send_input` while the
-        // turn was open and synthesize the canonical user-turn
-        // observation sequence BEFORE clearing staged input. Each text
-        // item gets its own TurnStarted / InputTranscriptPartial /
-        // InputTranscriptFinalForItem / TurnCommitted block — same shape
-        // ProviderManaged emits inline per text chunk — so explicit-commit
-        // text turns are projected into canonical history identically
-        // to provider-managed text turns. Audio commits do not need this
-        // synthesis: OpenAI's `input_audio_buffer.committed` server event
-        // drives the TurnCommitted observation through the normal mapping
-        // path (see `map_server_event`).
-        let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
-        for (item_id, text) in &pending_text_items {
-            Self::synthesize_text_turn_observations(&mut self.pending_events, item_id, text);
-        }
+        self.turn_staging
+            .project_explicit_commit_text_inputs(&mut self.pending_events);
         // `LiveResponseModality` is `#[non_exhaustive]`; future variants
         // the OpenAI realtime adapter does not yet honor must surface a
         // typed `InvalidRequest` rejection rather than silently dropping
@@ -2436,40 +2507,8 @@ impl OpenAiRealtimeSession {
                 response: Some(Box::new(response_config)),
             })
             .await?;
-        self.has_staged_input = false;
-        self.has_staged_audio = false;
+        self.turn_staging.clear_after_commit();
         Ok(())
-    }
-
-    /// R4-1 (P1): shared canonical-history synthesis for a single text
-    /// turn. Pushes the four observations a text turn must surface —
-    /// `TurnStarted`, `InputTranscriptPartial`,
-    /// `InputTranscriptFinalForItem`, `TurnCommitted` — into
-    /// `pending_events` in order. The synthetic item id is the same one
-    /// sent to the provider via `ConversationItemCreate`, so canonical
-    /// session append stays keyed and idempotent across modes.
-    ///
-    /// Used by the `ProviderManaged` text-input path (synthesis fires
-    /// inline on `send_input`) AND the `ExplicitCommit` text-input path
-    /// (synthesis fires on `commit_turn_with_modality`, draining the
-    /// staged queue). Both modes produce equivalent canonical
-    /// projection for text input.
-    fn synthesize_text_turn_observations(
-        pending_events: &mut VecDeque<RealtimeSessionEvent>,
-        item_id: &str,
-        text: &str,
-    ) {
-        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
-            item_id: item_id.to_string(),
-            previous_item_id: None,
-            content_index: 0,
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
     }
 }
 
@@ -2500,8 +2539,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         audio: chunk.data,
                     })
                     .await?;
-                self.has_staged_input = true;
-                self.has_staged_audio = true;
+                self.turn_staging.stage_audio_chunk();
                 Ok(())
             }
             RealtimeInputChunk::TextChunk(chunk) => {
@@ -2520,7 +2558,6 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         }),
                     })
                     .await?;
-                self.has_staged_input = true;
                 // Text turns in provider-managed mode have no server-VAD commit
                 // analogue: OpenAI only emits `input_audio_buffer.committed`
                 // (which drives TurnCommitted) for audio turns. Mirror the audio
@@ -2533,7 +2570,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // session append remains keyed and idempotent.
                 match self.turning_mode {
                     RealtimeTurningMode::ProviderManaged => {
-                        Self::synthesize_text_turn_observations(
+                        self.turn_staging.record_provider_managed_text_input(
                             &mut self.pending_events,
                             &synthetic_item_id,
                             &text,
@@ -2544,7 +2581,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                                 response: Some(Box::new(openai_audio_response_config())),
                             })
                             .await?;
-                        self.has_staged_input = false;
+                        self.turn_staging.complete_provider_managed_text_response();
                         self.response_nudge.begin_wait_after_commit(true);
                     }
                     RealtimeTurningMode::ExplicitCommit => {
@@ -2556,8 +2593,8 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         // queue and emit the same observation sequence
                         // ProviderManaged emits inline so explicit-commit
                         // text turns reach canonical history.
-                        self.pending_explicit_commit_text_items
-                            .push((synthetic_item_id, text));
+                        self.turn_staging
+                            .stage_explicit_commit_text_input(synthetic_item_id, text);
                     }
                 }
                 Ok(())
@@ -2762,9 +2799,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
 
     async fn close(&mut self) -> Result<(), LlmError> {
         self.raw.take();
-        self.has_staged_input = false;
-        self.has_staged_audio = false;
-        self.pending_explicit_commit_text_items.clear();
+        self.turn_staging.clear();
         self.pending_events.clear();
         self.pending_mcp_calls.clear();
         self.pending_text_suppressions.clear();
@@ -5876,6 +5911,64 @@ mod tests {
             }) if item_id == "item_live_user" && text == "Say only the codeword once."
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
+    }
+
+    #[test]
+    fn user_turn_staging_authority_owns_explicit_commit_text_projection() {
+        let mut authority = OpenAiUserTurnStagingAuthority::default();
+        assert!(matches!(
+            authority.admit_explicit_commit(),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        authority.stage_explicit_commit_text_input("item_text".to_string(), "hello".to_string());
+        let commit_plan = authority
+            .admit_explicit_commit()
+            .expect("text input admits explicit commit");
+        assert!(
+            !commit_plan.commit_audio,
+            "text-only explicit commit must not flush the audio buffer"
+        );
+
+        let mut pending_events = VecDeque::new();
+        authority.project_explicit_commit_text_inputs(&mut pending_events);
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::TurnStarted)
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::InputTranscriptPartial { text }) if text == "hello"
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                item_id,
+                previous_item_id: None,
+                content_index: 0,
+                text,
+            }) if item_id == "item_text" && text == "hello"
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::TurnCommitted)
+        ));
+        assert!(pending_events.is_empty());
+
+        authority.clear_after_commit();
+        assert!(matches!(
+            authority.admit_explicit_commit(),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        authority.stage_audio_chunk();
+        let commit_plan = authority
+            .admit_explicit_commit()
+            .expect("audio input admits explicit commit");
+        assert!(
+            commit_plan.commit_audio,
+            "audio input requires an OpenAI audio-buffer commit"
+        );
     }
 
     #[test]

@@ -37,6 +37,7 @@ rust_library(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -83,6 +84,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
     ],
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
@@ -142,6 +144,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
     ],
     srcs = [
         "tests/browser_contract.rs",
@@ -201,6 +204,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
     ],
     srcs = [
         "tests/release_targets.rs",
@@ -260,6 +264,7 @@ rust_test(
     edition = "2024",
     compile_data = [
         "Cargo.toml",
+        "src/lib.rs",
     ],
     srcs = [
         "tests/wasm_external_resolver.rs",

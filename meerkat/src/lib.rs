@@ -233,8 +233,8 @@ pub use service_factory::{
 // `docs/wave-d-prep/d-j-staged-session-design.md`.
 mod staged_sessions;
 pub use staged_sessions::{
-    PromotingSlot, StagedLifecycleError, StagedPhase, StagedSessionInfo, StagedSessionRegistry,
-    StagedSlot,
+    PromotingSlot, StagedLifecycleError, StagedPhase, StagedSessionInfo, StagedSessionMachineClaim,
+    StagedSessionRegistry, StagedSlot,
 };
 
 // Surface-agnostic session runtime. Empty during F2 — populated by

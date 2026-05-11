@@ -245,14 +245,26 @@ function parseResolvedModelCapabilities(
     raw,
     'Invalid mob member_status response: resolved_capabilities must be object',
   );
+  const fields = [
+    'vision',
+    'image_input',
+    'image_tool_results',
+    'inline_video',
+    'realtime',
+    'web_search',
+    'image_generation',
+  ] as const;
+  if (fields.some((field) => typeof record[field] !== 'boolean')) {
+    return undefined;
+  }
   return {
-    vision: Boolean(record.vision),
-    image_input: Boolean(record.image_input),
-    image_tool_results: Boolean(record.image_tool_results),
-    inline_video: Boolean(record.inline_video),
-    realtime: Boolean(record.realtime),
-    web_search: Boolean(record.web_search),
-    image_generation: Boolean(record.image_generation),
+    vision: record.vision as boolean,
+    image_input: record.image_input as boolean,
+    image_tool_results: record.image_tool_results as boolean,
+    inline_video: record.inline_video as boolean,
+    realtime: record.realtime as boolean,
+    web_search: record.web_search as boolean,
+    image_generation: record.image_generation as boolean,
   };
 }
 

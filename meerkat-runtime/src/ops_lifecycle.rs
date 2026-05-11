@@ -136,7 +136,7 @@ impl OpsLifecyclePersistenceRequest {
 ///
 /// Protected by the registry's `RwLock<ShellState>` for writes, and by its
 /// own `RwLock` for reads by external consumers (agent boundary, idle wake).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct FeedBufferInner {
     entries: VecDeque<CompletionEntry>,
     watermark: CompletionSeq,
@@ -187,6 +187,22 @@ impl FeedBuffer {
 
         self.watermark_atomic.store(seq, Ordering::Release);
         self.notify.notify_waiters();
+    }
+
+    fn snapshot_for_restore(&self) -> FeedBufferInner {
+        self.inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn restore_from_snapshot(&self, snapshot: FeedBufferInner) {
+        let watermark = snapshot.watermark;
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+        self.watermark_atomic.store(watermark, Ordering::Release);
     }
 }
 
@@ -300,11 +316,10 @@ impl ShellRecord {
         Self::epoch_millis(&wall)
     }
 
-    /// Notify all watchers with the given terminal outcome and drain the list.
-    fn notify_watchers(&mut self, outcome: &OperationTerminalOutcome) {
-        for watcher in std::mem::take(&mut self.watchers) {
-            let _ = watcher.send(outcome.clone());
-        }
+    /// Drain watchers for a terminal transition. The caller sends them only
+    /// after durable persistence confirms the terminal state.
+    fn take_watchers(&mut self) -> Vec<tokio::sync::oneshot::Sender<OperationTerminalOutcome>> {
+        std::mem::take(&mut self.watchers)
     }
 
     /// Mark the completion timestamp.
@@ -347,6 +362,75 @@ struct ShellState {
     persist_epoch_id: Option<meerkat_core::RuntimeEpochId>,
     /// Shared cursor state for persistence snapshots.
     persist_cursor_state: Option<Arc<meerkat_core::EpochCursorState>>,
+}
+
+struct TerminalRollback {
+    dsl_state: mm_dsl::MeerkatMachineState,
+    completed_order: VecDeque<OperationId>,
+    next_completion_seq: CompletionSeq,
+    feed_buffer: FeedBufferInner,
+    completed_at: HashMap<OperationId, Option<Instant>>,
+    evicted_records: HashMap<OperationId, ShellRecord>,
+    watcher_notifications: Vec<TerminalWatcherNotification>,
+    wait_notification: Option<TerminalWaitNotification>,
+}
+
+struct TerminalWatcherNotification {
+    operation_id: OperationId,
+    outcome: OperationTerminalOutcome,
+    watchers: Vec<tokio::sync::oneshot::Sender<OperationTerminalOutcome>>,
+}
+
+struct TerminalWaitNotification {
+    wait_request_id: WaitRequestId,
+    pending_wait: Option<PendingWaitState>,
+    satisfied: Option<WaitAllSatisfied>,
+}
+
+impl TerminalRollback {
+    fn stage_watchers(
+        &mut self,
+        operation_id: OperationId,
+        outcome: OperationTerminalOutcome,
+        watchers: Vec<tokio::sync::oneshot::Sender<OperationTerminalOutcome>>,
+    ) {
+        if watchers.is_empty() {
+            return;
+        }
+        self.watcher_notifications
+            .push(TerminalWatcherNotification {
+                operation_id,
+                outcome,
+                watchers,
+            });
+    }
+
+    fn stage_wait_notification(
+        &mut self,
+        wait_request_id: WaitRequestId,
+        pending_wait: Option<PendingWaitState>,
+        satisfied: Option<WaitAllSatisfied>,
+    ) {
+        self.wait_notification = Some(TerminalWaitNotification {
+            wait_request_id,
+            pending_wait,
+            satisfied,
+        });
+    }
+
+    fn deliver_terminal_effects(self) {
+        for notification in self.watcher_notifications {
+            for watcher in notification.watchers {
+                let _ = watcher.send(notification.outcome.clone());
+            }
+        }
+        if let Some(notification) = self.wait_notification
+            && let (Some(pending_wait), Some(satisfied)) =
+                (notification.pending_wait, notification.satisfied)
+        {
+            let _ = pending_wait.sender.send(satisfied);
+        }
+    }
 }
 
 /// Wrapper around the DSL authority that provides `Debug` output.
@@ -395,6 +479,71 @@ impl ShellState {
             persist_tx: None,
             persist_epoch_id: None,
             persist_cursor_state: None,
+        }
+    }
+
+    fn capture_terminal_rollback(&self, operation_ids: &[OperationId]) -> TerminalRollback {
+        TerminalRollback {
+            dsl_state: self.dsl.0.state.clone(),
+            completed_order: self.completed_order.clone(),
+            next_completion_seq: self.next_completion_seq,
+            feed_buffer: self.feed_buffer.snapshot_for_restore(),
+            completed_at: operation_ids
+                .iter()
+                .map(|id| {
+                    (
+                        id.clone(),
+                        self.records.get(id).and_then(|record| record.completed_at),
+                    )
+                })
+                .collect(),
+            evicted_records: HashMap::new(),
+            watcher_notifications: Vec::new(),
+            wait_notification: None,
+        }
+    }
+
+    fn restore_terminal_rollback(&mut self, rollback: TerminalRollback) {
+        self.dsl = DslAuthority(mm_dsl::MeerkatMachineAuthority::from_state(
+            rollback.dsl_state,
+        ));
+        self.completed_order = rollback.completed_order;
+        self.next_completion_seq = rollback.next_completion_seq;
+        self.feed_buffer.restore_from_snapshot(rollback.feed_buffer);
+        for (id, record) in rollback.evicted_records {
+            self.records.insert(id, record);
+        }
+        for (id, completed_at) in rollback.completed_at {
+            if let Some(record) = self.records.get_mut(&id) {
+                record.completed_at = completed_at;
+            }
+        }
+        for notification in rollback.watcher_notifications {
+            if let Some(record) = self.records.get_mut(&notification.operation_id) {
+                record.watchers.extend(notification.watchers);
+            }
+        }
+        if let Some(notification) = rollback.wait_notification {
+            self.wait_request_id = Some(notification.wait_request_id);
+            if let Some(pending_wait) = notification.pending_wait {
+                self.pending_wait = Some(pending_wait);
+            }
+        }
+    }
+
+    fn maybe_persist_or_restore_terminal(
+        &mut self,
+        rollback: TerminalRollback,
+    ) -> Result<(), OpsLifecycleError> {
+        match self.maybe_persist() {
+            Ok(()) => {
+                rollback.deliver_terminal_effects();
+                Ok(())
+            }
+            Err(error) => {
+                self.restore_terminal_rollback(rollback);
+                Err(error)
+            }
         }
     }
 
@@ -634,19 +783,22 @@ impl ShellState {
         })
     }
 
-    /// Emit shell-side mechanics for a terminal transition: notify watchers,
-    /// push CompletionEntry, retain in FIFO, evict as needed. Called AFTER the
-    /// DSL transition has already persisted the terminal status + outcome.
-    fn finalize_terminal(&mut self, id: &OperationId) {
+    /// Emit shell-side mechanics for a terminal transition: stage watcher/wait
+    /// notifications, push CompletionEntry, retain in FIFO, evict as needed.
+    /// Called AFTER the DSL transition has already accepted the terminal status
+    /// + outcome.
+    fn finalize_terminal(&mut self, id: &OperationId, rollback: &mut TerminalRollback) {
         let outcome = match self.terminal_outcome(id) {
             Some(o) => o,
             None => return,
         };
         let kind = self.kind(id);
 
-        // Notify watchers and mark completion timestamp.
+        // Stage watchers and mark completion timestamp. Watchers are delivered
+        // only after the terminal snapshot is durably confirmed.
         if let Some(shell) = self.records.get_mut(id) {
-            shell.notify_watchers(&outcome);
+            let watchers = shell.take_watchers();
+            rollback.stage_watchers(id.clone(), outcome.clone(), watchers);
             shell.mark_completed();
         }
 
@@ -683,12 +835,14 @@ impl ShellState {
                 self.dsl.0.state.op_terminal_outcomes.remove(&evicted_key);
                 self.dsl.0.state.op_terminal_payload.remove(&evicted_key);
                 self.dsl.0.state.op_completion_seq.remove(&evicted_key);
-                self.records.remove(&evicted);
+                if let Some(record) = self.records.remove(&evicted) {
+                    rollback.evicted_records.insert(evicted, record);
+                }
             }
         }
 
         // Satisfy a pending wait request if all its ops are now terminal.
-        self.maybe_satisfy_wait();
+        self.maybe_satisfy_wait(rollback);
     }
 
     /// Read barrier membership from DSL state (sole owner).
@@ -787,7 +941,7 @@ impl ShellState {
     /// selects which sender to notify; when the DSL barrier satisfies
     /// without a live correlation (post-recovery, or duplicate resolution),
     /// the oneshot simply remains pending.
-    fn maybe_satisfy_wait(&mut self) {
+    fn maybe_satisfy_wait(&mut self, rollback: &mut TerminalRollback) {
         // Capture membership *before* applying — `SatisfyWaitAll` clears the
         // DSL barrier, so a post-apply read would lose the member list carried
         // on the obligation token.
@@ -808,20 +962,24 @@ impl ShellState {
             // point, not a shell/DSL desync. Swallow.
             return;
         }
-        let wait_id = match self.wait_request_id.take() {
-            Some(id) => id,
-            None => return,
+        let wait_id = self.wait_request_id.take();
+        let Some(wait_id) = wait_id else {
+            return;
         };
+        let mut pending_to_notify = None;
+        let mut satisfied = None;
         if let Some(pending) = self.pending_wait.take() {
             if pending.wait_request_id == wait_id {
-                let _ = pending.sender.send(WaitAllSatisfied {
-                    wait_request_id: wait_id,
+                satisfied = Some(WaitAllSatisfied {
+                    wait_request_id: wait_id.clone(),
                     operation_ids: ids,
                 });
+                pending_to_notify = Some(pending);
             } else {
                 self.pending_wait = Some(pending);
             }
         }
+        rollback.stage_wait_notification(wait_id, pending_to_notify, satisfied);
     }
 
     /// Persist a terminal snapshot if a persistence channel is wired.
@@ -1460,6 +1618,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1469,8 +1628,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1556,6 +1715,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Completed(result);
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CompleteOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1565,8 +1725,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "complete_operation"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1579,6 +1739,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Failed { error };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::FailOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1588,8 +1749,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "fail_operation"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1606,6 +1767,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Aborted { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::AbortOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1615,8 +1777,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "abort_provisioning"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1633,6 +1795,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Cancelled { reason };
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::CancelOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1642,8 +1805,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "cancel_operation"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1671,6 +1834,7 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
 
         let terminal_outcome = OperationTerminalOutcome::Retired;
         let (outcome_kind, outcome_payload) = ShellState::split_outcome(&terminal_outcome);
+        let mut rollback = state.capture_terminal_rollback(std::slice::from_ref(id));
 
         if let Err(err) = state.dsl_apply_raw(mm_dsl::MeerkatMachineInput::RetireCompletedOp {
             operation_id: mm_dsl::OperationId::from_domain(id).0,
@@ -1680,8 +1844,8 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
             return Err(classify_op_rejection(err, id, status, "mark_retired"));
         }
 
-        state.finalize_terminal(id);
-        state.maybe_persist()?;
+        state.finalize_terminal(id, &mut rollback);
+        state.maybe_persist_or_restore_terminal(rollback)?;
         Ok(())
     }
 
@@ -1708,6 +1872,11 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
         let mut state = self.write_state()?;
 
         let to_terminate = state.owner_termination_targets();
+        let rollback_ids = to_terminate
+            .iter()
+            .map(|(op_id, _)| op_id.clone())
+            .collect::<Vec<_>>();
+        let mut rollback = state.capture_terminal_rollback(&rollback_ids);
 
         for (op_id, status) in &to_terminate {
             let terminal_outcome = OperationTerminalOutcome::Terminated {
@@ -1728,11 +1897,11 @@ impl OpsLifecycleRegistry for RuntimeOpsLifecycleRegistry {
                 ));
             }
 
-            state.finalize_terminal(op_id);
+            state.finalize_terminal(op_id, &mut rollback);
         }
 
         if !to_terminate.is_empty() {
-            state.maybe_persist()?;
+            state.maybe_persist_or_restore_terminal(rollback)?;
         }
         Ok(())
     }
@@ -1845,8 +2014,10 @@ mod tests {
     use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
     use meerkat_core::lifecycle::RunId;
     use meerkat_core::ops_lifecycle::{OperationKind, OpsLifecycleRegistry};
+    use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
     use meerkat_core::types::SessionId;
-    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
     fn test_run_id() -> RunId {
@@ -1863,6 +2034,40 @@ mod tests {
             child_session_id: None,
             expect_peer_channel: false,
         }
+    }
+
+    fn op_result(id: &OperationId, content: &str) -> OperationResult {
+        OperationResult {
+            id: id.clone(),
+            content: content.into(),
+            is_error: false,
+            duration_ms: 1,
+            tokens_used: 0,
+        }
+    }
+
+    fn set_persistence_failing_once(
+        registry: &RuntimeOpsLifecycleRegistry,
+    ) -> (Arc<AtomicUsize>, std::thread::JoinHandle<()>) {
+        let cursor_state = Arc::new(EpochCursorState::new());
+        let (persist_tx, mut persist_rx) =
+            tokio::sync::mpsc::unbounded_channel::<OpsLifecyclePersistenceRequest>();
+        let persist_calls = Arc::new(AtomicUsize::new(0));
+        let worker_calls = Arc::clone(&persist_calls);
+        let worker = std::thread::spawn(move || {
+            while let Some(request) = persist_rx.blocking_recv() {
+                let call = worker_calls.fetch_add(1, Ordering::SeqCst);
+                if call == 0 {
+                    request.complete(Err(OpsLifecycleError::Internal(
+                        "synthetic terminal persist failure".into(),
+                    )));
+                } else {
+                    request.complete(Ok(()));
+                }
+            }
+        });
+        registry.set_persistence_channel(persist_tx, RuntimeEpochId::new(), cursor_state);
+        (persist_calls, worker)
     }
 
     #[tokio::test]
@@ -2091,6 +2296,83 @@ mod tests {
             [(returned_id, OperationTerminalOutcome::Completed(_))] if *returned_id == op_id
         ));
         assert!(registry.read_state().unwrap().wait_request_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn terminal_persistence_failure_restores_waiters_before_retry() {
+        let registry = RuntimeOpsLifecycleRegistry::new();
+        let (persist_calls, worker) = set_persistence_failing_once(&registry);
+        let run_id = test_run_id();
+
+        let spec = background_spec("retry-terminal-waiters");
+        let op_id = spec.id.clone();
+        registry.register_operation(spec).unwrap();
+        registry.provisioning_succeeded(&op_id).unwrap();
+
+        {
+            let watch = registry.register_watcher(&op_id).unwrap();
+            let wait_fut = registry.wait_all(&run_id, std::slice::from_ref(&op_id));
+            tokio::pin!(wait_fut);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait_fut)
+                    .await
+                    .is_err()
+            );
+
+            let err = registry
+                .complete_operation(&op_id, op_result(&op_id, "first-attempt"))
+                .expect_err("first terminal persistence attempt should fail");
+            assert!(
+                err.to_string()
+                    .contains("synthetic terminal persist failure"),
+                "unexpected error: {err}"
+            );
+            assert_eq!(persist_calls.load(Ordering::SeqCst), 1);
+
+            let snapshot = registry
+                .snapshot(&op_id)
+                .expect("operation should remain registered after rollback");
+            assert_eq!(snapshot.status, OperationStatus::Running);
+            assert!(snapshot.terminal_outcome.is_none());
+            assert_eq!(
+                snapshot.watcher_count, 1,
+                "rollback must restore drained watcher senders"
+            );
+            {
+                let state = registry.read_state().unwrap();
+                assert!(state.wait_active());
+                assert!(state.wait_request_id.is_some());
+                assert!(state.pending_wait.is_some());
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait_fut)
+                    .await
+                    .is_err(),
+                "rollback must not resolve wait_all from an unpersisted terminal projection"
+            );
+
+            registry
+                .complete_operation(&op_id, op_result(&op_id, "second-attempt"))
+                .unwrap();
+
+            match watch.wait().await {
+                OperationTerminalOutcome::Completed(result) => {
+                    assert_eq!(result.content, "second-attempt");
+                }
+                other => panic!("expected completed watcher outcome, got {other:?}"),
+            }
+
+            let wait_result = wait_fut.await.unwrap();
+            assert!(matches!(
+                wait_result.outcomes.as_slice(),
+                [(returned_id, OperationTerminalOutcome::Completed(result))]
+                    if *returned_id == op_id && result.content == "second-attempt"
+            ));
+            assert!(registry.read_state().unwrap().wait_request_id.is_none());
+        }
+
+        drop(registry);
+        worker.join().unwrap();
     }
 
     #[tokio::test]

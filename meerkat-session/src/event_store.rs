@@ -207,7 +207,7 @@ impl FileEventStore {
         Ok(())
     }
 
-    async fn allocate_sequence_range(
+    async fn sequence_range_from_log_tail(
         &self,
         session_id: &SessionId,
         event_count: usize,
@@ -222,24 +222,31 @@ impl FileEventStore {
         }
 
         let event_log_tail = self.last_seq(session_id).await?;
-        let sequence_owner = self.read_sequence_owner(session_id).await?;
-        let base_seq = match sequence_owner {
-            Some(owner_seq) if owner_seq < event_log_tail => {
-                return Err(EventStoreError::Store(format!(
-                    "durable sequence owner for session {session_id} is stale ({owner_seq}) behind event log tail ({event_log_tail}); refusing to allocate"
-                )));
+        match self.read_sequence_owner(session_id).await {
+            Ok(Some(owner_seq)) if owner_seq != event_log_tail => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    sequence_owner = owner_seq,
+                    event_log_tail,
+                    "ignoring event sequence owner projection that diverged from canonical log tail"
+                );
             }
-            Some(owner_seq) => owner_seq,
-            None => event_log_tail,
-        };
-        let first_seq = base_seq.checked_add(1).ok_or_else(|| {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %error,
+                    "ignoring unreadable event sequence owner projection"
+                );
+            }
+        }
+        let first_seq = event_log_tail.checked_add(1).ok_or_else(|| {
             EventStoreError::Store("event sequence overflow while allocating first sequence".into())
         })?;
-        let last_seq = base_seq.checked_add(event_count).ok_or_else(|| {
+        let last_seq = event_log_tail.checked_add(event_count).ok_or_else(|| {
             EventStoreError::Store("event sequence overflow while allocating range".into())
         })?;
 
-        self.write_sequence_owner(session_id, last_seq).await?;
         Ok((first_seq, last_seq))
     }
 }
@@ -262,7 +269,7 @@ impl EventStore for FileEventStore {
         let _sequence_lock = self.acquire_sequence_lock(session_id).await?;
         let path = self.log_path(session_id);
         let (mut next_seq, last_allocated_seq) = self
-            .allocate_sequence_range(session_id, events.len())
+            .sequence_range_from_log_tail(session_id, events.len())
             .await?;
         let mut lines = String::new();
         for event in events {
@@ -286,6 +293,18 @@ impl EventStore for FileEventStore {
             .await?;
         file.write_all(lines.as_bytes()).await?;
         file.flush().await?;
+        file.sync_all().await?;
+        if let Err(error) = self
+            .write_sequence_owner(session_id, last_allocated_seq)
+            .await
+        {
+            tracing::warn!(
+                session_id = %session_id,
+                last_allocated_seq,
+                error = %error,
+                "failed to update event sequence owner projection after canonical append"
+            );
+        }
         Ok(last_allocated_seq)
     }
 
@@ -359,7 +378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_restart_continues_from_durable_sequence_owner()
+    async fn file_event_store_restart_continues_from_event_log_tail()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let root = temp.path().join("events");
@@ -451,7 +470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_event_store_process_local_counter_is_inert_when_durable_owner_advances()
+    async fn file_event_store_sequence_owner_projection_cannot_mint_gap()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
@@ -467,24 +486,24 @@ mod tests {
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
-                    content: "durable owner wins".to_string(),
+                    content: "log tail wins".to_string(),
                 }],
             )
             .await?;
 
-        assert_eq!(seq, 42);
+        assert_eq!(seq, 2);
         let sequences: Vec<u64> = store
             .read_from(&session_id, 1)
             .await?
             .into_iter()
             .map(|event| event.seq)
             .collect();
-        assert_eq!(sequences, vec![1, 42]);
+        assert_eq!(sequences, vec![1, 2]);
         Ok(())
     }
 
     #[tokio::test]
-    async fn file_event_store_corrupt_sequence_owner_fails_closed()
+    async fn file_event_store_corrupt_sequence_owner_projection_is_rebuilt()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
@@ -495,25 +514,25 @@ mod tests {
             .await?;
         tokio::fs::write(store.sequence_path(&session_id), b"not-a-sequence").await?;
 
-        let err = store
+        let seq = store
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
-                    content: "must not be minted".to_string(),
+                    content: "log tail remains authority".to_string(),
                 }],
             )
-            .await
-            .expect_err("corrupt durable sequence owner must fail closed");
+            .await?;
 
-        assert!(err.to_string().contains("durable sequence owner"));
-        assert_eq!(store.last_seq(&session_id).await?, 1);
+        assert_eq!(seq, 2);
+        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(2));
+        assert_eq!(store.last_seq(&session_id).await?, 2);
         let events = store.read_from(&session_id, 1).await?;
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2);
         Ok(())
     }
 
     #[tokio::test]
-    async fn file_event_store_stale_sequence_owner_fails_closed()
+    async fn file_event_store_stale_sequence_owner_projection_is_rebuilt()
     -> Result<(), Box<dyn std::error::Error>> {
         let temp = tempfile::tempdir()?;
         let store = FileEventStore::new(temp.path().join("events"));
@@ -532,20 +551,20 @@ mod tests {
             .await?;
         store.write_sequence_owner(&session_id, 1).await?;
 
-        let err = store
+        let seq = store
             .append(
                 &session_id,
                 &[AgentEvent::TextComplete {
                     content: "must not reuse sequence".to_string(),
                 }],
             )
-            .await
-            .expect_err("stale durable sequence owner must fail closed");
+            .await?;
 
-        assert!(err.to_string().contains("stale"));
-        assert_eq!(store.last_seq(&session_id).await?, 2);
+        assert_eq!(seq, 3);
+        assert_eq!(store.read_sequence_owner(&session_id).await?, Some(3));
+        assert_eq!(store.last_seq(&session_id).await?, 3);
         let events = store.read_from(&session_id, 1).await?;
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 3);
         Ok(())
     }
 }

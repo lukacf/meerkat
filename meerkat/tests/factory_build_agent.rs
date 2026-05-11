@@ -167,11 +167,19 @@ fn counting_agent_llm_client_decorator(
 struct CaptureClient {
     inner: TestClient,
     seen_tools: Mutex<Vec<String>>,
+    seen_tool_defs: Mutex<Vec<ToolDef>>,
 }
 
 impl CaptureClient {
     fn tool_names(&self) -> Vec<String> {
         self.seen_tools.lock().expect("capture lock").clone()
+    }
+
+    fn tool_defs(&self) -> Vec<ToolDef> {
+        self.seen_tool_defs
+            .lock()
+            .expect("capture tool defs lock")
+            .clone()
     }
 }
 
@@ -194,6 +202,8 @@ impl LlmClient for CaptureClient {
             .iter()
             .map(|tool| tool.name.to_string())
             .collect();
+        *self.seen_tool_defs.lock().expect("capture tool defs lock") =
+            request.tools.iter().map(|tool| (**tool).clone()).collect();
         self.inner.stream(request)
     }
 
@@ -307,6 +317,20 @@ async fn run_and_capture_tool_names(
         .unwrap();
     agent.run("inspect tools".to_string().into()).await.unwrap();
     capture.tool_names()
+}
+
+async fn run_and_capture_tool_defs(
+    factory: AgentFactory,
+    mut build_config: AgentBuildConfig,
+) -> Vec<ToolDef> {
+    let capture: Arc<CaptureClient> = Arc::new(CaptureClient::default());
+    build_config.llm_client_override = Some(capture.clone());
+    let mut agent = factory
+        .build_agent(build_config, &Config::default())
+        .await
+        .unwrap();
+    agent.run("inspect tools".to_string().into()).await.unwrap();
+    capture.tool_defs()
 }
 
 fn create_test_authority() -> MobToolAuthorityContext {
@@ -722,7 +746,7 @@ async fn build_agent_with_builtins_has_tools() {
 async fn build_agent_with_scheduler_has_tools_when_enabled_and_injected() {
     let temp = tempfile::tempdir().unwrap();
     let factory = temp_factory(&temp).schedule(true);
-    let tool_names = run_and_capture_tool_names(
+    let tool_defs = run_and_capture_tool_defs(
         factory,
         AgentBuildConfig {
             schedule_tools: Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
@@ -732,6 +756,10 @@ async fn build_agent_with_scheduler_has_tools_when_enabled_and_injected() {
         },
     )
     .await;
+    let tool_names = tool_defs
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect::<Vec<_>>();
 
     assert!(
         tool_names
@@ -742,6 +770,20 @@ async fn build_agent_with_scheduler_has_tools_when_enabled_and_injected() {
         tool_names
             .iter()
             .any(|name| name == "meerkat_schedule_list")
+    );
+    let create_tool = tool_defs
+        .iter()
+        .find(|tool| tool.name == "meerkat_schedule_create")
+        .expect("schedule create tool should be visible");
+    let target_types =
+        &create_tool.input_schema["properties"]["target"]["oneOf"][0]["properties"]["type"]["enum"];
+    assert!(
+        target_types
+            .as_array()
+            .expect("target type enum")
+            .iter()
+            .any(|value| value.as_str() == Some("current_session")),
+        "agent-facing schedule tools should expose current_session"
     );
 }
 

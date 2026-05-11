@@ -3537,6 +3537,11 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
+            let schedule_dispatcher =
+                Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
+                    schedule_dispatcher,
+                    session.id().clone(),
+                )) as Arc<dyn AgentToolDispatcher>;
             let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,

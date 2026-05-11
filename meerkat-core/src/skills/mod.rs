@@ -80,7 +80,11 @@ impl std::fmt::Display for SourceUuid {
     }
 }
 
-/// Canonical skill slug (lowercase, dash-separated).
+/// Canonical skill name.
+///
+/// Most skills are a single lowercase dash-separated slug. Sources whose
+/// canonical ownership includes a nested registration path may use slash-
+/// delimited slug segments, e.g. `collection/email-extractor`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(try_from = "String", into = "String")]
@@ -92,31 +96,39 @@ impl SkillName {
             return Err(SkillError::Parse("skill_name cannot be empty".into()));
         }
 
-        let bytes = value.as_bytes();
-        let starts_or_ends_dash = bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-');
-        if starts_or_ends_dash {
-            return Err(SkillError::Parse(
-                format!("invalid skill_name '{value}': cannot start/end with '-'").into(),
-            ));
-        }
-
-        if value
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-            && !value.contains("--")
-        {
+        if value.split('/').all(valid_skill_name_segment) {
             return Ok(Self(value.to_string()));
         }
 
         Err(SkillError::Parse(
-            format!("invalid skill_name '{value}': expected lowercase slug [a-z0-9-], no '--'")
-                .into(),
+            format!(
+                "invalid skill_name '{value}': expected lowercase slug path [a-z0-9-] segments, no empty segments or '--'"
+            )
+            .into(),
         ))
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn leaf_slug(&self) -> &str {
+        self.0.rsplit('/').next().unwrap_or(self.0.as_str())
+    }
+}
+
+fn valid_skill_name_segment(segment: &str) -> bool {
+    if segment.is_empty() {
+        return false;
+    }
+    let bytes = segment.as_bytes();
+    if bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
+        return false;
+    }
+    segment
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !segment.contains("--")
 }
 
 impl TryFrom<String> for SkillName {
@@ -415,7 +427,9 @@ impl Default for SourceHealthSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SkillQuarantineDiagnostic {
-    pub key: SkillKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<SkillKey>,
+    pub identity_hint: String,
     pub location: String,
     pub error_code: String,
     pub error_class: String,
@@ -1247,11 +1261,16 @@ mod tests {
     #[test]
     fn test_skill_name_slug_validation() {
         assert!(SkillName::parse("email-extractor").is_ok());
+        let nested = SkillName::parse("collection/email-extractor").unwrap();
+        assert_eq!(nested.leaf_slug(), "email-extractor");
         assert!(SkillName::parse("EmailExtractor").is_err());
         assert!(SkillName::parse("email_extractor").is_err());
         assert!(SkillName::parse("-leading").is_err());
         assert!(SkillName::parse("trailing-").is_err());
         assert!(SkillName::parse("double--dash").is_err());
+        assert!(SkillName::parse("/leading").is_err());
+        assert!(SkillName::parse("trailing/").is_err());
+        assert!(SkillName::parse("empty//segment").is_err());
         assert!(SkillName::parse("").is_err());
     }
 

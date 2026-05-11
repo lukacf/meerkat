@@ -75,11 +75,34 @@ fn response_status_to_dsl(
     }
 }
 
-fn lifecycle_peer_param(params: &serde_json::Value) -> Option<String> {
-    params
+fn lifecycle_peer_param(
+    params: &serde_json::Value,
+    context: &'static str,
+) -> Result<Option<String>, DslTransitionError> {
+    if let Some(peer_spec) = params.get("peer_spec") {
+        let peer_id = peer_spec
+            .get("peer_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                DslTransitionError::guard_rejected(
+                    context,
+                    "lifecycle peer_spec missing canonical peer_id",
+                )
+            })?;
+        meerkat_core::comms::PeerId::parse(peer_id).map_err(|err| {
+            DslTransitionError::guard_rejected(
+                context,
+                format!("lifecycle peer_spec has invalid peer_id: {err}"),
+            )
+        })?;
+        return Ok(Some(peer_id.to_string()));
+    }
+
+    Ok(params
         .get("peer")
         .and_then(serde_json::Value::as_str)
-        .map(ToOwned::to_owned)
+        .filter(|peer| !peer.is_empty())
+        .map(ToOwned::to_owned))
 }
 
 fn terminality_from_dsl(
@@ -102,7 +125,10 @@ fn terminality_from_dsl(
     }
 }
 
-fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::MeerkatMachineSignal {
+fn external_envelope_signal(
+    facts: &PeerIngressEnvelopeFacts,
+    context: &'static str,
+) -> Result<mm_dsl::MeerkatMachineSignal, DslTransitionError> {
     let (
         envelope_kind,
         request_intent,
@@ -123,7 +149,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Request,
             intent.clone(),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
-            lifecycle_peer_param(params),
+            lifecycle_peer_param(params, context)?,
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -131,7 +157,7 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
             mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
             String::new(),
             lifecycle_to_dsl(*kind),
-            lifecycle_peer_param(params),
+            lifecycle_peer_param(params, context)?,
             mm_dsl::PeerIngressResponseStatus::Accepted,
             String::new(),
         ),
@@ -159,16 +185,16 @@ fn external_envelope_signal(facts: &PeerIngressEnvelopeFacts) -> mm_dsl::Meerkat
         ),
     };
 
-    mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
+    Ok(mm_dsl::MeerkatMachineSignal::ClassifyExternalEnvelope {
         item_id: facts.item_id.clone(),
-        from_peer: facts.from_peer.clone(),
+        from_peer: facts.from_peer_id.as_str(),
         envelope_kind,
         request_intent,
         lifecycle_kind,
         lifecycle_peer_param,
         response_status,
         in_reply_to,
-    }
+    })
 }
 
 struct PeerIngressClassifiedEffect {
@@ -275,9 +301,8 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         facts: PeerIngressEnvelopeFacts,
     ) -> Result<PeerIngressAdmission, DslTransitionError> {
         let context = "PeerCommsHandle::classify_external_envelope";
-        let effects = self
-            .dsl
-            .apply_signal_with_effects(external_envelope_signal(&facts), context)?;
+        let signal = external_envelope_signal(&facts, context)?;
+        let effects = self.dsl.apply_signal_with_effects(signal, context)?;
         let effect = classified_effect(effects, context)?;
         let classification = classification_from_effect(&effect);
         Ok(PeerIngressAdmission {
@@ -387,12 +412,14 @@ mod tests {
         )));
         let handle =
             RuntimePeerCommsHandle::new(Arc::new(HandleDslAuthority::from_shared(authority)));
+        let orchestrator_id = meerkat_core::comms::PeerId::new();
+        let orchestrator_id_string = orchestrator_id.as_str();
 
         let with_param = handle
             .classify_external_envelope(PeerIngressEnvelopeFacts {
                 item_id: "request-param".to_string(),
                 from_peer: "orchestrator".to_string(),
-                from_peer_id: meerkat_core::comms::PeerId::new(),
+                from_peer_id: orchestrator_id,
                 kind: meerkat_core::PeerIngressEnvelopeKind::Request {
                     intent: "mob.peer_added".to_string(),
                     params: serde_json::json!({ "peer": "worker-1" }),
@@ -401,11 +428,32 @@ mod tests {
             .expect("machine should classify lifecycle request");
         assert_eq!(with_param.lifecycle_peer.as_deref(), Some("worker-1"));
 
+        let worker_id = meerkat_core::comms::PeerId::new();
+        let worker_id_string = worker_id.as_str();
+        let with_peer_spec = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-peer-spec".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: orchestrator_id,
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "mob.peer_added".to_string(),
+                    params: serde_json::json!({
+                        "peer": "legacy-worker",
+                        "peer_spec": { "peer_id": worker_id_string.clone() },
+                    }),
+                },
+            })
+            .expect("machine should classify lifecycle request from peer_spec");
+        assert_eq!(
+            with_peer_spec.lifecycle_peer.as_deref(),
+            Some(worker_id_string.as_str())
+        );
+
         let without_param = handle
             .classify_external_envelope(PeerIngressEnvelopeFacts {
                 item_id: "request-fallback".to_string(),
                 from_peer: "orchestrator".to_string(),
-                from_peer_id: meerkat_core::comms::PeerId::new(),
+                from_peer_id: orchestrator_id,
                 kind: meerkat_core::PeerIngressEnvelopeKind::Request {
                     intent: "mob.peer_retired".to_string(),
                     params: serde_json::json!({}),
@@ -414,21 +462,47 @@ mod tests {
             .expect("machine should classify lifecycle request fallback");
         assert_eq!(
             without_param.lifecycle_peer.as_deref(),
-            Some("orchestrator")
+            Some(orchestrator_id_string.as_str())
         );
 
         let empty_param = handle
             .classify_external_envelope(PeerIngressEnvelopeFacts {
                 item_id: "lifecycle-empty".to_string(),
                 from_peer: "orchestrator".to_string(),
-                from_peer_id: meerkat_core::comms::PeerId::new(),
+                from_peer_id: orchestrator_id,
                 kind: meerkat_core::PeerIngressEnvelopeKind::Lifecycle {
                     kind: meerkat_core::comms::PeerLifecycleKind::PeerUnwired,
                     params: serde_json::json!({ "peer": "" }),
                 },
             })
             .expect("machine should classify lifecycle event fallback");
-        assert_eq!(empty_param.lifecycle_peer.as_deref(), Some("orchestrator"));
+        assert_eq!(
+            empty_param.lifecycle_peer.as_deref(),
+            Some(orchestrator_id_string.as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_peer_comms_handle_rejects_invalid_lifecycle_peer_spec() {
+        let handle = handle_for_phase(mm_dsl::MeerkatPhase::Attached);
+        let err = handle
+            .classify_external_envelope(PeerIngressEnvelopeFacts {
+                item_id: "request-invalid-peer-spec".to_string(),
+                from_peer: "orchestrator".to_string(),
+                from_peer_id: meerkat_core::comms::PeerId::new(),
+                kind: meerkat_core::PeerIngressEnvelopeKind::Request {
+                    intent: "mob.peer_added".to_string(),
+                    params: serde_json::json!({
+                        "peer": "legacy-worker",
+                        "peer_spec": { "peer_id": "not-a-peer-id" },
+                    }),
+                },
+            })
+            .expect_err("invalid peer_spec peer_id must fail closed");
+        assert!(
+            err.to_string().contains("invalid peer_id"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -557,6 +631,14 @@ mod tests {
         assert!(
             signal_builder.contains("lifecycle_peer_param"),
             "runtime should pass the parsed lifecycle peer candidate"
+        );
+        assert!(
+            signal_builder.contains("facts.from_peer_id.as_str()"),
+            "runtime should pass canonical peer id as the machine sender identity"
+        );
+        assert!(
+            !signal_builder.contains("facts.from_peer.clone()"),
+            "runtime must not pass display peer names as machine sender identity"
         );
         assert!(
             !signal_builder.contains(&forbidden_helper),

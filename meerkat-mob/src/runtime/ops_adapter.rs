@@ -16,8 +16,6 @@ use meerkat_runtime::RuntimeOpsLifecycleRegistry;
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::sync::Mutex;
-#[cfg(feature = "runtime-adapter")]
-use uuid::Uuid;
 
 #[cfg(feature = "runtime-adapter")]
 #[derive(Clone)]
@@ -52,16 +50,6 @@ impl MemberOpsKey {
                 peer_id: peer_id.clone(),
                 address: address.clone(),
             }),
-        }
-    }
-
-    fn synthetic_owner_bridge_session_id(&self) -> SessionId {
-        match self {
-            Self::Session(session_id) => session_id.clone(),
-            Self::BackendPeer { peer_id, address } => SessionId::from_uuid(Uuid::new_v5(
-                &Uuid::NAMESPACE_URL,
-                format!("meerkat-mob/member-ops-owner/{peer_id}/{address}").as_bytes(),
-            )),
         }
     }
 
@@ -147,10 +135,24 @@ impl MobOpsAdapter {
         Ok(())
     }
 
+    pub(crate) fn bind_member_fallback_registry(
+        &self,
+        member_ref: &MemberRef,
+        owner_bridge_session_id: SessionId,
+        display_name: impl Into<String>,
+    ) -> Result<(), MobError> {
+        self.bind_member_registry(
+            member_ref,
+            owner_bridge_session_id,
+            Arc::clone(&self.fallback_registry) as Arc<dyn OpsLifecycleRegistry>,
+            display_name,
+        )
+    }
+
     fn registry_for_key(
         &self,
         member_key: &MemberOpsKey,
-    ) -> (Arc<dyn OpsLifecycleRegistry>, SessionId, String) {
+    ) -> Result<(Arc<dyn OpsLifecycleRegistry>, SessionId, String), MobError> {
         if let Some(binding) = self
             .member_bindings
             .lock()
@@ -158,19 +160,23 @@ impl MobOpsAdapter {
             .get(member_key)
             .cloned()
         {
-            (
+            return Ok((
                 binding.registry,
                 binding.owner_bridge_session_id,
                 binding
                     .display_name
                     .unwrap_or_else(|| member_key.fallback_display_name()),
-            )
-        } else {
-            (
+            ));
+        }
+        match member_key {
+            MemberOpsKey::Session(session_id) => Ok((
                 Arc::clone(&self.fallback_registry) as Arc<dyn OpsLifecycleRegistry>,
-                member_key.synthetic_owner_bridge_session_id(),
+                session_id.clone(),
                 member_key.fallback_display_name(),
-            )
+            )),
+            MemberOpsKey::BackendPeer { .. } => Err(MobError::Internal(format!(
+                "mob ops adapter has no canonical owner binding for backend peer member {member_key:?}"
+            ))),
         }
     }
 
@@ -179,6 +185,15 @@ impl MobOpsAdapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(member_key);
+    }
+
+    fn is_unbound_backend_peer_key(&self, member_key: &MemberOpsKey) -> bool {
+        matches!(member_key, MemberOpsKey::BackendPeer { .. })
+            && !self
+                .member_bindings
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .contains_key(member_key)
     }
 
     /// Resolve the live canonical mob-child lifecycle operation for a session.
@@ -203,7 +218,17 @@ impl MobOpsAdapter {
     }
 
     async fn active_operation_id_for_key(&self, member_key: &MemberOpsKey) -> Option<OperationId> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let snapshots = match self.matching_operations_for_key(member_key) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                tracing::error!(
+                    member_key = ?member_key,
+                    error = %error,
+                    "mob ops adapter cannot resolve active operation without canonical owner binding",
+                );
+                return None;
+            }
+        };
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => {
@@ -249,9 +274,9 @@ impl MobOpsAdapter {
     fn matching_operations_for_key(
         &self,
         member_key: &MemberOpsKey,
-    ) -> Vec<OperationLifecycleSnapshot> {
-        let (registry, _, display_name) = self.registry_for_key(member_key);
-        registry
+    ) -> Result<Vec<OperationLifecycleSnapshot>, MobError> {
+        let (registry, _, display_name) = self.registry_for_key(member_key)?;
+        Ok(registry
             .list_operations()
             .into_iter()
             .filter(|snapshot| {
@@ -266,7 +291,7 @@ impl MobOpsAdapter {
                         }
                     }
             })
-            .collect()
+            .collect())
     }
 
     fn newest_operation_snapshot(
@@ -299,7 +324,9 @@ impl MobOpsAdapter {
         session_id: &SessionId,
         operation_id: &OperationId,
     ) -> Option<OperationStatus> {
-        let (registry, _, _) = self.registry_for_key(&MemberOpsKey::Session(session_id.clone()));
+        let (registry, _, _) = self
+            .registry_for_key(&MemberOpsKey::Session(session_id.clone()))
+            .ok()?;
         registry
             .snapshot(operation_id)
             .map(|snapshot| snapshot.status)
@@ -311,7 +338,7 @@ impl MobOpsAdapter {
         operation: &str,
         display_name: &str,
     ) -> Result<OperationId, MobError> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let snapshots = self.matching_operations_for_key(member_key)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => Ok(active_ids[0].clone()),
@@ -331,7 +358,7 @@ impl MobOpsAdapter {
         member_key: &MemberOpsKey,
         display_name: &str,
     ) -> Result<OperationId, MobError> {
-        let snapshots = self.matching_operations_for_key(member_key);
+        let snapshots = self.matching_operations_for_key(member_key)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         match active_ids.len() {
             1 => return Ok(active_ids[0].clone()),
@@ -345,7 +372,7 @@ impl MobOpsAdapter {
         }
 
         let operation_id = OperationId::new();
-        let (registry, owner_bridge_session_id, _) = self.registry_for_key(member_key);
+        let (registry, owner_bridge_session_id, _) = self.registry_for_key(member_key)?;
         registry
             .register_operation(OperationSpec {
                 id: operation_id.clone(),
@@ -390,7 +417,7 @@ impl MobOpsAdapter {
         let operation_id = self
             .ensure_operation_for_key(member_key, display_name)
             .await?;
-        let (registry, _, _) = self.registry_for_key(member_key);
+        let (registry, _, _) = self.registry_for_key(member_key)?;
         match registry.provisioning_succeeded(&operation_id) {
             Ok(()) => {}
             Err(OpsLifecycleError::InvalidTransition {
@@ -408,7 +435,7 @@ impl MobOpsAdapter {
         message: impl Into<String>,
     ) -> Result<(), MobError> {
         let member_key = Self::require_member_key(member_ref, "report progress for")?;
-        let (_, _, display_name) = self.registry_for_key(&member_key);
+        let (_, _, display_name) = self.registry_for_key(&member_key)?;
         let operation_id = self
             .resolve_or_register_active_operation_id_for_key(
                 &member_key,
@@ -417,7 +444,7 @@ impl MobOpsAdapter {
             )
             .await?;
         self.ensure_running_before_live_update(&member_key, &operation_id, "report progress")?;
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let (registry, _, _) = self.registry_for_key(&member_key)?;
         match registry.report_progress(
             &operation_id,
             OperationProgressUpdate {
@@ -431,6 +458,19 @@ impl MobOpsAdapter {
             }
             Err(error) => Err(MobError::Internal(error.to_string())),
         }
+    }
+
+    pub(crate) async fn report_member_progress_if_bound(
+        &self,
+        member_ref: &MemberRef,
+        message: impl Into<String>,
+    ) -> Result<bool, MobError> {
+        let member_key = Self::require_member_key(member_ref, "report progress for")?;
+        if self.is_unbound_backend_peer_key(&member_key) {
+            return Ok(false);
+        }
+        self.report_member_progress(member_ref, message).await?;
+        Ok(true)
     }
 
     pub(crate) async fn mark_member_peer_ready(
@@ -448,7 +488,7 @@ impl MobOpsAdapter {
             )
             .await?;
         self.ensure_running_before_live_update(&member_key, &operation_id, "mark peer ready")?;
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let (registry, _, _) = self.registry_for_key(&member_key)?;
         match registry.peer_ready(
             &operation_id,
             OperationPeerHandle {
@@ -467,7 +507,7 @@ impl MobOpsAdapter {
 
     pub(crate) async fn mark_member_retired(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let member_key = Self::require_member_key(member_ref, "mark retired for")?;
-        let snapshots = self.matching_operations_for_key(&member_key);
+        let snapshots = self.matching_operations_for_key(&member_key)?;
         let active_ids = Self::active_operation_ids(&snapshots);
         let operation_id = match active_ids.len() {
             1 => active_ids[0].clone(),
@@ -486,7 +526,7 @@ impl MobOpsAdapter {
                 )));
             }
         };
-        let (registry, _, _) = self.registry_for_key(&member_key);
+        let (registry, _, _) = self.registry_for_key(&member_key)?;
         match registry.request_retire(&operation_id) {
             Ok(()) => {}
             Err(OpsLifecycleError::InvalidTransition {
@@ -540,7 +580,7 @@ impl MobOpsAdapter {
         operation_id: &OperationId,
         reason: Option<String>,
     ) -> Result<(), MobError> {
-        let (registry, _, _) = self.registry_for_key(member_key);
+        let (registry, _, _) = self.registry_for_key(member_key)?;
         let result = match registry.abort_provisioning(operation_id, reason) {
             Ok(()) => Ok(()),
             Err(OpsLifecycleError::NotFound(_)) => Ok(()),
@@ -561,7 +601,7 @@ impl MobOpsAdapter {
         operation_id: &OperationId,
         operation: &str,
     ) -> Result<(), MobError> {
-        let (registry, _, _) = self.registry_for_key(member_key);
+        let (registry, _, _) = self.registry_for_key(member_key)?;
         let Some(snapshot) = registry.snapshot(operation_id) else {
             return Err(MobError::Internal(format!(
                 "mob ops adapter cannot {operation}: operation '{operation_id}' not found",
@@ -666,6 +706,32 @@ mod tests {
         assert!(
             adapter.registry().snapshot(&operation_id).is_none(),
             "fallback registry must not own bound child operation ids"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_peer_without_owner_binding_fails_closed() {
+        let adapter = MobOpsAdapter::new();
+        let member_ref = MemberRef::BackendPeer {
+            peer_id: "peer-1".to_string(),
+            address: "inproc://peer-1".to_string(),
+            pubkey: None,
+            bootstrap_token: None,
+            session_id: None,
+        };
+
+        let err = adapter
+            .mark_member_provisioned_for_member(&member_ref, "mob/member-backend")
+            .await
+            .expect_err("backend peer must require canonical owner binding");
+
+        assert!(
+            err.to_string().contains("no canonical owner binding"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            adapter.registry().list_operations().is_empty(),
+            "fallback registry must not receive synthetic backend-peer owner operations"
         );
     }
 

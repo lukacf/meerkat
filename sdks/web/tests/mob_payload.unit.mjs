@@ -9,7 +9,7 @@ import { isKnownEvent } from '../dist/types.js';
 function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
-    runtime_version: () => '0.6.0',
+    runtime_version: () => '0.6.5',
     init_runtime_from_config: () => JSON.stringify({ status: 'initialized' }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
@@ -63,10 +63,10 @@ function canonicalEnvelope(overrides = {}) {
 function makeSubscriptionMob(pollSubscription) {
   return new Mob('mob-web-unit', {
     async mob_member_subscribe() {
-      return 1;
+      return 'session:00000000-0000-4000-8000-000000000011';
     },
     async mob_subscribe_events() {
-      return 2;
+      return 'mob:mob-web-unit';
     },
     poll_subscription: pollSubscription,
     close_subscription: () => undefined,
@@ -75,7 +75,7 @@ function makeSubscriptionMob(pollSubscription) {
 
 function makeDirectSession(pollEvents) {
   return new Session(
-    7,
+    '00000000-0000-4000-8000-000000000007',
     async () => '{}',
     () => JSON.stringify({ session_id: 'session-web-unit', phase: 'idle' }),
     () => undefined,
@@ -89,7 +89,7 @@ async function runtimeWithMobList(payload) {
     {
       async default() {},
       runtime_version() {
-        return '0.6.0';
+        return '0.6.5';
       },
       init_runtime_from_config() {
         return JSON.stringify({ status: 'initialized' });
@@ -291,8 +291,8 @@ test('Mob.spawn rejects typed failed rows instead of projecting success', async 
 
 test('Mob.subscribeMemberEvents projects canonical WASM EventEnvelope payloads', async () => {
   const envelope = canonicalEnvelope();
-  const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    assert.equal(subscriptionRef, 'session:00000000-0000-4000-8000-000000000011');
     return JSON.stringify([envelope]);
   });
 
@@ -318,8 +318,8 @@ test('Mob.subscribeEvents projects canonical attributed WASM EventEnvelope paylo
     role: 'worker',
     envelope,
   };
-  const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    assert.equal(subscriptionRef, 'mob:mob-web-unit');
     return JSON.stringify([attributed]);
   });
 
@@ -344,8 +344,8 @@ test('Mob subscriptions reject source-id-only EventEnvelope payloads', async () 
       delta: 'legacy',
     },
   };
-  const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    if (subscriptionRef.startsWith('session:')) {
       return JSON.stringify([sourceIdOnly]);
     }
     return JSON.stringify([
@@ -374,8 +374,8 @@ test('Mob subscriptions reject malformed typed EventEnvelope source instead of t
     },
     source_id: 'session:00000000-0000-4000-8000-000000000001',
   });
-  const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    assert.equal(subscriptionRef, 'session:00000000-0000-4000-8000-000000000011');
     return JSON.stringify([malformedSource]);
   });
 
@@ -391,8 +391,8 @@ test('Mob subscriptions keep legacy source_id inert when typed source disagrees'
     },
     source_id: 'session:not-a-uuid',
   });
-  const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 1);
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    assert.equal(subscriptionRef, 'session:00000000-0000-4000-8000-000000000011');
     return JSON.stringify([envelope]);
   });
 
@@ -417,8 +417,8 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
       delta: 'legacy',
     },
   };
-  const mob = makeSubscriptionMob((handle) => {
-    if (handle === 1) {
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    if (subscriptionRef.startsWith('session:')) {
       return JSON.stringify([legacyMemberEnvelope]);
     }
     return JSON.stringify([
@@ -441,8 +441,8 @@ test('Mob subscriptions reject unrecognized event envelopes instead of fabricati
 });
 
 test('Mob.subscribeEvents rejects legacy string sources instead of hiding runtime generation', async () => {
-  const mob = makeSubscriptionMob((handle) => {
-    assert.equal(handle, 2);
+  const mob = makeSubscriptionMob((subscriptionRef) => {
+    assert.equal(subscriptionRef, 'mob:mob-web-unit');
     return JSON.stringify([
       {
         source: 'worker-runtime',
@@ -480,20 +480,19 @@ test('Session direct polling rejects malformed event items', () => {
   assert.throws(() => session.subscribe().poll(), /missing type/);
 });
 
-test('Session destroy does not cache lifecycle state in the browser handle', async () => {
+test('Session destroy does not cache lifecycle state in the browser session object', async () => {
   let destroyCalls = 0;
   let stateCalls = 0;
   let pollCalls = 0;
   let appendCalls = 0;
   const session = new Session(
-    11,
+    '00000000-0000-4000-8000-000000000011',
     async () => {
       throw new Error('SESSION_NOT_FOUND: session not found');
     },
     () => {
       stateCalls += 1;
       return JSON.stringify({
-        handle: 11,
         session_id: 'session-web-unit',
         mob_id: '',
         model: 'claude-sonnet-4-5',
@@ -704,14 +703,14 @@ test('Mob result decoders reject missing generated truth instead of fabricating 
   const malformedHelperResults = [
     {
       method: 'spawnHelper',
-      call: (mob) => mob.spawnHelper('summarize'),
+      call: (mob) => mob.spawnHelper('summarize', { agentIdentity: 'helper-1' }),
       binding: 'mob_spawn_helper',
       response: { agent_identity: 'helper-1', member_ref: 'ref-helper-1' },
       pattern: /Invalid mob spawn_helper response: tokens_used must be number/,
     },
     {
       method: 'forkHelper',
-      call: (mob) => mob.forkHelper('worker-1', 'review'),
+      call: (mob) => mob.forkHelper('worker-1', 'review', { agentIdentity: 'fork-1' }),
       binding: 'mob_fork_helper',
       response: { agent_identity: 'fork-1', member_ref: 'ref-fork-1' },
       pattern: /Invalid mob fork_helper response: tokens_used must be number/,
@@ -755,6 +754,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
     async mob_member_status() {
       return JSON.stringify({
         status: 'active',
+        member_ref: 'ref-worker-1',
         tokens_used: 3,
         is_final: false,
         current_session_id: 'session-1',
@@ -791,6 +791,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
   });
 
   const snapshot = await deliveryMob.memberStatus('worker-1');
+  assert.equal(snapshot.member_ref, 'ref-worker-1');
   assert.equal(snapshot.current_session_id, 'session-1');
   // J58: realtime_attachment_status assertion removed; field gone from the
   // wire shape with the live-adapter-mvp sweep.

@@ -246,7 +246,7 @@ async function scenarioRawMob004({ wasm }) {
         JSON.stringify([
           {
             profile: 'worker',
-            meerkat_id: 'worker-1',
+            agent_identity: 'worker-1',
             runtime_mode: 'turn_driven',
           },
         ]),
@@ -258,6 +258,7 @@ async function scenarioRawMob004({ wasm }) {
   assert(
     Array.isArray(spawn) &&
       spawn[0]?.status === 'spawned' &&
+      spawn[0]?.result?.agent_identity === 'worker-1' &&
       typeof spawn[0]?.result?.member_ref === 'string',
     `spawn failed: ${JSON.stringify(spawn)}`,
   );

@@ -592,7 +592,7 @@ async fn claude_ai_oauth_rejects_wrong_source_even_with_matching_mode() {
     let realm = realm_with_oauth_binding_source(
         "claude_ai_oauth",
         CredentialSourceSpec::ExternalResolver {
-            handle: "external-claude".into(),
+            handle: meerkat_core::ExternalAuthResolverId::parse("external-claude").unwrap(),
         },
     );
     let env = ResolverEnvironment::testing()

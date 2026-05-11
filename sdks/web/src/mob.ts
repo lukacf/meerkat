@@ -66,24 +66,10 @@ interface MobWasmBindings {
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
-}
-
-function encodeBase64UrlJson(payload: Record<string, unknown>): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(payload));
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  const b64 = btoa(binary);
-  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
-
-function encodeMemberRef(mobId: string, agentIdentity: string): string {
-  return encodeBase64UrlJson({ m: mobId, a: agentIdentity });
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (subscriptionRef: string) => string;
+  close_subscription: (subscriptionRef: string) => void;
 }
 
 function spawnSpecPayload(spec: SpawnSpec): Record<string, unknown> {
@@ -593,7 +579,7 @@ function parseMobEvents(raw: unknown): MobEvent[] {
   return parseEventItems(raw, 'Invalid mob/events response', parseMobEvent);
 }
 
-function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: string): MobMemberSnapshot {
+function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
   const snapshot = requireRecord(
     raw,
     'Invalid mob member_status response: malformed envelope',
@@ -608,7 +594,11 @@ function parseMobMemberSnapshot(raw: unknown, mobId: string, agentIdentity: stri
       snapshot.status,
       'Invalid mob member_status response: missing status',
     ),
-    member_ref: encodeMemberRef(mobId, agentIdentity),
+    member_ref: requireStringField(
+      snapshot,
+      'member_ref',
+      'Invalid mob member_status response: missing member_ref',
+    ),
     output_preview: optionalStringField(
       snapshot,
       'output_preview',
@@ -807,12 +797,15 @@ export class Member {
   }
 
   async subscribe(): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, this.agentIdentity);
+    const subscriptionRef = await this.bindings.mob_member_subscribe(
+      this.mobId,
+      this.agentIdentity,
+    );
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(subscriptionRef),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(subscriptionRef),
     );
   }
 }
@@ -992,16 +985,14 @@ export class Mob {
     const json = await this.bindings.mob_member_status(this.mobId, agentIdentity);
     return parseMobMemberSnapshot(
       parseJsonPayload(json, 'Invalid mob member_status response'),
-      this.mobId,
-      agentIdentity,
     );
   }
 
   /** Spawn a short-lived helper and return its terminal result. */
   async spawnHelper(
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       runtimeMode?: string;
@@ -1010,14 +1001,14 @@ export class Mob {
   ): Promise<MobHelperResult> {
     const json = await this.bindings.mob_spawn_helper(
       this.mobId,
-        JSON.stringify({
-          prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
-        }),
+      JSON.stringify({
+        prompt,
+        agent_identity: options.agentIdentity,
+        profile_name: options.profileName,
+        auth_binding: options.authBinding,
+        runtime_mode: options.runtimeMode,
+        backend: options.backend,
+      }),
     );
     return parseMobHelperResult(
       parseJsonPayload(json, 'Invalid mob spawn_helper response'),
@@ -1029,8 +1020,8 @@ export class Mob {
   async forkHelper(
     sourceMemberId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       profileName?: string;
       authBinding?: AuthBindingRef;
       forkContext?: Record<string, unknown>;
@@ -1040,16 +1031,16 @@ export class Mob {
   ): Promise<MobHelperResult> {
     const json = await this.bindings.mob_fork_helper(
       this.mobId,
-        JSON.stringify({
-          source_member_id: sourceMemberId,
-          prompt,
-          agent_identity: options?.agentIdentity,
-          profile_name: options?.profileName,
-          auth_binding: options?.authBinding,
-          fork_context: options?.forkContext,
-          runtime_mode: options?.runtimeMode,
-          backend: options?.backend,
-        }),
+      JSON.stringify({
+        source_member_id: sourceMemberId,
+        prompt,
+        agent_identity: options.agentIdentity,
+        profile_name: options.profileName,
+        auth_binding: options.authBinding,
+        fork_context: options.forkContext,
+        runtime_mode: options.runtimeMode,
+        backend: options.backend,
+      }),
     );
     return parseMobHelperResult(
       parseJsonPayload(json, 'Invalid mob fork_helper response'),
@@ -1097,23 +1088,23 @@ export class Mob {
 
   /** Subscribe to events for a specific member. */
   async subscribeMemberEvents(agentIdentity: string): Promise<EventSubscription<MemberEventItem>> {
-    const handle = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
+    const subscriptionRef = await this.bindings.mob_member_subscribe(this.mobId, agentIdentity);
     return new EventSubscription<MemberEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(subscriptionRef),
       (raw) =>
         parseEventItems(raw, 'Invalid mob member subscription event', parseMemberEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(subscriptionRef),
     );
   }
 
   /** Subscribe to all mob-wide attributed events. */
   async subscribeEvents(): Promise<EventSubscription<AttributedEventItem>> {
-    const handle = await this.bindings.mob_subscribe_events(this.mobId);
+    const subscriptionRef = await this.bindings.mob_subscribe_events(this.mobId);
     return new EventSubscription<AttributedEventItem>(
-      () => this.bindings.poll_subscription(handle),
+      () => this.bindings.poll_subscription(subscriptionRef),
       (raw) =>
         parseEventItems(raw, 'Invalid mob attributed subscription event', parseAttributedEventItem),
-      () => this.bindings.close_subscription(handle),
+      () => this.bindings.close_subscription(subscriptionRef),
     );
   }
 

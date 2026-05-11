@@ -493,6 +493,7 @@ export interface MobMemberStatusResult {
   external_member?: unknown;
   is_final: boolean;
   kickoff?: unknown;
+  member_ref: WireMemberRef;
   output_preview?: string;
   peer_connectivity?: unknown;
   resolved_capabilities?: WireResolvedModelCapabilities;

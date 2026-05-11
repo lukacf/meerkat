@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     Anthropic,
+    #[serde(rename = "openai")]
     OpenAI,
     Gemini,
     SelfHosted,
@@ -66,4 +67,22 @@ impl Provider {
         Provider::Gemini,
         Provider::SelfHosted,
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Provider;
+
+    #[test]
+    fn provider_openai_serializes_to_canonical_spelling() {
+        let json = serde_json::to_string(&Provider::OpenAI).expect("serialize provider");
+        assert_eq!(json, "\"openai\"");
+
+        let decoded: Provider = serde_json::from_str("\"openai\"").expect("deserialize provider");
+        assert_eq!(decoded, Provider::OpenAI);
+        assert!(
+            serde_json::from_str::<Provider>("\"open_a_i\"").is_err(),
+            "non-canonical OpenAI spelling must fail closed",
+        );
+    }
 }

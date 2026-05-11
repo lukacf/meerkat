@@ -12,10 +12,9 @@
 //! - browse with `query` narrows by substring match (case-insensitive).
 //! - browse with `source_uuid` filter narrows by source.
 //! - browse rejects an unparseable `source_uuid`.
-//! - load returns the skill body + key fields for a known key.
+//! - load returns the skill body + canonical key object for a known key.
 //! - load surfaces `ExecutionFailed` for a missing key.
-//! - load rejects a missing `source_uuid` / `skill_name` as
-//!   `InvalidArgs`.
+//! - load rejects a missing `skill_key` as `InvalidArgs`.
 //!
 //! See `docs/wave-c-prep/test-coverage-audit.md` §6 #15.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -211,6 +210,20 @@ fn harness_runtime() -> (Arc<SkillRuntime>, SourceUuid) {
     (Arc::new(SkillRuntime::new(Arc::new(engine))), source)
 }
 
+fn skill_key_json(source: &SourceUuid, skill_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "skill_key": {
+            "source_uuid": source.to_string(),
+            "skill_name": skill_name,
+        }
+    })
+}
+
+fn assert_skill_key(value: &serde_json::Value, source: &SourceUuid, skill_name: &str) {
+    assert_eq!(value["source_uuid"].as_str().unwrap(), source.to_string());
+    assert_eq!(value["skill_name"].as_str().unwrap(), skill_name);
+}
+
 #[tokio::test]
 async fn browse_no_filter_returns_all_skills() {
     let (runtime, _primary, _secondary) = fixture_runtime();
@@ -228,7 +241,7 @@ async fn browse_no_filter_returns_all_skills() {
 
     let names: Vec<&str> = skills
         .iter()
-        .map(|s| s["skill_name"].as_str().unwrap())
+        .map(|s| s["skill_key"]["skill_name"].as_str().unwrap())
         .collect();
     // BTreeMap ordering inside InMemorySkillSource → deterministic order.
     assert!(names.contains(&"alpha"));
@@ -252,7 +265,10 @@ async fn browse_query_filter_narrows_case_insensitive() {
         1,
         "only gamma's description mentions 'Helper'; got {json}"
     );
-    assert_eq!(skills[0]["skill_name"].as_str().unwrap(), "gamma");
+    assert_eq!(
+        skills[0]["skill_key"]["skill_name"].as_str().unwrap(),
+        "gamma"
+    );
 }
 
 #[tokio::test]
@@ -267,11 +283,7 @@ async fn browse_source_uuid_filter_narrows_by_source() {
     let json = output.into_json().unwrap();
     let skills = json["skills"].as_array().unwrap();
     assert_eq!(skills.len(), 1, "only secondary has one skill");
-    assert_eq!(skills[0]["skill_name"].as_str().unwrap(), "gamma");
-    assert_eq!(
-        skills[0]["source_uuid"].as_str().unwrap(),
-        secondary.to_string()
-    );
+    assert_skill_key(&skills[0]["skill_key"], &secondary, "gamma");
 }
 
 #[tokio::test]
@@ -322,21 +334,14 @@ async fn browse_surfaces_source_identity_registry_failures() {
 }
 
 #[tokio::test]
-async fn load_returns_body_and_key_fields_for_known_skill() {
+async fn load_returns_body_and_skill_key_for_known_skill() {
     let (runtime, primary, _s) = fixture_runtime();
     let tool = LoadSkillTool::new(runtime);
 
-    let output = tool
-        .call(serde_json::json!({
-            "source_uuid": primary.to_string(),
-            "skill_name": "alpha",
-        }))
-        .await
-        .unwrap();
+    let output = tool.call(skill_key_json(&primary, "alpha")).await.unwrap();
     let json = output.into_json().unwrap();
 
-    assert_eq!(json["skill_name"].as_str().unwrap(), "alpha");
-    assert_eq!(json["source_uuid"].as_str().unwrap(), primary.to_string());
+    assert_skill_key(&json["skill_key"], &primary, "alpha");
     let body = json["body"].as_str().unwrap();
     assert!(
         body.contains("body-alpha"),
@@ -354,10 +359,7 @@ async fn load_missing_skill_surfaces_execution_failure() {
     let tool = LoadSkillTool::new(runtime);
 
     let err = tool
-        .call(serde_json::json!({
-            "source_uuid": primary.to_string(),
-            "skill_name": "ghost",
-        }))
+        .call(skill_key_json(&primary, "ghost"))
         .await
         .unwrap_err();
 
@@ -376,7 +378,7 @@ async fn load_missing_required_args_returns_invalid_args() {
     match &err {
         meerkat_tools::BuiltinToolError::InvalidArgs(msg) => {
             assert!(
-                msg.contains("source_uuid"),
+                msg.contains("skill_key"),
                 "InvalidArgs must name the missing field; got {msg:?}"
             );
         }
@@ -384,7 +386,11 @@ async fn load_missing_required_args_returns_invalid_args() {
     }
 
     let err = tool
-        .call(serde_json::json!({ "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f" }))
+        .call(serde_json::json!({
+            "skill_key": {
+                "source_uuid": "dc256086-0d2f-4f61-a307-320d4148107f"
+            }
+        }))
         .await
         .unwrap_err();
     match &err {
@@ -399,7 +405,7 @@ async fn load_missing_required_args_returns_invalid_args() {
 }
 
 #[tokio::test]
-async fn browse_output_always_carries_typed_key_fields() {
+async fn browse_output_always_carries_typed_skill_key() {
     let (runtime, _p, _s) = fixture_runtime();
     let tool = BrowseSkillsTool::new(runtime);
 
@@ -407,21 +413,19 @@ async fn browse_output_always_carries_typed_key_fields() {
     let json = output.into_json().unwrap();
     let skills = json["skills"].as_array().unwrap();
 
-    // Each result must have typed key fields on every row — no legacy
-    // slash path, no bare `id`. This is the V4 wire discipline check.
+    // Each result must have a typed key object on every row — no legacy
+    // slash path, no bare `id`, no decomposed sibling key fields.
     for entry in skills {
         let obj = entry.as_object().expect("skill rows are objects");
         assert!(
-            obj.contains_key("source_uuid"),
-            "each row must carry source_uuid; got {entry}",
+            obj.contains_key("skill_key"),
+            "each row must carry skill_key; got {entry}",
         );
-        assert!(
-            obj.contains_key("skill_name"),
-            "each row must carry skill_name; got {entry}",
-        );
-        // Parse both halves to confirm they're typed-safe.
-        SourceUuid::parse(obj["source_uuid"].as_str().unwrap()).unwrap();
-        SkillName::parse(obj["skill_name"].as_str().unwrap()).unwrap();
+        assert!(!obj.contains_key("source_uuid"));
+        assert!(!obj.contains_key("skill_name"));
+        let key = obj["skill_key"].as_object().expect("skill_key object");
+        SourceUuid::parse(key["source_uuid"].as_str().unwrap()).unwrap();
+        SkillName::parse(key["skill_name"].as_str().unwrap()).unwrap();
     }
 }
 
@@ -430,13 +434,7 @@ async fn list_resources_returns_artifact_metadata_for_known_skill() {
     let (runtime, source) = harness_runtime();
     let tool = SkillListResourcesTool::new(runtime);
 
-    let output = tool
-        .call(serde_json::json!({
-            "source_uuid": source.to_string(),
-            "skill_name": "alpha",
-        }))
-        .await
-        .unwrap();
+    let output = tool.call(skill_key_json(&source, "alpha")).await.unwrap();
     let json = output.into_json().unwrap();
     let artifacts = json["artifacts"].as_array().unwrap();
 
@@ -451,11 +449,11 @@ async fn read_resource_returns_artifact_content_for_known_path() {
     let tool = SkillReadResourceTool::new(runtime);
 
     let output = tool
-        .call(serde_json::json!({
-            "source_uuid": source.to_string(),
-            "skill_name": "alpha",
-            "path": "README.md",
-        }))
+        .call({
+            let mut args = skill_key_json(&source, "alpha");
+            args["path"] = serde_json::json!("README.md");
+            args
+        })
         .await
         .unwrap();
     let json = output.into_json().unwrap();
@@ -473,10 +471,7 @@ async fn read_resource_missing_path_returns_invalid_args() {
     let tool = SkillReadResourceTool::new(runtime);
 
     let err = tool
-        .call(serde_json::json!({
-            "source_uuid": source.to_string(),
-            "skill_name": "alpha",
-        }))
+        .call(skill_key_json(&source, "alpha"))
         .await
         .unwrap_err();
 
@@ -497,11 +492,11 @@ async fn invoke_function_passes_typed_key_and_default_arguments() {
     let tool = SkillInvokeFunctionTool::new(runtime);
 
     let output = tool
-        .call(serde_json::json!({
-            "source_uuid": source.to_string(),
-            "skill_name": "alpha",
-            "function_name": "echo",
-        }))
+        .call({
+            let mut args = skill_key_json(&source, "alpha");
+            args["function_name"] = serde_json::json!("echo");
+            args
+        })
         .await
         .unwrap();
     let json = output.into_json().unwrap();
@@ -516,12 +511,12 @@ async fn invoke_function_preserves_structured_arguments() {
     let tool = SkillInvokeFunctionTool::new(runtime);
 
     let output = tool
-        .call(serde_json::json!({
-            "source_uuid": source.to_string(),
-            "skill_name": "alpha",
-            "function_name": "echo",
-            "arguments": { "subject": "typed" },
-        }))
+        .call({
+            let mut args = skill_key_json(&source, "alpha");
+            args["function_name"] = serde_json::json!("echo");
+            args["arguments"] = serde_json::json!({ "subject": "typed" });
+            args
+        })
         .await
         .unwrap();
     let json = output.into_json().unwrap();

@@ -1,7 +1,7 @@
 use crate::digest::{MobpackDigest, canonical_digest_from_map};
-use crate::signing::PackSignature;
+use crate::signing::{MobpackPublicKey, MobpackSignerId, PackSignature};
 use crate::validate::PackValidationError;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::Verifier;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,12 +17,12 @@ pub enum TrustPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TrustedSigners {
     #[serde(default)]
-    pub signers: BTreeMap<String, String>,
+    pub signers: BTreeMap<MobpackSignerId, MobpackPublicKey>,
 }
 
 impl TrustedSigners {
-    pub fn lookup(&self, signer_id: &str) -> Option<&str> {
-        self.signers.get(signer_id).map(String::as_str)
+    pub fn lookup(&self, signer_id: &MobpackSignerId) -> Option<&MobpackPublicKey> {
+        self.signers.get(signer_id)
     }
 }
 
@@ -93,14 +93,19 @@ pub fn verify_pack_trust(
     if pack_signature.digest != digest {
         return Err(PackValidationError::SignatureDigestMismatch);
     }
-    let embedded_key = parse_verifying_key(&pack_signature.public_key)?;
-    let sig = parse_signature(&pack_signature.signature)?;
+    let embedded_key = pack_signature
+        .public_key
+        .to_verifying_key()
+        .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?;
+    let sig = pack_signature.signature.to_signature();
 
     if let Some(trusted_hex) = trusted_signers.lookup(&pack_signature.signer_id) {
-        let trusted_key = parse_verifying_key(trusted_hex)?;
+        let trusted_key = trusted_hex
+            .to_verifying_key()
+            .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?;
         if trusted_key.to_bytes() != embedded_key.to_bytes() {
             return Err(PackValidationError::SignerKeyMismatch(
-                pack_signature.signer_id,
+                pack_signature.signer_id.to_string(),
             ));
         }
         trusted_key
@@ -115,32 +120,11 @@ pub fn verify_pack_trust(
 
     if trust_policy == TrustPolicy::Strict {
         return Err(PackValidationError::UnknownSignerStrict(
-            pack_signature.signer_id,
+            pack_signature.signer_id.to_string(),
         ));
     }
     warnings.push("signature valid but signer is unknown in permissive mode".to_string());
     Ok(warnings)
-}
-
-fn parse_verifying_key(hex_key: &str) -> Result<VerifyingKey, PackValidationError> {
-    let bytes: [u8; 32] = hex::decode(hex_key)
-        .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?
-        .try_into()
-        .map_err(|_| {
-            PackValidationError::InvalidSignature("expected 32-byte public key".to_string())
-        })?;
-    VerifyingKey::from_bytes(&bytes)
-        .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))
-}
-
-fn parse_signature(hex_sig: &str) -> Result<Signature, PackValidationError> {
-    let bytes: [u8; 64] = hex::decode(hex_sig)
-        .map_err(|err| PackValidationError::InvalidSignature(err.to_string()))?
-        .try_into()
-        .map_err(|_| {
-            PackValidationError::InvalidSignature("expected 64-byte signature".to_string())
-        })?;
-    Ok(Signature::from_bytes(&bytes))
 }
 
 #[cfg(test)]
@@ -152,19 +136,49 @@ mod tests {
     use std::str::FromStr;
     use tempfile::TempDir;
 
+    fn signer_id(value: &str) -> MobpackSignerId {
+        MobpackSignerId::new(value).unwrap()
+    }
+
+    fn public_key(signing_key: &SigningKey) -> MobpackPublicKey {
+        MobpackPublicKey::from_verifying_key(&signing_key.verifying_key())
+    }
+
+    fn timestamp() -> crate::signing::MobpackSignatureTimestamp {
+        crate::signing::MobpackSignatureTimestamp::parse("2026-02-24T00:00:00Z").unwrap()
+    }
+
+    fn signature_doc(
+        signer: &str,
+        signing_key: &SigningKey,
+        digest: MobpackDigest,
+        signature: ed25519_dalek::Signature,
+    ) -> String {
+        toml::to_string(&PackSignature {
+            signer_id: signer_id(signer),
+            public_key: public_key(signing_key),
+            digest,
+            signature: crate::signing::MobpackSignatureBytes::from_signature(&signature),
+            timestamp: timestamp(),
+        })
+        .unwrap()
+    }
+
     #[test]
     fn test_trust_store_toml_roundtrip() {
+        let ci_key = SigningKey::from_bytes(&[1u8; 32]);
+        let release_key = SigningKey::from_bytes(&[2u8; 32]);
         let store = TrustedSigners {
             signers: BTreeMap::from([
-                ("ci".to_string(), "abcd1234".to_string()),
-                ("release".to_string(), "beefcafe".to_string()),
+                (signer_id("ci"), public_key(&ci_key)),
+                (signer_id("release"), public_key(&release_key)),
             ]),
         };
 
         let encoded = toml::to_string(&store).unwrap();
         let decoded: TrustedSigners = toml::from_str(&encoded).unwrap();
         assert_eq!(decoded, store);
-        assert_eq!(decoded.lookup("ci"), Some("abcd1234"));
+        assert_eq!(decoded.lookup(&signer_id("ci")), Some(&public_key(&ci_key)));
     }
 
     #[test]
@@ -185,12 +199,12 @@ mod tests {
 
         let merged = load_trusted_signers(&user_path, &project_path).unwrap();
         assert_eq!(
-            merged.lookup("ci"),
-            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+            merged.lookup(&signer_id("ci")),
+            Some(&MobpackPublicKey::from_bytes([0xbb; 32]))
         );
         assert_eq!(
-            merged.lookup("release"),
-            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc")
+            merged.lookup(&signer_id("release")),
+            Some(&MobpackPublicKey::from_bytes([0xcc; 32]))
         );
     }
 
@@ -230,20 +244,10 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let digest = MobpackDigest::from_bytes([3u8; 32]);
         let signature = signing_key.sign(digest.as_bytes());
-        let signature_doc = toml::to_string(&PackSignature {
-            signer_id: "ci".to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-            digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: "2026-02-24T00:00:00Z".to_string(),
-        })
-        .unwrap();
+        let signature_doc = signature_doc("ci", &signing_key, digest, signature);
         let files = BTreeMap::from([("signature.toml".to_string(), signature_doc.into_bytes())]);
         let trusted = TrustedSigners {
-            signers: BTreeMap::from([(
-                "ci".to_string(),
-                hex::encode(signing_key.verifying_key().to_bytes()),
-            )]),
+            signers: BTreeMap::from([(signer_id("ci"), public_key(&signing_key))]),
         };
         verify_pack_trust(&files, digest, TrustPolicy::Strict, &trusted).unwrap();
     }
@@ -253,14 +257,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let digest = MobpackDigest::from_bytes([4u8; 32]);
         let signature = signing_key.sign(digest.as_bytes());
-        let signature_doc = toml::to_string(&PackSignature {
-            signer_id: "ci".to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-            digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: "2026-02-24T00:00:00Z".to_string(),
-        })
-        .unwrap();
+        let signature_doc = signature_doc("ci", &signing_key, digest, signature);
         let files = BTreeMap::from([("signature.toml".to_string(), signature_doc.into_bytes())]);
         let err = verify_pack_trust(
             &files,
@@ -278,20 +275,10 @@ mod tests {
         let trusted_key = SigningKey::from_bytes(&[8u8; 32]);
         let digest = MobpackDigest::from_bytes([5u8; 32]);
         let signature = signing_key.sign(digest.as_bytes());
-        let signature_doc = toml::to_string(&PackSignature {
-            signer_id: "ci".to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-            digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: "2026-02-24T00:00:00Z".to_string(),
-        })
-        .unwrap();
+        let signature_doc = signature_doc("ci", &signing_key, digest, signature);
         let files = BTreeMap::from([("signature.toml".to_string(), signature_doc.into_bytes())]);
         let trusted = TrustedSigners {
-            signers: BTreeMap::from([(
-                "ci".to_string(),
-                hex::encode(trusted_key.verifying_key().to_bytes()),
-            )]),
+            signers: BTreeMap::from([(signer_id("ci"), public_key(&trusted_key))]),
         };
         let err = verify_pack_trust(&files, digest, TrustPolicy::Strict, &trusted).unwrap_err();
         assert!(matches!(err, PackValidationError::SignerKeyMismatch(_)));
@@ -304,11 +291,11 @@ mod tests {
         let mut signature_bytes = signing_key.sign(digest.as_bytes()).to_bytes();
         signature_bytes[0] ^= 0xFF;
         let signature_doc = toml::to_string(&PackSignature {
-            signer_id: "ci".to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            signer_id: signer_id("ci"),
+            public_key: public_key(&signing_key),
             digest,
-            signature: hex::encode(signature_bytes),
-            timestamp: "2026-02-24T00:00:00Z".to_string(),
+            signature: crate::signing::MobpackSignatureBytes::from_bytes(signature_bytes),
+            timestamp: timestamp(),
         })
         .unwrap();
         let files = BTreeMap::from([("signature.toml".to_string(), signature_doc.into_bytes())]);
@@ -327,14 +314,7 @@ mod tests {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let digest = MobpackDigest::from_bytes([7u8; 32]);
         let signature = signing_key.sign(digest.as_bytes());
-        let signature_doc = toml::to_string(&PackSignature {
-            signer_id: "ci".to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
-            digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: "2026-02-24T00:00:00Z".to_string(),
-        })
-        .unwrap();
+        let signature_doc = signature_doc("ci", &signing_key, digest, signature);
         let files = BTreeMap::from([("signature.toml".to_string(), signature_doc.into_bytes())]);
         let warnings = verify_pack_trust(
             &files,

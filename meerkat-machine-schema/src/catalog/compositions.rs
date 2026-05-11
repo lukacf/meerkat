@@ -1181,7 +1181,8 @@ fn supervisor_trust_bundle_composition() -> CompositionSchema {
                         "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs".into(),
                     generation_mode: ProtocolGenerationMode::EffectExtractor,
                     required_imports: vec![
-                        "use crate::meerkat_machine::dsl::{MeerkatMachineEffect, PeerId};".into(),
+                        "use crate::meerkat_machine::dsl::MeerkatMachineEffect;".into(),
+                        "use meerkat_core::comms::{PeerAddress, PeerId, PeerName, TrustedPeerDescriptor};".into(),
                     ],
                     authority_type_path: Some(
                         "crate::meerkat_machine::dsl::MeerkatMachineAuthority".into(),

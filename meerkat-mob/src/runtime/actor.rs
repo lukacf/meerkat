@@ -617,20 +617,33 @@ impl MobActor {
                         )));
                     }
                 };
-                if obligation.name != next_name
-                    || obligation.peer_id != next_peer_id
-                    || obligation.address != next_address
-                    || obligation.epoch != next_epoch
-                {
+                if let Err(reason) = obligation.peer.matches_descriptor(&spec) {
                     return Err(MobError::WiringError(format!(
-                        "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding"
+                        "supervisor private trust publication for session '{session_id}' generated obligation did not match the staged supervisor binding: {reason}"
+                    )));
+                }
+                if obligation.epoch != next_epoch {
+                    return Err(MobError::WiringError(format!(
+                        "supervisor private trust publication for session '{session_id}' generated obligation epoch {} did not match staged supervisor epoch {next_epoch}",
+                        obligation.epoch
                     )));
                 }
                 Some(obligation)
             };
             let publish_peer_id = publish_obligation
                 .as_ref()
-                .map(|obligation| obligation.peer_id.clone())
+                .map(|obligation| {
+                    obligation
+                        .peer
+                        .peer_id()
+                        .map(|peer_id| peer_id.to_string())
+                        .map_err(|reason| {
+                            MobError::WiringError(format!(
+                                "supervisor private trust publication for session '{session_id}' generated invalid typed peer obligation: {reason}"
+                            ))
+                        })
+                })
+                .transpose()?
                 .unwrap_or_else(|| next_peer_id.clone());
             let publish_epoch = publish_obligation
                 .as_ref()
@@ -4075,7 +4088,7 @@ impl MobActor {
                 }
                 if roster
                     .list()
-                    .any(|entry| entry.external_peer_specs.contains_key(&agent_identity))
+                    .any(|entry| entry.has_external_peer_name(agent_identity.as_str()))
                 {
                     return Err(MobError::WiringError(format!(
                         "meerkat id '{agent_identity}' collides with an existing external peer name"
@@ -4754,7 +4767,7 @@ impl MobActor {
             }
             if roster
                 .list()
-                .any(|entry| entry.external_peer_specs.contains_key(agent_identity))
+                .any(|entry| entry.has_external_peer_name(agent_identity.as_str()))
             {
                 return Err(MobError::WiringError(format!(
                     "meerkat id '{agent_identity}' collides with an existing external peer name"
@@ -6199,15 +6212,15 @@ impl MobActor {
                 // If the peer is not in the roster but is tracked as an
                 // external peer spec on the local member, route through
                 // the external unwire path. Callers commonly unwire an
-                // external peer by name (projected as an `AgentIdentity`
-                // Local target) rather than passing the full descriptor.
+                // external peer by name (carried through the legacy local
+                // target variant) rather than passing the full descriptor.
                 let external_peer = {
                     let roster = self.roster.read().await;
                     match roster.get(&local) {
                         Some(local_entry)
                             if roster.get(&MeerkatId::from(id.as_str())).is_none() =>
                         {
-                            local_entry.external_peer_specs.contains_key(&id)
+                            local_entry.has_external_peer_name(id.as_str())
                         }
                         _ => false,
                     }
@@ -6870,7 +6883,7 @@ impl MobActor {
                 .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
             let already = entry
                 .external_peer_specs
-                .get(&external_identity)
+                .get(&spec.peer_id)
                 .map(|existing| existing == &spec)
                 .unwrap_or(false);
             (entry.member_ref.clone(), already)
@@ -6965,8 +6978,6 @@ impl MobActor {
         stale_cleanup_spec: Option<TrustedPeerDescriptor>,
     ) -> Result<(), MobError> {
         let local_identity = AgentIdentity::from(local.as_str());
-        let external_identity = AgentIdentity::from(peer_name.as_str());
-
         // Look up the prior descriptor so we can compensate on append
         // failure. Idempotent: absent projection stays success, but a
         // descriptor-bearing External target still prunes any stale comms
@@ -6976,7 +6987,7 @@ impl MobActor {
             let entry = roster
                 .get(&local)
                 .ok_or_else(|| MobError::MemberNotFound(local.clone()))?;
-            let prior = entry.external_peer_specs.get(&external_identity).cloned();
+            let prior = entry.external_peer_spec_by_name(&peer_name).cloned();
             (entry.member_ref.clone(), prior)
         };
 

@@ -63,7 +63,7 @@ impl MemorySearchDispatcher {
             description: "Search semantic memory for past conversation content. \
                 Memory contains text from earlier conversation turns that were \
                 compacted away to save context space. Use this to recall \
-                information from earlier in the conversation or from previous sessions."
+                information from earlier in this memory owner scope."
                 .to_string(),
             input_schema: input_schema(),
             provenance: Some(ToolProvenance {
@@ -91,8 +91,9 @@ impl MemorySearchDispatcher {
     pub fn usage_instructions() -> &'static str {
         "# Semantic Memory\n\n\
          You have access to a semantic memory store that contains text from earlier \
-         conversation turns that were compacted away. Use the `memory_search` tool \
-         to recall information that is no longer in your visible context."
+         conversation turns that were compacted away for this memory owner. Use the \
+         `memory_search` tool to recall information that is no longer in your \
+         visible context."
     }
 }
 
@@ -131,6 +132,11 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
                     "content": r.content,
                     "score": r.score,
                     "turn": r.metadata.turn,
+                    "source": {
+                        "kind": "session_message_range",
+                        "ref": r.metadata.source_ref(),
+                        "message_range": r.metadata.source.as_ref().map(|source| &source.message_range),
+                    },
                 })
             })
             .collect();
@@ -152,7 +158,9 @@ impl AgentToolDispatcher for MemorySearchDispatcher {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemoryStore};
+    use meerkat_core::memory::{
+        MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySourceProvenance, MemoryStore,
+    };
     use meerkat_core::types::SessionId;
     use serde_json::value::RawValue;
     use std::time::SystemTime;
@@ -178,6 +186,7 @@ mod tests {
             session_id: session_id.clone(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
+            source: Some(MemorySourceProvenance::for_message(session_id.clone(), 0)),
         }
     }
 
@@ -273,9 +282,15 @@ mod tests {
         assert!(!parsed.is_empty());
         assert!(parsed[0]["content"].as_str().unwrap().contains("AURORA"));
         assert!(parsed[0]["score"].as_f64().unwrap() > 0.0);
+        assert!(parsed[0].get("session_id").is_none());
+        assert_eq!(
+            parsed[0]["source"]["kind"].as_str(),
+            Some("session_message_range")
+        );
         assert!(
-            parsed[0].get("session_id").is_none(),
-            "memory tool must not leak raw source session ids"
+            parsed[0]["source"]["ref"]
+                .as_str()
+                .is_some_and(|source_ref| source_ref.starts_with("memory:session:"))
         );
     }
 

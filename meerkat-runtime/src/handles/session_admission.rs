@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use meerkat_core::SessionId;
 use meerkat_core::comms::InputSource;
 use meerkat_core::handles::{DslTransitionError, SessionAdmissionHandle};
 use meerkat_core::lifecycle::{InputId, RunId};
@@ -16,19 +17,20 @@ use crate::meerkat_machine::dsl as mm_dsl;
 #[derive(Debug)]
 pub struct RuntimeSessionAdmissionHandle {
     dsl: Arc<HandleDslAuthority>,
+    session_id: SessionId,
 }
 
 impl RuntimeSessionAdmissionHandle {
     /// Construct a handle backed by the session's shared DSL authority.
-    pub fn new(dsl: Arc<HandleDslAuthority>) -> Self {
-        Self { dsl }
+    pub fn new(dsl: Arc<HandleDslAuthority>, session_id: SessionId) -> Self {
+        Self { dsl, session_id }
     }
 
     /// Construct a handle backed by an ephemeral DSL authority.
     ///
     /// See [`RuntimeTurnStateHandle::ephemeral`].
     pub fn ephemeral() -> Self {
-        Self::new(Arc::new(HandleDslAuthority::ephemeral()))
+        Self::new(Arc::new(HandleDslAuthority::ephemeral()), SessionId::new())
     }
 }
 
@@ -83,7 +85,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::Prepare {
-                session_id: mm_dsl::SessionId::default(),
+                session_id: mm_dsl::SessionId::from_domain(&self.session_id),
                 run_id: mm_dsl::RunId::from_domain(run_id),
             },
             "SessionAdmissionHandle::prepare",
@@ -101,6 +103,7 @@ impl SessionAdmissionHandle for RuntimeSessionAdmissionHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use uuid::Uuid;
 
     #[test]
@@ -109,5 +112,37 @@ mod tests {
         handle
             .commit(&InputId(Uuid::from_u128(1)), &RunId(Uuid::from_u128(2)))
             .expect("runtime-backed admission commit is observation-only");
+    }
+
+    #[test]
+    fn prepare_uses_bound_session_identity_instead_of_default() {
+        let session_id = SessionId::from_uuid(Uuid::from_u128(0x212));
+        let dsl_session_id = mm_dsl::SessionId::from_domain(&session_id);
+        let state = mm_dsl::MeerkatMachineState {
+            lifecycle_phase: mm_dsl::MeerkatPhase::Idle,
+            session_id: Some(dsl_session_id.clone()),
+            ..Default::default()
+        };
+        let shared = Arc::new(HandleDslAuthority::from_shared(Arc::new(Mutex::new(
+            mm_dsl::MeerkatMachineAuthority::from_state(state),
+        ))));
+        let handle = RuntimeSessionAdmissionHandle::new(Arc::clone(&shared), session_id);
+        let run_id = RunId(Uuid::from_u128(0x213));
+
+        handle
+            .prepare(&run_id)
+            .expect("prepare should use canonical bound session id");
+
+        let state = shared.snapshot_state();
+        assert_eq!(state.session_id, Some(dsl_session_id));
+        assert_eq!(
+            state.current_run_id,
+            Some(mm_dsl::RunId::from_domain(&run_id))
+        );
+        assert_ne!(
+            state.session_id,
+            Some(mm_dsl::SessionId::default()),
+            "prepare must never fabricate a nil/default session identity"
+        );
     }
 }

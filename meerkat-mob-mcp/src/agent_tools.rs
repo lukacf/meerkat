@@ -738,7 +738,7 @@ impl AgentMobToolSurface {
         // cleanup policy.
         let mut definition = args.definition;
         definition.clear_internal_lifecycle_flags();
-        definition.mark_owner_bridge_session_indexed(&self.owner_bridge_session_id.to_string());
+        definition.mark_owner_bridge_session_indexed(self.owner_bridge_session_id.clone());
 
         let mob_id = self
             .state
@@ -3044,7 +3044,7 @@ mod tests {
         let factory = AgentMobToolSurfaceFactory::new(Arc::clone(&state));
         let session_id = SessionId::new();
         let mut definition = sample_definition("owned-without-scope");
-        definition.mark_owner_bridge_session_indexed(&session_id.to_string());
+        definition.mark_owner_bridge_session_indexed(session_id.clone());
         let mob_id = state
             .mob_create_definition(definition)
             .await
@@ -3211,13 +3211,12 @@ mod tests {
     async fn test_create_only_authority_grants_exact_scope_for_new_explicit_mob() {
         let state = MobMcpState::new_in_memory();
         let session_id = SessionId::new();
-        let expected_session_id = session_id.to_string();
         let surface = AgentMobToolSurface::new(
             Arc::clone(&state),
             None,
             create_only_authority(),
             "claude-sonnet-4-5".to_string(),
-            session_id,
+            session_id.clone(),
             None,
             None,
             None,
@@ -3268,7 +3267,7 @@ mod tests {
         let created_definition = created_handle.definition();
         assert_eq!(
             created_definition.owner_bridge_session_index(),
-            Some(expected_session_id.as_str()),
+            Some(&session_id),
             "mob_create must rebind bridge-session indexing to the current owner bridge session"
         );
         assert_eq!(

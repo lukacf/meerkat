@@ -179,6 +179,11 @@ fn generate_protocol_helpers_impl(
         writeln!(&mut out)?;
     }
 
+    if protocol.name.as_str() == "supervisor_trust_publish" {
+        generate_supervisor_trust_publish_helpers(&mut out)?;
+        return Ok(out);
+    }
+
     let obligation_type = generate_obligation_struct(&mut out, protocol, producer_machine)?;
     generate_feedback_input_pattern_macro(&mut out, protocol, composition, machine_by_name)?;
 
@@ -208,6 +213,125 @@ fn generate_protocol_helpers_impl(
     }
 
     Ok(out)
+}
+
+fn generate_supervisor_trust_publish_helpers(out: &mut String) -> Result<()> {
+    write!(
+        out,
+        r#"#[derive(Debug, Clone)]
+pub struct SupervisorTrustPublishObligation {{
+    pub peer: SupervisorTrustPublishPeer,
+    pub epoch: u64,
+}}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorTrustPublishPeer {{
+    Valid {{
+        peer_id: PeerId,
+        name: PeerName,
+        address: PeerAddress,
+        signing_public_key: Option<String>,
+    }},
+    Invalid {{
+        reason: String,
+    }},
+}}
+
+impl SupervisorTrustPublishPeer {{
+    fn from_effect_fields(
+        peer_id: &str,
+        name: &str,
+        address: &str,
+        signing_public_key: Option<String>,
+    ) -> Self {{
+        let peer_id = match PeerId::parse(peer_id) {{
+            Ok(peer_id) => peer_id,
+            Err(error) => {{
+                return Self::Invalid {{
+                    reason: format!("invalid peer_id: {{error}}"),
+                }};
+            }}
+        }};
+        let name = match PeerName::new(name.to_string()) {{
+            Ok(name) => name,
+            Err(error) => {{
+                return Self::Invalid {{
+                    reason: format!("invalid peer name: {{error}}"),
+                }};
+            }}
+        }};
+        let address = match PeerAddress::parse(address) {{
+            Ok(address) => address,
+            Err(error) => {{
+                return Self::Invalid {{
+                    reason: format!("invalid peer address: {{error}}"),
+                }};
+            }}
+        }};
+        Self::Valid {{
+            peer_id,
+            name,
+            address,
+            signing_public_key,
+        }}
+    }}
+
+    pub fn peer_id(&self) -> Result<PeerId, String> {{
+        match self {{
+            Self::Valid {{ peer_id, .. }} => Ok(*peer_id),
+            Self::Invalid {{ reason }} => Err(reason.clone()),
+        }}
+    }}
+
+    pub fn matches_descriptor(&self, descriptor: &TrustedPeerDescriptor) -> Result<(), String> {{
+        match self {{
+            Self::Valid {{
+                peer_id,
+                name,
+                address,
+                ..
+            }} if peer_id == &descriptor.peer_id
+                && name == &descriptor.name
+                && address == &descriptor.address =>
+            {{
+                Ok(())
+            }}
+            Self::Valid {{ .. }} => {{
+                Err("typed publish peer does not match staged supervisor descriptor".to_string())
+            }}
+            Self::Invalid {{ reason }} => Err(reason.clone()),
+        }}
+    }}
+}}
+
+pub fn extract_obligations(
+    effects: &[MeerkatMachineEffect],
+) -> Vec<SupervisorTrustPublishObligation> {{
+    effects
+        .iter()
+        .filter_map(|effect| match effect {{
+            MeerkatMachineEffect::PublishSupervisorTrustEdge {{
+                peer_id,
+                name,
+                address,
+                signing_public_key,
+                epoch,
+            }} => Some(SupervisorTrustPublishObligation {{
+                peer: SupervisorTrustPublishPeer::from_effect_fields(
+                    peer_id,
+                    name,
+                    address,
+                    signing_public_key.clone(),
+                ),
+                epoch: *epoch,
+            }}),
+            _ => None,
+        }})
+        .collect()
+}}
+"#
+    )?;
+    Ok(())
 }
 
 fn generate_feedback_input_pattern_macro(

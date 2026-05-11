@@ -1,9 +1,11 @@
 use crate::digest::{MobpackDigest, canonical_digest_from_map};
 use crate::manifest::MobpackManifest;
-use crate::signing::{PackSignature, sign_digest};
+use crate::signing::{
+    MobpackPublicKey, MobpackSignatureBytes, MobpackSignatureTimestamp, MobpackSignerId,
+    PackSignature, sign_digest,
+};
 use crate::targz::{create_targz, extract_targz_safe, normalize_for_archive};
 use crate::validate::PackValidationError;
-use chrono::{SecondsFormat, Utc};
 use ed25519_dalek::SigningKey;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use std::collections::BTreeMap;
@@ -66,11 +68,12 @@ pub fn pack_directory_with_excludes(
         let signing_key = load_signing_key(request.key_path)?;
         let signature = sign_digest(&signing_key, digest);
         let signature_toml = toml::to_string(&PackSignature {
-            signer_id: request.signer_id.to_string(),
-            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
+            signer_id: MobpackSignerId::new(request.signer_id)
+                .map_err(PackValidationError::InvalidSignature)?,
+            public_key: MobpackPublicKey::from_verifying_key(&signing_key.verifying_key()),
             digest,
-            signature: hex::encode(signature.to_bytes()),
-            timestamp: Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+            signature: MobpackSignatureBytes::from_signature(&signature),
+            timestamp: MobpackSignatureTimestamp::now(),
         })
         .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         files.insert("signature.toml".to_string(), signature_toml.into_bytes());
@@ -295,7 +298,6 @@ fn load_signing_key(path: &Path) -> Result<SigningKey, PackValidationError> {
 mod tests {
     use super::*;
     use crate::signing::verify_digest;
-    use ed25519_dalek::{Signature, VerifyingKey};
     use tempfile::TempDir;
 
     #[test]
@@ -375,18 +377,10 @@ mod tests {
         let recomputed = compute_archive_digest(&packed.archive_bytes).unwrap();
         assert_eq!(recomputed, packed.digest);
         assert_eq!(signature.digest, packed.digest);
-        assert_eq!(signature.signer_id, "test-signer");
+        assert_eq!(signature.signer_id.as_str(), "test-signer");
 
-        let vk_bytes: [u8; 32] = hex::decode(signature.public_key)
-            .unwrap()
-            .try_into()
-            .expect("public key bytes");
-        let verifying_key = VerifyingKey::from_bytes(&vk_bytes).unwrap();
-        let sig_bytes: [u8; 64] = hex::decode(signature.signature)
-            .unwrap()
-            .try_into()
-            .expect("sig bytes");
-        let ed_sig = Signature::from_bytes(&sig_bytes);
+        let verifying_key = signature.public_key.to_verifying_key().unwrap();
+        let ed_sig = signature.signature.to_signature();
         verify_digest(&verifying_key, signature.digest, &ed_sig).unwrap();
     }
 

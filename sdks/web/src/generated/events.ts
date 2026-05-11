@@ -171,7 +171,7 @@ export interface PromptText {
   content: string;
 }
 
-export type Provider = "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+export type Provider = "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 
 export type ProviderImageMetadata = {
   provider: "not_emitted";

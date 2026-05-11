@@ -357,7 +357,9 @@ async fn main() -> anyhow::Result<()> {
             }),
         };
         if let Some(ref bridge_session_id) = hive_session_id {
-            definition.set_owner_bridge_session_lookup_index(bridge_session_id.clone());
+            let bridge_session_id = meerkat_core::types::SessionId::parse(bridge_session_id)
+                .expect("hive session id is valid uuid");
+            definition.set_owner_bridge_session_lookup_index(bridge_session_id);
         }
 
         match hive_mob_state_for_kennel

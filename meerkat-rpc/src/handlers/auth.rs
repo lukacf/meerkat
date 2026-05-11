@@ -2006,7 +2006,7 @@ mod tests {
                 provider: "openai".into(),
                 auth_method: "external_authorizer".into(),
                 source: CredentialSourceSpec::ExternalResolver {
-                    handle: "external-openai".into(),
+                    handle: meerkat_core::ExternalAuthResolverId::parse("external-openai").unwrap(),
                 },
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2684,7 +2684,7 @@ mod tests {
     async fn login_start_rejects_oauth_method_with_external_source_before_state_admission() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ExternalResolver {
-                handle: "external-chatgpt".into(),
+                handle: meerkat_core::ExternalAuthResolverId::parse("external-chatgpt").unwrap(),
             },
         ));
         let params = raw_params(serde_json::json!({
@@ -3260,7 +3260,7 @@ mod tests {
     async fn auth_status_hides_wrong_source_oauth_token_even_with_auth_machine_lifecycle() {
         let runtime = test_runtime_with_config(config_with_openai_oauth_binding(
             CredentialSourceSpec::ExternalResolver {
-                handle: "external-chatgpt".into(),
+                handle: meerkat_core::ExternalAuthResolverId::parse("external-chatgpt").unwrap(),
             },
         ));
         let auth_binding = openai_auth_binding();

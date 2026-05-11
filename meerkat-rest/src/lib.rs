@@ -2462,7 +2462,21 @@ async fn mob_member_status(
         .mob_member_status(&mob_id, &identity)
         .await
         .map_err(|e| ApiError::BadRequest(e.to_string()))?;
-    Ok(Json(json!(snapshot)))
+    let mut value = json!(snapshot);
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "member_ref".to_string(),
+            Value::String(
+                meerkat_contracts::WireMemberRef::encode(
+                    mob_id.as_str(),
+                    snapshot.agent_identity().as_str(),
+                )
+                .as_str()
+                .to_string(),
+            ),
+        );
+    }
+    Ok(Json(value))
 }
 
 /// POST /mob/{id}/members/{agent_identity}/cancel — force-cancel in-flight turn.
@@ -7186,7 +7200,9 @@ mod tests {
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        definition.mark_owner_bridge_session_indexed(
+            SessionId::parse(owner_session_id).expect("valid owner session id"),
+        );
         let events = Arc::new(RestFailClearEventStore::new());
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)

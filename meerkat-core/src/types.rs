@@ -560,6 +560,16 @@ pub enum AssistantBlock {
     },
 }
 
+pub fn assistant_blocks_have_visible_or_actionable_output(blocks: &[AssistantBlock]) -> bool {
+    blocks.iter().any(|block| match block {
+        AssistantBlock::Text { text, .. } | AssistantBlock::Transcript { text, .. } => {
+            !text.trim().is_empty()
+        }
+        AssistantBlock::ToolUse { .. } | AssistantBlock::Image { .. } => true,
+        AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => false,
+    })
+}
+
 impl PartialEq for AssistantBlock {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -1230,6 +1240,10 @@ impl BlockAssistantMessage {
         self.blocks
             .iter()
             .any(|b| matches!(b, AssistantBlock::ToolUse { .. }))
+    }
+
+    pub fn has_visible_or_actionable_output(&self) -> bool {
+        assistant_blocks_have_visible_or_actionable_output(&self.blocks)
     }
 
     /// Get tool use block by ID.

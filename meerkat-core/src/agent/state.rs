@@ -1821,6 +1821,24 @@ where
                     let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let assistant_text = assistant_msg.to_string();
 
+                    if !assistant_msg.has_visible_or_actionable_output() {
+                        let error = AgentError::llm_empty_response(self.client.provider());
+                        if in_extraction {
+                            return self
+                                .complete_extraction_failed(
+                                    &run_id,
+                                    turn_count,
+                                    tool_call_count,
+                                    error.to_string(),
+                                    &event_tx,
+                                )
+                                .await;
+                        }
+                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
+                            .await?;
+                        return Err(error);
+                    }
+
                     let post_llm_invocation = HookInvocation {
                         point: HookPoint::PostLlmResponse,
                         session_id: self.session.id().clone(),
@@ -5965,6 +5983,81 @@ mod tests {
         fn model(&self) -> &'static str {
             "mock-model"
         }
+    }
+
+    struct ReasoningOnlyLlmClient;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for ReasoningOnlyLlmClient {
+        async fn stream_response(
+            &self,
+            _messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Reasoning {
+                    text: "I should call a tool".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_llm_response_does_not_complete_turn() {
+        let mut agent = build_agent(Arc::new(ReasoningOnlyLlmClient)).await;
+        agent.config.max_turns = Some(1);
+
+        let err = agent
+            .run("Use a tool".to_string().into())
+            .await
+            .expect_err("reasoning-only LLM response should terminalize as a failure");
+
+        match err {
+            AgentError::Llm {
+                reason, message, ..
+            } => {
+                assert!(
+                    message.contains("user-visible text"),
+                    "unexpected message: {message}"
+                );
+                assert!(matches!(
+                    reason,
+                    crate::error::LlmFailureReason::ProviderError(crate::error::LlmProviderError {
+                        kind: crate::error::LlmProviderErrorKind::IncompleteResponse,
+                        ..
+                    })
+                ));
+            }
+            other => panic!("expected LLM incomplete-response failure, got {other:?}"),
+        }
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Failed
+        );
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
     }
 
     #[tokio::test]

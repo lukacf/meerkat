@@ -42,6 +42,7 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 # Output
 - When the task is complete, provide a clear summary of what was accomplished.
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
+use meerkat_core::LocalToolVisibilityOwner;
 #[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
@@ -4161,8 +4162,9 @@ impl AgentFactory {
                     .with_mcp_server_lifecycle_handle(Arc::clone(bindings.mcp_server_lifecycle()));
             }
             RuntimeBuildMode::StandaloneEphemeral => {
-                builder =
-                    builder.with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
+                builder = builder
+                    .with_tool_visibility_owner(Arc::new(LocalToolVisibilityOwner::new()))
+                    .with_turn_state_handle(Arc::new(RuntimeTurnStateHandle::ephemeral()));
             }
         }
         // 12h. Wire completion feed + enrichment for cursor-based delivery

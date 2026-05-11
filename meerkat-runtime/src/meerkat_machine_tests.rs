@@ -19053,6 +19053,9 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
         MeerkatMachineCommandResult::ImageOperationPhase(phase) => {
             format!("image_operation_phase:{phase:?}")
         }
+        MeerkatMachineCommandResult::TranscriptEditAdmission(result) => {
+            format!("transcript_edit_admission:{result:?}")
+        }
         MeerkatMachineCommandResult::Prepared(_) => "prepared".to_string(),
     }
 }

@@ -381,10 +381,11 @@ pub async fn run_prebuilt_smoke_selection(
     let manifest = Arc::new(ArtifactManifest::from_path(manifest_path)?);
     let scheduler = Arc::new(SmokeScheduler::from_env(selected.len()));
     eprintln!(
-        "e2e smoke scheduler: specs={}, jobs={}, media_jobs={}, mob_suite_jobs={}",
+        "e2e smoke scheduler: specs={}, jobs={}, media_jobs={}, live_audio_jobs={}, mob_suite_jobs={}",
         selected.len(),
         scheduler.jobs,
         scheduler.media_jobs,
+        scheduler.live_audio_jobs,
         scheduler.mob_suite_jobs
     );
 
@@ -441,9 +442,11 @@ async fn run_prebuilt_smoke_spec(
 struct SmokeScheduler {
     jobs: usize,
     media_jobs: usize,
+    live_audio_jobs: usize,
     mob_suite_jobs: usize,
     global: Arc<Semaphore>,
     media: Arc<Semaphore>,
+    live_audio: Arc<Semaphore>,
     mob_suite: Arc<Semaphore>,
 }
 
@@ -451,14 +454,18 @@ impl SmokeScheduler {
     fn from_env(selected_count: usize) -> Self {
         let jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_JOBS", 12, selected_count);
         let media_jobs = smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MEDIA_JOBS", 6, selected_count);
+        let live_audio_jobs =
+            smoke_scheduler_limit("MEERKAT_E2E_SMOKE_LIVE_AUDIO_JOBS", 1, selected_count);
         let mob_suite_jobs =
             smoke_scheduler_limit("MEERKAT_E2E_SMOKE_MOB_SUITE_JOBS", 2, selected_count);
         Self {
             jobs,
             media_jobs,
+            live_audio_jobs,
             mob_suite_jobs,
             global: Arc::new(Semaphore::new(jobs)),
             media: Arc::new(Semaphore::new(media_jobs)),
+            live_audio: Arc::new(Semaphore::new(live_audio_jobs)),
             mob_suite: Arc::new(Semaphore::new(mob_suite_jobs)),
         }
     }
@@ -473,6 +480,11 @@ impl SmokeScheduler {
                             format!("media scheduler closed for {}", run_label(spec))
                         })?,
                     )
+                }
+                SmokeRuntimeClass::LiveAudio => {
+                    Some(self.live_audio.clone().acquire_owned().await.map_err(|_| {
+                        format!("live-audio scheduler closed for {}", run_label(spec))
+                    })?)
                 }
                 SmokeRuntimeClass::MobSuite => {
                     Some(self.mob_suite.clone().acquire_owned().await.map_err(|_| {
@@ -507,10 +519,14 @@ struct SmokePermits {
 enum SmokeRuntimeClass {
     Standard,
     Media,
+    LiveAudio,
     MobSuite,
 }
 
 fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
+    if matches!(spec.id, Some(71 | 72)) {
+        return SmokeRuntimeClass::LiveAudio;
+    }
     let label = run_label(spec).to_ascii_lowercase();
     if label.contains("mob flow runtime")
         || label.contains("pictionary")
@@ -567,6 +583,7 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
     }
     match smoke_runtime_class(spec) {
         SmokeRuntimeClass::Media => 500,
+        SmokeRuntimeClass::LiveAudio => 500,
         SmokeRuntimeClass::MobSuite => 400,
         SmokeRuntimeClass::Standard => 100,
     }
@@ -4974,6 +4991,14 @@ mod tests {
             SmokeRuntimeClass::Media
         );
         assert_eq!(
+            smoke_runtime_class(scenario_spec(71).unwrap()),
+            SmokeRuntimeClass::LiveAudio
+        );
+        assert_eq!(
+            smoke_runtime_class(scenario_spec(72).unwrap()),
+            SmokeRuntimeClass::LiveAudio
+        );
+        assert_eq!(
             smoke_runtime_class(suite_spec("rpc-dynamic-tool-pickup").unwrap()),
             SmokeRuntimeClass::Standard
         );
@@ -5006,9 +5031,11 @@ mod tests {
         let scheduler = Arc::new(SmokeScheduler {
             jobs: 1,
             media_jobs: 0,
+            live_audio_jobs: 1,
             mob_suite_jobs: 1,
             global: Arc::new(Semaphore::new(1)),
             media: Arc::new(Semaphore::new(0)),
+            live_audio: Arc::new(Semaphore::new(1)),
             mob_suite: Arc::new(Semaphore::new(1)),
         });
         let blocked_media = {

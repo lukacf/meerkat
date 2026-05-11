@@ -172,6 +172,10 @@ fn trace_server_event_json(event: &ServerEvent) -> Option<String> {
             "{{\"type\":\"response.output_audio.delta\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
             delta.len()
         )),
+        ServerEvent::SessionOutputAudioDelta { delta, .. } => Some(format!(
+            "{{\"type\":\"session.output_audio.delta\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
+            delta.len()
+        )),
         other => serde_json::to_string(other).ok(),
     }
 }
@@ -2276,6 +2280,21 @@ impl OpenAiRealtimeSession {
                     }
                     None => Some(final_event),
                 }
+            }
+            ServerEvent::SessionOutputAudioDelta { delta, .. } => {
+                self.note_provider_response_progressed();
+                self.mark_audio_output_active();
+                Some(RealtimeSessionEvent::OutputAudioChunk {
+                    chunk: RealtimeAudioChunk {
+                        mime_type: OPENAI_REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                        channels: OPENAI_REALTIME_AUDIO_CHANNELS,
+                        data: delta,
+                    },
+                    response_id: self.active_response_id.clone(),
+                    item_id: None,
+                    content_index: None,
+                })
             }
             ServerEvent::ResponseOutputAudioDelta {
                 response_id,
@@ -9130,6 +9149,39 @@ mod tests {
             }
             other => {
                 panic!("ResponseOutputAudioDelta must map to AssistantAudioChunk, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn mapping_routes_session_output_audio_delta_to_audio_chunk_without_item_identity() {
+        let mut session = empty_fake_session();
+        session.active_response_id = Some("resp_session_audio".to_string());
+        let mapped = session
+            .map_server_event(ServerEvent::SessionOutputAudioDelta {
+                event_id: Some("evt_session_audio".to_string()),
+                delta: "AAEC".to_string(),
+            })
+            .expect("session audio delta must map cleanly")
+            .expect("session audio delta must produce a realtime event");
+        let obs = translate_realtime_event(mapped);
+        match obs {
+            LiveAdapterObservation::AssistantAudioChunk {
+                sample_rate_hz,
+                channels,
+                response_id,
+                item_id,
+                content_index,
+                ..
+            } => {
+                assert_eq!(sample_rate_hz, OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ);
+                assert_eq!(channels, u16::from(OPENAI_REALTIME_AUDIO_CHANNELS));
+                assert_eq!(response_id.as_deref(), Some("resp_session_audio"));
+                assert!(item_id.is_none());
+                assert!(content_index.is_none());
+            }
+            other => {
+                panic!("SessionOutputAudioDelta must map to AssistantAudioChunk, got {other:?}")
             }
         }
     }

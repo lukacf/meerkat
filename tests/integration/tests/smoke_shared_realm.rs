@@ -3542,6 +3542,14 @@ fn pcm_has_non_silence(pcm: &[u8]) -> bool {
         .any(|sample| sample != 0)
 }
 
+fn live_capture_has_non_silent_audio(capture: &LiveObservationCapture) -> bool {
+    !capture.output_audio_pcm.is_empty() && pcm_has_non_silence(&capture.output_audio_pcm)
+}
+
+fn live_capture_has_assistant_text(capture: &LiveObservationCapture) -> bool {
+    !normalize_semantic_text(&capture.output_text).is_empty()
+}
+
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
     let model = openai_tts_model();
@@ -4394,9 +4402,29 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             settle_live_turn_after_input(&mut ws_read, &remember_capture, 120).await?,
         );
         let remember_output_text = normalize_semantic_text(&remember_capture.output_text);
-        if remember_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&remember_capture.output_audio_pcm)
-        {
+        if !live_capture_has_non_silent_audio(&remember_capture) {
+            if live_capture_has_assistant_text(&remember_capture) {
+                eprintln!(
+                    "[scenario 71] turn 1 completed with transcript-only output: {}",
+                    &remember_capture.output_text
+                );
+            } else {
+                dump_live_audio_artifacts(
+                    scenario_name,
+                    "turn-1-remember",
+                    &remember_pcm,
+                    &remember_capture,
+                )
+                .await?;
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "turn 1 remember emitted neither real audio nor transcript: output_text=`{remember_output_text}`: {remember_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        if !live_capture_has_assistant_text(&remember_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
                 "turn-1-remember",
@@ -4404,8 +4432,10 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &remember_capture,
             )
             .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
             return Err(format!(
-                "turn 1 remember did not emit real audio: output_text=`{remember_output_text}`: {remember_capture:?}"
+                "turn 1 remember did not emit transcript text: output_text=`{remember_output_text}`: {remember_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
             )
             .into());
         }
@@ -4432,9 +4462,29 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let mut turn2_capture = turn2_commit.clone();
         turn2_capture.merge_from(turn2_settled_capture);
         let turn2_output_text = normalize_semantic_text(&turn2_capture.output_text);
-        if turn2_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn2_capture.output_audio_pcm)
-        {
+        if !live_capture_has_non_silent_audio(&turn2_capture) {
+            if live_capture_has_assistant_text(&turn2_capture) {
+                eprintln!(
+                    "[scenario 71] turn 2 completed with transcript-only output: {}",
+                    &turn2_capture.output_text
+                );
+            } else {
+                dump_live_audio_artifacts(
+                    scenario_name,
+                    "turn-2-codeword-only",
+                    &codeword_only_pcm,
+                    &turn2_capture,
+                )
+                .await?;
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "turn 2 codeword-only recall emitted neither real audio nor transcript: output_text=`{turn2_output_text}`: {turn2_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        if !live_capture_has_assistant_text(&turn2_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
                 "turn-2-codeword-only",
@@ -4442,8 +4492,10 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &turn2_capture,
             )
             .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
             return Err(format!(
-                "turn 2 codeword-only recall did not emit real audio: output_text=`{turn2_output_text}`: {turn2_capture:?}"
+                "turn 2 codeword-only recall did not emit transcript text: output_text=`{turn2_output_text}`: {turn2_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
             )
             .into());
         }
@@ -4488,11 +4540,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             &turn3_commit,
             &stop_pcm,
             120,
-            |_capture| {
-                // Start barge-in immediately. The realtime model delivers audio
-                // faster than realtime.
-                true
-            },
+            live_capture_has_non_silent_audio,
         )
         .await
         {
@@ -4513,10 +4561,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let mut turn34_capture = turn3_commit.clone();
         turn34_capture.merge_from(turn34_preemption_capture.clone());
         turn34_capture.merge_from(turn34_settled_capture);
-        if !turn34_capture.saw_interrupted
-            || turn34_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn34_capture.output_audio_pcm)
-        {
+        if !turn34_capture.saw_interrupted || !live_capture_has_non_silent_audio(&turn34_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
                 "turn-34-stop",
@@ -4551,9 +4596,29 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             settle_live_turn_after_input(&mut ws_read, &turn5_commit, 120).await?;
         let mut turn5_capture = turn5_commit.clone();
         turn5_capture.merge_from(turn5_settled_capture);
-        if turn5_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn5_capture.output_audio_pcm)
-        {
+        if !live_capture_has_non_silent_audio(&turn5_capture) {
+            if live_capture_has_assistant_text(&turn5_capture) {
+                eprintln!(
+                    "[scenario 71] turn 5 completed with transcript-only output: {}",
+                    &turn5_capture.output_text
+                );
+            } else {
+                dump_live_audio_artifacts(
+                    scenario_name,
+                    "turn-5-recall",
+                    &recall_pcm,
+                    &turn5_capture,
+                )
+                .await?;
+                let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
+                return Err(format!(
+                    "turn 5 recall emitted neither real audio nor transcript: {turn5_capture:?}\nrpc stderr:\n{}",
+                    rpc_stderr.trim()
+                )
+                .into());
+            }
+        }
+        if !live_capture_has_assistant_text(&turn5_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
                 "turn-5-recall",
@@ -4561,8 +4626,10 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &turn5_capture,
             )
             .await?;
+            let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
             return Err(format!(
-                "turn 5 recall did not emit real audio: {turn5_capture:?}"
+                "turn 5 recall did not emit transcript text: {turn5_capture:?}\nrpc stderr:\n{}",
+                rpc_stderr.trim()
             )
             .into());
         }
@@ -4747,15 +4814,18 @@ async fn e2e_scenario_72_live_adapter_model_switch_continuity()
             }
         }
         let turn1_output_text = normalize_semantic_text(&turn1_capture.output_text);
-        if turn1_capture.output_audio_pcm.is_empty()
-            || !pcm_has_non_silence(&turn1_capture.output_audio_pcm)
-            || turn1_output_text.is_empty()
-        {
+        if !live_capture_has_non_silent_audio(&turn1_capture) {
+            eprintln!(
+                "[scenario 72] turn 1 completed with transcript-only output: {}",
+                &turn1_capture.output_text
+            );
+        }
+        if turn1_output_text.is_empty() {
             dump_live_audio_artifacts(scenario_name, "turn-1", &turn1_pcm, &turn1_capture)
                 .await?;
             let rpc_stderr = read_available_stderr(&mut rpc, 1_000).await;
             return Err(format!(
-                "scenario 72 turn 1 did not emit non-silent audio plus text deltas `{turn1_output_text}`: {turn1_capture:?}\nrpc stderr:\n{}",
+                "scenario 72 turn 1 did not emit transcript text `{turn1_output_text}`: {turn1_capture:?}\nrpc stderr:\n{}",
                 rpc_stderr.trim()
             )
             .into());

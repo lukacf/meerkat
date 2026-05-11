@@ -192,6 +192,7 @@ impl McpScheduleContext {
             agent_llm_client_decorator: None,
             override_builtins: meerkat_core::ToolCategoryOverride::Inherit,
             override_shell: meerkat_core::ToolCategoryOverride::Inherit,
+            override_comms: meerkat_core::ToolCategoryOverride::Inherit,
             override_memory: meerkat_core::ToolCategoryOverride::Inherit,
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,

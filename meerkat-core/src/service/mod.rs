@@ -200,6 +200,51 @@ impl CreateSessionRequest {
                 .and_then(|build| build.app_context.clone()),
         )
     }
+
+    /// Build the canonical runtime metadata carrier for this request's first
+    /// turn without mutating the request.
+    ///
+    /// Legacy create-session fields (`render_metadata`, `skill_references`)
+    /// are compatibility inputs only. The returned [`RuntimeTurnMetadata`] is
+    /// the single semantic carrier consumed by session/runtime first-turn
+    /// paths.
+    #[must_use]
+    pub fn initial_runtime_metadata(&self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self
+            .build
+            .as_ref()
+            .and_then(|build| build.initial_turn_metadata.clone())
+            .unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.clone();
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.clone();
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    /// Take the canonical first-turn runtime metadata carrier, clearing any
+    /// compatibility fields it absorbs from the request.
+    #[must_use]
+    pub fn take_initial_runtime_metadata(&mut self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self
+            .build
+            .as_mut()
+            .and_then(|build| build.initial_turn_metadata.take())
+            .unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.take();
+        } else {
+            self.render_metadata = None;
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.take();
+        } else {
+            self.skill_references = None;
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
 }
 
 /// Optional build-time options used by factory-backed session builders.
@@ -235,6 +280,8 @@ pub struct SessionBuildOptions {
     // Use runtime_build_mode instead.
     pub override_builtins: ToolCategoryOverride,
     pub override_shell: ToolCategoryOverride,
+    /// Per-build override for the factory-level comms capability.
+    pub override_comms: ToolCategoryOverride,
     pub override_memory: ToolCategoryOverride,
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
@@ -631,6 +678,7 @@ pub struct ResumeOverrideMask {
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
+    pub override_comms: bool,
     pub override_memory: bool,
     pub override_workgraph: bool,
     pub override_mob: bool,
@@ -695,6 +743,7 @@ impl Default for SessionBuildOptions {
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -749,6 +798,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
@@ -871,6 +921,66 @@ impl StartTurnRuntimeSemantics {
     pub fn with_typed_turn_appends(mut self, typed_turn_appends: Vec<ConversationAppend>) -> Self {
         self.typed_turn_appends = typed_turn_appends;
         self
+    }
+
+    /// Return the canonical per-turn metadata carrier, folding legacy split
+    /// compatibility fields into a cloned [`RuntimeTurnMetadata`].
+    #[must_use]
+    pub fn canonical_turn_metadata(&self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self.turn_metadata.clone().unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.clone();
+        }
+        if metadata.handling_mode.is_none() && self.handling_mode != HandlingMode::Queue {
+            metadata.handling_mode = Some(self.handling_mode);
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.clone();
+        }
+        if metadata.flow_tool_overlay.is_none() {
+            metadata.flow_tool_overlay = self.flow_tool_overlay.clone();
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    /// Consume this carrier into the effective fields needed by the session
+    /// task. Semantic fields are derived from [`RuntimeTurnMetadata`]; the
+    /// public split fields exist only as compatibility inputs.
+    #[must_use]
+    pub fn into_effective_parts(
+        self,
+    ) -> (
+        Option<RenderMetadata>,
+        HandlingMode,
+        Option<Vec<crate::skills::SkillKey>>,
+        Option<TurnToolOverlay>,
+        Vec<PendingSystemContextAppend>,
+        Vec<ConversationAppend>,
+        Option<RuntimeTurnMetadata>,
+    ) {
+        let metadata = self.canonical_turn_metadata();
+        let render_metadata = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.render_metadata.clone());
+        let handling_mode = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.handling_mode)
+            .unwrap_or(HandlingMode::Queue);
+        let skill_references = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.skill_references.clone());
+        let flow_tool_overlay = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone());
+        (
+            render_metadata,
+            handling_mode,
+            skill_references,
+            flow_tool_overlay,
+            self.pre_turn_context_appends,
+            self.typed_turn_appends,
+            metadata,
+        )
     }
 }
 
@@ -1455,6 +1565,81 @@ mod tests {
         assert!(ctx.managed_mob_scope.contains("mob-1"));
         assert!(ctx.managed_mob_scope.contains("mob-2"));
         assert_eq!(ctx.managed_mob_scope.len(), 2);
+    }
+
+    #[test]
+    fn create_session_runtime_metadata_absorbs_legacy_split_fields() {
+        let split_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("split-create-skill").expect("valid skill"),
+        );
+        let render_metadata = RenderMetadata {
+            class: crate::types::RenderClass::UserPrompt,
+            salience: crate::types::RenderSalience::Important,
+        };
+        let mut req = CreateSessionRequest {
+            model: "model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            render_metadata: Some(render_metadata.clone()),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: Some(vec![split_skill.clone()]),
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        };
+
+        let metadata = req
+            .take_initial_runtime_metadata()
+            .expect("split fields should materialize runtime metadata");
+
+        assert_eq!(metadata.render_metadata, Some(render_metadata));
+        assert_eq!(metadata.skill_references, Some(vec![split_skill]));
+        assert!(req.render_metadata.is_none());
+        assert!(req.skill_references.is_none());
+    }
+
+    #[test]
+    fn create_session_runtime_metadata_prefers_canonical_build_carrier() {
+        let split_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("stale-create-skill").expect("valid skill"),
+        );
+        let canonical_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("canonical-create-skill").expect("valid skill"),
+        );
+        let mut req = CreateSessionRequest {
+            model: "model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: Some(vec![split_skill]),
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    skill_references: Some(vec![canonical_skill.clone()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        let metadata = req
+            .take_initial_runtime_metadata()
+            .expect("build metadata should remain the first-turn carrier");
+
+        assert_eq!(metadata.skill_references, Some(vec![canonical_skill]));
+        assert!(req.skill_references.is_none());
+        assert!(
+            req.build
+                .as_ref()
+                .and_then(|build| build.initial_turn_metadata.as_ref())
+                .is_none()
+        );
     }
 
     struct MockSnapshotProvider {

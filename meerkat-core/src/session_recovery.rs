@@ -40,6 +40,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub budget_limits: Option<BudgetLimits>,
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
+    pub override_comms: Option<bool>,
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
     pub override_image_generation: Option<bool>,
@@ -213,6 +214,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.budget_limits.is_some()
         || overrides.override_builtins.is_some()
         || overrides.override_shell.is_some()
+        || overrides.override_comms.is_some()
         || overrides.override_memory.is_some()
         || overrides.override_mob.is_some()
         || overrides.override_image_generation.is_some()
@@ -318,6 +320,7 @@ pub fn resolve_effective_turn_config(
         auth_binding: overrides.auth_binding.is_some() || overrides.clear_auth_binding,
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
+        override_comms: overrides.override_comms.is_some(),
         override_memory: overrides.override_memory.is_some(),
         override_workgraph: false,
         override_mob: overrides.override_mob.is_some(),
@@ -396,6 +399,10 @@ pub fn resolve_effective_turn_config(
             .override_shell
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.shell),
+        override_comms: overrides
+            .override_comms
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.comms),
         override_memory: overrides
             .override_memory
             .map(ToolCategoryOverride::from_effective)

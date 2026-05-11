@@ -1931,8 +1931,8 @@ pub async fn mob_append_system_context(
 /// Wire bidirectional comms trust between meerkats in DIFFERENT mobs.
 ///
 /// Unlike `mob_wire` (which is intra-mob), this establishes peer trust across
-/// mob boundaries by accessing each member's comms runtime through the shared
-/// session service. Both members must have comms enabled.
+/// mob boundaries by submitting descriptor-bearing external peer edges through
+/// each mob's wiring authority. Both members must have comms enabled.
 #[wasm_bindgen]
 pub async fn wire_cross_mob(
     mob_a: &str,
@@ -2004,14 +2004,37 @@ pub async fn wire_cross_mob(
     let spec_a = build_inproc_trusted_peer(&name_a, &key_a)?;
     let spec_b = build_inproc_trusted_peer(&name_b, &key_b)?;
 
-    comms_a
-        .add_trusted_peer(spec_b)
+    mob_state
+        .mob_wire(
+            &MobId::from(mob_a),
+            identity_a.clone(),
+            meerkat_mob::PeerTarget::External(spec_b.clone()),
+        )
         .await
-        .map_err(|e| err_str("wire_error", e))?;
-    comms_b
-        .add_trusted_peer(spec_a)
+        .map_err(err_mob)?;
+    if let Err(error) = mob_state
+        .mob_wire(
+            &MobId::from(mob_b),
+            identity_b,
+            meerkat_mob::PeerTarget::External(spec_a),
+        )
         .await
-        .map_err(|e| err_str("wire_error", e))?;
+    {
+        if let Err(rollback_error) = mob_state
+            .mob_unwire(
+                &MobId::from(mob_a),
+                identity_a,
+                meerkat_mob::PeerTarget::External(spec_b),
+            )
+            .await
+        {
+            tracing::warn!(
+                %rollback_error,
+                "failed to rollback first side of cross-mob wire after second side failed"
+            );
+        }
+        return Err(err_mob(error));
+    }
 
     Ok(())
 }
@@ -2647,6 +2670,35 @@ capabilities = [{capability_values}]
             .to_string(),
         );
         assert!(init.is_ok());
+    }
+
+    #[test]
+    fn wire_cross_mob_routes_trust_through_mob_authority() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split("pub async fn wire_cross_mob")
+            .nth(1)
+            .expect("wire_cross_mob export should exist")
+            .split("/// Build an inproc")
+            .next()
+            .expect("wire_cross_mob should precede trusted peer helper");
+
+        assert!(
+            !body.contains(".add_trusted_peer("),
+            "wire_cross_mob must not mutate comms trust stores directly"
+        );
+        assert!(
+            body.matches(".mob_wire(").count() >= 2,
+            "wire_cross_mob must route both sides through MobMachine wiring authority"
+        );
+        assert!(
+            body.contains("PeerTarget::External"),
+            "cross-mob descriptors must be submitted as MobMachine external peer edges"
+        );
+        assert!(
+            body.contains(".mob_unwire("),
+            "second-side failure must compensate by unwiring the first MobMachine edge"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

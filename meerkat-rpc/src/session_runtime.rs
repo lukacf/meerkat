@@ -25,8 +25,8 @@ use futures::StreamExt;
 use meerkat::{
     AgentBuildConfig, AgentFactory, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,
     MachineSessionArchiveProtocol, PersistenceBundle, PersistentSessionService, PromotingSlot,
-    ScheduleService, ScheduleToolDispatcher, StagedPhase, StagedSessionRegistry, StagedSlot,
-    encode_llm_client_override_for_service,
+    ScheduleService, ScheduleToolDispatcher, StagedPhase, StagedSessionMachineClaim,
+    StagedSessionRegistry, StagedSlot, encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
 use meerkat_core::AgentToolDispatcher;
@@ -5284,6 +5284,7 @@ impl SessionRuntime {
                 ),
                 data: None,
             })?;
+        let machine_claim = StagedSessionMachineClaim::from_runtime_bindings(&bindings);
 
         let build_config = AgentBuildConfig {
             resume_session: Some(session),
@@ -5330,6 +5331,7 @@ impl SessionRuntime {
             .stage(
                 session_id.clone(),
                 StagedSlot {
+                    machine_claim,
                     effective_llm_identity,
                     phase: StagedPhase::Staged {
                         build_config: Box::new(build_config),
@@ -5783,6 +5785,23 @@ impl SessionRuntime {
         build_config.apply_session_build_options(&build);
         build_config.system_prompt = create_request.system_prompt.clone();
         build_config.max_tokens = create_request.max_tokens;
+        let machine_claim = match StagedSessionMachineClaim::from_runtime_build_mode(
+            session_id,
+            &build_config.runtime_build_mode,
+        ) {
+            Ok(claim) => claim,
+            Err(err) => {
+                self.cleanup_recovered_runtime_if_new(session_id, runtime_was_registered)
+                    .await;
+                return Err(RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!(
+                        "failed to claim recovered staged session {session_id}: {err}"
+                    ),
+                    data: None,
+                });
+            }
+        };
 
         // Stage as pending and re-enter the materialization path.
         // Labels are managed by the session service — pass None so
@@ -5806,6 +5825,7 @@ impl SessionRuntime {
                 .stage(
                     session_id.clone(),
                     StagedSlot {
+                        machine_claim,
                         effective_llm_identity,
                         phase: StagedPhase::Staged {
                             build_config: Box::new(build_config),
@@ -12272,7 +12292,14 @@ mod tests {
         let mut build_config = mock_build_config();
         let session = Session::new();
         let session_id = session.id().clone();
+        let bindings = runtime
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare staged runtime bindings");
+        let machine_claim = StagedSessionMachineClaim::from_runtime_bindings(&bindings);
         build_config.resume_session = Some(session);
+        build_config.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings);
         let effective_llm_identity = runtime
             .llm_identity_from_pending_build(&build_config)
             .await
@@ -12282,6 +12309,7 @@ mod tests {
             .stage(
                 session_id.clone(),
                 StagedSlot {
+                    machine_claim,
                     effective_llm_identity,
                     phase: StagedPhase::Staged {
                         build_config: Box::new(build_config),

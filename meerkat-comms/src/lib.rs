@@ -27,6 +27,7 @@ pub(crate) mod classify;
 pub mod event_injector;
 pub mod mcp;
 pub(crate) mod peer_directory_reachability_authority;
+pub(crate) mod peer_response_routing_authority;
 pub(crate) mod peer_types;
 pub mod router;
 pub mod runtime;

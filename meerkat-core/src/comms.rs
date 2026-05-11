@@ -21,6 +21,41 @@ use uuid::Uuid;
 /// core policy rather than owning a local string exemption.
 pub const SUPERVISOR_BRIDGE_INTENT: &str = "supervisor.bridge";
 
+/// Authority for comms text/block projection at transport boundaries.
+///
+/// Legacy comms surfaces still accept a `body` string next to optional
+/// multimodal blocks. Once blocks are present, the blocks are the semantic
+/// content and the text body is only a compatibility projection derived from
+/// them. This helper keeps that rule in one place instead of allowing senders,
+/// classifiers, and bridge renderers to pick different carriers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CommsContentAuthority;
+
+impl CommsContentAuthority {
+    pub fn canonical_text_and_blocks(
+        body: String,
+        blocks: Option<Vec<ContentBlock>>,
+    ) -> (String, Option<Vec<ContentBlock>>) {
+        let blocks = Self::normalize_blocks(blocks);
+        let body = match blocks.as_deref() {
+            Some(blocks) => crate::types::text_content(blocks),
+            None => body,
+        };
+        (body, blocks)
+    }
+
+    pub fn normalize_blocks(blocks: Option<Vec<ContentBlock>>) -> Option<Vec<ContentBlock>> {
+        blocks.filter(|blocks| !blocks.is_empty())
+    }
+
+    pub fn text_projection(body: &str, blocks: Option<&[ContentBlock]>) -> String {
+        match blocks {
+            Some(blocks) if !blocks.is_empty() => crate::types::text_content(blocks),
+            _ => body.to_string(),
+        }
+    }
+}
+
 /// Canonical runtime identity for a peer.
 ///
 /// `PeerId` is the routing key: the router and trust store key by `PeerId`,
@@ -603,26 +638,32 @@ impl CommsCommandRequest {
                 stream,
                 handling_mode,
                 allow_self_session,
-            } => CommsCommand::Input {
-                session_id: session_id.clone(),
-                body,
-                blocks,
-                handling_mode: handling_mode.unwrap_or_default(),
-                source: source.unwrap_or(InputSource::Rpc),
-                stream: stream.unwrap_or(InputStreamMode::None),
-                allow_self_session: allow_self_session.unwrap_or(false),
-            },
+            } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                CommsCommand::Input {
+                    session_id: session_id.clone(),
+                    body,
+                    blocks,
+                    handling_mode: handling_mode.unwrap_or_default(),
+                    source: source.unwrap_or(InputSource::Rpc),
+                    stream: stream.unwrap_or(InputStreamMode::None),
+                    allow_self_session: allow_self_session.unwrap_or(false),
+                }
+            }
             CommsCommandRequest::PeerMessage {
                 to,
                 body,
                 blocks,
                 handling_mode,
-            } => CommsCommand::PeerMessage {
-                to: PeerRoute::new(to),
-                body,
-                blocks,
-                handling_mode: handling_mode.unwrap_or_default(),
-            },
+            } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                CommsCommand::PeerMessage {
+                    to: PeerRoute::new(to),
+                    body,
+                    blocks,
+                    handling_mode: handling_mode.unwrap_or_default(),
+                }
+            }
             CommsCommandRequest::PeerLifecycle {
                 to,
                 lifecycle_kind,
@@ -643,7 +684,7 @@ impl CommsCommandRequest {
                 to: PeerRoute::new(to),
                 intent,
                 params,
-                blocks,
+                blocks: CommsContentAuthority::normalize_blocks(blocks),
                 handling_mode: handling_mode.unwrap_or_default(),
                 stream: stream.unwrap_or(InputStreamMode::None),
             },
@@ -663,7 +704,7 @@ impl CommsCommandRequest {
                     in_reply_to,
                     status,
                     result,
-                    blocks,
+                    blocks: CommsContentAuthority::normalize_blocks(blocks),
                     handling_mode,
                 }
             }
@@ -1201,6 +1242,41 @@ mod tests {
         assert_eq!(serialized.as_str(), Some("reserve_interaction"));
         assert_eq!(serde_json::from_value::<InputStreamMode>(serialized)?, mode);
         Ok(())
+    }
+
+    #[test]
+    fn command_request_blocks_own_text_projection() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "canonical caption".to_string(),
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "abc123".into(),
+            },
+        ];
+        let request = CommsCommandRequest::PeerMessage {
+            to: PeerId::new(),
+            body: "stale helper text".to_string(),
+            blocks: Some(blocks.clone()),
+            handling_mode: None,
+        };
+
+        let command = request
+            .into_command(&crate::types::SessionId::new())
+            .expect("request should parse");
+
+        match command {
+            CommsCommand::PeerMessage {
+                body,
+                blocks: got_blocks,
+                ..
+            } => {
+                assert_eq!(body, crate::types::text_content(&blocks));
+                assert_eq!(got_blocks.as_ref(), Some(&blocks));
+            }
+            other => panic!("expected peer message command, got {other:?}"),
+        }
     }
 
     #[test]

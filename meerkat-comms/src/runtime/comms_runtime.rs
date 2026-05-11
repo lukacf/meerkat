@@ -10,6 +10,7 @@ use crate::handle_connection;
 use crate::peer_directory_reachability_authority::{
     PeerDirectoryReachabilityAuthority, ReachabilityKey,
 };
+use crate::peer_response_routing_authority::PeerResponseRoutingAuthority;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
@@ -665,16 +666,10 @@ impl CoreCommsRuntime for CommsRuntime {
                     core_status,
                     meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
                 );
-                let effective_handling_mode = handling_mode.or_else(|| {
-                    is_terminal_reply
-                        .then(|| {
-                            self.inbound_request_handling_modes
-                                .lock()
-                                .get(&corr_id)
-                                .copied()
-                        })
-                        .flatten()
-                });
+                let effective_handling_mode = self
+                    .peer_response_routing
+                    .lock()
+                    .response_handling_mode(corr_id, core_status, handling_mode);
                 let envelope_id = self
                     .send_peer_command(
                         &to,
@@ -702,7 +697,9 @@ impl CoreCommsRuntime for CommsRuntime {
                     )));
                 }
                 if is_terminal_reply {
-                    self.inbound_request_handling_modes.lock().remove(&corr_id);
+                    self.peer_response_routing
+                        .lock()
+                        .terminal_response_sent(corr_id);
                 }
 
                 Ok(SendReceipt::PeerResponseSent {
@@ -1044,7 +1041,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         };
 
                         if is_peer_request_envelope {
-                            self.inbound_request_handling_modes.lock().insert(
+                            self.peer_response_routing.lock().record_inbound_request(
                                 meerkat_core::PeerCorrelationId::from_uuid(envelope.id),
                                 envelope_handling_mode,
                             );
@@ -1291,12 +1288,12 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
-    /// Transport-owned projection of the handling mode carried by inbound
-    /// peer requests. `send_response` uses this only when the caller omits an
-    /// explicit response override, matching the tool contract that responses
-    /// default to the original request's delivery mode.
-    inbound_request_handling_modes:
-        Arc<Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::types::HandlingMode>>>,
+    /// Narrow authority for terminal peer-response routing inheritance.
+    ///
+    /// The runtime records the handling mode carried by inbound peer requests,
+    /// and `send_response` asks this seam for the effective response mode when
+    /// the caller omits an explicit override.
+    peer_response_routing: Arc<Mutex<PeerResponseRoutingAuthority>>,
 }
 
 impl CommsRuntime {
@@ -1410,7 +1407,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1526,7 +1523,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -1654,7 +1651,7 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
@@ -2394,9 +2391,9 @@ impl CommsRuntime {
     /// Callers that want the stream-lifecycle CAS (Reserved/Attached gate)
     /// should use [`mark_interaction_complete`].
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
-        self.inbound_request_handling_modes
+        self.peer_response_routing
             .lock()
-            .remove(&meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
+            .clear(meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
         let removed_stream = self
             .interaction_stream_registry
@@ -3584,10 +3581,119 @@ mod tests {
         ));
         assert!(
             !runtime
-                .inbound_request_handling_modes
+                .peer_response_routing
                 .lock()
-                .contains_key(&meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
             "lifecycle projections are request-shaped but are not responseable peer requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_peer_response_inherits_request_mode_through_routing_authority() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let requester_name = format!("routing-requester-{suffix}");
+        let responder_name = format!("routing-responder-{suffix}");
+
+        let requester = Arc::new(CommsRuntime::inproc_only(&requester_name).unwrap());
+        let responder = Arc::new(CommsRuntime::inproc_only(&responder_name).unwrap());
+        install_test_peer_request_response_authority(&requester);
+        let responder_peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        responder.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            responder_peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        CoreCommsRuntime::add_trusted_peer(
+            requester.as_ref(),
+            trusted_descriptor(
+                &responder_name,
+                responder.public_key(),
+                &format!("inproc://{responder_name}"),
+            ),
+        )
+        .await
+        .expect("requester should trust responder");
+        CoreCommsRuntime::add_trusted_peer(
+            responder.as_ref(),
+            trusted_descriptor(
+                &requester_name,
+                requester.public_key(),
+                &format!("inproc://{requester_name}"),
+            ),
+        )
+        .await
+        .expect("responder should trust requester");
+
+        let request_receipt = CoreCommsRuntime::send(
+            requester.as_ref(),
+            CommsCommand::PeerRequest {
+                to: peer_route(&responder_name, responder.public_key()),
+                intent: "route-mode".to_string(),
+                params: serde_json::json!({"expect": "steer"}),
+                blocks: None,
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                stream: InputStreamMode::None,
+            },
+        )
+        .await
+        .expect("request should send");
+        let interaction_id = match request_receipt {
+            SendReceipt::PeerRequestSent { envelope_id, .. } => InteractionId(envelope_id),
+            other => panic!("expected PeerRequestSent, got {other:?}"),
+        };
+
+        let responder_interactions =
+            CoreCommsRuntime::drain_inbox_interactions(responder.as_ref()).await;
+        assert_eq!(responder_interactions.len(), 1);
+        assert_eq!(
+            responder_interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Steer
+        );
+        assert!(
+            responder
+                .peer_response_routing
+                .lock()
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(
+                    interaction_id.0
+                )),
+            "draining the inbound peer request should record routing inheritance"
+        );
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            responder_peer_handle.as_ref(),
+            meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0),
+        )
+        .expect("test authority should seed inbound request state");
+
+        CoreCommsRuntime::send(
+            responder.as_ref(),
+            CommsCommand::PeerResponse {
+                to: peer_route(&requester_name, requester.public_key()),
+                in_reply_to: interaction_id,
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                blocks: None,
+                handling_mode: None,
+            },
+        )
+        .await
+        .expect("terminal response should send without explicit mode");
+
+        let requester_interactions =
+            CoreCommsRuntime::drain_inbox_interactions(requester.as_ref()).await;
+        assert_eq!(requester_interactions.len(), 1);
+        assert_eq!(
+            requester_interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Steer,
+            "terminal response should inherit request mode via routing authority"
+        );
+        assert!(
+            !responder
+                .peer_response_routing
+                .lock()
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(
+                    interaction_id.0
+                )),
+            "terminal send should clear inherited routing state"
         );
     }
 

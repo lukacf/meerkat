@@ -19,7 +19,7 @@ use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 use crate::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
-    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, SelfHostedAuthMethod,
+    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, OtherBackendKind, SelfHostedAuthMethod,
     SelfHostedBackendKind,
 };
 
@@ -987,7 +987,11 @@ impl RealmConnectionSet {
                 "RKAT_SELF_HOSTED_API_KEY",
                 vec![],
             ),
-            Provider::Other => ("other_api", "RKAT_OTHER_API_KEY", vec![]),
+            Provider::Other => (
+                OtherBackendKind::OtherApi.as_str(),
+                "RKAT_OTHER_API_KEY",
+                vec![],
+            ),
         };
         let backend = BackendProfile {
             id: "default".to_string(),

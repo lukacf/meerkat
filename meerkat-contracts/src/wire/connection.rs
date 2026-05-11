@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 use meerkat_core::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
-    OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
+    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, OtherBackendKind, SelfHostedAuthMethod,
+    SelfHostedBackendKind,
 };
 use meerkat_core::{OAuthProviderIdentity, PersistedAuthMode};
 use serde::{Deserialize, Serialize};
@@ -48,6 +49,7 @@ pub enum WireBackendKind {
     GoogleCodeAssist,
     SelfHosted,
     OpenAiCompatible,
+    OtherApi,
 }
 
 impl WireBackendKind {
@@ -91,12 +93,13 @@ impl WireBackendKind {
                     kind: raw.to_string(),
                 }),
             },
-            meerkat_core::Provider::Other => {
-                Err(WireConnectionProjectionError::UnknownBackendKind {
+            meerkat_core::Provider::Other => match OtherBackendKind::parse(raw) {
+                Some(OtherBackendKind::OtherApi) => Ok(Self::OtherApi),
+                None => Err(WireConnectionProjectionError::UnknownBackendKind {
                     provider,
                     kind: raw.to_string(),
-                })
-            }
+                }),
+            },
         }
     }
 }
@@ -180,12 +183,15 @@ impl WireAuthMethod {
                     method: raw.to_string(),
                 }),
             },
-            meerkat_core::Provider::Other => {
-                Err(WireConnectionProjectionError::UnknownAuthMethod {
+            meerkat_core::Provider::Other => match OtherAuthMethod::parse(raw) {
+                Some(OtherAuthMethod::ApiKey) => Ok(Self::ApiKey),
+                Some(OtherAuthMethod::StaticBearer) => Ok(Self::StaticBearer),
+                Some(OtherAuthMethod::None) => Ok(Self::None),
+                None => Err(WireConnectionProjectionError::UnknownAuthMethod {
                     provider,
                     method: raw.to_string(),
-                })
-            }
+                }),
+            },
         }
     }
 }
@@ -354,15 +360,16 @@ pub struct WireBackendProfile {
     pub base_url: Option<String>,
 }
 
-impl From<&meerkat_core::BackendProfile> for WireBackendProfile {
-    fn from(value: &meerkat_core::BackendProfile) -> Self {
-        Self {
+impl TryFrom<&meerkat_core::BackendProfile> for WireBackendProfile {
+    type Error = WireConnectionProjectionError;
+
+    fn try_from(value: &meerkat_core::BackendProfile) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: value.id.clone(),
             provider: value.provider,
-            backend_kind: WireBackendKind::from_provider_raw(value.provider, &value.backend_kind)
-                .expect("BackendProfile provider/backend_kind must be provider-matrix typed"),
+            backend_kind: WireBackendKind::from_provider_raw(value.provider, &value.backend_kind)?,
             base_url: value.base_url.clone(),
-        }
+        })
     }
 }
 
@@ -381,15 +388,16 @@ pub struct WireAuthProfile {
     pub source_kind: WireCredentialSourceKind,
 }
 
-impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
-    fn from(value: &meerkat_core::AuthProfile) -> Self {
-        Self {
+impl TryFrom<&meerkat_core::AuthProfile> for WireAuthProfile {
+    type Error = WireConnectionProjectionError;
+
+    fn try_from(value: &meerkat_core::AuthProfile) -> Result<Self, Self::Error> {
+        Ok(Self {
             id: value.id.clone(),
             provider: value.provider,
-            auth_method: WireAuthMethod::from_provider_raw(value.provider, &value.auth_method)
-                .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            auth_method: WireAuthMethod::from_provider_raw(value.provider, &value.auth_method)?,
             source_kind: WireCredentialSourceKind::from(&value.source),
-        }
+        })
     }
 }
 
@@ -437,27 +445,29 @@ pub struct WireRealmConnectionSet {
     pub default_binding: Option<String>,
 }
 
-impl From<&meerkat_core::RealmConnectionSet> for WireRealmConnectionSet {
-    fn from(value: &meerkat_core::RealmConnectionSet) -> Self {
-        Self {
+impl TryFrom<&meerkat_core::RealmConnectionSet> for WireRealmConnectionSet {
+    type Error = WireConnectionProjectionError;
+
+    fn try_from(value: &meerkat_core::RealmConnectionSet) -> Result<Self, Self::Error> {
+        Ok(Self {
             realm_id: value.realm_id.clone(),
             backends: value
                 .backends
                 .iter()
-                .map(|(k, v)| (k.clone(), WireBackendProfile::from(v)))
-                .collect(),
+                .map(|(k, v)| WireBackendProfile::try_from(v).map(|wire| (k.clone(), wire)))
+                .collect::<Result<_, _>>()?,
             auth_profiles: value
                 .auth_profiles
                 .iter()
-                .map(|(k, v)| (k.clone(), WireAuthProfile::from(v)))
-                .collect(),
+                .map(|(k, v)| WireAuthProfile::try_from(v).map(|wire| (k.clone(), wire)))
+                .collect::<Result<_, _>>()?,
             bindings: value
                 .bindings
                 .iter()
                 .map(|(k, v)| (k.clone(), WireProviderBinding::from(v)))
                 .collect(),
             default_binding: value.default_binding.clone(),
-        }
+        })
     }
 }
 
@@ -766,9 +776,71 @@ mod tests {
             base_url: None,
             options: serde_json::Value::Null,
         };
-        let w: WireBackendProfile = (&bp).into();
+        let w = WireBackendProfile::try_from(&bp).unwrap();
         assert_eq!(w.provider, meerkat_core::Provider::OpenAI);
         assert_eq!(w.backend_kind, WireBackendKind::OpenAiApi);
+    }
+
+    #[test]
+    fn custom_provider_profiles_project_through_typed_other_matrix() {
+        let backend = meerkat_core::BackendProfile {
+            id: "other_api".into(),
+            provider: meerkat_core::Provider::Other,
+            backend_kind: "other_api".into(),
+            base_url: Some("https://provider.example".into()),
+            options: serde_json::Value::Null,
+        };
+        let wire_backend = WireBackendProfile::try_from(&backend).unwrap();
+        assert_eq!(wire_backend.provider, meerkat_core::Provider::Other);
+        assert_eq!(wire_backend.backend_kind, WireBackendKind::OtherApi);
+
+        let auth = meerkat_core::AuthProfile {
+            id: "custom_bearer".into(),
+            provider: meerkat_core::Provider::Other,
+            auth_method: "static_bearer".into(),
+            source: meerkat_core::CredentialSourceSpec::ManagedStore,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        };
+        let wire_auth = WireAuthProfile::try_from(&auth).unwrap();
+        assert_eq!(wire_auth.provider, meerkat_core::Provider::Other);
+        assert_eq!(wire_auth.auth_method, WireAuthMethod::StaticBearer);
+    }
+
+    #[test]
+    fn profile_projection_rejects_unknown_provider_matrix_values() {
+        let backend = meerkat_core::BackendProfile {
+            id: "custom".into(),
+            provider: meerkat_core::Provider::Other,
+            backend_kind: "custom_string".into(),
+            base_url: None,
+            options: serde_json::Value::Null,
+        };
+        let err = WireBackendProfile::try_from(&backend).unwrap_err();
+        assert!(matches!(
+            err,
+            WireConnectionProjectionError::UnknownBackendKind {
+                provider: meerkat_core::Provider::Other,
+                ..
+            }
+        ));
+
+        let auth = meerkat_core::AuthProfile {
+            id: "custom_auth".into(),
+            provider: meerkat_core::Provider::Other,
+            auth_method: "custom_auth_method".into(),
+            source: meerkat_core::CredentialSourceSpec::ManagedStore,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        };
+        let err = WireAuthProfile::try_from(&auth).unwrap_err();
+        assert!(matches!(
+            err,
+            WireConnectionProjectionError::UnknownAuthMethod {
+                provider: meerkat_core::Provider::Other,
+                ..
+            }
+        ));
     }
 
     #[test]

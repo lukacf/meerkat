@@ -38,7 +38,8 @@
     "vertex_ai",
     "google_code_assist",
     "self_hosted",
-    "open_ai_compatible"
+    "open_ai_compatible",
+    "other_api"
   ],
   "credential_source_kinds": [
     "inline_secret",
@@ -86,6 +87,11 @@
       "external_chatgpt_tokens",
       "external_authorizer"
     ],
+    "other": [
+      "api_key",
+      "static_bearer",
+      "none"
+    ],
     "self_hosted": [
       "api_key",
       "static_bearer",
@@ -108,6 +114,9 @@
       "open_ai_api",
       "chatgpt_backend"
     ],
+    "other": [
+      "other_api"
+    ],
     "self_hosted": [
       "self_hosted",
       "open_ai_compatible"
@@ -117,6 +126,7 @@
     "anthropic",
     "openai",
     "gemini",
-    "self_hosted"
+    "self_hosted",
+    "other"
   ]
 }

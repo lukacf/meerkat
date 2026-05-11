@@ -6,7 +6,8 @@ export const WIRE_AUTH_PROVIDERS = [
   "anthropic",
   "openai",
   "gemini",
-  "self_hosted"
+  "self_hosted",
+  "other"
 ] as const;
 
 export type WireAuthProvider = typeof WIRE_AUTH_PROVIDERS[number];
@@ -31,7 +32,8 @@ export const WIRE_BACKEND_KINDS = [
   "vertex_ai",
   "google_code_assist",
   "self_hosted",
-  "open_ai_compatible"
+  "open_ai_compatible",
+  "other_api"
 ] as const;
 
 export type WireBackendKind = typeof WIRE_BACKEND_KINDS[number];
@@ -98,6 +100,9 @@ export const WIRE_PROVIDER_BACKEND_KINDS = {
     "self_hosted",
     "open_ai_compatible",
   ],
+  other: [
+    "other_api",
+  ],
 } as const satisfies Record<WireAuthProvider, readonly WireBackendKind[]>;
 
 export const WIRE_PROVIDER_AUTH_METHODS = {
@@ -130,6 +135,11 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
     "compute_adc",
   ],
   self_hosted: [
+    "api_key",
+    "static_bearer",
+    "none",
+  ],
+  other: [
     "api_key",
     "static_bearer",
     "none",

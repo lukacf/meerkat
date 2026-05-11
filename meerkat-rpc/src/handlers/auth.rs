@@ -15,8 +15,8 @@ use meerkat_contracts::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
     LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams, WireAuthMethod,
     WireAuthProfile, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
-    WireDeviceCompleteResult, WireProviderBinding, WireProvisionApiKeyResult,
-    WireRealmConnectionSet,
+    WireConnectionProjectionError, WireDeviceCompleteResult, WireProviderBinding,
+    WireProvisionApiKeyResult, WireRealmConnectionSet,
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
@@ -78,6 +78,17 @@ async fn resolve_realm(
             format!("Realm config invalid: {e}"),
         )
     })
+}
+
+fn connection_projection_error(
+    id: Option<RpcId>,
+    error: WireConnectionProjectionError,
+) -> RpcResponse {
+    RpcResponse::error(
+        id,
+        error::INTERNAL_ERROR,
+        format!("Connection projection invalid: {error}"),
+    )
 }
 
 async fn resolve_binding_identity(
@@ -738,7 +749,10 @@ pub async fn handle_realm_get(
         Ok(r) => r,
         Err(r) => return r.with_id(id),
     };
-    let wire = WireRealmConnectionSet::from(&realm);
+    let wire = match WireRealmConnectionSet::try_from(&realm) {
+        Ok(wire) => wire,
+        Err(error) => return connection_projection_error(id, error),
+    };
     match serde_json::to_value(wire) {
         Ok(v) => RpcResponse::success(id, v),
         Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, format!("Serialize error: {e}")),
@@ -760,16 +774,24 @@ pub async fn handle_auth_profile_list(
         Ok(r) => r,
         Err(r) => return r.with_id(id),
     };
-    let profiles: Vec<WireAuthProfile> = realm
+    let profiles: Vec<WireAuthProfile> = match realm
         .auth_profiles
         .values()
-        .map(WireAuthProfile::from)
-        .collect();
-    let backends: Vec<WireBackendProfile> = realm
+        .map(WireAuthProfile::try_from)
+        .collect()
+    {
+        Ok(profiles) => profiles,
+        Err(error) => return connection_projection_error(id, error),
+    };
+    let backends: Vec<WireBackendProfile> = match realm
         .backends
         .values()
-        .map(WireBackendProfile::from)
-        .collect();
+        .map(WireBackendProfile::try_from)
+        .collect()
+    {
+        Ok(backends) => backends,
+        Err(error) => return connection_projection_error(id, error),
+    };
     let bindings: Vec<WireProviderBinding> = realm
         .bindings
         .values()
@@ -803,15 +825,21 @@ pub async fn handle_auth_profile_get(
     )
     .await
     {
-        Ok((auth_binding, binding, auth_profile)) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "auth_binding": &auth_binding,
-                "binding_id": &binding.id,
-                "profile_id": &auth_profile.id,
-                "auth_profile": WireAuthProfile::from(&auth_profile),
-            }),
-        ),
+        Ok((auth_binding, binding, auth_profile)) => {
+            let wire_auth_profile = match WireAuthProfile::try_from(&auth_profile) {
+                Ok(auth_profile) => auth_profile,
+                Err(error) => return connection_projection_error(id, error),
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "auth_binding": &auth_binding,
+                    "binding_id": &binding.id,
+                    "profile_id": &auth_profile.id,
+                    "auth_profile": wire_auth_profile,
+                }),
+            )
+        }
         Err(r) => r.with_id(id),
     }
 }
@@ -892,6 +920,11 @@ pub async fn handle_auth_profile_create(
         auth_method = %auth_profile.auth_method,
         "binding-scoped auth credentials stored via RPC"
     );
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(id, error),
+        };
     RpcResponse::success(
         id,
         serde_json::json!({
@@ -900,11 +933,7 @@ pub async fn handle_auth_profile_create(
             "auth_binding": &auth_binding,
             "profile_id": &auth_profile.id,
             "provider": auth_profile.provider,
-            "auth_method": WireAuthMethod::from_provider_raw(
-                auth_profile.provider,
-                &auth_profile.auth_method,
-            )
-            .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            "auth_method": auth_method,
             "stored": true,
         }),
     )
@@ -1728,17 +1757,18 @@ pub async fn handle_auth_status_get(
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
     let tokens = projection.tokens;
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(id, error),
+        };
     RpcResponse::success(
         id,
         WireAuthStatusDetail {
             identity: WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id,
             provider: auth_profile.provider,
-            auth_method: WireAuthMethod::from_provider_raw(
-                auth_profile.provider,
-                &auth_profile.auth_method,
-            )
-            .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            auth_method,
             state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),

@@ -77,7 +77,7 @@ fn auth_binding_serde_roundtrip() {
 #[test]
 fn backend_profile_wire_carries_typed_provider_and_backend_kind() {
     let bp = sample_backend_profile();
-    let wire: WireBackendProfile = (&bp).into();
+    let wire = WireBackendProfile::try_from(&bp).unwrap();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"provider\":\"openai\""));
     assert!(s.contains("\"backend_kind\":\"openai_api\""));
@@ -91,7 +91,7 @@ fn backend_profile_wire_carries_typed_provider_and_backend_kind() {
 #[test]
 fn auth_profile_wire_carries_typed_auth_and_source_discriminators() {
     let ap = sample_auth_profile();
-    let wire: WireAuthProfile = (&ap).into();
+    let wire = WireAuthProfile::try_from(&ap).unwrap();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"source_kind\":\"env\""));
     assert!(s.contains("\"auth_method\":\"api_key\""));
@@ -127,7 +127,7 @@ fn realm_connection_set_roundtrips_with_populated_maps() {
         bindings,
         default_binding: Some("default".to_string()),
     };
-    let wire: WireRealmConnectionSet = (&realm).into();
+    let wire = WireRealmConnectionSet::try_from(&realm).unwrap();
     let s = serde_json::to_string(&wire).unwrap();
     let back: WireRealmConnectionSet = serde_json::from_str(&s).unwrap();
     assert_eq!(back, wire);

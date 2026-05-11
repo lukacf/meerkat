@@ -15,14 +15,14 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 
 use meerkat_contracts::{
     CreateProfileParams, LoginStartParams, WireAuthProfile, WireAuthProfileCleared,
     WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatusDetail,
-    WireBackendProfile, WireBindingIdentity, WireDeviceStart, WireLoginReady, WireLoginStart,
-    WireAuthMethod, WireProviderBinding,
-    WireRealmConnectionSet, WireRealmList, WireRealmSummary,
+    WireAuthMethod, WireBackendProfile, WireBindingIdentity, WireConnectionProjectionError,
+    WireDeviceStart, WireLoginReady,
+    WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
 use meerkat_core::handles::LeaseKey;
@@ -74,6 +74,16 @@ async fn resolve_realm(
             format!("Realm config invalid: {e}"),
         )
     })
+}
+
+fn connection_projection_error(error: WireConnectionProjectionError) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({
+            "error": format!("Connection projection invalid: {error}"),
+        })),
+    )
+        .into_response()
 }
 
 async fn resolve_binding_identity(
@@ -639,7 +649,10 @@ pub async fn get_realm(
 ) -> impl IntoResponse {
     match resolve_realm(&state, &realm_id).await {
         Ok(realm) => {
-            let wire = WireRealmConnectionSet::from(&realm);
+            let wire = match WireRealmConnectionSet::try_from(&realm) {
+                Ok(wire) => wire,
+                Err(error) => return connection_projection_error(error),
+            };
             (StatusCode::OK, Json(wire)).into_response()
         }
         Err((status, msg)) => (status, Json(serde_json::json!({ "error": msg }))).into_response(),
@@ -661,16 +674,24 @@ pub async fn list_auth_profiles(
 ) -> impl IntoResponse {
     match resolve_realm(&state, &query.realm_id).await {
         Ok(realm) => {
-            let profiles: Vec<WireAuthProfile> = realm
+            let profiles: Vec<WireAuthProfile> = match realm
                 .auth_profiles
                 .values()
-                .map(WireAuthProfile::from)
-                .collect();
-            let backends: Vec<WireBackendProfile> = realm
+                .map(WireAuthProfile::try_from)
+                .collect()
+            {
+                Ok(profiles) => profiles,
+                Err(error) => return connection_projection_error(error),
+            };
+            let backends: Vec<WireBackendProfile> = match realm
                 .backends
                 .values()
-                .map(WireBackendProfile::from)
-                .collect();
+                .map(WireBackendProfile::try_from)
+                .collect()
+            {
+                Ok(backends) => backends,
+                Err(error) => return connection_projection_error(error),
+            };
             let bindings: Vec<WireProviderBinding> = realm
                 .bindings
                 .values()
@@ -787,17 +808,18 @@ pub async fn create_auth_profile(
         auth_method = %auth_profile.auth_method,
         "binding-scoped auth credentials stored via REST"
     );
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(error),
+        };
     (
         StatusCode::CREATED,
         Json(WireAuthProfileCreated {
             identity: WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider,
-            auth_method: WireAuthMethod::from_provider_raw(
-                auth_profile.provider,
-                &auth_profile.auth_method,
-            )
-            .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            auth_method,
             stored: true,
         }),
     )
@@ -817,16 +839,22 @@ pub async fn get_auth_profile(
     )
     .await
     {
-        Ok((auth_binding, binding, auth_profile)) => (
-            StatusCode::OK,
-            Json(WireAuthProfileDetail {
-                auth_binding: auth_binding.into(),
-                binding_id: binding.id.clone(),
-                profile_id: auth_profile.id.clone(),
-                auth_profile: WireAuthProfile::from(&auth_profile),
-            }),
-        )
-            .into_response(),
+        Ok((auth_binding, binding, auth_profile)) => {
+            let auth_profile = match WireAuthProfile::try_from(&auth_profile) {
+                Ok(auth_profile) => auth_profile,
+                Err(error) => return connection_projection_error(error),
+            };
+            (
+                StatusCode::OK,
+                Json(WireAuthProfileDetail {
+                    auth_binding: auth_binding.into(),
+                    binding_id: binding.id.clone(),
+                    profile_id: auth_profile.id.clone(),
+                    auth_profile,
+                }),
+            )
+                .into_response()
+        }
         Err((status, msg)) => (status, Json(serde_json::json!({ "error": msg }))).into_response(),
     }
 }
@@ -1671,17 +1699,18 @@ pub async fn get_auth_status(
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
     let tokens = projection.tokens;
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(error),
+        };
     (
         StatusCode::OK,
         Json(WireAuthStatusDetail {
             identity: WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id.clone(),
             provider: auth_profile.provider,
-            auth_method: WireAuthMethod::from_provider_raw(
-                auth_profile.provider,
-                &auth_profile.auth_method,
-            )
-            .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            auth_method,
             state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),

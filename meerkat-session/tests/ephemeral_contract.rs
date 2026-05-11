@@ -1153,7 +1153,7 @@ async fn test_turn_on_archived_session_returns_not_found() {
 }
 
 #[tokio::test]
-async fn test_read_history_on_archived_session_returns_persistence_disabled() {
+async fn test_read_history_on_archived_session_returns_not_found() {
     let service = make_service(MockAgentBuilder::new());
     let _ = service.create_session(create_req("Hello")).await.unwrap();
 
@@ -1171,8 +1171,8 @@ async fn test_read_history_on_archived_session_returns_persistence_disabled() {
             },
         )
         .await
-        .expect_err("ephemeral archived history should be unavailable");
-    assert_eq!(err.code(), "SESSION_PERSISTENCE_DISABLED");
+        .expect_err("ephemeral archive must not expose local history cache");
+    assert_eq!(err.code(), "SESSION_NOT_FOUND");
 }
 
 #[tokio::test]

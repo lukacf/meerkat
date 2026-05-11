@@ -10357,23 +10357,35 @@ impl MobActor {
         let prepared_run_flow = self
             .prepare_dsl_input(run_flow.clone(), "run_flow")
             .map_err(|_| self.invalid_transition_to(MobState::Running))?;
-        self.create_pending_run(
-            run_id.clone(),
-            &config,
-            &prepared_run_flow.authority.state,
-            activation_params.clone(),
-            vec![run_flow],
-        )
-        .await
-        .inspect_err(|error| {
+        let prepared_run_flow_state = prepared_run_flow.authority.state.clone();
+        let rollback_run_flow_state = self.dsl_authority.state.clone();
+        let rollback_routed_effect_len = self.pending_routed_effects.len();
+        self.commit_prepared_dsl_input(prepared_run_flow);
+        if let Err(error) = self
+            .create_pending_run(
+                run_id.clone(),
+                &config,
+                &prepared_run_flow_state,
+                activation_params.clone(),
+                vec![run_flow],
+            )
+            .await
+        {
             tracing::warn!(
                 run_id = %run_id,
                 flow_id = %config.flow_id,
                 error = %error,
-                "flow admission run-store create failed before committing MobMachine RunFlow"
+                "flow admission run-store create failed after committing MobMachine RunFlow; restoring pre-admission authority"
             );
-        })?;
-        self.commit_prepared_dsl_input(prepared_run_flow);
+            self.dsl_authority = mob_dsl::MobMachineAuthority::from_state(rollback_run_flow_state);
+            self.pending_routed_effects
+                .truncate(rollback_routed_effect_len);
+            let _ = self.phase_watch_tx.send(self.state());
+            self.publish_machine_state_projection();
+            return Err(MobError::Internal(format!(
+                "flow admission run-store create failed after MobMachine RunFlow commit; MobMachine authority restored to pre-admission state: {error}"
+            )));
+        }
         if let Err(error) = self.apply_dsl_signal(mob_dsl::MobMachineSignal::StartRun, "start_run")
         {
             let mut details = Vec::new();
@@ -10559,9 +10571,8 @@ impl MobActor {
             tracing::debug!(
                 run_id = %run_id,
                 context = context,
-                "flow cleanup command had no local run-tracker entries"
+                "flow cleanup command had no local run-tracker entries; applying MobMachine cleanup convergence"
             );
-            return Ok(());
         }
 
         self.apply_dsl_signal(mob_dsl::MobMachineSignal::CompleteFlow, "flow_cleanup")?;

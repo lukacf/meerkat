@@ -2062,8 +2062,8 @@ impl CommsRuntime {
     ///
     /// The peer goes through the same router + classified-inbox sync as
     /// [`register_trusted_peer`](Self::register_trusted_peer) — admission
-    /// and send-resolution behave identically — but its pubkey is added
-    /// to the router's private peer-id directory filter so
+    /// and send-resolution behave identically — but the router records the
+    /// app-facing directory visibility through its visibility authority so
     /// `resolve_peer_directory()` (and downstream `comms.peers`
     /// REST/RPC/MCP handlers) filter it out. Intended for control-plane
     /// edges such as the supervisor→member lifecycle channel for
@@ -2077,11 +2077,9 @@ impl CommsRuntime {
         peer.addr = parse_peer_address(&peer.addr)
             .map_err(SendError::Validation)?
             .to_string();
-        let pubkey = peer.pubkey;
         self.router
-            .add_trusted_peer(peer)
+            .add_private_trusted_peer(peer)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private(pubkey);
         Ok(())
     }
 
@@ -2092,9 +2090,8 @@ impl CommsRuntime {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
         self.router
-            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .add_private_trusted_peer_with_peer_id(peer_id, peer)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private_peer_id(peer_id);
         Ok(())
     }
 
@@ -2189,54 +2186,85 @@ impl CommsRuntime {
                 .map(|p| (p.name.clone(), p.pubkey))
                 .collect();
         let participant_name = self.participant_name().to_string();
-        let private_peer_ids = self.router.private_peer_ids();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
         let mut emitted = 0usize;
 
         {
             let trusted = self.trusted_peers.read();
-            let entries = match trusted.canonical_entries() {
-                Ok(entries) => entries,
-                Err(error) => {
+            let trusted_peer_id_counts: HashMap<PeerId, usize> = trusted
+                .peers
+                .iter()
+                .filter(|peer| peer.has_raw_sendable_identity())
+                .fold(HashMap::new(), |mut counts, peer| {
+                    *counts
+                        .entry(self.router.peer_id_for_pubkey(&peer.pubkey))
+                        .or_default() += 1;
+                    counts
+                });
+            for peer in &trusted.peers {
+                if !peer.has_raw_sendable_identity() {
                     tracing::warn!(
-                        error = %error,
-                        "skipping non-canonical trusted peers in peer directory"
+                        peer_name = %peer.name,
+                        "skipping zero-pubkey trusted peer in peer directory"
                     );
-                    for peer in trusted
-                        .peers
-                        .iter()
-                        .filter(|peer| peer.has_raw_sendable_identity())
-                    {
-                        trusted_names.insert(peer.name.clone());
-                        trusted_pubkeys.insert(peer.pubkey);
-                    }
-                    Vec::new()
-                }
-            };
-            for entry in entries {
-                if entry.name.as_str() == participant_name || entry.pubkey == self.public_key {
                     continue;
                 }
-                trusted_names.insert(entry.name.as_string());
-                trusted_pubkeys.insert(entry.pubkey);
-                if private_peer_ids.contains(&entry.peer_id) {
+                if peer.name == participant_name || peer.pubkey == self.public_key {
+                    continue;
+                }
+                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
+                trusted_names.insert(peer.name.clone());
+                trusted_pubkeys.insert(peer.pubkey);
+                if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
+                    tracing::warn!(
+                        peer_name = %peer.name,
+                        peer_id = %peer_id,
+                        "skipping duplicate trusted peer id in peer directory"
+                    );
+                    continue;
+                }
+                if !self.router.is_peer_directory_visible(&peer_id) {
                     continue;
                 }
                 let source = if inproc_by_name
-                    .get(entry.name.as_str())
-                    .is_some_and(|key| *key == entry.pubkey)
+                    .get(&peer.name)
+                    .is_some_and(|key| *key == peer.pubkey)
                 {
                     PeerDirectorySource::TrustedAndInproc
                 } else {
                     PeerDirectorySource::Trusted
                 };
+                let name = match PeerName::new(peer.name.clone()) {
+                    Ok(name) => name,
+                    Err(_) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            peer_id = %peer.pubkey.to_peer_id(),
+                            "skipping invalid peer name in trusted peers"
+                        );
+                        continue;
+                    }
+                };
+                let address = match parse_peer_address(&peer.addr) {
+                    Ok(address) => address,
+                    Err(err) => {
+                        tracing::warn!(
+                            peer_name = %peer.name,
+                            peer_id = %peer_id,
+                            address = %peer.addr,
+                            error = %err,
+                            "skipping trusted peer with invalid address in peer directory"
+                        );
+                        continue;
+                    }
+                };
                 on_peer(ResolvedPeer {
-                    name: entry.name,
-                    peer_id: entry.peer_id,
-                    address: entry.address,
+                    name,
+                    peer_id,
+                    address,
                     source,
-                    meta: entry.meta,
+                    meta: peer.meta.clone(),
                 });
                 emitted += 1;
             }
@@ -2259,7 +2287,7 @@ impl CommsRuntime {
                 );
                 continue;
             }
-            if private_peer_ids.contains(&peer_id) {
+            if !self.router.is_peer_directory_visible(&peer_id) {
                 continue;
             }
             let name = match PeerName::new(inproc.name.clone()) {
@@ -6792,6 +6820,59 @@ mod tests {
             .await
             .expect("remove after rejected private add should still validate peer id");
         assert!(!removed, "rejected private peer must not enter trust");
+    }
+
+    #[tokio::test]
+    async fn test_private_trusted_peer_visibility_is_authority_owned() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("private-vis-sender-{suffix}");
+        let receiver_name = format!("private-vis-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver_id = receiver.public_key().to_peer_id();
+
+        CoreCommsRuntime::add_private_trusted_peer(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .expect("private trust should register through router authority");
+
+        assert!(
+            sender
+                .trusted_peers
+                .read()
+                .peers
+                .iter()
+                .any(|peer| peer.name == receiver_name),
+            "private peer must remain trusted and send-resolvable"
+        );
+        assert!(
+            sender.router().is_private(&receiver.public_key()),
+            "directory visibility authority must own the private marker"
+        );
+        assert!(
+            CoreCommsRuntime::peers(&sender)
+                .await
+                .iter()
+                .all(|peer| peer.peer_id != receiver_id),
+            "private trust must not leak into the public peer directory"
+        );
+
+        assert!(
+            CoreCommsRuntime::remove_private_trusted_peer(&sender, &receiver_id.to_string())
+                .await
+                .expect("remove private peer should validate id"),
+            "private peer should be removable by canonical peer id"
+        );
+        assert!(
+            !sender.router().is_private(&receiver.public_key()),
+            "removing private trust must also clear the visibility fact"
+        );
     }
 
     #[tokio::test]

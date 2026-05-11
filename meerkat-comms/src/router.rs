@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::identity::Keypair;
 use crate::inbox::InboxSender;
 use crate::inproc::{InprocRegistry, InprocSendError};
+use crate::peer_directory_visibility_authority::PeerDirectoryVisibilityAuthority;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
@@ -100,12 +101,15 @@ pub struct Router {
     /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
-    /// Directory-filter side-channel for private (control-plane) trust
-    /// edges. Membership here is additive to `trusted_peers`: the peer
-    /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
-    /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
-    /// for the supervisor bridge in session-backed mob members.
-    private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
+    /// Canonical peer IDs supplied at descriptor registration time, keyed by
+    /// signing pubkey. This preserves explicit `PeerId`s for descriptor
+    /// registrations where the runtime owns a stable routing id in addition
+    /// to the peer's signing key.
+    trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
+    /// Authority for app-facing peer-directory visibility. Trust remains
+    /// owned by `trusted_peers`; this authority owns whether a trusted peer
+    /// is public or private on user-facing directory surfaces.
+    directory_visibility: Arc<RwLock<PeerDirectoryVisibilityAuthority>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -130,7 +134,8 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            directory_visibility: Arc::new(RwLock::new(PeerDirectoryVisibilityAuthority::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -149,7 +154,8 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            directory_visibility: Arc::new(RwLock::new(PeerDirectoryVisibilityAuthority::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -157,35 +163,32 @@ impl Router {
         }
     }
 
-    /// Mark a peer as private (hidden from `resolve_peer_directory`).
-    pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
-        self.mark_private_peer_id(self.peer_id_for_pubkey(&pubkey));
-    }
-
-    /// Mark a peer as private by canonical `PeerId`.
-    pub(crate) fn mark_private_peer_id(&self, peer_id: PeerId) {
-        self.private_peer_ids.write().insert(peer_id);
-    }
-
     /// Remove the private marker for a peer. Returns `true` if the marker
     /// was present and removed.
-    pub fn unmark_private(&self, peer_id: &PeerId) -> bool {
-        self.private_peer_ids.write().remove(peer_id)
+    pub(crate) fn unmark_private(&self, peer_id: &PeerId) -> bool {
+        self.directory_visibility.write().unmark_private(peer_id)
     }
 
     /// Returns `true` if the peer is currently marked private.
     pub fn is_private(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.private_peer_ids
+        self.directory_visibility
             .read()
-            .contains(&peer_id_from_pubkey(pubkey))
+            .is_private(&self.peer_id_for_pubkey(pubkey))
     }
 
-    pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
-        self.private_peer_ids.read().clone()
+    pub(crate) fn is_peer_directory_visible(&self, peer_id: &PeerId) -> bool {
+        self.directory_visibility
+            .read()
+            .visibility_for(peer_id)
+            .is_visible()
     }
 
     pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
-        peer_id_from_pubkey(pubkey)
+        self.trusted_peer_ids
+            .read()
+            .get(pubkey)
+            .copied()
+            .unwrap_or_else(|| peer_id_from_pubkey(pubkey))
     }
 
     /// Scope in-process routing to a namespace.
@@ -219,43 +222,78 @@ impl Router {
         peer: TrustedPeer,
     ) -> Result<(), TrustError> {
         peer.to_trust_entry_with_peer_id(peer_id)?;
+        let pubkey = peer.pubkey;
         self.trusted_peers.write().upsert(peer)?;
+        self.trusted_peer_ids.write().insert(pubkey, peer_id);
+        Ok(())
+    }
+
+    pub(crate) fn add_private_trusted_peer(&self, peer: TrustedPeer) -> Result<PeerId, TrustError> {
+        let peer_id = peer_id_from_pubkey(&peer.pubkey);
+        self.add_private_trusted_peer_with_peer_id(peer_id, peer)?;
+        Ok(peer_id)
+    }
+
+    pub(crate) fn add_private_trusted_peer_with_peer_id(
+        &self,
+        peer_id: PeerId,
+        peer: TrustedPeer,
+    ) -> Result<(), TrustError> {
+        self.add_trusted_peer_with_peer_id(peer_id, peer)?;
+        self.directory_visibility.write().mark_private(peer_id);
         Ok(())
     }
 
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
-        if self
-            .trusted_peers
-            .write()
-            .remove_by_peer_id(peer_id)
-            .is_none()
-        {
+        let peer_ids = self.trusted_peer_ids.read().clone();
+        let removed_pubkeys = {
+            let mut trusted = self.trusted_peers.write();
+            let mut removed_pubkeys = Vec::new();
+            trusted.peers.retain(|peer| {
+                let matches = peer_ids
+                    .get(&peer.pubkey)
+                    .copied()
+                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
+                    == *peer_id;
+                if matches {
+                    removed_pubkeys.push(peer.pubkey);
+                    false
+                } else {
+                    true
+                }
+            });
+            removed_pubkeys
+        };
+        if removed_pubkeys.is_empty() {
             return false;
         }
-        self.private_peer_ids.write().remove(peer_id);
+        let mut trusted_peer_ids = self.trusted_peer_ids.write();
+        for pubkey in removed_pubkeys {
+            trusted_peer_ids.remove(&pubkey);
+        }
+        drop(trusted_peer_ids);
+        self.directory_visibility.write().unmark_private(peer_id);
         true
     }
 
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
+        let peer_ids = self.trusted_peer_ids.read().clone();
         let trusted = self.trusted_peers.read();
-        match trusted.canonical_store() {
-            Ok(store) if !store.contains(peer_id) => TrustedPeerLookup::Missing,
-            Ok(_) => trusted
-                .find_by_peer_id(peer_id)
-                .cloned()
-                .map(TrustedPeerLookup::Resolved)
-                .unwrap_or(TrustedPeerLookup::Missing),
-            Err(TrustError::DuplicatePeerId { peer_id: duplicate }) if duplicate == *peer_id => {
-                TrustedPeerLookup::Ambiguous
-            }
-            Err(error) => {
-                tracing::warn!(
-                    peer_id = %peer_id,
-                    error = %error,
-                    "trusted peer lookup rejected non-canonical trust projection"
-                );
-                TrustedPeerLookup::Missing
-            }
+        let mut matches = trusted.peers.iter().filter(|peer| {
+            !peer.pubkey.is_zero()
+                && peer_ids
+                    .get(&peer.pubkey)
+                    .copied()
+                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
+                    == *peer_id
+        });
+        let Some(peer) = matches.next() else {
+            return TrustedPeerLookup::Missing;
+        };
+        if matches.next().is_some() {
+            TrustedPeerLookup::Ambiguous
+        } else {
+            TrustedPeerLookup::Resolved(peer.clone())
         }
     }
 

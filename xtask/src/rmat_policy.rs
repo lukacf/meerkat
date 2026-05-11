@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use meerkat_machine_schema::canonical_machine_schemas;
+use meerkat_machine_schema::{
+    CompositionSchema, canonical_composition_schemas, canonical_machine_schemas,
+};
 
 #[derive(Debug, Clone)]
 pub struct AuditPolicy {
@@ -168,6 +170,7 @@ pub struct RequiredLiveSymbolRule {
 
 fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
     let mut rules = Vec::new();
+    let compositions = canonical_composition_schemas();
     for schema in canonical_machine_schemas() {
         for disposition in &schema.effect_dispositions {
             let meerkat_machine_schema::EffectDisposition::Routed { consumer_machines } =
@@ -179,47 +182,90 @@ fn default_routed_effect_realizations() -> Vec<RoutedEffectRealizationRule> {
                 let producer_str = schema.machine.as_str();
                 let effect_str = disposition.effect_variant.as_str();
                 let consumer_str = consumer_machine.as_str();
-                let consumer_input = default_consumer_input(producer_str, effect_str, consumer_str);
-                rules.push(RoutedEffectRealizationRule::new(
-                    producer_str.to_string(),
-                    effect_str.to_string(),
-                    consumer_str.to_string(),
-                    consumer_input,
-                    &default_allowed_paths(producer_str, consumer_str),
-                ));
+                for consumer_input in routed_consumer_inputs_from_compositions(
+                    &compositions,
+                    producer_str,
+                    effect_str,
+                    consumer_str,
+                ) {
+                    rules.push(RoutedEffectRealizationRule::new(
+                        producer_str.to_string(),
+                        effect_str.to_string(),
+                        consumer_str.to_string(),
+                        consumer_input,
+                        &default_allowed_paths(producer_str, consumer_str),
+                    ));
+                }
             }
         }
     }
+    rules.sort_by(|left, right| {
+        (
+            &left.producer_machine,
+            &left.effect_variant,
+            &left.consumer_machine,
+            &left.consumer_input,
+        )
+            .cmp(&(
+                &right.producer_machine,
+                &right.effect_variant,
+                &right.consumer_machine,
+                &right.consumer_input,
+            ))
+    });
+    rules.dedup_by(|left, right| {
+        left.producer_machine == right.producer_machine
+            && left.effect_variant == right.effect_variant
+            && left.consumer_machine == right.consumer_machine
+            && left.consumer_input == right.consumer_input
+    });
     rules
 }
 
-fn default_consumer_input(producer: &str, effect_variant: &str, consumer: &str) -> String {
-    // Kept in lock-step with the typed `Route::to.input_variant` entries in
-    // the canonical composition schemas (see
-    // `meerkat-machine-schema/src/catalog/compositions.rs`). The RMAT audit
-    // `CompositionRouteSemanticCoverage` rule fails the build if this map
-    // and the typed routes disagree about which consumer input a given
-    // routed effect realizes.
-    match (producer, effect_variant, consumer) {
-        ("MobMachine", "RequestRuntimeBinding", "MeerkatMachine") => "PrepareBindings".to_string(),
-        ("MobMachine", "RequestRuntimeIngress", "MeerkatMachine") => "Ingest".to_string(),
-        ("MobMachine", "RequestRuntimeRetire", "MeerkatMachine") => "Retire".to_string(),
-        ("MobMachine", "RequestRuntimeDestroy", "MeerkatMachine") => "Destroy".to_string(),
-        ("MeerkatMachine", "RuntimeBound", "MobMachine") => "ObserveRuntimeReady".to_string(),
-        ("MeerkatMachine", "RuntimeRetired", "MobMachine") => "ObserveRuntimeRetired".to_string(),
-        ("MeerkatMachine", "RuntimeDestroyed", "MobMachine") => {
-            "ObserveRuntimeDestroyed".to_string()
+fn routed_consumer_inputs_from_compositions(
+    compositions: &[CompositionSchema],
+    producer: &str,
+    effect_variant: &str,
+    consumer: &str,
+) -> Vec<String> {
+    let mut inputs = Vec::new();
+    for composition in compositions {
+        let producer_instances = composition
+            .machines
+            .iter()
+            .filter(|instance| instance.machine_name.as_str() == producer)
+            .map(|instance| &instance.instance_id)
+            .collect::<Vec<_>>();
+        let consumer_instances = composition
+            .machines
+            .iter()
+            .filter(|instance| instance.machine_name.as_str() == consumer)
+            .map(|instance| &instance.instance_id)
+            .collect::<Vec<_>>();
+        if producer_instances.is_empty() || consumer_instances.is_empty() {
+            continue;
         }
-        (
-            "ScheduleLifecycleMachine",
-            "SupersedePendingOccurrences",
-            "OccurrenceLifecycleMachine",
-        ) => "Supersede".to_string(),
-        ("OccurrenceLifecycleMachine", "OccurrencesSuperseded", "ScheduleLifecycleMachine") => {
-            "ConfirmOccurrencesSuperseded".to_string()
+        for route in &composition.routes {
+            if producer_instances
+                .iter()
+                .any(|instance| **instance == route.from_machine)
+                && route.effect_variant.as_str() == effect_variant
+                && consumer_instances
+                    .iter()
+                    .any(|instance| **instance == route.to.machine)
+            {
+                inputs.push(route.to.input_variant.as_str().to_string());
+            }
         }
-        _ => format!("{producer}:{effect_variant}->{consumer}"),
     }
+    inputs.sort();
+    inputs.dedup();
+    if inputs.is_empty() {
+        panic!(
+            "routed effect {producer}::{effect_variant} declares consumer {consumer}, but no canonical composition Route resolves the consumer input"
+        );
+    }
+    inputs
 }
 
 /// Rule: every effect with `handoff_protocol: Some(name)` must have a matching
@@ -390,6 +436,26 @@ fn default_terminal_mapping_constraints() -> Vec<TerminalMappingConstraintRule> 
         }
     }
     rules
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routed_effect_policy_derives_consumer_inputs_from_typed_routes() {
+        let policy = AuditPolicy::load();
+
+        assert!(policy.routed_effect_realizations.iter().any(|rule| {
+            rule.producer_machine == "MobMachine"
+                && rule.effect_variant == "RequestRuntimeDestroy"
+                && rule.consumer_machine == "MeerkatMachine"
+                && rule.consumer_input == "Destroy"
+        }));
+        assert!(policy.routed_effect_realizations.iter().all(|rule| {
+            !rule.consumer_input.contains("->") && !rule.consumer_input.contains(':')
+        }));
+    }
 }
 
 /// Rule: detect shell-side authority state reads and shadow-state declarations

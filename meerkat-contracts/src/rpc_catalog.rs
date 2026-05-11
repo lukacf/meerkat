@@ -150,10 +150,24 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
             "InterruptParams",
             "Value",
         ),
-        RpcMethodDescriptor::basic("config/get", "Read config"),
-        RpcMethodDescriptor::basic("config/set", "Replace config"),
-        RpcMethodDescriptor::basic("config/patch", "Merge-patch config"),
-        RpcMethodDescriptor::basic("capabilities/get", "Get runtime capabilities"),
+        RpcMethodDescriptor::result_only("config/get", "Read config", "ConfigEnvelope"),
+        RpcMethodDescriptor::typed(
+            "config/set",
+            "Replace config",
+            "ConfigSetParams",
+            "ConfigEnvelope",
+        ),
+        RpcMethodDescriptor::typed(
+            "config/patch",
+            "Merge-patch config",
+            "ConfigPatchParams",
+            "ConfigEnvelope",
+        ),
+        RpcMethodDescriptor::result_only(
+            "capabilities/get",
+            "Get runtime capabilities",
+            "CapabilitiesResponse",
+        ),
         RpcMethodDescriptor::result_only(
             "runtime/host_info",
             "Get read-only runtime host information",
@@ -436,7 +450,7 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "schedule/call",
                 "Call a schedule transport tool",
                 "ScheduleToolCallParams",
-                "Value",
+                "ScheduleToolCallResult",
             ),
         ]);
     }
@@ -477,9 +491,10 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
     }
 
     if options.skills_enabled {
-        methods.extend([RpcMethodDescriptor::basic(
+        methods.extend([RpcMethodDescriptor::result_only(
             "skills/list",
             "List available skills",
+            "SkillListResponse",
         )]);
     }
 
@@ -1101,6 +1116,45 @@ mod tests {
                     "{name} must advertise its required params type"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn config_capability_and_skill_methods_advertise_generated_contracts() {
+        let methods = rpc_method_catalog(RpcMethodCatalogOptions::documented_surface());
+        for (name, expected_params_type, expected_result_type) in [
+            ("config/get", None, Some("ConfigEnvelope")),
+            (
+                "config/set",
+                Some("ConfigSetParams"),
+                Some("ConfigEnvelope"),
+            ),
+            (
+                "config/patch",
+                Some("ConfigPatchParams"),
+                Some("ConfigEnvelope"),
+            ),
+            ("capabilities/get", None, Some("CapabilitiesResponse")),
+            ("skills/list", None, Some("SkillListResponse")),
+            ("schedule/tools", None, Some("ScheduleToolsResult")),
+            (
+                "schedule/call",
+                Some("ScheduleToolCallParams"),
+                Some("ScheduleToolCallResult"),
+            ),
+        ] {
+            let descriptor = methods
+                .iter()
+                .find(|method| method.name == name)
+                .unwrap_or_else(|| panic!("missing descriptor for {name}"));
+            assert_eq!(
+                descriptor.params_type, expected_params_type,
+                "{name} params contract drifted"
+            );
+            assert_eq!(
+                descriptor.result_type, expected_result_type,
+                "{name} result contract drifted"
+            );
         }
     }
 

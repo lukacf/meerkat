@@ -3,11 +3,37 @@ import type {
   AgentErrorReport,
   AgentEvent,
   SkillKey,
+  StreamLaggedEvent,
   TurnTerminalCauseKind,
   TurnTerminalOutcome,
   Usage,
 } from './generated/events.js';
-import type { WireMobMemberStatus } from './generated/mob.js';
+import type {
+  MobAppendSystemContextResult as GeneratedMobAppendSystemContextResult,
+  MobDefinitionInput,
+  MobHelperResult as GeneratedMobHelperResult,
+  MobMemberListEntryWire,
+  MobMemberSendResult as GeneratedMobMemberSendResult,
+  MobMemberStatusResult as GeneratedMobMemberStatusResult,
+  MobProfileInput,
+  MobRespawnResult as GeneratedMobRespawnResult,
+  MobRoleWiringRuleInput,
+  MobSpawnResult as GeneratedMobSpawnResult,
+  MobSpawnSpecParams,
+  MobStatusResult as GeneratedMobStatusResult,
+  MobToolConfigInput,
+  MobWiringRulesInput,
+  WireHandlingMode,
+  WireMobMemberStatus,
+  WireMemberRef,
+  WireMobEvent,
+  WireMobRun,
+  WireRenderClass,
+  WireRenderMetadata,
+  WireRenderSalience,
+  WireResolvedModelCapabilities,
+  WireTrustedPeerSpec,
+} from './generated/mob.js';
 
 // ─── Bootstrap config ───────────────────────────────────────────
 
@@ -86,29 +112,16 @@ export type ContentBlock =
 export type ContentInput = string | ContentBlock[];
 
 /** Runtime handling mode for ordinary work. */
-export type HandlingMode = 'queue' | 'steer';
+export type HandlingMode = WireHandlingMode;
 
 /** Standardized rendering class for injected ordinary work. */
-export type RenderClass =
-  | 'user_prompt'
-  | 'peer_message'
-  | 'peer_request'
-  | 'peer_response'
-  | 'external_event'
-  | 'flow_step'
-  | 'continuation'
-  | 'system_notice'
-  | 'tool_scope_notice'
-  | 'ops_progress';
+export type RenderClass = WireRenderClass;
 
 /** Normalized rendering salience for injected work. */
-export type RenderSalience = 'background' | 'normal' | 'important' | 'urgent';
+export type RenderSalience = WireRenderSalience;
 
 /** Normalized rendering metadata for injected work. */
-export interface RenderMetadata {
-  class: RenderClass;
-  salience?: RenderSalience;
-}
+export type RenderMetadata = WireRenderMetadata;
 
 /** Runtime system-context append request. */
 export interface AppendSystemContextOptions {
@@ -140,31 +153,16 @@ export interface SessionState {
 }
 
 /** Result of appending runtime system context to a mob member session. */
-export interface MobAppendSystemContextResult {
-  mob_id: string;
-  agent_identity: string;
-  status: 'staged' | 'duplicate';
-}
+export type MobAppendSystemContextResult = GeneratedMobAppendSystemContextResult;
 
 /** Delivery receipt for a direct mob member turn. */
-export interface MemberDeliveryReceipt {
-  agent_identity: string;
-  member_ref: MobMemberRef;
-  handling_mode: HandlingMode;
-}
+export type MemberDeliveryReceipt = GeneratedMobMemberSendResult;
 
 /** Respawn receipt for a mob member. */
-export interface MemberRespawnReceipt {
-  agent_identity: string;
-  member_ref: MobMemberRef;
-}
+export type MemberRespawnReceipt = GeneratedMobRespawnResult['receipt'];
 
 /** Result envelope for a member respawn operation. */
-export interface MobRespawnResult {
-  status: 'completed' | 'topology_restore_failed';
-  receipt: MemberRespawnReceipt;
-  failed_peer_ids?: string[];
-}
+export type MobRespawnResult = GeneratedMobRespawnResult;
 
 /** Canonical terminal result for a direct browser turn. */
 export interface TurnTerminalResult {
@@ -198,6 +196,7 @@ export type {
   HookReasonCode,
   InteractionId,
   KnownAgentEventType,
+  ProviderImageMetadata,
   ReasoningCompleteEvent,
   ReasoningDeltaEvent,
   RunCompletedEvent,
@@ -245,97 +244,20 @@ export type SkillId = SkillKey;
 
 // ─── Mob types (matches meerkat-mob Rust wire format) ───────────
 
-/**
- * Mob definition passed to {@link MeerkatRuntime.createMob}.
- *
- * Matches Rust `MobDefinition` in `meerkat-mob/src/definition.rs`.
- */
-export interface MobDefinition {
-  id: string;
-  profiles: Record<string, Profile>;
-  /** Wiring rules for automatic peer connections. */
-  wiring?: WiringRules;
-  /** Named flow definitions. */
-  flows?: Record<string, unknown>;
-  /** Named MCP server configurations. */
-  mcp_servers?: Record<string, unknown>;
-  /** Named skill sources. */
-  skills?: Record<string, unknown>;
-  /** Orchestrator configuration. */
-  orchestrator?: unknown;
-  /** Backend selection config. */
-  backend?: unknown;
-}
+export type MobDefinition = MobDefinitionInput;
 
-/**
- * Profile template for spawning agents.
- *
- * Matches Rust `Profile` in `meerkat-mob/src/profile.rs`.
- * Note: there is NO `system_prompt` field — prompts are built from skills.
- */
-export interface Profile {
-  /** LLM model name (e.g. "claude-sonnet-4-5"). */
-  model: string;
-  /** Skill references to load. */
-  skills?: string[];
-  /** Tool configuration. */
-  tools?: ToolConfig;
-  /** Human-readable role description visible to peers. */
-  peer_description?: string;
-  /** Whether this agent can receive turns from external callers. */
-  external_addressable?: boolean;
-  /** Runtime mode: 'turn_driven' or 'autonomous_host'. */
-  runtime_mode?: string;
-  /** Max peer-count threshold for inline peer lifecycle notifications. */
-  max_inline_peer_notifications?: number;
-  /** JSON Schema for structured output extraction. */
-  output_schema?: unknown;
-  /** Provider-specific parameters (e.g. thinking_budget, reasoning_effort). */
-  provider_params?: unknown;
-}
+export type Profile = MobProfileInput;
 
-/** Tool configuration for a profile. Matches Rust `ToolConfig`. */
-export interface ToolConfig {
-  /** Enable built-in tools (file read, etc.). */
-  builtins?: boolean;
-  /** Enable shell execution tool. */
-  shell?: boolean;
-  /** Enable comms tools (peer messaging). */
-  comms?: boolean;
-  /** Enable memory/semantic search tools. */
-  memory?: boolean;
-  /** Enable mob management tools (spawn, retire, wire, unwire, list). */
-  mob?: boolean;
-  /** MCP server names this profile connects to. */
-  mcp?: string[];
-}
+export type ToolConfig = MobToolConfigInput;
 
-/** Wiring rules controlling automatic peer connections. */
-export interface WiringRules {
-  /** Automatically wire every spawned agent to the orchestrator. */
-  auto_wire_orchestrator?: boolean;
-  /** Fan-out wiring rules between profile roles. */
-  role_wiring?: RoleWiringRule[];
-}
+export type WiringRules = MobWiringRulesInput;
 
-/** Wiring rule between two profile roles. */
-export interface RoleWiringRule {
-  /** First profile name. */
-  a: string;
-  /** Second profile name. */
-  b: string;
-}
+export type RoleWiringRule = MobRoleWiringRuleInput;
 
 /** Spawn specification for a single agent within a mob. */
-export interface SpawnSpec {
-  profile: string;
-  agent_identity: string;
-  runtime_mode?: 'turn_driven' | 'autonomous_host';
-  initial_message?: string | ContentBlock[];
-  labels?: Record<string, string>;
-  context?: Record<string, unknown>;
-  additional_instructions?: string[];
-}
+export type SpawnSpec = Omit<MobSpawnSpecParams, 'initial_message'> & {
+  initial_message?: ContentInput;
+};
 
 /**
  * Server-resolved opaque handle for a mob member. Treat as an opaque
@@ -343,7 +265,7 @@ export interface SpawnSpec {
  * from mob spawn and member-list surfaces, and are passed back on
  * work-lane and member-targeted calls.
  */
-export type MobMemberRef = string;
+export type MobMemberRef = WireMemberRef;
 
 /** Typed lifecycle action for the `mob/lifecycle` surface. */
 export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
@@ -357,49 +279,28 @@ export interface MobLifecycleResult {
 }
 
 /** Result of a spawn operation. */
-export interface SpawnResult {
-  mob_id: string;
-  agent_identity: string;
-  member_ref: MobMemberRef;
-}
+export type SpawnResult = GeneratedMobSpawnResult;
 
 /** A mob member entry from listMembers. */
-export interface MobMember {
-  agent_identity: string;
-  member_ref: MobMemberRef;
-  profile: string;
+export type MobMember = MobMemberListEntryWire & {
+  /** @deprecated Use `role`, the generated roster field. */
+  profile: MobMemberListEntryWire['role'];
   peer_id?: string;
   external_peer_specs?: Record<string, Record<string, unknown>>;
-  runtime_mode?: string;
-  state?: string;
-  wired_to?: string[];
-  labels?: Record<string, string>;
-  status?: string;
-  error?: string;
-  is_final?: boolean;
   kickoff?: Record<string, unknown>;
-}
+};
 
 export interface ExternalPeerTarget {
-  external: {
-    name: string;
-    address: string;
-    identity: {
-      kind: "ed25519_public_key";
-      public_key: string;
-    };
-  };
+  external: WireTrustedPeerSpec;
 }
 
 export type MobPeerTarget = string | ExternalPeerTarget;
 
 /** Mob status. */
-export interface MobStatus {
-  mob_id: string;
-  status: string;
+export type MobStatus = GeneratedMobStatusResult & {
   /** @deprecated Use `status`. Kept as an inert projection of generated status. */
   state: string;
-}
+};
 
 /** Unreachable peer entry from a live member connectivity snapshot. */
 export interface MobUnreachablePeer {
@@ -414,38 +315,20 @@ export interface MobPeerConnectivitySnapshot {
   unreachable_peers: MobUnreachablePeer[];
 }
 
-export interface ResolvedModelCapabilities {
-  vision: boolean;
-  image_input: boolean;
-  image_tool_results: boolean;
-  inline_video: boolean;
-  realtime: boolean;
-  web_search: boolean;
-  image_generation: boolean;
-}
+export type ResolvedModelCapabilities = WireResolvedModelCapabilities;
 
 /** Point-in-time execution snapshot for a mob member. */
-export interface MobMemberSnapshot {
-  status: WireMobMemberStatus;
+export type MobMemberSnapshot = Omit<
+  GeneratedMobMemberStatusResult,
+  'peer_connectivity' | 'resolved_capabilities'
+> & {
   member_ref: MobMemberRef;
-  output_preview?: string;
-  error?: string;
-  tokens_used: number;
-  is_final: boolean;
-  current_session_id?: string;
   resolved_capabilities?: ResolvedModelCapabilities;
-  external_member?: unknown;
-  kickoff?: Record<string, unknown>;
   peer_connectivity?: MobPeerConnectivitySnapshot;
-}
+};
 
 /** Result envelope for helper-style mob flows. */
-export interface MobHelperResult {
-  output?: string;
-  tokens_used: number;
-  agent_identity: string;
-  member_ref: MobMemberRef;
-}
+export type MobHelperResult = GeneratedMobHelperResult;
 
 // ─── Event types (matches meerkat-core AgentEvent serde) ────────
 
@@ -472,10 +355,7 @@ export interface EventEnvelope {
 }
 
 /** Poll/subscribe lag sentinel emitted by the browser runtime. */
-export interface SubscriptionLaggedEvent {
-  type: 'lagged';
-  skipped: number;
-}
+export type SubscriptionLaggedEvent = StreamLaggedEvent;
 
 /** Direct-session event item. */
 export type SessionEvent = AgentEvent | SubscriptionLaggedEvent;
@@ -501,12 +381,7 @@ export interface AttributedEvent {
 export type AttributedEventItem = AttributedEvent | SubscriptionLaggedEvent;
 
 /** Structural mob event from the mob event log. */
-export interface MobEvent {
-  cursor: number;
-  timestamp: string;
-  mob_id: string;
-  kind: Record<string, unknown>;
-}
+export type MobEvent = WireMobEvent;
 
 export { KNOWN_AGENT_EVENT_TYPES };
 
@@ -615,8 +490,4 @@ export type ToolCallback = (args: string) => Promise<ToolCallbackResult>;
 // ─── Flow types ─────────────────────────────────────────────────
 
 /** Status of a running flow. */
-export interface FlowStatus {
-  run_id: string;
-  status: string;
-  [key: string]: unknown;
-}
+export type FlowStatus = WireMobRun;

@@ -5,3 +5,6 @@ description = "Minimal browser-safe mobpack fixture for WASM live smoke coverage
 
 [requires]
 capabilities = ["comms"]
+
+[profiles.browser]
+skills = ["skills/browser-guide.md"]

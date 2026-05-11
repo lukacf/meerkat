@@ -409,10 +409,16 @@ pub fn schedule_mob_bundle_composition() -> CompositionSchema {
 
 pub fn meerkat_mob_seam_composition() -> CompositionSchema {
     let mut handoff_protocols = Vec::new();
-    handoff_protocols.extend(mob_bundle_composition().handoff_protocols);
-    handoff_protocols.extend(external_tool_bundle_composition().handoff_protocols);
-    handoff_protocols.extend(supervisor_trust_bundle_composition().handoff_protocols);
-    handoff_protocols.extend(mob_destroy_session_ingress_bundle_composition().handoff_protocols);
+    let mut invariants = Vec::new();
+    for bundle in [
+        mob_bundle_composition(),
+        external_tool_bundle_composition(),
+        supervisor_trust_bundle_composition(),
+        mob_destroy_session_ingress_bundle_composition(),
+    ] {
+        handoff_protocols.extend(bundle.handoff_protocols);
+        invariants.extend(bundle.invariants);
+    }
 
     CompositionSchema {
         name: comp_id("meerkat_mob_seam"),
@@ -610,7 +616,7 @@ pub fn meerkat_mob_seam_composition() -> CompositionSchema {
         transaction_plans: vec![],
         actor_priorities: vec![],
         scheduler_rules: vec![],
-        invariants: vec![],
+        invariants,
         witnesses: vec![
             witness(
                 "basic_round_trip",

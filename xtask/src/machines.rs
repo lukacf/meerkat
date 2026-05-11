@@ -27,7 +27,10 @@ use meerkat_machine_schema::{
 };
 use quote::ToTokens;
 use serde::Serialize;
-use syn::spanned::Spanned;
+use syn::{
+    spanned::Spanned,
+    visit::{self, Visit},
+};
 
 #[derive(Debug, Clone, Args)]
 pub struct SelectionArgs {
@@ -972,7 +975,6 @@ fn rust_type_tokens(ty: &syn::Type) -> String {
 
 pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<Vec<String>> {
     let mut mismatches = Vec::new();
-    let forbidden_modules = ["flow_run", "flow_frame", "loop_iteration"];
     let forbidden_flow_projection_fields = [
         "phase",
         "step_status",
@@ -1025,112 +1027,28 @@ pub fn collect_direct_flow_reducer_transition_mismatches(root: &Path) -> Result<
         })?;
         let lines = contents.lines().collect::<Vec<_>>();
         let test_only_lines = flow_reducer_test_only_lines(&rel, &lines);
-        let mut module_aliases = BTreeMap::new();
-        let mut bare_transition_aliases = BTreeMap::new();
-        let mut bare_input_aliases = BTreeMap::new();
+        let parsed = syn::parse_file(&contents)
+            .with_context(|| format!("parse flow reducer candidate {rel}"))?;
+        let aliases = collect_reducer_aliases(&parsed);
+        let mut reducer_visitor = ReducerDirectUseVisitor {
+            rel: &rel,
+            lines: &lines,
+            test_only_lines: &test_only_lines,
+            aliases: &aliases,
+            mismatches: &mut mismatches,
+        };
+        reducer_visitor.visit_file(&parsed);
 
-        for module in forbidden_modules {
-            module_aliases.insert(module.to_string(), module.to_string());
-        }
-
-        for line in contents.lines() {
-            let compact = line.split_whitespace().collect::<Vec<_>>().join(" ");
-            for module in forbidden_modules {
-                if let Some(alias) = reducer_module_alias(&compact, module) {
-                    module_aliases.insert(alias, module.to_string());
-                }
-                if compact.contains(&format!("{module}::transition"))
-                    || compact.contains(&format!("{module}::Input"))
-                    || compact.contains(&format!("{module}::{{"))
-                {
-                    collect_reducer_bare_aliases(
-                        &compact,
-                        module,
-                        &mut bare_transition_aliases,
-                        &mut bare_input_aliases,
-                    );
-                }
-            }
-        }
-
-        for (line_index, line) in lines.iter().enumerate() {
-            if test_only_lines[line_index] {
-                continue;
-            }
-            for alias in module_aliases.keys() {
-                let module = module_aliases
-                    .get(alias)
-                    .map(String::as_str)
-                    .unwrap_or(alias);
-                for token in [format!("{alias}::transition("), format!("{alias}::Input::")] {
-                    if line.contains(&token)
-                        && !flow_reducer_direct_use_is_structurally_allowed(
-                            &rel, &lines, line_index, module, &token,
-                        )
-                    {
-                        mismatches.push(format!(
-                            "direct live-flow reducer transition `{token}` is not MobMachine-command gated: {rel}:{}",
-                            line_index + 1
-                        ));
-                    }
-                }
-            }
-            for (alias, module) in &bare_transition_aliases {
-                if line.contains(&format!("{alias}("))
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, alias,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer transition alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for (alias, module) in &bare_input_aliases {
-                let token = format!("{alias}::");
-                if line.contains(&token)
-                    && !flow_reducer_direct_use_is_structurally_allowed(
-                        &rel, &lines, line_index, module, &token,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow reducer input alias `{alias}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_flow_projection_fields {
-                let token = format!(".flow_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for field in forbidden_frame_projection_fields {
-                let token = format!(".kernel_state.{field}");
-                if projection_field_is_directly_written(line, &token) {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-            for token in forbidden_projection_cas_writes {
-                if line.contains(token)
-                    && !flow_reducer_projection_commit_is_structurally_allowed(
-                        &rel, &lines, line_index,
-                    )
-                {
-                    mismatches.push(format!(
-                        "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {rel}:{}",
-                        line_index + 1
-                    ));
-                }
-            }
-        }
+        let mut projection_visitor = FlowProjectionMutationVisitor {
+            rel: &rel,
+            lines: &lines,
+            test_only_lines: &test_only_lines,
+            forbidden_flow_projection_fields: &forbidden_flow_projection_fields,
+            forbidden_frame_projection_fields: &forbidden_frame_projection_fields,
+            forbidden_projection_cas_writes: &forbidden_projection_cas_writes,
+            mismatches: &mut mismatches,
+        };
+        projection_visitor.visit_file(&parsed);
     }
 
     Ok(mismatches)
@@ -1144,9 +1062,42 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
 
     let contents = fs::read_to_string(&actor_path)
         .with_context(|| format!("read Mob runtime actor {}", actor_path.display()))?;
-    let lines = contents.lines().collect::<Vec<_>>();
     let rel = relative_slash_path(root, &actor_path)?;
-    let critical_inputs = [
+    let parsed =
+        syn::parse_file(&contents).with_context(|| format!("parse Mob runtime actor {rel}"))?;
+    let critical_inputs = mob_runtime_catalog_command_gate_requirements();
+    let schema_input_variants = mob_machine_input_variant_names();
+    let mut mismatches = Vec::new();
+
+    for spec in &critical_inputs {
+        if !schema_input_variants.contains(spec.input) {
+            mismatches.push(format!(
+                "Mob runtime command gate requirement references unknown MobMachineInput::{} in the canonical machine schema",
+                spec.input
+            ));
+            continue;
+        }
+        let gated = match spec.scope {
+            MobCatalogCommandGateScope::Function(name) => {
+                function_named_has_fail_closed_gate(&parsed, name, spec.input)
+            }
+            MobCatalogCommandGateScope::CommandArm(variant) => {
+                mob_command_arm_has_fail_closed_gate(&parsed, variant, spec.input)
+            }
+        };
+        if !gated {
+            mismatches.push(format!(
+                "MobCommand::{} is catalog-classified but does not fail-close on MobMachineInput::{} in {}",
+                spec.input, spec.input, rel
+            ));
+        }
+    }
+
+    Ok(mismatches)
+}
+
+fn mob_runtime_catalog_command_gate_requirements() -> Vec<MobCatalogCommandGateSpec> {
+    vec![
         MobCatalogCommandGateSpec {
             input: "RunFlow",
             scope: MobCatalogCommandGateScope::Function("handle_run_flow"),
@@ -1163,23 +1114,22 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
             input: "ForceCancel",
             scope: MobCatalogCommandGateScope::Function("handle_force_cancel"),
         },
-    ];
-    let mut mismatches = Vec::new();
+    ]
+}
 
-    for spec in critical_inputs {
-        let scope = spec.scope.resolve(&lines);
-        let gated = scope.is_some_and(|(start, end)| {
-            mob_catalog_input_has_fail_closed_gate(&lines[start..=end], spec.input)
-        });
-        if !gated {
-            mismatches.push(format!(
-                "MobCommand::{} is catalog-classified but does not fail-close on MobMachineInput::{} in {}",
-                spec.input, spec.input, rel
-            ));
-        }
-    }
-
-    Ok(mismatches)
+fn mob_machine_input_variant_names() -> BTreeSet<String> {
+    canonical_machine_schemas()
+        .into_iter()
+        .find(|schema| schema.machine.as_str() == "MobMachine")
+        .map(|schema| {
+            schema
+                .inputs
+                .variants
+                .into_iter()
+                .map(|variant| variant.name.as_str().to_owned())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1194,186 +1144,642 @@ enum MobCatalogCommandGateScope {
     CommandArm(&'static str),
 }
 
-impl MobCatalogCommandGateScope {
-    fn resolve(self, lines: &[&str]) -> Option<(usize, usize)> {
-        match self {
-            Self::Function(name) => function_scope_bounds(lines, name),
-            Self::CommandArm(variant) => command_arm_scope_bounds(lines, variant),
+fn function_named_has_fail_closed_gate(parsed: &syn::File, name: &str, input: &str) -> bool {
+    let mut visitor = FunctionGateVisitor {
+        name,
+        input,
+        found: false,
+    };
+    visitor.visit_file(parsed);
+    visitor.found
+}
+
+struct FunctionGateVisitor<'a> {
+    name: &'a str,
+    input: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for FunctionGateVisitor<'_> {
+    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+        if item.sig.ident == self.name
+            && block_has_fail_closed_mob_machine_gate(&item.block, self.input)
+        {
+            self.found = true;
+            return;
         }
+        visit::visit_item_fn(self, item);
+    }
+
+    fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+        if item.sig.ident == self.name
+            && block_has_fail_closed_mob_machine_gate(&item.block, self.input)
+        {
+            self.found = true;
+            return;
+        }
+        visit::visit_impl_item_fn(self, item);
     }
 }
 
-fn reducer_module_alias(line: &str, module: &str) -> Option<String> {
-    let marker = format!("{module} as ");
-    let index = line.find(&marker)?;
-    Some(
-        line[index + marker.len()..]
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect(),
+fn mob_command_arm_has_fail_closed_gate(parsed: &syn::File, variant: &str, input: &str) -> bool {
+    let mut visitor = MobCommandArmGateVisitor {
+        variant,
+        input,
+        found: false,
+    };
+    visitor.visit_file(parsed);
+    visitor.found
+}
+
+struct MobCommandArmGateVisitor<'a> {
+    variant: &'a str,
+    input: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MobCommandArmGateVisitor<'_> {
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        for arm in &node.arms {
+            if pat_mentions_path_variant(&arm.pat, "MobCommand", self.variant)
+                && expr_has_fail_closed_mob_machine_gate(&arm.body, self.input)
+            {
+                self.found = true;
+                return;
+            }
+        }
+        visit::visit_expr_match(self, node);
+    }
+}
+
+fn block_has_fail_closed_mob_machine_gate(block: &syn::Block, input: &str) -> bool {
+    let mut visitor = FailClosedMobMachineGateVisitor {
+        input,
+        found: false,
+    };
+    visitor.visit_block(block);
+    visitor.found
+}
+
+fn expr_has_fail_closed_mob_machine_gate(expr: &syn::Expr, input: &str) -> bool {
+    let mut visitor = FailClosedMobMachineGateVisitor {
+        input,
+        found: false,
+    };
+    visitor.visit_expr(expr);
+    visitor.found
+}
+
+struct FailClosedMobMachineGateVisitor<'a> {
+    input: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for FailClosedMobMachineGateVisitor<'_> {
+    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
+        if expr_contains_mob_machine_gate_call(&node.expr, self.input, true) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_try(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if expr_contains_mob_machine_gate_call(&syn::Expr::Call(node.clone()), self.input, false) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if expr_contains_mob_machine_gate_call(
+            &syn::Expr::MethodCall(node.clone()),
+            self.input,
+            false,
+        ) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn expr_contains_mob_machine_gate_call(
+    expr: &syn::Expr,
+    input: &str,
+    fail_closed_context: bool,
+) -> bool {
+    let mut visitor = MobMachineGateCallVisitor {
+        input,
+        fail_closed_context,
+        found: false,
+    };
+    visitor.visit_expr(expr);
+    visitor.found
+}
+
+struct MobMachineGateCallVisitor<'a> {
+    input: &'a str,
+    fail_closed_context: bool,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MobMachineGateCallVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref()
+            && path.path.segments.last().is_some_and(|segment| {
+                segment.ident == "probe_mob_machine_input"
+                    || (self.fail_closed_context && is_fail_closed_gate_function(&segment.ident))
+            })
+            && node
+                .args
+                .iter()
+                .any(|arg| expr_mentions_mob_machine_input(arg, self.input))
+        {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if (node.method == "probe_mob_machine_input"
+            || (self.fail_closed_context && is_fail_closed_gate_function(&node.method)))
+            && node
+                .args
+                .iter()
+                .any(|arg| expr_mentions_mob_machine_input(arg, self.input))
+        {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn is_fail_closed_gate_function(ident: &syn::Ident) -> bool {
+    matches!(
+        ident.to_string().as_str(),
+        "apply_dsl_input"
+            | "prepare_dsl_input"
+            | "apply_command_admission"
+            | "prepare_command_admission"
     )
-    .filter(|alias: &String| !alias.is_empty())
 }
 
-fn collect_reducer_bare_aliases(
-    line: &str,
-    module: &str,
-    transition_aliases: &mut BTreeMap<String, String>,
-    input_aliases: &mut BTreeMap<String, String>,
+fn expr_mentions_mob_machine_input(expr: &syn::Expr, input: &str) -> bool {
+    let mut visitor = MobMachineInputVariantVisitor {
+        input,
+        found: false,
+    };
+    visitor.visit_expr(expr);
+    visitor.found
+}
+
+struct MobMachineInputVariantVisitor<'a> {
+    input: &'a str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for MobMachineInputVariantVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if path_mentions_variant(&node.path, "MobMachineInput", self.input) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        if path_mentions_variant(&node.path, "MobMachineInput", self.input) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+fn pat_mentions_path_variant(pat: &syn::Pat, owner: &str, variant: &str) -> bool {
+    match pat {
+        syn::Pat::Path(path) => path_mentions_variant(&path.path, owner, variant),
+        syn::Pat::Struct(item) => path_mentions_variant(&item.path, owner, variant),
+        syn::Pat::TupleStruct(item) => path_mentions_variant(&item.path, owner, variant),
+        syn::Pat::Or(item) => item
+            .cases
+            .iter()
+            .any(|case| pat_mentions_path_variant(case, owner, variant)),
+        syn::Pat::Reference(item) => pat_mentions_path_variant(&item.pat, owner, variant),
+        syn::Pat::Paren(item) => pat_mentions_path_variant(&item.pat, owner, variant),
+        _ => false,
+    }
+}
+
+fn path_mentions_variant(path: &syn::Path, owner: &str, variant: &str) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    segments
+        .windows(2)
+        .any(|window| window[0] == owner && window[1] == variant)
+}
+
+const FLOW_REDUCER_MODULES: &[&str] = &["flow_run", "flow_frame", "loop_iteration"];
+
+#[derive(Debug, Clone, Default)]
+struct ReducerAliases {
+    modules: BTreeMap<String, String>,
+    transitions: BTreeMap<String, String>,
+    inputs: BTreeMap<String, String>,
+}
+
+fn collect_reducer_aliases(parsed: &syn::File) -> ReducerAliases {
+    let mut aliases = ReducerAliases::default();
+    for module in FLOW_REDUCER_MODULES {
+        aliases
+            .modules
+            .insert((*module).to_owned(), (*module).to_owned());
+    }
+    let mut visitor = ReducerUseAliasVisitor {
+        aliases: &mut aliases,
+    };
+    visitor.visit_file(parsed);
+    aliases
+}
+
+struct ReducerUseAliasVisitor<'a> {
+    aliases: &'a mut ReducerAliases,
+}
+
+impl<'ast> Visit<'ast> for ReducerUseAliasVisitor<'_> {
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        collect_reducer_aliases_from_use_tree(&item.tree, &mut Vec::new(), self.aliases);
+        visit::visit_item_use(self, item);
+    }
+}
+
+fn collect_reducer_aliases_from_use_tree(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    aliases: &mut ReducerAliases,
 ) {
-    if let Some((_, after)) = line.split_once(&format!("{module}::transition")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            transition_aliases.insert(alias, module.to_string());
-        } else {
-            transition_aliases.insert("transition".to_string(), module.to_string());
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_reducer_aliases_from_use_tree(&path.tree, prefix, aliases);
+            prefix.pop();
         }
-    }
-    if let Some((_, after)) = line.split_once(&format!("{module}::Input")) {
-        if let Some(alias) = after
-            .trim_start()
-            .strip_prefix("as ")
-            .map(|value| {
-                value
-                    .chars()
-                    .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                    .collect::<String>()
-            })
-            .filter(|alias| !alias.is_empty())
-        {
-            input_aliases.insert(alias, module.to_string());
-        } else {
-            input_aliases.insert("Input".to_string(), module.to_string());
+        syn::UseTree::Name(name) => {
+            let mut full_path = prefix.clone();
+            full_path.push(name.ident.to_string());
+            classify_reducer_use_path(&full_path, name.ident.to_string(), aliases);
         }
-    }
-    if line.contains(&format!("{module}::*")) {
-        transition_aliases.insert("transition".to_string(), module.to_string());
-        input_aliases.insert("Input".to_string(), module.to_string());
-    }
-    if let Some((_, imports)) = line.split_once(&format!("{module}::{{"))
-        && let Some((imports, _)) = imports.split_once('}')
-    {
-        for item in imports.split(',').map(str::trim) {
-            if let Some(alias) = item.strip_prefix("transition as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    transition_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "transition" {
-                transition_aliases.insert("transition".to_string(), module.to_string());
-            } else if let Some(alias) = item.strip_prefix("Input as ") {
-                let alias = alias.trim();
-                if !alias.is_empty() {
-                    input_aliases.insert(alias.to_string(), module.to_string());
-                }
-            } else if item == "Input" {
-                input_aliases.insert("Input".to_string(), module.to_string());
+        syn::UseTree::Rename(rename) => {
+            let mut full_path = prefix.clone();
+            full_path.push(rename.ident.to_string());
+            classify_reducer_use_path(&full_path, rename.rename.to_string(), aliases);
+        }
+        syn::UseTree::Glob(_) => {
+            if let Some(module) = prefix.last().and_then(|name| reducer_module_name(name)) {
+                aliases
+                    .transitions
+                    .insert("transition".to_owned(), module.to_owned());
+                aliases.inputs.insert("Input".to_owned(), module.to_owned());
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_reducer_aliases_from_use_tree(item, prefix, aliases);
             }
         }
     }
 }
 
-fn projection_field_is_directly_written(line: &str, token: &str) -> bool {
-    let Some(index) = line.find(token) else {
-        return false;
-    };
-    let tail = &line[index + token.len()..];
-    let tail = tail.trim_start();
-    (tail.starts_with('=') && !tail.starts_with("==") && !tail.starts_with("=>"))
-        || tail.starts_with("+=")
-        || tail.starts_with("-=")
-        || tail.starts_with(".insert(")
-        || tail.starts_with(".remove(")
-        || tail.starts_with(".clear(")
-        || tail.starts_with(".push(")
-        || tail.starts_with(".retain(")
-}
-
-fn mob_catalog_input_has_fail_closed_gate(lines: &[&str], input: &str) -> bool {
-    let token = format!("MobMachineInput::{input}");
-    lines
-        .iter()
-        .enumerate()
-        .filter(|(_, line)| line.contains(&token))
-        .any(|(line_index, _)| mob_catalog_input_occurrence_is_fail_closed(lines, line_index))
-}
-
-fn mob_catalog_input_occurrence_is_fail_closed(lines: &[&str], line_index: usize) -> bool {
-    let start = line_index.saturating_sub(4);
-    let end = (line_index + 18).min(lines.len());
-    let window = lines[start..end].join("\n");
-    let compact = window.split_whitespace().collect::<Vec<_>>().join(" ");
-
-    if compact.contains("let _ = self.apply_dsl_input") || compact.contains("may diverge") {
-        return false;
+fn classify_reducer_use_path(
+    full_path: &[String],
+    local_name: String,
+    aliases: &mut ReducerAliases,
+) {
+    if let Some(module) = full_path.last().and_then(|name| reducer_module_name(name)) {
+        aliases.modules.insert(local_name, module.to_owned());
+        return;
     }
-
-    compact.contains("probe_mob_machine_input(")
-        || (compact.contains("apply_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_dsl_input(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("apply_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-        || (compact.contains("prepare_command_admission(")
-            && (compact.contains('?')
-                || compact.contains("return Err")
-                || compact.contains("continue;")
-                || compact.contains(".map_err(")))
-}
-
-fn function_scope_bounds(lines: &[&str], function_name: &str) -> Option<(usize, usize)> {
-    let needle = format!("fn{function_name}(");
-    let start = lines.iter().position(|line| {
-        let compact = line.split_whitespace().collect::<String>();
-        compact.contains(&needle)
-    })?;
-    brace_scope_bounds(lines, start)
-}
-
-fn command_arm_scope_bounds(lines: &[&str], variant: &str) -> Option<(usize, usize)> {
-    let needle = format!("MobCommand::{variant}");
-    let start = lines.iter().position(|line| line.contains(&needle))?;
-    brace_scope_bounds(lines, start)
-}
-
-fn brace_scope_bounds(lines: &[&str], start: usize) -> Option<(usize, usize)> {
-    let mut depth = 0usize;
-    let mut opened = false;
-    for (index, line) in lines.iter().enumerate().skip(start) {
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
+    for window in full_path.windows(2) {
+        if let Some(module) = reducer_module_name(&window[0]) {
+            match window[1].as_str() {
+                "transition" => {
+                    aliases.transitions.insert(local_name, module.to_owned());
+                    return;
                 }
-                '}' if depth > 0 => depth -= 1,
+                "Input" => {
+                    aliases.inputs.insert(local_name, module.to_owned());
+                    return;
+                }
                 _ => {}
             }
         }
-        if opened && depth == 0 {
-            return Some((start, index));
+    }
+}
+
+fn reducer_module_name(name: &str) -> Option<&'static str> {
+    FLOW_REDUCER_MODULES
+        .iter()
+        .copied()
+        .find(|module| *module == name)
+}
+
+struct ReducerDirectUseVisitor<'a, 'b> {
+    rel: &'a str,
+    lines: &'a [&'a str],
+    test_only_lines: &'a [bool],
+    aliases: &'a ReducerAliases,
+    mismatches: &'b mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for ReducerDirectUseVisitor<'_, '_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(func_path) = node.func.as_ref() {
+            self.record_reducer_path_use(&func_path.path);
+        }
+        visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
+        self.record_reducer_path_use(&node.path);
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+impl ReducerDirectUseVisitor<'_, '_> {
+    fn record_reducer_path_use(&mut self, path: &syn::Path) {
+        let line_index = path.span().start().line.saturating_sub(1);
+        if self
+            .test_only_lines
+            .get(line_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            return;
+        }
+
+        if let Some(use_ref) = reducer_transition_use(path, self.aliases)
+            && !flow_reducer_direct_use_is_structurally_allowed(
+                self.rel,
+                self.lines,
+                line_index,
+                use_ref.module,
+                use_ref.token.as_str(),
+            )
+        {
+            match use_ref.kind {
+                ReducerUseKind::QualifiedTransition => self.mismatches.push(format!(
+                    "direct live-flow reducer transition `{}` is not MobMachine-command gated: {}:{}",
+                    use_ref.token,
+                    self.rel,
+                    line_index + 1
+                )),
+                ReducerUseKind::TransitionAlias => self.mismatches.push(format!(
+                    "direct live-flow reducer transition alias `{}` is not MobMachine-command gated: {}:{}",
+                    use_ref.alias,
+                    self.rel,
+                    line_index + 1
+                )),
+                ReducerUseKind::QualifiedInput => self.mismatches.push(format!(
+                    "direct live-flow reducer transition `{}` is not MobMachine-command gated: {}:{}",
+                    use_ref.token,
+                    self.rel,
+                    line_index + 1
+                )),
+                ReducerUseKind::InputAlias => self.mismatches.push(format!(
+                    "direct live-flow reducer input alias `{}` is not MobMachine-command gated: {}:{}",
+                    use_ref.alias,
+                    self.rel,
+                    line_index + 1
+                )),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ReducerUseKind {
+    QualifiedTransition,
+    TransitionAlias,
+    QualifiedInput,
+    InputAlias,
+}
+
+#[derive(Debug)]
+struct ReducerUseRef<'a> {
+    module: &'a str,
+    alias: String,
+    token: String,
+    kind: ReducerUseKind,
+}
+
+fn reducer_transition_use<'a>(
+    path: &syn::Path,
+    aliases: &'a ReducerAliases,
+) -> Option<ReducerUseRef<'a>> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+
+    if segments.len() == 1
+        && let Some(module) = aliases.transitions.get(&segments[0])
+    {
+        return Some(ReducerUseRef {
+            module,
+            alias: segments[0].clone(),
+            token: segments[0].clone(),
+            kind: ReducerUseKind::TransitionAlias,
+        });
+    }
+
+    if segments.len() >= 2 {
+        if let Some(module) = aliases.transitions.get(&segments[0]) {
+            return Some(ReducerUseRef {
+                module,
+                alias: segments[0].clone(),
+                token: format!("{}::", segments[0]),
+                kind: ReducerUseKind::TransitionAlias,
+            });
+        }
+        if let Some(module) = aliases.inputs.get(&segments[0]) {
+            return Some(ReducerUseRef {
+                module,
+                alias: segments[0].clone(),
+                token: format!("{}::", segments[0]),
+                kind: ReducerUseKind::InputAlias,
+            });
+        }
+    }
+
+    for window in segments.windows(2) {
+        if window[1] == "transition"
+            && let Some(module) = aliases.modules.get(&window[0])
+        {
+            return Some(ReducerUseRef {
+                module,
+                alias: window[0].clone(),
+                token: format!("{}::transition(", window[0]),
+                kind: ReducerUseKind::QualifiedTransition,
+            });
+        }
+    }
+
+    for window in segments.windows(2) {
+        if window[1] == "Input"
+            && let Some(module) = aliases.modules.get(&window[0])
+        {
+            return Some(ReducerUseRef {
+                module,
+                alias: window[0].clone(),
+                token: format!("{}::Input::", window[0]),
+                kind: ReducerUseKind::QualifiedInput,
+            });
+        }
+    }
+
+    None
+}
+
+struct FlowProjectionMutationVisitor<'a, 'b> {
+    rel: &'a str,
+    lines: &'a [&'a str],
+    test_only_lines: &'a [bool],
+    forbidden_flow_projection_fields: &'a [&'a str],
+    forbidden_frame_projection_fields: &'a [&'a str],
+    forbidden_projection_cas_writes: &'a [&'a str],
+    mismatches: &'b mut Vec<String>,
+}
+
+impl<'ast> Visit<'ast> for FlowProjectionMutationVisitor<'_, '_> {
+    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
+        self.record_projection_assignment(&node.left);
+        visit::visit_expr_assign(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::AddAssign(_) | syn::BinOp::SubAssign(_)) {
+            self.record_projection_assignment(&node.left);
+        }
+        visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.record_projection_method_call(node);
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+impl FlowProjectionMutationVisitor<'_, '_> {
+    fn record_projection_assignment(&mut self, left: &syn::Expr) {
+        if let Some(token) = projection_field_token(
+            left,
+            self.forbidden_flow_projection_fields,
+            self.forbidden_frame_projection_fields,
+        ) {
+            self.push_projection_mismatch(left.span().start().line, token);
+        }
+    }
+
+    fn record_projection_method_call(&mut self, call: &syn::ExprMethodCall) {
+        let method = call.method.to_string();
+        if matches!(
+            method.as_str(),
+            "insert" | "remove" | "clear" | "push" | "retain"
+        ) && let Some(token) = projection_field_token(
+            &call.receiver,
+            self.forbidden_flow_projection_fields,
+            self.forbidden_frame_projection_fields,
+        ) {
+            self.push_projection_mismatch(call.method.span().start().line, token);
+            return;
+        }
+
+        let cas_token = format!(".{method}(");
+        if self
+            .forbidden_projection_cas_writes
+            .contains(&cas_token.as_str())
+        {
+            let line = call.method.span().start().line;
+            let line_index = line.saturating_sub(1);
+            if !self
+                .test_only_lines
+                .get(line_index)
+                .copied()
+                .unwrap_or(false)
+                && !flow_reducer_projection_commit_is_structurally_allowed(
+                    self.rel, self.lines, line_index,
+                )
+            {
+                self.push_projection_mismatch(line, cas_token);
+            }
+        }
+    }
+
+    fn push_projection_mismatch(&mut self, line: usize, token: String) {
+        let line_index = line.saturating_sub(1);
+        if self
+            .test_only_lines
+            .get(line_index)
+            .copied()
+            .unwrap_or(false)
+        {
+            return;
+        }
+        self.mismatches.push(format!(
+            "direct live-flow projection mutation `{token}` is not MobMachine-command gated: {}:{}",
+            self.rel, line
+        ));
+    }
+}
+
+fn projection_field_token(
+    expr: &syn::Expr,
+    flow_fields: &[&str],
+    frame_fields: &[&str],
+) -> Option<String> {
+    let chain = field_access_chain(expr)?;
+    for window in chain.windows(2) {
+        if window[0] == "flow_state" && flow_fields.contains(&window[1].as_str()) {
+            return Some(format!(".flow_state.{}", window[1]));
+        }
+        if window[0] == "kernel_state" && frame_fields.contains(&window[1].as_str()) {
+            return Some(format!(".kernel_state.{}", window[1]));
         }
     }
     None
+}
+
+fn field_access_chain(expr: &syn::Expr) -> Option<Vec<String>> {
+    match expr {
+        syn::Expr::Field(field) => {
+            let mut chain = field_access_chain(&field.base)?;
+            if let syn::Member::Named(ident) = &field.member {
+                chain.push(ident.to_string());
+                Some(chain)
+            } else {
+                None
+            }
+        }
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .map(|segment| vec![segment.ident.to_string()]),
+        syn::Expr::Paren(paren) => field_access_chain(&paren.expr),
+        syn::Expr::Reference(reference) => field_access_chain(&reference.expr),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

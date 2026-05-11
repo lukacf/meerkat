@@ -31,8 +31,9 @@ use async_trait::async_trait;
 
 use meerkat_client::LlmClient;
 use meerkat_contracts::{
-    MobDefinitionInput, MobLifecycleParams, MobLifecycleResult, MobSpawnManyResultEntry,
-    WireMemberRef, WireMobLifecycleAction,
+    MobDefinitionInput, MobEventsResult, MobFlowStatusResult, MobLifecycleParams,
+    MobLifecycleResult, MobSpawnManyResultEntry, WireMemberRef, WireMobEvent,
+    WireMobLifecycleAction, WireMobRun,
 };
 use meerkat_core::AppendSystemContextStatus;
 use meerkat_core::ScopedAgentEvent;
@@ -2283,38 +2284,38 @@ impl MobMcpDispatcher {
             tool(
                 "mob_create",
                 &format!("{PRIMER} Create a new mob from a definition. Returns mob_id."),
-                json!({"type":"object","properties":{"definition":{"type":"object"}},"required":["definition"]}),
+                tool_schema::<MobCreateArgs>(),
             ),
             tool(
                 "mob_list",
                 &format!("List mobs or get detail for one. Omit mob_id for summary of all mobs; \
                      provide mob_id for detailed status of that mob. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"}}}),
+                tool_schema::<MobListArgs>(),
             ),
             tool(
                 "mob_lifecycle",
                 &format!("Lifecycle action on a mob. action: stop | resume | reset | complete | destroy. {COMMON}"),
-                lifecycle_input_schema(),
+                tool_schema::<MobLifecycleParams>(),
             ),
             tool(
                 "mob_events",
                 &format!("Fetch mob lifecycle events. Optional: after_cursor, limit. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"after_cursor":{"type":"integer"},"limit":{"type":"integer"}},"required":["mob_id"]}),
+                tool_schema::<EventsArgs>(),
             ),
             tool(
                 "mob_run_flow",
                 &format!("Start a configured flow run. Required: mob_id, flow_id. Optional params object. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"flow_id":{"type":"string"},"params":{"type":"object"}},"required":["mob_id","flow_id"]}),
+                tool_schema::<RunFlowArgs>(),
             ),
             tool(
                 "mob_flow_status",
                 &format!("Read flow run status and ledgers by run_id. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"run_id":{"type":"string"}},"required":["mob_id","run_id"]}),
+                tool_schema::<FlowStatusArgs>(),
             ),
             tool(
                 "mob_cancel_flow",
                 &format!("Cancel an in-flight flow run by run_id. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"run_id":{"type":"string"}},"required":["mob_id","run_id"]}),
+                tool_schema::<FlowStatusArgs>(),
             ),
             // ── Member-level (mob_* member ops) ────────────────────────
             tool(
@@ -2322,154 +2323,57 @@ impl MobMcpDispatcher {
                 &format!("Spawn one or more mob members. Required: mob_id, specs[].profile, specs[].agent_identity. \
                      Optional per-spec: backend=session|external, runtime_mode=autonomous_host|turn_driven, \
                      initial_message, labels (key-value map), context (opaque JSON). {COMMON}"),
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "mob_id":{"type":"string"},
-                        "specs":{
-                            "type":"array",
-                            "items":{
-                                "type":"object",
-                                "properties":{
-                                    "profile":{"type":"string"},
-                                    "agent_identity":{"type":"string"},
-                                    "initial_message": content_input_schema(),
-                                    "backend":{"type":"string","enum":["session","external"]},
-                                    "binding": runtime_binding_schema(),
-                                    "runtime_mode":{"type":"string","enum":["autonomous_host","turn_driven"]},
-                                    "labels":{"type":"object","additionalProperties":{"type":"string"}},
-                                    "context":{"type":"object"}
-                                },
-                                "required":["profile","agent_identity"]
-                            }
-                        }
-                    },
-                    "required":["mob_id","specs"]
-                }),
+                tool_schema::<SpawnManyMeerkatsArgs>(),
             ),
             tool(
                 "mob_retire_member",
                 &format!("Retire a spawned mob member by identity. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
+                tool_schema::<RetireArgs>(),
             ),
             tool(
                 "mob_list_members",
                 &format!("List current members in a mob. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"}},"required":["mob_id"]}),
+                tool_schema::<MobIdArgs>(),
             ),
             tool(
                 "mob_wire",
 	                &format!("Wire or unwire bidirectional trust between a local member and a peer target. \
 	                     action: wire | unwire. Use external_binding for wire and external name handles for unwire. {COMMON}"),
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "mob_id":{"type":"string"},
-                        "agent_identity":{"type":"string"},
-                        "peer":{
-                            "oneOf":[
-                                {
-                                    "type":"object",
-                                    "properties":{"local":{"type":"string"}},
-                                    "required":["local"],
-                                    "additionalProperties":false
-                                },
-                                {
-                                    "type":"object",
-                                    "properties":{
-	                                        "external_binding":{
-	                                            "type":"object",
-	                                            "properties":{
-	                                                "name":{"type":"string"},
-                                                "address":{"type":"string"},
-                                                "identity":{
-                                                    "type":"object",
-                                                    "properties":{
-                                                        "kind":{"type":"string","enum":["ed25519_public_key"]},
-                                                        "public_key":{"type":"string"}
-                                                    },
-                                                    "required":["kind","public_key"],
-                                                    "additionalProperties":false
-                                                }
-	                                            },
-	                                            "required":["name","address","identity"],
-	                                            "additionalProperties":false
-	                                        }
-	                                    },
-	                                    "required":["external_binding"],
-	                                    "additionalProperties":false
-	                                },
-	                                {
-	                                    "type":"object",
-	                                    "properties":{
-	                                        "external":{
-	                                            "type":"object",
-	                                            "properties":{
-	                                                "name":{"type":"string"}
-	                                            },
-	                                            "required":["name"],
-	                                            "additionalProperties":false
-	                                        }
-	                                    },
-	                                    "required":["external"],
-	                                    "additionalProperties":false
-	                                }
-	                            ]
-	                        },
-                        "action":{"type":"string","enum":["wire","unwire"]}
-                    },
-                    "required":["mob_id","agent_identity","peer","action"]
-                }),
+                tool_schema::<WireActionArgs>(),
             ),
             tool(
                 "mob_respawn",
                 &format!("Retire and re-spawn a member with the same profile. \
                      Required: mob_id, agent_identity. Optional: initial_message. \
                      Returns an identity-native respawn receipt. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"},"initial_message": content_input_schema()},"required":["mob_id","agent_identity"]}),
+                tool_schema::<RespawnArgs>(),
             ),
             tool(
                 "mob_force_cancel",
                 &format!("Force-cancel a member's in-flight turn. Unlike retire, this \
                      interrupts immediately without graceful shutdown. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
+                tool_schema::<ForceCancelArgs>(),
             ),
             tool(
                 "mob_member_status",
                 &format!("Get execution status snapshot for a member. Returns status, \
                      output_preview (the current bridge session's last committed assistant text), \
                      tokens_used, and is_final. {COMMON}"),
-                json!({"type":"object","properties":{"mob_id":{"type":"string"},"agent_identity":{"type":"string"}},"required":["mob_id","agent_identity"]}),
+                tool_schema::<MeerkatStatusArgs>(),
             ),
             tool(
                 "mob_wait_kickoff",
                 &format!(
                     "Wait until autonomous kickoff turns complete. Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
                 ),
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "mob_id":{"type":"string"},
-                        "member_ids":{"type":"array","items":{"type":"string"}},
-                        "timeout_ms":{"type":"integer","minimum":1}
-                    },
-                    "required":["mob_id"]
-                }),
+                tool_schema::<WaitKickoffArgs>(),
             ),
             tool(
                 "mob_wait_ready",
                 &format!(
                     "Wait until mob startup readiness (members bound but kickoff not required). Optional: member_ids (subset), timeout_ms. Returns member snapshots. {COMMON}"
                 ),
-                json!({
-                    "type":"object",
-                    "properties":{
-                        "mob_id":{"type":"string"},
-                        "member_ids":{"type":"array","items":{"type":"string"}},
-                        "timeout_ms":{"type":"integer","minimum":1}
-                    },
-                    "required":["mob_id"]
-                }),
+                tool_schema::<WaitReadyArgs>(),
             ),
         ]
         .into();
@@ -2489,75 +2393,8 @@ fn tool(name: &str, description: &str, input_schema: serde_json::Value) -> Arc<T
     })
 }
 
-fn lifecycle_input_schema() -> serde_json::Value {
-    serde_json::to_value(schemars::schema_for!(MobLifecycleParams))
-        .unwrap_or_else(|_| json!({ "type": "object" }))
-}
-
-fn content_input_schema() -> serde_json::Value {
-    json!({
-        "oneOf": [
-            { "type": "string" },
-            {
-                "type": "array",
-                "items": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "text" },
-                                "text": { "type": "string" }
-                            },
-                            "required": ["type", "text"]
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "image" },
-                                "media_type": { "type": "string" },
-                                "data": { "type": "string" }
-                            },
-                            "required": ["type", "media_type", "data"]
-                        }
-                    ]
-                }
-            }
-        ]
-    })
-}
-
-fn runtime_binding_schema() -> serde_json::Value {
-    json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "session" }
-                },
-                "required": ["kind"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "kind": { "const": "external" },
-                    "address": { "type": "string" },
-                    "bootstrap_token": { "type": "string" },
-                    "identity": {
-                        "type": "object",
-                        "properties": {
-                            "kind": { "const": "ed25519_public_key" },
-                            "public_key": { "type": "string" }
-                        },
-                        "required": ["kind", "public_key"],
-                        "additionalProperties": false
-                    }
-                },
-                "required": ["kind", "address", "identity"],
-                "additionalProperties": false
-            }
-        ]
-    })
+fn tool_schema<T: schemars::JsonSchema>() -> serde_json::Value {
+    serde_json::to_value(schemars::schema_for!(T)).unwrap_or_else(|_| json!({ "type": "object" }))
 }
 
 fn encode(call: ToolCallView<'_>, payload: serde_json::Value) -> Result<ToolResult, ToolError> {
@@ -2584,31 +2421,31 @@ fn map_destroy_err(call: ToolCallView<'_>, err: MobMcpDestroyError) -> ToolError
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct MobCreateArgs {
     definition: MobDefinitionInput,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct MobListArgs {
     #[serde(default)]
     mob_id: Option<String>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct MobIdArgs {
     mob_id: String,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct MobSpawnMeerkatArgs {
     profile: String,
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
     #[serde(default)]
-    backend: Option<MobBackendKind>,
+    backend: Option<WireMobBackendKind>,
     #[serde(default)]
     binding: Option<meerkat_contracts::WireRuntimeBinding>,
     #[serde(default)]
-    runtime_mode: Option<MobRuntimeMode>,
+    runtime_mode: Option<WireMobRuntimeMode>,
     #[serde(default)]
     labels: Option<BTreeMap<String, String>>,
     #[serde(default)]
@@ -2616,17 +2453,17 @@ struct MobSpawnMeerkatArgs {
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
 }
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SpawnManyMeerkatsArgs {
     mob_id: String,
     specs: Vec<MobSpawnMeerkatArgs>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct RetireArgs {
     mob_id: String,
     agent_identity: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct WireActionArgs {
     mob_id: String,
     agent_identity: String,
@@ -2634,7 +2471,7 @@ struct WireActionArgs {
     action: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 enum WireActionPeerTarget {
     Local(WireActionLocalPeerTarget),
@@ -2642,25 +2479,25 @@ enum WireActionPeerTarget {
     External(WireActionExternalHandleTarget),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireActionLocalPeerTarget {
     local: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireActionExternalBindingTarget {
     external_binding: WireActionExternalBinding,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireActionExternalHandleTarget {
     external: WireActionExternalHandle,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireActionExternalBinding {
     name: String,
@@ -2668,10 +2505,42 @@ struct WireActionExternalBinding {
     identity: meerkat_contracts::WireTrustedPeerIdentity,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct WireActionExternalHandle {
     name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireMobBackendKind {
+    Session,
+    External,
+}
+
+impl From<WireMobBackendKind> for MobBackendKind {
+    fn from(value: WireMobBackendKind) -> Self {
+        match value {
+            WireMobBackendKind::Session => Self::Session,
+            WireMobBackendKind::External => Self::External,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum WireMobRuntimeMode {
+    AutonomousHost,
+    TurnDriven,
+}
+
+impl From<WireMobRuntimeMode> for MobRuntimeMode {
+    fn from(value: WireMobRuntimeMode) -> Self {
+        match value {
+            WireMobRuntimeMode::AutonomousHost => Self::AutonomousHost,
+            WireMobRuntimeMode::TurnDriven => Self::TurnDriven,
+        }
+    }
 }
 
 fn runtime_binding_from_wire(
@@ -2728,19 +2597,19 @@ impl WireActionArgs {
         ))
     }
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct RunFlowArgs {
     mob_id: String,
     flow_id: String,
     #[serde(default)]
     params: serde_json::Value,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct FlowStatusArgs {
     mob_id: String,
     run_id: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct EventsArgs {
     mob_id: String,
     #[serde(default)]
@@ -2748,24 +2617,24 @@ struct EventsArgs {
     #[serde(default = "default_limit")]
     limit: usize,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct RespawnArgs {
     mob_id: String,
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<ContentInput>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct ForceCancelArgs {
     mob_id: String,
     agent_identity: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct MeerkatStatusArgs {
     mob_id: String,
     agent_identity: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct WaitKickoffArgs {
     mob_id: String,
     #[serde(default)]
@@ -2773,7 +2642,7 @@ struct WaitKickoffArgs {
     #[serde(default)]
     timeout_ms: Option<u64>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, schemars::JsonSchema)]
 struct WaitReadyArgs {
     mob_id: String,
     #[serde(default)]
@@ -2810,7 +2679,7 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .parse_args()
                     .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let definition = decode_public_mob_definition(args.definition)
-                    .map_err(|e| ToolError::invalid_arguments(call.name, e))?;
+                    .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
                 let mob_id = self
                     .state
                     .mob_create_definition(definition)
@@ -2880,7 +2749,17 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .mob_events(&MobId::from(args.mob_id), args.after_cursor, args.limit)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"events": events}))
+                let events = events
+                    .iter()
+                    .map(WireMobEvent::from_serializable)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| {
+                        ToolError::invalid_arguments(
+                            call.name,
+                            format!("mob/events runtime projection failed generated contract: {e}"),
+                        )
+                    })?;
+                encode(call, json!(MobEventsResult { events }))
             }
             "mob_run_flow" => {
                 let args: RunFlowArgs = call
@@ -2909,7 +2788,19 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .mob_flow_status(&MobId::from(args.mob_id), run_id)
                     .await
                     .map_err(|e| map_mob_err(call, e))?;
-                encode(call, json!({"run": run}))
+                let run = run
+                    .as_ref()
+                    .map(WireMobRun::from_serializable)
+                    .transpose()
+                    .map_err(|e| {
+                        ToolError::invalid_arguments(
+                            call.name,
+                            format!(
+                                "mob/flow_status runtime projection failed generated contract: {e}"
+                            ),
+                        )
+                    })?;
+                encode(call, json!(MobFlowStatusResult { run }))
             }
             "mob_cancel_flow" => {
                 let args: FlowStatusArgs = call
@@ -2935,8 +2826,8 @@ impl AgentToolDispatcher for MobMcpDispatcher {
                     .map(|spec| {
                         let mut s = SpawnMemberSpec::new(spec.profile, spec.agent_identity);
                         s.initial_message = spec.initial_message;
-                        s.runtime_mode = spec.runtime_mode;
-                        s.backend = spec.backend;
+                        s.runtime_mode = spec.runtime_mode.map(Into::into);
+                        s.backend = spec.backend.map(Into::into);
                         s.binding = spec
                             .binding
                             .map(runtime_binding_from_wire)
@@ -4473,6 +4364,44 @@ mod tests {
             !schema_text.contains("\"peer_id\"") && !schema_text.contains("\"pubkey\""),
             "mob_wire schema must not expose raw comms identity atoms: {schema_text}"
         );
+    }
+
+    #[test]
+    fn agent_mob_tool_schemas_are_derived_from_typed_args() {
+        let tools = tools_list();
+        let actual = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .and_then(|tool| tool.get("inputSchema"))
+                .cloned()
+                .unwrap_or_else(|| panic!("tool schema missing for {name}"))
+        };
+
+        for (name, expected) in [
+            ("mob_create", tool_schema::<MobCreateArgs>()),
+            ("mob_list", tool_schema::<MobListArgs>()),
+            ("mob_lifecycle", tool_schema::<MobLifecycleParams>()),
+            ("mob_events", tool_schema::<EventsArgs>()),
+            ("mob_run_flow", tool_schema::<RunFlowArgs>()),
+            ("mob_flow_status", tool_schema::<FlowStatusArgs>()),
+            ("mob_cancel_flow", tool_schema::<FlowStatusArgs>()),
+            ("mob_spawn_member", tool_schema::<SpawnManyMeerkatsArgs>()),
+            ("mob_retire_member", tool_schema::<RetireArgs>()),
+            ("mob_list_members", tool_schema::<MobIdArgs>()),
+            ("mob_wire", tool_schema::<WireActionArgs>()),
+            ("mob_respawn", tool_schema::<RespawnArgs>()),
+            ("mob_force_cancel", tool_schema::<ForceCancelArgs>()),
+            ("mob_member_status", tool_schema::<MeerkatStatusArgs>()),
+            ("mob_wait_kickoff", tool_schema::<WaitKickoffArgs>()),
+            ("mob_wait_ready", tool_schema::<WaitReadyArgs>()),
+        ] {
+            assert_eq!(
+                actual(name),
+                expected,
+                "{name} must use its typed arg schema"
+            );
+        }
     }
 
     #[tokio::test]

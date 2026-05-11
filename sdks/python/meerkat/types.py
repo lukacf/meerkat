@@ -12,6 +12,28 @@ from typing import Any, Literal, NewType, NotRequired, TypedDict, Union
 
 from .generated.types import CONTRACT_VERSION as CONTRACT_VERSION  # re-export
 from .generated.types import (
+    BridgeCommand as BridgeCommand,
+    BridgeCommandAuthorizeSupervisor as BridgeCommandAuthorizeSupervisor,
+    BridgeCommandBindMember as BridgeCommandBindMember,
+    BridgeCommandDeliverMemberInput as BridgeCommandDeliverMemberInput,
+    BridgeCommandDestroyMember as BridgeCommandDestroyMember,
+    BridgeCommandHardCancelMember as BridgeCommandHardCancelMember,
+    BridgeCommandInterruptMember as BridgeCommandInterruptMember,
+    BridgeCommandObserveMember as BridgeCommandObserveMember,
+    BridgeCommandRetireMember as BridgeCommandRetireMember,
+    BridgeCommandRevokeSupervisor as BridgeCommandRevokeSupervisor,
+    BridgeCommandUnwireMember as BridgeCommandUnwireMember,
+    BridgeCommandWireMember as BridgeCommandWireMember,
+    BridgePeerSpec as BridgePeerSpec,
+    BindingIdParams as BindingIdParams,
+    CommsCommandRequest as CommsCommandRequest,
+    CommsPeersResult as CommsPeersResult,
+    CommsSendResult as CommsSendResult,
+    CreateProfileParams as CreateProfileParams,
+    DeviceCompleteParams as DeviceCompleteParams,
+    DeviceStartParams as DeviceStartParams,
+    LoginCompleteParams as LoginCompleteParams,
+    LoginStartParams as LoginStartParams,
     McpAddParams as McpAddParams,
     McpHttpConfig as McpHttpConfig,
     McpHttpServerConfig as McpHttpServerConfig,
@@ -22,6 +44,8 @@ from .generated.types import (
     McpServerConfig as McpServerConfig,
     McpStdioConfig as McpStdioConfig,
     McpStdioServerConfig as McpStdioServerConfig,
+    ProvisionApiKeyParams as ProvisionApiKeyParams,
+    RealmIdParams as RealmIdParams,
     MobBackendConfigInput as MobBackendConfigInput,
     MobCreateParams as MobCreateParams,
     MobCreateResult as MobCreateResult,
@@ -29,6 +53,7 @@ from .generated.types import (
     MobEnsureMemberParams as MobEnsureMemberParams,
     MobEnsureMemberResult as MobEnsureMemberResult,
     MobEventRouterConfigInput as MobEventRouterConfigInput,
+    MobEventsResult as MobEventsResult,
     MobExternalBackendConfigInput as MobExternalBackendConfigInput,
     MobFlowNodeInput as MobFlowNodeInput,
     MobFlowSpecInput as MobFlowSpecInput,
@@ -135,6 +160,11 @@ from .generated.types import (
     WireAssistantBlockServerToolContent as WireAssistantBlockServerToolContent,
     WireAssistantBlockImage as WireAssistantBlockImage,
     WireAssistantBlockUnknown as WireAssistantBlockUnknown,
+    WireTranscriptReplacement as WireTranscriptReplacement,
+    WireTranscriptReplacementMessage as WireTranscriptReplacementMessage,
+    WireTranscriptReplacementUserContentBlock as WireTranscriptReplacementUserContentBlock,
+    WireTranscriptReplacementAssistantBlock as WireTranscriptReplacementAssistantBlock,
+    WireTranscriptReplacementToolResultContentBlock as WireTranscriptReplacementToolResultContentBlock,
     WireTranscriptSource as WireTranscriptSource,
     WireTranscriptSourceSpoken as WireTranscriptSourceSpoken,
     WireTranscriptSourceUnknown as WireTranscriptSourceUnknown,
@@ -150,22 +180,40 @@ from .generated.types import (
     RealtimeVideoChunk as RealtimeVideoChunk,
     RuntimeAcceptResult as RuntimeAcceptResult,
     RuntimeStateResult as RuntimeStateResult,
+    ScheduleToolCallParams as ScheduleToolCall,
+    ScheduleToolCallResult as ScheduleToolCallResult,
+    ScheduleToolDescriptor as ScheduleToolDescriptor,
+    ScheduleToolsResult as ScheduleToolsResult,
     WireBudgetSplitPolicy as WireBudgetSplitPolicy,
     WireAssistantImageRef as WireAssistantImageRef,
+    WireAuthProfileCleared as WireAuthProfileCleared,
+    WireAuthProfileCreated as WireAuthProfileCreated,
+    WireAuthProfileDetail as WireAuthProfileDetail,
+    WireAuthProfilesList as WireAuthProfilesList,
+    WireAuthStatusDetail as WireAuthStatusDetail,
     WireAuthBindingRef as WireAuthBindingRef,
     WireGenerateImageExecutionPlan as WireGenerateImageExecutionPlan,
     WireGenerateImageRequest as WireGenerateImageRequest,
     WireImageGenerationToolResult as WireImageGenerationToolResult,
     WireImageOperationPhase as WireImageOperationPhase,
+    WireDeviceCompleteResult as WireDeviceCompleteResult,
+    WireDeviceStart as WireDeviceStart,
+    WireLoginReady as WireLoginReady,
+    WireLoginStart as WireLoginStart,
     WireInputState as WireInputState,
     WireMemberLaunchMode as WireMemberLaunchMode,
     WireMemberRef as WireMemberRef,
     WireMemberState as WireMemberState,
     WireMobBackendKind as WireMobBackendKind,
+    WireMobEvent as WireMobEvent,
+    WireMobRun as WireMobRun,
     WireMobMemberStatus as WireMobMemberStatus,
     WireMobProfile as WireMobProfile,
     WireMobRuntimeMode as WireMobRuntimeMode,
     WireMobToolConfig as WireMobToolConfig,
+    WireProvisionApiKeyResult as WireProvisionApiKeyResult,
+    WireRealmConnectionSet as WireRealmConnectionSet,
+    WireRealmList as WireRealmList,
     WireRuntimeBinding as WireRuntimeBinding,
     WireToolAccessPolicy as WireToolAccessPolicy,
     WireToolFilter as WireToolFilter,
@@ -413,15 +461,6 @@ class ScheduleOccurrencesResult(TypedDict):
     occurrences: list[ScheduleOccurrenceRecord]
 
 
-class ScheduleToolsResult(TypedDict):
-    tools: list[dict[str, Any]]
-
-
-class ScheduleToolCall(TypedDict, total=False):
-    name: str
-    arguments: Any
-
-
 WorkGraphStatus = Literal[
     "open",
     "in_progress",
@@ -569,13 +608,7 @@ class WorkGraphEventFilter(TypedDict, total=False):
     limit: int
 
 
-class MobEventCursorEntry(TypedDict, total=False):
-    cursor: int
-    event: dict[str, Any]
-
-
-class MobEventsResult(TypedDict):
-    events: list[MobEventCursorEntry]
+MobEventCursorEntry = WireMobEvent
 
 
 class MobProfileTools(TypedDict, total=False):
@@ -743,37 +776,12 @@ TranscriptEditRunningBehavior = Literal["reject"]
 """Behavior for transcript edit requests when the source session has active work."""
 
 
-class TranscriptMessageReplacement(TypedDict):
-    type: Literal["message"]
-    message: dict[str, Any]
-
-
-class TranscriptUserContentBlockReplacement(TypedDict):
-    type: Literal["user_content_block"]
-    block_index: int
-    block: ContentBlock
-
-
-class TranscriptAssistantBlockReplacement(TypedDict):
-    type: Literal["assistant_block"]
-    block_index: int
-    block: dict[str, Any]
-
-
-class TranscriptToolResultContentBlockReplacement(TypedDict):
-    type: Literal["tool_result_content_block"]
-    result_index: int
-    block_index: int
-    block: ContentBlock
-
-
-TranscriptReplacement = (
-    TranscriptMessageReplacement
-    | TranscriptUserContentBlockReplacement
-    | TranscriptAssistantBlockReplacement
-    | TranscriptToolResultContentBlockReplacement
-)
-"""Typed transcript replacement used to create an edited session fork."""
+TranscriptMessageReplacement = WireTranscriptReplacementMessage
+TranscriptUserContentBlockReplacement = WireTranscriptReplacementUserContentBlock
+TranscriptAssistantBlockReplacement = WireTranscriptReplacementAssistantBlock
+TranscriptToolResultContentBlockReplacement = WireTranscriptReplacementToolResultContentBlock
+TranscriptReplacement = WireTranscriptReplacement
+"""Generated transcript replacement contract used by session/fork_replace."""
 
 
 @dataclass(frozen=True, slots=True)

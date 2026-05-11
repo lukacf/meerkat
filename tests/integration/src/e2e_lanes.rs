@@ -161,6 +161,10 @@ const WEB_RUNTIME_BUILD_IF_STALE: &[&str] = &[
     "-c",
     "wasm_dir=\"${MEERKAT_WEB_WASM_OUT_DIR:-../../../sdks/web/wasm}\"; if test \"${MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT:-0}\" = 1; then test -f \"${wasm_dir}/meerkat_web_runtime.js\" && test -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || { echo \"missing assumed prebuilt web WASM bundle in ${wasm_dir}\" >&2; exit 1; }; elif test ! -f \"${wasm_dir}/meerkat_web_runtime.js\" || test ! -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || test -n \"$(find ../../../meerkat-web-runtime ../../../sdks/web/src ../../../sdks/web/scripts ../../../sdks/web/package.json ../../../sdks/web/tsconfig.json -type f -newer \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" -print -quit)\"; then npm --prefix ../../../sdks/web run build; fi",
 ];
+const WEB_RUNTIME_BROWSER_ENV: &[(&str, &str)] = &[
+    ("CARGO_BUILD_JOBS", "1"),
+    ("MEERKAT_WEB_WASM_PROFILE", "dev"),
+];
 
 const WEB_RUNTIME_E2E_ENV: &[(&str, &str)] = &[
     ("CARGO_BUILD_JOBS", "1"),
@@ -2342,10 +2346,7 @@ fn materialize_node_build(cwd: &str) -> Result<(), String> {
             run_materialize_command_with_env(
                 cwd,
                 WEB_RUNTIME_BUILD_IF_STALE,
-                &[
-                    ("CARGO_BUILD_JOBS", "1"),
-                    ("MEERKAT_WEB_WASM_PROFILE", "dev"),
-                ],
+                WEB_RUNTIME_BROWSER_ENV,
             )?;
             run_materialize_command(cwd, &["npx", "playwright", "install", "chromium"])?;
         }

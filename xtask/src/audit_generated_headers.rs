@@ -3,9 +3,9 @@
 //! A file earns the codegen marker iff it is emitted by one of our
 //! codegen passes. This module enforces both directions:
 //!
-//! * Header without matching codegen-emit path → `ForbiddenHeader` (hand-
+//! * Header without matching codegen-emit path -> `ForbiddenHeader` (hand-
 //!   edited file claiming to be generated).
-//! * Emit path without header → `MissingHeader` (generator failed to mark
+//! * Emit path without header -> `MissingHeader` (generator failed to mark
 //!   its output).
 //!
 //! The emit-path set is computed from the same schema the protocol codegen
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use meerkat_machine_schema::{
-    CompositionSchema, canonical_composition_schemas, canonical_machine_schemas,
+    CompositionSchema, MachineSchema, canonical_composition_schemas, canonical_machine_schemas,
     compat_composition_schemas,
 };
 
@@ -99,7 +99,7 @@ pub fn audit_with_emit_set(
         if !abs_root.exists() {
             continue;
         }
-        visit_rs_files(&abs_root, &mut |abs_path| {
+        visit_candidate_files(&abs_root, &mut |abs_path| {
             let rel = abs_path
                 .strip_prefix(workspace_root)
                 .unwrap_or(abs_path)
@@ -156,11 +156,14 @@ pub fn audit_via_git_ls_files(
         }
     }
 
-    // Direction 2: every tracked `.rs` file outside the emit set that
-    // carries the marker is a violation.
+    // Direction 2: every tracked candidate file outside the emit set
+    // that carries the marker is a violation. The candidate set covers
+    // Rust helpers, formal machine specs, and generated SDK contracts.
     let output = std::process::Command::new("git")
         .current_dir(workspace_root)
-        .args(["ls-files", "-z", "*.rs"])
+        .args([
+            "ls-files", "-z", "*.rs", "*.ts", "*.py", "*.md", "*.tla", "*.cfg",
+        ])
         .output()
         .context("invoke git ls-files")?;
     if !output.status.success() {
@@ -225,6 +228,26 @@ pub fn live_emit_paths() -> BTreeSet<PathBuf> {
             "meerkat-machine-kernels/src/generated/{}.rs",
             machine_slug(machine.machine.as_str())
         )));
+        insert_machine_spec_paths(&mut set, &machine);
+    }
+
+    for composition in canonical_composition_schemas() {
+        insert_composition_spec_paths(&mut set, &composition);
+    }
+
+    // SDK codegen writes generated contract files from artifacts/schemas/.
+    for path in [
+        "sdks/python/meerkat/generated/__init__.py",
+        "sdks/python/meerkat/generated/errors.py",
+        "sdks/python/meerkat/generated/types.py",
+        "sdks/typescript/src/generated/errors.ts",
+        "sdks/typescript/src/generated/index.ts",
+        "sdks/typescript/src/generated/types.ts",
+        "sdks/web/src/generated/auth.ts",
+        "sdks/web/src/generated/events.ts",
+        "sdks/web/src/generated/mob.ts",
+    ] {
+        set.insert(PathBuf::from(path));
     }
 
     set
@@ -242,6 +265,11 @@ fn default_scan_roots() -> Vec<&'static str> {
         "meerkat-runtime/src/generated",
         "meerkat-session/src/generated",
         "meerkat-tools/src/generated",
+        "sdks/python/meerkat/generated",
+        "sdks/typescript/src/generated",
+        "sdks/web/src/generated",
+        "specs/machines",
+        "specs/compositions",
     ]
 }
 
@@ -252,7 +280,7 @@ fn has_generated_marker(contents: &str) -> bool {
         .any(|line| line.contains(&generated_marker()))
 }
 
-fn visit_rs_files<F>(root: &Path, visitor: &mut F) -> Result<()>
+fn visit_candidate_files<F>(root: &Path, visitor: &mut F) -> Result<()>
 where
     F: FnMut(&Path) -> Result<()>,
 {
@@ -263,12 +291,19 @@ where
     for entry in entries {
         let path = entry.path();
         if path.is_dir() {
-            visit_rs_files(&path, visitor)?;
-        } else if path.extension().and_then(|s| s.to_str()) == Some("rs") {
+            visit_candidate_files(&path, visitor)?;
+        } else if is_candidate_extension(&path) {
             visitor(&path)?;
         }
     }
     Ok(())
+}
+
+fn is_candidate_extension(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|s| s.to_str()),
+        Some("rs" | "ts" | "py" | "md" | "tla" | "cfg")
+    )
 }
 
 /// Render findings as a human-readable error report (for xtask CLI output).
@@ -294,6 +329,57 @@ pub fn render_findings(findings: &[AuditFinding]) -> String {
 fn machine_slug(machine_name: &str) -> String {
     let trimmed = machine_name.strip_suffix("Machine").unwrap_or(machine_name);
     to_snake_case(trimmed)
+}
+
+fn insert_machine_spec_paths(set: &mut BTreeSet<PathBuf>, machine: &MachineSchema) {
+    let slug = machine_spec_slug(machine.machine.as_str());
+    for file in [
+        "model.tla",
+        "ci.cfg",
+        "deep.cfg",
+        "contract.md",
+        "mapping.md",
+    ] {
+        set.insert(PathBuf::from(format!("specs/machines/{slug}/{file}")));
+    }
+}
+
+fn machine_spec_slug(machine_name: &str) -> String {
+    match machine_name {
+        "MeerkatMachine" => "meerkat_machine".to_string(),
+        "MobMachine" => "mob_machine".to_string(),
+        other => machine_slug(other),
+    }
+}
+
+fn insert_composition_spec_paths(set: &mut BTreeSet<PathBuf>, composition: &CompositionSchema) {
+    let slug = to_snake_case(composition.name.as_str());
+    for file in [
+        "model.tla",
+        "ci.cfg",
+        "deep.cfg",
+        "contract.md",
+        "mapping.md",
+    ] {
+        set.insert(PathBuf::from(format!("specs/compositions/{slug}/{file}")));
+    }
+    for witness in &composition.witnesses {
+        set.insert(PathBuf::from(format!(
+            "specs/compositions/{slug}/{}",
+            composition_witness_cfg_name(witness.name.as_str())
+        )));
+    }
+}
+
+fn composition_witness_cfg_name(name: &str) -> String {
+    format!("witness-{}.cfg", tla_ident(name))
+}
+
+fn tla_ident(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect()
 }
 
 fn to_snake_case(value: &str) -> String {

@@ -36,8 +36,6 @@ use meerkat_runtime::{
     Input, InputDurability, InputHeader, InputOrigin, InputVisibility, MeerkatMachine, PromptInput,
 };
 #[cfg(feature = "runtime-adapter")]
-use serde::de::DeserializeOwned;
-#[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::time::Duration;
@@ -1912,16 +1910,31 @@ impl MultiBackendProvisioner {
         }
     }
 
+    fn bridge_typed_rejection_error(
+        cause: super::bridge_protocol::BridgeRejectionCause,
+        reason: String,
+    ) -> MobError {
+        MobError::BridgeCommandRejected { cause, reason }
+    }
+
+    fn unexpected_bridge_reply(
+        reply: super::bridge_protocol::BridgeReply,
+        context: &str,
+    ) -> MobError {
+        MobError::Internal(format!(
+            "unexpected supervisor bridge reply for {context}: {reply:?}"
+        ))
+    }
+
     async fn ensure_supervisor_authorized(
         &self,
         peer: &TrustedPeerDescriptor,
         binding: Option<PeerOnlyBindingParts<'_>>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
-        let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = match self
+        let reply = match self
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
             .await
@@ -1939,47 +1952,59 @@ impl MultiBackendProvisioner {
                 ));
             }
         };
-        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            if let Some(cause) = rejection.typed_cause()
-                && super::bridge_fallback::should_fall_back_to_bind(cause)
-                && let Some((peer_id, address, bootstrap_token, pubkey)) = binding
-            {
-                self.supervisor_bridge
+        match reply {
+            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+                if super::bridge_fallback::should_fall_back_to_bind(cause)
+                    && let Some((peer_id, address, bootstrap_token, pubkey)) = binding
+                {
+                    self.supervisor_bridge
+                        .rollback_recipient_trust(trust_install)
+                        .await?;
+                    let bind: super::bridge_protocol::BridgeBindResponse = self
+                        .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
+                        .await?;
+                    let effective_bootstrap_token =
+                        Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
+                    let rebound_peer =
+                        Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address, pubkey)?;
+                    self.persist_rebound_binding(
+                        peer_id,
+                        Some(effective_bootstrap_token.clone()),
+                        &bind,
+                        pubkey,
+                    )
+                    .await?;
+                    self.clear_pending_supervisor_acceptance_for_peer_ids(&[
+                        peer_id.to_string(),
+                        bind.peer_id.clone(),
+                    ])
+                    .await?;
+                    return Ok(rebound_peer);
+                }
+                let error = Self::bridge_typed_rejection_error(cause, reason);
+                let rollback = self
+                    .supervisor_bridge
                     .rollback_recipient_trust(trust_install)
-                    .await?;
-                let bind: super::bridge_protocol::BridgeBindResponse = self
-                    .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
-                    .await?;
-                let effective_bootstrap_token =
-                    Self::bridge_bootstrap_token_from_binding(address, bootstrap_token)?;
-                let rebound_peer =
-                    Self::peer_only_spec_from_parts(&bind.peer_id, &bind.address, pubkey)?;
-                self.persist_rebound_binding(
-                    peer_id,
-                    Some(effective_bootstrap_token.clone()),
-                    &bind,
-                    pubkey,
-                )
-                .await?;
-                self.clear_pending_supervisor_acceptance_for_peer_ids(&[
-                    peer_id.to_string(),
-                    bind.peer_id.clone(),
-                ])
-                .await?;
-                return Ok(rebound_peer);
+                    .await;
+                Err(Self::bridge_trust_rollback_error(
+                    "authorize supervisor rejected",
+                    error,
+                    rollback,
+                ))
             }
-            let error = Self::bridge_rejection_error(rejection);
-            let rollback = self
-                .supervisor_bridge
-                .rollback_recipient_trust(trust_install)
-                .await;
-            return Err(Self::bridge_trust_rollback_error(
-                "authorize supervisor rejected",
-                error,
-                rollback,
-            ));
+            super::bridge_protocol::BridgeReply::Ack(_) => Ok(peer.clone()),
+            other => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                Err(Self::bridge_trust_rollback_error(
+                    "authorize supervisor unexpected response",
+                    Self::unexpected_bridge_reply(other, "authorize supervisor response"),
+                    rollback,
+                ))
+            }
         }
-        Ok(peer.clone())
     }
 
     async fn clear_pending_supervisor_acceptance_for_peer_ids(
@@ -2041,14 +2066,14 @@ impl MultiBackendProvisioner {
         }
     }
 
-    async fn send_bridge_command_typed<R: DeserializeOwned>(
+    async fn send_bridge_command_typed<R: super::bridge_protocol::BridgeReplyPayload>(
         &self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
     ) -> Result<R, MobError> {
         let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = match self
+        let reply = match self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await
@@ -2066,30 +2091,27 @@ impl MultiBackendProvisioner {
                 ));
             }
         };
-        if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            let error = Self::bridge_rejection_error(rejection);
-            let rollback = self
-                .supervisor_bridge
-                .rollback_recipient_trust(trust_install)
-                .await;
-            return Err(Self::bridge_trust_rollback_error(
-                "bridge command rejected",
-                error,
-                rollback,
-            ));
-        }
-        match serde_json::from_value(value) {
-            Ok(response) => Ok(response),
-            Err(error) => {
+        match R::from_bridge_reply(reply) {
+            Ok(value) => Ok(value),
+            Err(super::bridge_protocol::BridgeReply::Rejected { cause, reason }) => {
                 let rollback = self
                     .supervisor_bridge
                     .rollback_recipient_trust(trust_install)
                     .await;
                 Err(Self::bridge_trust_rollback_error(
-                    "bridge command response decode failed",
-                    MobError::Internal(format!(
-                        "failed to decode bridge command response: {error}"
-                    )),
+                    "bridge command rejected",
+                    Self::bridge_typed_rejection_error(cause, reason),
+                    rollback,
+                ))
+            }
+            Err(other) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                Err(Self::bridge_trust_rollback_error(
+                    "bridge command unexpected response",
+                    Self::unexpected_bridge_reply(other, "bridge command response"),
                     rollback,
                 ))
             }

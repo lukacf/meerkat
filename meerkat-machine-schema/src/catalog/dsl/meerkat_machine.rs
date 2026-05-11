@@ -49,7 +49,19 @@ pub enum OperationKind {
 /// Typed mirror of [`meerkat_core::Provider`] for use inside DSL bridging
 /// types. Closed 5-variant enum; the seam carries the discriminant directly
 /// rather than a JSON-encoded string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum Provider {
     #[default]
     Anthropic,
@@ -68,7 +80,18 @@ pub enum Provider {
 /// transitions where slug validation has already happened at the
 /// boundary). Domain-side `AuthBindingRef` carries the typed atoms
 /// (`RealmId` / `BindingId` / `ProfileId`).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct AuthBindingRef {
     pub realm_id: String,
     pub binding_id: String,
@@ -84,7 +107,18 @@ pub struct AuthBindingRef {
 /// at the persistence boundary (arbitrary provider-specific options), so it
 /// rides on a stable JSON-serialization field inside the DSL — never parsed
 /// back as a discriminant inside any guard or transition.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SessionLlmIdentity {
     pub model: String,
     pub provider: Provider,
@@ -100,7 +134,18 @@ pub struct SessionLlmIdentity {
 /// Typed mirror of [`meerkat_core::SessionToolVisibilityState`] —
 /// structural projection using typed `ToolFilter` / `ToolVisibilityWitness`
 /// mirrors plus ordered name sets for deterministic Ord/Hash.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SessionToolVisibilityState {
     pub capability_base_filter: ToolFilter,
     pub inherited_base_filter: ToolFilter,
@@ -117,7 +162,19 @@ pub struct SessionToolVisibilityState {
 /// Typed mirror of
 /// [`crate::meerkat_machine_types::SessionLlmCapabilitySurface`] — structural
 /// projection of the boolean capability matrix plus optional call timeout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SessionLlmCapabilitySurface {
     pub supports_temperature: bool,
     pub supports_thinking: bool,
@@ -151,7 +208,18 @@ pub enum SessionLlmCapabilitySurfaceStatus {
 /// [`crate::meerkat_machine_types::SessionToolVisibilityDelta`] — structural
 /// projection using typed `ToolFilter` mirrors plus the two boolean change
 /// flags. Replaces the former `format!("{id:?}")` Debug-stringified wrapper.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SessionToolVisibilityDelta {
     pub previous_capability_base_filter: ToolFilter,
     pub current_capability_base_filter: ToolFilter,

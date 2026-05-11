@@ -343,6 +343,7 @@ pub mod inputs {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     CreateOpen(inputs::CreateOpen),

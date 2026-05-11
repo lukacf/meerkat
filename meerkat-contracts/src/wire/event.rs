@@ -17,6 +17,15 @@ pub struct WireEvent {
     pub contract_version: ContractVersion,
 }
 
+/// Typed lag sentinel emitted by browser-local broadcast streams when the
+/// underlying receiver reports skipped items.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StreamLaggedEvent {
+    Lagged { skipped: u64 },
+}
+
 /// Authoritative event source scope for the generic replay surface.
 ///
 /// This is intentionally a typed enum. Product concepts such as projects or

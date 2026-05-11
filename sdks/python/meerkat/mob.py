@@ -16,7 +16,7 @@ from .generated.types import (
     WireToolFilter,
 )
 from .streaming import EventSubscription
-from .types import ResolvedModelCapabilities
+from .types import MobEventsResult, ResolvedModelCapabilities, WireMobRun
 
 MobLifecycleAction = Literal["stop", "resume", "complete", "reset", "destroy"]
 
@@ -268,7 +268,7 @@ class Mob:
         *,
         after_cursor: int = 0,
         limit: int = 100,
-    ) -> dict[str, list[dict[str, Any]]]:
+    ) -> MobEventsResult:
         return await self._client.read_mob_events(
             self.id,
             after_cursor=after_cursor,
@@ -381,7 +381,7 @@ class Mob:
     async def run_flow(self, flow_id: str, params: dict[str, Any] | None = None) -> str:
         return await self._client.run_mob_flow(self.id, flow_id, params or {})
 
-    async def flow_status(self, run_id: str) -> dict[str, Any] | None:
+    async def flow_status(self, run_id: str) -> WireMobRun | None:
         return await self._client.get_mob_flow_status(self.id, run_id)
 
     async def cancel_flow(self, run_id: str) -> None:

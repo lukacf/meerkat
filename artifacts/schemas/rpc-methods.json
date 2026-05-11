@@ -60,19 +60,25 @@
     },
     {
       "description": "Read config",
-      "name": "config/get"
+      "name": "config/get",
+      "result_type": "ConfigEnvelope"
     },
     {
       "description": "Replace config",
-      "name": "config/set"
+      "name": "config/set",
+      "params_type": "ConfigSetParams",
+      "result_type": "ConfigEnvelope"
     },
     {
       "description": "Merge-patch config",
-      "name": "config/patch"
+      "name": "config/patch",
+      "params_type": "ConfigPatchParams",
+      "result_type": "ConfigEnvelope"
     },
     {
       "description": "Get runtime capabilities",
-      "name": "capabilities/get"
+      "name": "capabilities/get",
+      "result_type": "CapabilitiesResponse"
     },
     {
       "description": "Get read-only runtime host information",
@@ -330,7 +336,7 @@
       "description": "Call a schedule transport tool",
       "name": "schedule/call",
       "params_type": "ScheduleToolCallParams",
-      "result_type": "Value"
+      "result_type": "ScheduleToolCallResult"
     },
     {
       "description": "Get one WorkGraph item",
@@ -364,7 +370,8 @@
     },
     {
       "description": "List available skills",
-      "name": "skills/list"
+      "name": "skills/list",
+      "result_type": "SkillListResponse"
     },
     {
       "description": "Open a live audio/text channel for a session",

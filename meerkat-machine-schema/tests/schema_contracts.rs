@@ -129,6 +129,41 @@ fn external_tool_surface_failure_cause_fields_are_typed() {
 }
 
 #[test]
+fn llm_identity_visibility_and_capability_mirrors_bind_to_typed_dsl_structs() {
+    let schema = meerkat_machine();
+
+    for (name, path) in [
+        (
+            "SessionLlmCapabilitySurface",
+            "crate::catalog::dsl::meerkat_machine::SessionLlmCapabilitySurface",
+        ),
+        (
+            "SessionLlmIdentity",
+            "crate::catalog::dsl::meerkat_machine::SessionLlmIdentity",
+        ),
+        (
+            "SessionToolVisibilityDelta",
+            "crate::catalog::dsl::meerkat_machine::SessionToolVisibilityDelta",
+        ),
+        (
+            "SessionToolVisibilityState",
+            "crate::catalog::dsl::meerkat_machine::SessionToolVisibilityState",
+        ),
+    ] {
+        let binding = schema
+            .named_types
+            .iter()
+            .find(|binding| binding.name.as_str() == name)
+            .expect("typed mirror binding");
+        assert_eq!(
+            binding.rust,
+            RustTypeAtom::TypePath(path.to_string()),
+            "{name} must bind generated kernels to the typed DSL mirror, not a raw String wrapper"
+        );
+    }
+}
+
+#[test]
 fn canonical_composition_registry_contains_kernel_seam_and_schedule_perimeter_entries() {
     let names = canonical_composition_schemas()
         .into_iter()

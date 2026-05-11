@@ -4,6 +4,8 @@
 //! Lives in `meerkat-core` following the `McpServerConfig` precedent.
 //! Resolution logic is in `meerkat-skills::resolve`.
 
+#[cfg(feature = "schema")]
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashSet;
@@ -25,6 +27,7 @@ use crate::skills::{
 
 /// Complete skills configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct SkillsConfig {
     /// Whether skills are enabled.
@@ -61,6 +64,7 @@ impl Default for SkillsConfig {
 
 /// Source identity governance controls.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct SkillsIdentityConfig {
     pub lineage: Vec<SourceIdentityLineage>,
@@ -74,6 +78,7 @@ pub struct SkillsIdentityConfig {
 
 /// A named skill repository.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 pub struct SkillRepositoryConfig {
     /// Human-readable name (used in browsing, tracing, shadowing logs).
     pub name: String,
@@ -86,6 +91,7 @@ pub struct SkillRepositoryConfig {
 
 /// Transport configuration for a skill repository.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SkillRepoTransport {
     Filesystem {
@@ -150,6 +156,7 @@ fn default_clone_depth() -> Option<usize> {
 
 /// Git ref type for version pinning.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum GitRefType {
     #[default]

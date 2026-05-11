@@ -84,6 +84,17 @@ describe("Contract Version", () => {
       video: false,
     });
   });
+
+  it("live observation parser uses generated discriminator metadata", () => {
+    assert.deepEqual(
+      MeerkatClient.parseLiveObservation({ observation: "ready" }),
+      { observation: "ready" },
+    );
+    assert.throws(
+      () => MeerkatClient.parseLiveObservation({ observation: "not_generated" }),
+      /generated WireLiveAdapterObservation contract/,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2121,7 +2132,7 @@ describe("Parity wrappers", () => {
     await client.deleteSchedule("sch-1");
     const occurrences = await client.listScheduleOccurrences("sch-1", { includeTerminal: false });
     const tools = await client.listScheduleTools();
-    await client.callScheduleTool({ name: "schedule.create", arguments: { a: 1 } });
+    await client.callScheduleTool({ name: "meerkat_schedule_list" });
 
     assert.equal(created.scheduleId, "sch-1");
     assert.equal(fetched.scheduleId, "sch-1");
@@ -2143,6 +2154,7 @@ describe("Parity wrappers", () => {
     ]);
     assert.deepEqual(calls[2].params, { labels: { env: "prod" }, limit: 5, offset: 2 });
     assert.deepEqual(calls[7].params, { schedule_id: "sch-1", include_terminal: false });
+    assert.deepEqual(calls[9].params, { name: "meerkat_schedule_list" });
   });
 
   it("adds wrappers for WorkGraph read-only APIs", async () => {

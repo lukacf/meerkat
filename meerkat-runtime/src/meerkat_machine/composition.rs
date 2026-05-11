@@ -48,6 +48,9 @@ use crate::composition::{
     ConsumerRefusal, ConsumerSurface, OwnedFieldValue, SignalDispatchOutcome, SignalDispatchRefusal,
 };
 use crate::generated::meerkat_mob_seam as seam_facts;
+use crate::generated::meerkat_mob_seam::adapters::{
+    Field as SeamField, Input as SeamInput, meerkat::Effect as MeerkatSeamEffectAdapter,
+};
 use crate::meerkat_machine::{MeerkatMachine, RoutedMeerkatInputError, dsl as mm_dsl};
 
 /// Consumer-side surface for the `meerkat_mob_seam` composition.
@@ -94,22 +97,24 @@ pub enum MeerkatSeamSignal {
 }
 
 impl MeerkatSeamSignal {
-    pub fn variant_id(&self) -> EffectVariantId {
+    fn generated_adapter(&self) -> MeerkatSeamEffectAdapter {
         match self {
-            Self::RuntimeBound { .. } => seam_facts::effects::meerkat::runtime_bound(),
-            Self::RuntimeRetired { .. } => seam_facts::effects::meerkat::runtime_retired(),
-            Self::RuntimeDestroyed { .. } => seam_facts::effects::meerkat::runtime_destroyed(),
+            Self::RuntimeBound { .. } => MeerkatSeamEffectAdapter::RuntimeBound,
+            Self::RuntimeRetired { .. } => MeerkatSeamEffectAdapter::RuntimeRetired,
+            Self::RuntimeDestroyed { .. } => MeerkatSeamEffectAdapter::RuntimeDestroyed,
         }
     }
 
+    pub fn variant_id(&self) -> EffectVariantId {
+        self.generated_adapter().variant_id()
+    }
+
     pub fn generated_signal_route(&self) -> Option<seam_facts::TypedRoutedSignal> {
-        seam_facts::route_to_signal(
-            &seam_facts::producers::meerkat_instance_id(),
-            &self.variant_id(),
-        )
+        self.generated_adapter().signal_route()
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
+        let field = self.generated_adapter().field(id)?;
         let (agent_runtime_id, fence_token) = match self {
             Self::RuntimeBound {
                 agent_runtime_id,
@@ -124,12 +129,10 @@ impl MeerkatSeamSignal {
                 fence_token,
             } => (agent_runtime_id, fence_token),
         };
-        if id == &seam_facts::fields::agent_runtime_id() {
-            Some(FieldValue::Str(agent_runtime_id.0.as_str()))
-        } else if id == &seam_facts::fields::fence_token() {
-            Some(FieldValue::U64(fence_token.0))
-        } else {
-            None
+        match field {
+            SeamField::AgentRuntimeId => Some(FieldValue::Str(agent_runtime_id.0.as_str())),
+            SeamField::FenceToken => Some(FieldValue::U64(fence_token.0)),
+            _ => None,
         }
     }
 }
@@ -257,8 +260,8 @@ impl MeerkatConsumerSurface {
             (None, Some(sid)) => SessionId::parse(&sid).map_err(|e| ConsumerRefusal::Projection {
                 reason: format!("routed session_id `{sid}` is not a valid UUID: {e}"),
             }),
-            (None, None) if variant == &seam_facts::inputs::ingest() => {
-                let runtime_id = project_str(projected, &seam_facts::fields::runtime_id())
+            (None, None) if SeamInput::from_variant(variant) == Some(SeamInput::Ingest) => {
+                let runtime_id = project_str(projected, &SeamField::RuntimeId.id())
                     .map_err(|reason| ConsumerRefusal::Projection { reason })?;
                 self.machine
                     .resolve_registered_session_for_runtime_id(&mm_dsl::AgentRuntimeId::from(
@@ -405,58 +408,64 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         projected: Vec<(FieldId, OwnedFieldValue)>,
     ) -> Result<(), ConsumerRefusal> {
         let session_id = self.resolve_session(&variant, &projected).await?;
-        let input = if variant == seam_facts::inputs::prepare_bindings() {
-            let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())
-                .map_err(projection_refusal)?;
-            let fence = project_u64(&projected, &seam_facts::fields::fence_token())
-                .map_err(projection_refusal)?;
-            let gen_ = project_u64(&projected, &seam_facts::fields::generation())
-                .map_err(projection_refusal)?;
-            let sid = project_str(&projected, &seam_facts::fields::session_id())
-                .map_err(projection_refusal)?;
-            mm_dsl::MeerkatMachineInput::PrepareBindings {
-                agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
-                fence_token: mm_dsl::FenceToken(fence),
-                generation: mm_dsl::Generation(gen_),
-                session_id: mm_dsl::SessionId::from(sid.to_string()),
+        let input = match SeamInput::from_variant(&variant) {
+            Some(SeamInput::PrepareBindings) => {
+                let rt = project_str(&projected, &SeamField::AgentRuntimeId.id())
+                    .map_err(projection_refusal)?;
+                let fence = project_u64(&projected, &SeamField::FenceToken.id())
+                    .map_err(projection_refusal)?;
+                let gen_ = project_u64(&projected, &SeamField::Generation.id())
+                    .map_err(projection_refusal)?;
+                let sid = project_str(&projected, &SeamField::SessionId.id())
+                    .map_err(projection_refusal)?;
+                mm_dsl::MeerkatMachineInput::PrepareBindings {
+                    agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
+                    fence_token: mm_dsl::FenceToken(fence),
+                    generation: mm_dsl::Generation(gen_),
+                    session_id: mm_dsl::SessionId::from(sid.to_string()),
+                }
             }
-        } else if variant == seam_facts::inputs::ingest() {
-            // Route binding `work_request_reaches_meerkat` delivers
-            // producer `agent_runtime_id` into the consumer's canonical
-            // `runtime_id` field; producer `work_id` → consumer
-            // `work_id`; producer `origin` → consumer `origin`.
-            let rt = project_str(&projected, &seam_facts::fields::runtime_id())
-                .map_err(projection_refusal)?;
-            let work_id = project_str(&projected, &seam_facts::fields::work_id())
-                .map_err(projection_refusal)?;
-            let origin = project_work_origin(&projected, &seam_facts::fields::origin())
-                .map_err(projection_refusal)?;
-            mm_dsl::MeerkatMachineInput::Ingest {
-                runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
-                work_id: mm_dsl::WorkId::from(work_id.to_string()),
-                origin,
+            Some(SeamInput::Ingest) => {
+                // Route binding `work_request_reaches_meerkat` delivers
+                // producer `agent_runtime_id` into the consumer's canonical
+                // `runtime_id` field; producer `work_id` -> consumer
+                // `work_id`; producer `origin` -> consumer `origin`.
+                let rt = project_str(&projected, &SeamField::RuntimeId.id())
+                    .map_err(projection_refusal)?;
+                let work_id =
+                    project_str(&projected, &SeamField::WorkId.id()).map_err(projection_refusal)?;
+                let origin = project_work_origin(&projected, &SeamField::Origin.id())
+                    .map_err(projection_refusal)?;
+                mm_dsl::MeerkatMachineInput::Ingest {
+                    runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
+                    work_id: mm_dsl::WorkId::from(work_id.to_string()),
+                    origin,
+                }
             }
-        } else if variant == seam_facts::inputs::retire() {
-            let sid = project_str(&projected, &seam_facts::fields::session_id())
-                .map_err(projection_refusal)?;
-            mm_dsl::MeerkatMachineInput::Retire {
-                session_id: mm_dsl::SessionId::from(sid.to_string()),
+            Some(SeamInput::Retire) => {
+                let sid = project_str(&projected, &SeamField::SessionId.id())
+                    .map_err(projection_refusal)?;
+                mm_dsl::MeerkatMachineInput::Retire {
+                    session_id: mm_dsl::SessionId::from(sid.to_string()),
+                }
             }
-        } else if variant == seam_facts::inputs::destroy() {
-            let sid = project_str(&projected, &seam_facts::fields::session_id())
-                .map_err(projection_refusal)?;
-            mm_dsl::MeerkatMachineInput::Destroy {
-                session_id: mm_dsl::SessionId::from(sid.to_string()),
+            Some(SeamInput::Destroy) => {
+                let sid = project_str(&projected, &SeamField::SessionId.id())
+                    .map_err(projection_refusal)?;
+                mm_dsl::MeerkatMachineInput::Destroy {
+                    session_id: mm_dsl::SessionId::from(sid.to_string()),
+                }
             }
-        } else {
-            return Err(ConsumerRefusal::Projection {
-                reason: format!(
-                    "meerkat consumer surface does not accept routed input `{}`; \
+            None => {
+                return Err(ConsumerRefusal::Projection {
+                    reason: format!(
+                        "meerkat consumer surface does not accept routed input `{}`; \
                      only PrepareBindings/Ingest/Retire/Destroy are declared in the \
                      `meerkat_mob_seam` schema",
-                    variant.as_str()
-                ),
-            });
+                        variant.as_str()
+                    ),
+                });
+            }
         };
 
         self.machine

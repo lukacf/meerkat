@@ -1,6 +1,7 @@
 //! Config store abstraction.
 
 use crate::config::{Config, ConfigDelta, ConfigError};
+pub use crate::config_contract::{ConfigResolvedPaths, ConfigStoreMetadata};
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use async_trait::async_trait;
@@ -8,26 +9,6 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-
-/// Resolved paths attached to a config store context.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConfigResolvedPaths {
-    pub root: String,
-    pub manifest_path: String,
-    pub config_path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sessions_sqlite_path: Option<String>,
-    pub sessions_jsonl_dir: String,
-}
-
-/// Optional metadata for config endpoints.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConfigStoreMetadata {
-    pub realm_id: Option<String>,
-    pub instance_id: Option<String>,
-    pub backend: Option<String>,
-    pub resolved_paths: Option<ConfigResolvedPaths>,
-}
 
 /// Abstraction over config persistence backends.
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]

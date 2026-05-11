@@ -2856,34 +2856,8 @@ impl std::fmt::Display for SessionId {
         f.write_str(&self.0)
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct SessionLlmCapabilitySurface(pub String);
-impl From<String> for SessionLlmCapabilitySurface {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for SessionLlmCapabilitySurface {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for SessionLlmCapabilitySurface {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type SessionLlmCapabilitySurface =
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionLlmCapabilitySurface;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -2936,90 +2910,12 @@ impl std::fmt::Display for SessionLlmCapabilitySurfaceStatus {
         f.write_str(self.as_str())
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct SessionLlmIdentity(pub String);
-impl From<String> for SessionLlmIdentity {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for SessionLlmIdentity {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for SessionLlmIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct SessionToolVisibilityDelta(pub String);
-impl From<String> for SessionToolVisibilityDelta {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for SessionToolVisibilityDelta {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for SessionToolVisibilityDelta {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct SessionToolVisibilityState(pub String);
-impl From<String> for SessionToolVisibilityState {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for SessionToolVisibilityState {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for SessionToolVisibilityState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type SessionLlmIdentity =
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionLlmIdentity;
+pub type SessionToolVisibilityDelta =
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionToolVisibilityDelta;
+pub type SessionToolVisibilityState =
+    meerkat_machine_schema::catalog::dsl::meerkat_machine::SessionToolVisibilityState;
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -4752,6 +4648,7 @@ pub mod inputs {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Input {
     RegisterSession(inputs::RegisterSession),

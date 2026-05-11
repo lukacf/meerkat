@@ -20,3 +20,27 @@ pub use meerkat_contracts::wire::supervisor_bridge::{
     supervisor_bridge_default_protocol_version, supervisor_bridge_protocol_version_supported,
     supervisor_bridge_supported_protocol_versions,
 };
+
+pub(crate) trait BridgeReplyPayload: Sized {
+    fn from_bridge_reply(reply: BridgeReply) -> Result<Self, BridgeReply>;
+}
+
+macro_rules! bridge_reply_payload {
+    ($ty:ty, $variant:ident) => {
+        impl BridgeReplyPayload for $ty {
+            fn from_bridge_reply(reply: BridgeReply) -> Result<Self, BridgeReply> {
+                match reply {
+                    BridgeReply::$variant(value) => Ok(value),
+                    other => Err(other),
+                }
+            }
+        }
+    };
+}
+
+bridge_reply_payload!(BridgeBindResponse, BindMember);
+bridge_reply_payload!(BridgeAck, Ack);
+bridge_reply_payload!(BridgeObservationResponse, Observation);
+bridge_reply_payload!(BridgeDeliveryResponse, Delivery);
+bridge_reply_payload!(BridgeRetireResponse, Retire);
+bridge_reply_payload!(BridgeDestroyResponse, Destroy);

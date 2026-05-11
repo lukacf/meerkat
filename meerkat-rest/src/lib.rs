@@ -4121,6 +4121,7 @@ async fn create_session_inner(
         agent_llm_client_decorator: None,
         override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(req.enable_shell),
+        override_comms: ToolCategoryOverride::Inherit,
         override_schedule: ToolCategoryOverride::from_override(req.enable_schedule),
         override_workgraph: ToolCategoryOverride::from_override(req.enable_workgraph),
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
@@ -5019,6 +5020,7 @@ async fn continue_session_inner(
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -6675,6 +6677,24 @@ mod tests {
             .expect("hook override fixture must deserialize")
     }
 
+    async fn runtime_owned_test_build_options(state: &AppState) -> SessionBuildOptions {
+        let session = Session::new();
+        let bindings = state
+            .runtime_adapter
+            .prepare_bindings(session.id().clone())
+            .await
+            .expect("runtime bindings should prepare");
+        SessionBuildOptions {
+            resume_session: Some(session),
+            llm_client_override: state
+                .llm_client_override
+                .clone()
+                .map(encode_llm_client_override_for_service),
+            runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
+            ..Default::default()
+        }
+    }
+
     fn self_hosted_test_config(inline_video: bool) -> Config {
         let mut config = Config::default();
         config.self_hosted.servers.insert(
@@ -6873,13 +6893,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -8463,13 +8477,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -9498,13 +9506,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10179,13 +10181,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10250,14 +10246,11 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    comms_name: Some("stale-rest-agent".to_string()),
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: {
+                    let mut build = runtime_owned_test_build_options(&state).await;
+                    build.comms_name = Some("stale-rest-agent".to_string());
+                    Some(build)
+                },
                 labels: None,
             })
             .await
@@ -10334,13 +10327,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10421,13 +10408,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10508,13 +10489,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10586,13 +10561,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: state
-                        .llm_client_override
-                        .clone()
-                        .map(encode_llm_client_override_for_service),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -10802,12 +10771,7 @@ mod tests {
                 skill_references: None,
                 initial_turn: InitialTurnPolicy::Defer,
                 deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                build: Some(SessionBuildOptions {
-                    llm_client_override: Some(encode_llm_client_override_for_service(Arc::new(
-                        MockLlmClient,
-                    ))),
-                    ..Default::default()
-                }),
+                build: Some(runtime_owned_test_build_options(&state).await),
                 labels: None,
             })
             .await
@@ -11624,13 +11588,7 @@ mod tests {
                     skill_references: None,
                     initial_turn: InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                    build: Some(SessionBuildOptions {
-                        llm_client_override: state
-                            .llm_client_override
-                            .clone()
-                            .map(encode_llm_client_override_for_service),
-                        ..Default::default()
-                    }),
+                    build: Some(runtime_owned_test_build_options(&state).await),
                     labels: None,
                 })
                 .await
@@ -11683,13 +11641,7 @@ mod tests {
                     skill_references: None,
                     initial_turn: InitialTurnPolicy::Defer,
                     deferred_prompt_policy: DeferredPromptPolicy::Discard,
-                    build: Some(SessionBuildOptions {
-                        llm_client_override: state
-                            .llm_client_override
-                            .clone()
-                            .map(encode_llm_client_override_for_service),
-                        ..Default::default()
-                    }),
+                    build: Some(runtime_owned_test_build_options(&state).await),
                     labels: None,
                 })
                 .await

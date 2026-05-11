@@ -846,6 +846,7 @@ Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you ca
       { skip: !(hasAnthropicKey() && hasGeminiKey()) },
       async () => {
       const scenario = "Scenario 77";
+      await withScenarioRetry(scenario, async () => {
       const client = await withStepTimeout(
         scenario,
         "connect client",
@@ -888,6 +889,7 @@ Your final reply must include STACKED-IMAGE-77-DONE.`,
       assert.notEqual(secondImage.imageId, firstImage.imageId);
       await withStepTimeout(scenario, "fetch first stacked image", assertFetchableImageBlob(client, firstImage));
       await withStepTimeout(scenario, "fetch second stacked image", assertFetchableImageBlob(client, secondImage));
+      });
       },
     );
   }

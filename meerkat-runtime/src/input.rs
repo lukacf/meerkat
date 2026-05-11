@@ -812,7 +812,7 @@ fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderabl
         .map(ToOwned::to_owned);
     let summary = body.as_ref().map_or_else(
         || format!("External event via {source}"),
-        |body| body.clone(),
+        std::clone::Clone::clone,
     );
     CoreRenderable::SystemNotice {
         kind: SystemNoticeKind::ExternalEvent,

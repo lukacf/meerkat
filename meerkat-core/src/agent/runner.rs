@@ -44,54 +44,6 @@ fn user_message_from_operator_renderable(
     }
 }
 
-#[cfg(test)]
-mod typed_transcript_contract_tests {
-    use super::*;
-
-    #[test]
-    fn user_role_accepts_only_operator_text_or_blocks() {
-        assert!(
-            user_message_from_operator_renderable(CoreRenderable::Text {
-                text: "hello".to_string(),
-            })
-            .is_ok()
-        );
-        assert!(
-            user_message_from_operator_renderable(CoreRenderable::Blocks {
-                blocks: vec![crate::types::ContentBlock::Text {
-                    text: "hello".to_string(),
-                }],
-            })
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn user_role_rejects_runtime_authored_renderables() {
-        for content in [
-            CoreRenderable::SystemNotice {
-                kind: crate::types::SystemNoticeKind::Comms,
-                body: Some("runtime".to_string()),
-                blocks: Vec::new(),
-            },
-            CoreRenderable::Json {
-                value: serde_json::json!({"runtime": true}),
-            },
-            CoreRenderable::Reference {
-                uri: "artifact://runtime".to_string(),
-                label: Some("runtime".to_string()),
-            },
-        ] {
-            let err = user_message_from_operator_renderable(content)
-                .expect_err("runtime renderable must not become user text");
-            assert!(
-                matches!(err, AgentError::ConfigError(ref message) if message.contains("role=user")),
-                "unexpected error: {err:?}"
-            );
-        }
-    }
-}
-
 fn dispatcher_knows_tool<T>(dispatcher: &T, name: &str) -> bool
 where
     T: AgentToolDispatcher + ?Sized,
@@ -1275,6 +1227,59 @@ where
             prefix_parts.join("\n\n")
         } else {
             format!("{}\n\n{user_input}", prefix_parts.join("\n\n"))
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod typed_transcript_contract_tests {
+    use super::*;
+
+    #[test]
+    fn user_role_accepts_only_operator_text_or_blocks() {
+        assert!(
+            user_message_from_operator_renderable(CoreRenderable::Text {
+                text: "hello".to_string(),
+            })
+            .is_ok()
+        );
+        assert!(
+            user_message_from_operator_renderable(CoreRenderable::Blocks {
+                blocks: vec![crate::types::ContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn user_role_rejects_runtime_authored_renderables() {
+        for content in [
+            CoreRenderable::SystemNotice {
+                kind: crate::types::SystemNoticeKind::Comms,
+                body: Some("runtime".to_string()),
+                blocks: Vec::new(),
+            },
+            CoreRenderable::Json {
+                value: serde_json::json!({"runtime": true}),
+            },
+            CoreRenderable::Reference {
+                uri: "artifact://runtime".to_string(),
+                label: Some("runtime".to_string()),
+            },
+        ] {
+            let err = match user_message_from_operator_renderable(content) {
+                Ok(message) => {
+                    panic!("runtime renderable must not become user text: {message:?}")
+                }
+                Err(err) => err,
+            };
+            assert!(
+                matches!(err, AgentError::ConfigError(ref message) if message.contains("role=user")),
+                "unexpected error: {err:?}"
+            );
         }
     }
 }

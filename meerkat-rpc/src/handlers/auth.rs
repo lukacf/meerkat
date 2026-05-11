@@ -4292,7 +4292,7 @@ mod tests {
         let replacement = PersistedTokens::api_key("sk-new");
         store.save(&key, &previous).await.unwrap();
 
-        let result = save_tokens_and_publish_lifecycle_commit_unlocked(
+        let err = match save_tokens_and_publish_lifecycle_commit_unlocked(
             Some(RpcId::Num(1)),
             &store,
             &runtime,
@@ -4300,13 +4300,9 @@ mod tests {
             &replacement,
             true,
         )
-        .await;
-        assert!(
-            result.is_err(),
-            "lifecycle acquire should fail before TokenStore save"
-        );
-        let err = match result {
-            Ok(_) => return,
+        .await
+        {
+            Ok(_) => panic!("lifecycle acquire should fail before TokenStore save"),
             Err(err) => err,
         };
 

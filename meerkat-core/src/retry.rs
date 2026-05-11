@@ -498,39 +498,27 @@ mod tests {
             .expect("network timeout should be retryable");
         let run_id = RunId::new();
 
-        let recoverable_input = lifecycle.recoverable_failure_input(run_id.clone());
-        assert!(
-            matches!(
-                &recoverable_input,
-                TurnExecutionInput::RecoverableFailure { .. }
-            ),
-            "unexpected recoverable input: {recoverable_input:?}"
-        );
-        if let TurnExecutionInput::RecoverableFailure {
-            run_id: input_run_id,
-            retry,
-        } = recoverable_input
-        {
-            assert_eq!(input_run_id, run_id);
-            assert_eq!(retry.failure.kind, LlmRetryFailureKind::NetworkTimeout);
-            assert_eq!(retry.plan.attempt, 1);
+        match lifecycle.recoverable_failure_input(run_id.clone()) {
+            TurnExecutionInput::RecoverableFailure {
+                run_id: input_run_id,
+                retry,
+            } => {
+                assert_eq!(input_run_id, run_id);
+                assert_eq!(retry.failure.kind, LlmRetryFailureKind::NetworkTimeout);
+                assert_eq!(retry.plan.attempt, 1);
+            }
+            other => panic!("unexpected recoverable input: {other:?}"),
         }
 
-        let retry_requested_input = lifecycle.retry_requested_input(run_id.clone());
-        assert!(
-            matches!(
-                &retry_requested_input,
-                TurnExecutionInput::RetryRequested { .. }
-            ),
-            "unexpected retry input: {retry_requested_input:?}"
-        );
-        if let TurnExecutionInput::RetryRequested {
-            run_id: input_run_id,
-            retry_attempt,
-        } = retry_requested_input
-        {
-            assert_eq!(input_run_id, run_id);
-            assert_eq!(retry_attempt, 1);
+        match lifecycle.retry_requested_input(run_id.clone()) {
+            TurnExecutionInput::RetryRequested {
+                run_id: input_run_id,
+                retry_attempt,
+            } => {
+                assert_eq!(input_run_id, run_id);
+                assert_eq!(retry_attempt, 1);
+            }
+            other => panic!("unexpected retry input: {other:?}"),
         }
 
         let event = serde_json::to_value(lifecycle.retrying_event()).unwrap();

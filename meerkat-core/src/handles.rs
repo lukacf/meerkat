@@ -894,9 +894,9 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 /// Runtime-backed comms ingress hands parsed transport facts to this handle
 /// and receives the complete typed admission/classification facts back. A
 /// rejection is authoritative and callers fail closed. Standalone comms
-/// runtimes may have no session DSL handle; those retain a local
-/// `PeerIngressMachinePolicy` adapter for wire-compatible operation without a
-/// session authority.
+/// runtimes may have no session DSL handle; those use the explicit
+/// `PeerIngressCompatibilityAuthority` seam for wire-compatible operation
+/// without a session authority.
 pub trait PeerCommsHandle: Send + Sync {
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.

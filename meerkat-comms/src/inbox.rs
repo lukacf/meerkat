@@ -1083,7 +1083,7 @@ mod tests {
 
     use crate::classify::IngressClassificationContext;
     use crate::trust::{TrustedPeer, TrustedPeers};
-    use meerkat_core::PeerIngressMachinePolicy;
+    use meerkat_core::{PeerIngressCompatibilityAuthority, PeerIngressMachinePolicy};
     use std::sync::atomic::AtomicUsize;
 
     fn make_classification_context(
@@ -1101,7 +1101,7 @@ mod tests {
         Arc::new(IngressClassificationContext {
             require_peer_auth: require_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted)),
-            ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
+            standalone_ingress: Arc::new(PeerIngressCompatibilityAuthority::default()),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
             require_machine_authority: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inproc_namespace: None,

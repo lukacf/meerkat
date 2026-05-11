@@ -115,15 +115,50 @@ host_wasm_pack_repo() {
 }
 
 buildbuddy_wasm_pack_bin() {
-  local output_base repo candidate
+  local output_base host_archive candidate
   output_base="$(buildbuddy_output_base)"
-  repo="$(host_wasm_pack_repo)" || return 1
+  host_archive="$(host_wasm_pack_repo || true)"
+  if [[ -n "${host_archive}" ]]; then
+    for candidate in \
+      "${output_base}/external/+http_archive+${host_archive}/wasm-pack" \
+      "${output_base}/external/${host_archive}/wasm-pack" \
+      "${output_base}/execroot/_main/external/+http_archive+${host_archive}/wasm-pack" \
+      "${output_base}/execroot/_main/external/${host_archive}/wasm-pack"; do
+      if host_can_execute_binary "${candidate}"; then
+        printf '%s\n' "${candidate}"
+        return 0
+      fi
+    done
+    candidate="$(
+      find -L "${output_base}" \
+        -type f \
+        -name wasm-pack \
+        -path "*/${host_archive}/*" \
+        -perm -111 \
+        2>/dev/null |
+        while IFS= read -r path; do
+          if host_can_execute_binary "${path}"; then
+            printf '%s\n' "${path}"
+            break
+          fi
+        done
+    )"
+    if [[ -n "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+    return 1
+  fi
 
   for candidate in \
-    "${output_base}/external/+http_archive+${repo}/wasm-pack" \
-    "${output_base}/external/${repo}/wasm-pack" \
-    "${output_base}/execroot/_main/external/+http_archive+${repo}/wasm-pack" \
-    "${output_base}/execroot/_main/external/${repo}/wasm-pack"; do
+    "${output_base}/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/external/wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
+    "${output_base}/external/wasm_pack_linux_x86_64/wasm-pack" \
+    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/execroot/_main/external/wasm_pack_darwin_arm64/wasm-pack" \
+    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
+    "${output_base}/execroot/_main/external/wasm_pack_linux_x86_64/wasm-pack"; do
     if host_can_execute_binary "${candidate}"; then
       printf '%s\n' "${candidate}"
       return 0
@@ -134,7 +169,7 @@ buildbuddy_wasm_pack_bin() {
     find -L "${output_base}" \
       -type f \
       -name wasm-pack \
-      -path "*/${repo}/*" \
+      \( -path '*/wasm_pack_darwin_arm64/*' -o -path '*/wasm_pack_linux_x86_64/*' \) \
       -perm -111 \
       2>/dev/null |
       while IFS= read -r path; do

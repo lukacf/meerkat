@@ -8,7 +8,7 @@ use crate::error::{
 use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::interaction::InteractionId;
 use crate::ops_lifecycle::{OperationStatus, OperationTerminalOutcome};
-use crate::retry::LlmRetrySchedule;
+use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule};
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
@@ -114,6 +114,145 @@ pub struct EventEnvelope<T> {
     pub mob_id: Option<String>,
     pub timestamp_ms: u64,
     pub payload: T,
+}
+
+/// Typed public retry event projection.
+///
+/// The retry schedule is the semantic payload. Legacy top-level fields are
+/// serialized from it for existing event consumers, and legacy events without a
+/// typed schedule deserialize into a synthetic schedule instead of making those
+/// string fields authoritative for new producers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmRetryEvent {
+    schedule: LlmRetrySchedule,
+}
+
+impl LlmRetryEvent {
+    #[must_use]
+    pub fn from_schedule(schedule: LlmRetrySchedule) -> Self {
+        Self { schedule }
+    }
+
+    #[must_use]
+    pub fn schedule(&self) -> &LlmRetrySchedule {
+        &self.schedule
+    }
+
+    #[must_use]
+    pub fn into_schedule(self) -> LlmRetrySchedule {
+        self.schedule
+    }
+
+    #[must_use]
+    pub fn attempt(&self) -> u32 {
+        self.schedule.plan.attempt
+    }
+
+    #[must_use]
+    pub fn max_attempts(&self) -> u32 {
+        self.schedule.plan.max_retries
+    }
+
+    #[must_use]
+    pub fn delay_ms(&self) -> u64 {
+        self.schedule.plan.selected_delay_ms
+    }
+
+    #[must_use]
+    pub fn error(&self) -> &str {
+        &self.schedule.failure.message
+    }
+
+    fn from_legacy_mirrors(attempt: u32, max_attempts: u32, error: String, delay_ms: u64) -> Self {
+        Self {
+            schedule: LlmRetrySchedule {
+                failure: LlmRetryFailure {
+                    provider: "legacy".to_string(),
+                    kind: LlmRetryFailureKind::RetryableProviderError,
+                    retry_after_ms: None,
+                    duration_ms: None,
+                    message: error,
+                },
+                plan: LlmRetryPlan {
+                    attempt,
+                    max_retries: max_attempts,
+                    computed_delay_ms: delay_ms,
+                    selected_delay_ms: delay_ms,
+                    retry_after_hint_ms: None,
+                    rate_limit_floor_applied: false,
+                    budget_capped: false,
+                },
+            },
+        }
+    }
+}
+
+impl Serialize for LlmRetryEvent {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("LlmRetryEvent", 5)?;
+        state.serialize_field("attempt", &self.attempt())?;
+        state.serialize_field("max_attempts", &self.max_attempts())?;
+        state.serialize_field("error", self.error())?;
+        state.serialize_field("delay_ms", &self.delay_ms())?;
+        state.serialize_field("retry", &self.schedule)?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for LlmRetryEvent {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct WireRetryEvent {
+            attempt: Option<u32>,
+            max_attempts: Option<u32>,
+            error: Option<String>,
+            delay_ms: Option<u64>,
+            retry: Option<LlmRetrySchedule>,
+        }
+
+        let wire = WireRetryEvent::deserialize(deserializer)?;
+        if let Some(schedule) = wire.retry {
+            return Ok(Self::from_schedule(schedule));
+        }
+
+        Ok(Self::from_legacy_mirrors(
+            wire.attempt
+                .ok_or_else(|| de::Error::missing_field("attempt"))?,
+            wire.max_attempts
+                .ok_or_else(|| de::Error::missing_field("max_attempts"))?,
+            wire.error
+                .ok_or_else(|| de::Error::missing_field("error"))?,
+            wire.delay_ms
+                .ok_or_else(|| de::Error::missing_field("delay_ms"))?,
+        ))
+    }
+}
+
+#[cfg(feature = "schema")]
+impl schemars::JsonSchema for LlmRetryEvent {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "LlmRetryEvent".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        #[allow(dead_code)]
+        #[derive(schemars::JsonSchema)]
+        struct LlmRetryEventSchema {
+            attempt: u32,
+            max_attempts: u32,
+            error: String,
+            delay_ms: u64,
+            retry: LlmRetrySchedule,
+        }
+
+        LlmRetryEventSchema::json_schema(generator)
+    }
 }
 
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1656,12 +1795,8 @@ pub enum AgentEvent {
     // === Retry Events ===
     /// Retrying after error
     Retrying {
-        attempt: u32,
-        max_attempts: u32,
-        error: String,
-        delay_ms: u64,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        retry: Option<LlmRetrySchedule>,
+        #[serde(flatten)]
+        retry: LlmRetryEvent,
     },
 
     // === Skill Events ===
@@ -1734,6 +1869,15 @@ pub enum AgentEvent {
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
+}
+
+impl AgentEvent {
+    #[must_use]
+    pub fn retrying(schedule: LlmRetrySchedule) -> Self {
+        Self::Retrying {
+            retry: LlmRetryEvent::from_schedule(schedule),
+        }
+    }
 }
 
 impl AgentEvent {
@@ -1921,14 +2065,12 @@ pub fn format_verbose_event_with_config(
                 Some(format!("  💭 Thinking: {preview}"))
             }
         }
-        AgentEvent::Retrying {
-            attempt,
-            max_attempts,
-            error,
-            delay_ms,
-            ..
-        } => Some(format!(
-            "  ⟳ Retry {attempt}/{max_attempts}: {error} (waiting {delay_ms}ms)"
+        AgentEvent::Retrying { retry } => Some(format!(
+            "  ⟳ Retry {}/{}: {} (waiting {}ms)",
+            retry.attempt(),
+            retry.max_attempts(),
+            retry.error(),
+            retry.delay_ms()
         )),
         AgentEvent::BudgetWarning {
             budget_type,
@@ -2023,6 +2165,32 @@ mod tests {
 
     fn tool_args(value: Value) -> ToolCallArguments {
         ToolCallArguments::from_value(value).expect("test tool args must be an object")
+    }
+
+    fn retry_schedule(
+        message: &str,
+        attempt: u32,
+        max_retries: u32,
+        delay_ms: u64,
+    ) -> LlmRetrySchedule {
+        LlmRetrySchedule {
+            failure: LlmRetryFailure {
+                provider: "test".to_string(),
+                kind: LlmRetryFailureKind::RetryableProviderError,
+                retry_after_ms: None,
+                duration_ms: None,
+                message: message.to_string(),
+            },
+            plan: LlmRetryPlan {
+                attempt,
+                max_retries,
+                computed_delay_ms: delay_ms,
+                selected_delay_ms: delay_ms,
+                retry_after_hint_ms: None,
+                rate_limit_floor_applied: false,
+                budget_capped: false,
+            },
+        }
     }
 
     #[test]
@@ -2428,11 +2596,7 @@ mod tests {
                 percent: 0.8,
             },
             AgentEvent::Retrying {
-                attempt: 1,
-                max_attempts: 3,
-                error: "Rate limited".to_string(),
-                delay_ms: 1000,
-                retry: None,
+                retry: LlmRetryEvent::from_schedule(retry_schedule("Rate limited", 1, 3, 1000)),
             },
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
@@ -2765,18 +2929,43 @@ mod tests {
                 budget_capped: false,
             },
         };
-        let event = AgentEvent::Retrying {
-            attempt: schedule.plan.attempt,
-            max_attempts: schedule.plan.max_retries,
-            error: schedule.failure.message.clone(),
-            delay_ms: schedule.plan.selected_delay_ms,
-            retry: Some(schedule),
-        };
+        let event = AgentEvent::retrying(schedule);
 
         let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["attempt"], 1);
+        assert_eq!(value["max_attempts"], 3);
+        assert_eq!(value["error"], "rate limited");
+        assert_eq!(value["delay_ms"], 30_000);
         assert_eq!(value["retry"]["failure"]["kind"], "rate_limited");
         assert_eq!(value["retry"]["plan"]["attempt"], 1);
         assert_eq!(value["retry"]["plan"]["selected_delay_ms"], 30_000);
+    }
+
+    #[test]
+    fn retry_event_legacy_mirrors_deserialize_into_typed_schedule() {
+        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+            "type": "retrying",
+            "attempt": 2,
+            "max_attempts": 4,
+            "error": "legacy retry",
+            "delay_ms": 250
+        }))
+        .unwrap();
+
+        match event {
+            AgentEvent::Retrying { retry } => {
+                assert_eq!(retry.attempt(), 2);
+                assert_eq!(retry.max_attempts(), 4);
+                assert_eq!(retry.error(), "legacy retry");
+                assert_eq!(retry.delay_ms(), 250);
+                assert_eq!(retry.schedule().failure.provider, "legacy");
+                assert_eq!(
+                    retry.schedule().failure.kind,
+                    LlmRetryFailureKind::RetryableProviderError
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
@@ -3076,11 +3265,7 @@ mod tests {
                 percent: 50.0,
             },
             AgentEvent::Retrying {
-                attempt: 1,
-                max_attempts: 2,
-                error: "retry".to_string(),
-                delay_ms: 100,
-                retry: None,
+                retry: LlmRetryEvent::from_schedule(retry_schedule("retry", 1, 2, 100)),
             },
             AgentEvent::SkillsResolved {
                 skills: vec![],

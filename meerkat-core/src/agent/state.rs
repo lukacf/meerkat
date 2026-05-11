@@ -14,6 +14,7 @@ use crate::hooks::{
 use crate::image_content::{MissingBlobBehavior, hydrate_messages_for_execution};
 use crate::lifecycle::RunId;
 use crate::lifecycle::run_primitive::ProviderParamsOverride;
+use crate::retry::LlmRetryLifecycleAuthority;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
@@ -441,6 +442,7 @@ where
         };
         let messages = hydrated_messages.as_deref().unwrap_or(messages);
         let mut attempt = 0u32;
+        let retry_authority = LlmRetryLifecycleAuthority::new(self.retry_policy.clone());
 
         loop {
             // 1. Budget gate at loop entry
@@ -536,45 +538,37 @@ where
             match call_result {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    if let Some(retry_schedule) = self.retry_policy.schedule_retry(
+                    if let Some(retry_lifecycle) = retry_authority.plan_recoverable_failure(
                         &e,
                         attempt,
                         self.budget.remaining_duration(),
                     ) {
+                        let retry_schedule = retry_lifecycle.schedule();
                         tracing::warn!(
                             "LLM call failed (attempt {}), retrying in {}ms: {}",
                             retry_schedule.plan.attempt,
                             retry_schedule.plan.selected_delay_ms,
                             e
                         );
-                        let recover =
-                            self.apply_turn_input(TurnExecutionInput::RecoverableFailure {
-                                run_id: run_id.clone(),
-                                retry: retry_schedule.clone(),
-                            })?;
+                        let recover = self.apply_turn_input(
+                            retry_lifecycle.recoverable_failure_input(run_id.clone()),
+                        )?;
                         self.execute_turn_effects(&recover, turn_count, event_tx)
                             .await;
                         let _ = crate::event_tap::tap_emit(
                             &self.event_tap,
                             event_tx.as_ref(),
-                            AgentEvent::Retrying {
-                                attempt: retry_schedule.plan.attempt,
-                                max_attempts: retry_schedule.plan.max_retries,
-                                error: e.to_string(),
-                                delay_ms: retry_schedule.plan.selected_delay_ms,
-                                retry: Some(retry_schedule.clone()),
-                            },
+                            retry_lifecycle.retrying_event(),
                         )
                         .await;
-                        attempt += 1;
-                        tokio::time::sleep(retry_schedule.plan.selected_delay()).await;
+                        attempt = retry_schedule.plan.attempt;
+                        retry_lifecycle.wait_for_continuation().await;
                         if let Some(exceeded) = self.budget.observe().exceeded() {
                             return Err(exceeded.to_agent_error());
                         }
-                        let retry = self.apply_turn_input(TurnExecutionInput::RetryRequested {
-                            run_id: run_id.clone(),
-                            retry_attempt: retry_schedule.plan.attempt,
-                        })?;
+                        let retry = self.apply_turn_input(
+                            retry_lifecycle.retry_requested_input(run_id.clone()),
+                        )?;
                         self.execute_turn_effects(&retry, turn_count, event_tx)
                             .await;
                         continue;

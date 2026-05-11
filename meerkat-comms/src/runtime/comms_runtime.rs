@@ -19,9 +19,10 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, PeerSendability,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsContentAuthority, EventStream, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+    PeerReachabilityReason, PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -498,6 +499,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
                 // Self-input guard: when allow_self_session is false, this runtime's
                 // inbox is the target, which is a self-loop. Reject unless explicitly
                 // opted in. MCP never exposes this flag.
@@ -545,8 +547,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 body,
                 blocks,
                 handling_mode,
-            } => self
-                .send_peer_command(
+            } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                self.send_peer_command(
                     &to,
                     crate::types::MessageKind::Message {
                         body,
@@ -558,7 +561,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 .map(|envelope_id| SendReceipt::PeerMessageSent {
                     envelope_id,
                     acked: false,
-                }),
+                })
+            }
             CommsCommand::PeerLifecycle { to, kind, params } => self
                 .send_peer_command(&to, crate::types::MessageKind::Lifecycle { kind, params })
                 .await
@@ -571,6 +575,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
                 stream,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
@@ -644,6 +649,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 let (peer_handle, _stream_authority) =
                     self.require_peer_request_response_authority("PeerResponse")?;
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
@@ -720,6 +726,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
                 if !allow_self_session {
                     return Err(SendAndStreamError::Send(SendError::Validation(
                         "self-session input rejected: set allow_self_session=true to override"
@@ -756,6 +763,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 // Reserve under the canonical request envelope id so the same
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
@@ -984,7 +992,11 @@ impl CoreCommsRuntime for CommsRuntime {
                                 body,
                                 blocks,
                                 handling_mode: _,
-                            } => meerkat_core::InteractionContent::Message { body, blocks },
+                            } => {
+                                let (body, blocks) =
+                                    CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                                meerkat_core::InteractionContent::Message { body, blocks }
+                            }
                             MessageKind::Request {
                                 intent,
                                 params,
@@ -995,7 +1007,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 meerkat_core::InteractionContent::Request {
                                     intent: typed_intent.to_string(),
                                     params,
-                                    blocks,
+                                    blocks: CommsContentAuthority::normalize_blocks(blocks),
                                 }
                             }
                             MessageKind::Lifecycle { kind, params } => {
@@ -1027,7 +1039,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                     in_reply_to: meerkat_core::InteractionId(in_reply_to),
                                     status: core_status,
                                     result,
-                                    blocks,
+                                    blocks: CommsContentAuthority::normalize_blocks(blocks),
                                 }
                             }
                             MessageKind::Ack { .. } => {
@@ -1066,22 +1078,26 @@ impl CoreCommsRuntime for CommsRuntime {
                         blocks,
                         render_metadata,
                         ..
-                    } => Some(meerkat_core::ClassifiedInboxInteraction {
-                        interaction: meerkat_core::InboxInteraction {
-                            id: meerkat_core::InteractionId(
-                                interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
-                            ),
-                            from_route: None,
-                            from: format!("event:{source}"),
-                            content: meerkat_core::InteractionContent::Message { body, blocks },
-                            rendered_text,
-                            handling_mode,
-                            render_metadata,
-                        },
-                        ingress,
-                        lifecycle_peer,
-                        response_terminality: entry.response_terminality,
-                    }),
+                    } => {
+                        let (body, blocks) =
+                            CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                        Some(meerkat_core::ClassifiedInboxInteraction {
+                            interaction: meerkat_core::InboxInteraction {
+                                id: meerkat_core::InteractionId(
+                                    interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
+                                ),
+                                from_route: None,
+                                from: format!("event:{source}"),
+                                content: meerkat_core::InteractionContent::Message { body, blocks },
+                                rendered_text,
+                                handling_mode,
+                                render_metadata,
+                            },
+                            ingress,
+                            lifecycle_peer,
+                            response_terminality: entry.response_terminality,
+                        })
+                    }
                 }
             })
             .collect())
@@ -1872,9 +1888,11 @@ impl CommsRuntime {
             } => {
                 self.hydrate_blocks_for_transport(&mut blocks, "comms message")
                     .await?;
+                let (body, blocks) =
+                    CommsContentAuthority::canonical_text_and_blocks(body, Some(blocks));
                 Ok(crate::types::MessageKind::Message {
                     body,
-                    blocks: Some(blocks),
+                    blocks,
                     handling_mode,
                 })
             }
@@ -1889,7 +1907,7 @@ impl CommsRuntime {
                 Ok(crate::types::MessageKind::Request {
                     intent,
                     params,
-                    blocks: Some(blocks),
+                    blocks: CommsContentAuthority::normalize_blocks(Some(blocks)),
                     handling_mode,
                 })
             }
@@ -1906,7 +1924,7 @@ impl CommsRuntime {
                     in_reply_to,
                     status,
                     result,
-                    blocks: Some(blocks),
+                    blocks: CommsContentAuthority::normalize_blocks(Some(blocks)),
                     handling_mode,
                 })
             }
@@ -2615,6 +2633,7 @@ impl CommsRuntime {
         source: meerkat_core::InputSource,
         handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<(), SendError> {
+        let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
         self.reserve_interaction_stream_channels(
             corr_id,
@@ -3758,7 +3777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_drain_inbox_interactions_multimodal_message_keeps_body_as_projection() {
+    async fn test_drain_inbox_interactions_multimodal_message_blocks_own_projection() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("multimodal-body-projection", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -3784,7 +3803,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
-                body: "please inspect this".to_string(),
+                body: "stale helper text".to_string(),
                 blocks: Some(blocks.clone()),
                 handling_mode: None,
             },
@@ -3800,16 +3819,17 @@ mod tests {
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         let interaction = &interactions[0];
+        let canonical_body = meerkat_core::types::text_content(&blocks);
         assert_eq!(
             interaction.rendered_text,
-            "[COMMS MESSAGE from sender]\nplease inspect this"
+            format!("[COMMS MESSAGE from sender]\n{canonical_body}")
         );
         match &interaction.content {
             meerkat_core::InteractionContent::Message {
                 body,
                 blocks: got_blocks,
             } => {
-                assert_eq!(body, "please inspect this");
+                assert_eq!(body, &canonical_body);
                 assert_eq!(got_blocks.as_ref(), Some(&blocks));
             }
             other => panic!("expected message content, got {other:?}"),

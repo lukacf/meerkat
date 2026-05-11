@@ -17,10 +17,11 @@
 //!
 //! This module ports the deleted `LocalTurnExecutionState` phase logic and
 //! wraps it in a [`TurnStateHandle`] so core tests can exercise the full
-//! agent loop against a phase-tracking handle. The adapter shape mirrors
-//! `apply_turn_input_via_runtime_handle` in `agent::state`: each trait
-//! method builds the corresponding `TurnExecutionInput` and drives the
-//! internal state machine via `apply`.
+//! agent loop against a phase-tracking handle. The adapter shape mirrors the
+//! runtime turn handle: each trait method builds the corresponding
+//! `TurnExecutionInput` and drives the internal state machine via `apply`;
+//! the default aggregate `TurnStateHandle::apply_turn_input` projects effects
+//! through the shared core compatibility authority.
 //!
 //! See #32 Class W1.
 //!
@@ -738,17 +739,11 @@ impl TurnStateHandle for TestTurnStateHandle {
 
     fn primitive_applied(&self) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
-        // `apply_turn_input_via_runtime_handle` in `agent::state` deliberately
-        // returns Ok without routing `TurnExecutionInput::StartConversationRun`
-        // (and its Immediate* siblings) through the handle — the real runtime
-        // DSL absorbs those Start* inputs through a separate wiring layer that
-        // does not exist in `meerkat-core`. Tests therefore arrive at
-        // `primitive_applied` with the stub still in `Ready`/no-active-run or
-        // at a terminal phase from a previous turn. Reset terminal phases and
-        // seed a synthetic `StartConversationRun` so the downstream phase
-        // transitions flow; multi-turn tests (e.g. compact-between-turns) do
-        // not fire `AcknowledgeTerminal` either, so we treat any non-active
-        // state as "ready for a fresh run".
+        // Some core tests call the per-input trait methods directly rather
+        // than the aggregate `apply_turn_input` path. Preserve that fixture
+        // behavior by seeding a synthetic run when a test jumps straight to
+        // primitive application or reuses a terminal handle without an
+        // explicit AcknowledgeTerminal.
         let is_terminal = matches!(
             guard.phase,
             TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled

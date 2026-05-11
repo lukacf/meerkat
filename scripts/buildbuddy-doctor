@@ -225,14 +225,15 @@ else
   bad "BuildBuddy launcher still carries stale vendored oai-rt-rs lock handling"
 fi
 
-if [[ ! -e vendor/oai-rt-rs ]] &&
-  grep -Fq 'oai-rt-rs = "0.3.0"' Cargo.toml &&
+oai_rt_rs_version="$(awk -F'"' '/^oai-rt-rs = / { print $2; exit }' Cargo.toml)"
+if [[ -n "${oai_rt_rs_version}" ]] &&
+  [[ ! -e vendor/oai-rt-rs ]] &&
   ! grep -Fq '//vendor/oai-rt-rs:package_runfiles' BUILD.bazel xtask/BUILD.bazel &&
   ! grep -Fq 'crate = "oai-rt-rs"' MODULE.bazel &&
   ! grep -Fq 'additive_build_file_content' MODULE.bazel &&
   ! grep -Fq 'vendor/oai-rt-rs' MODULE.bazel.lock &&
   ! grep -Fq 'crates__oai-rt-rs-0.2.1' MODULE.bazel.lock &&
-  grep -Fq 'crates__oai-rt-rs-0.3.0' MODULE.bazel.lock; then
+  grep -Fq "crates__oai-rt-rs-${oai_rt_rs_version}" MODULE.bazel.lock; then
   pass "oai-rt-rs resolves from crates.io without vendored runfiles plumbing"
 else
   bad "oai-rt-rs still appears to use vendored runfiles plumbing"

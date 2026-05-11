@@ -3577,4 +3577,47 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn browser_consume_requires_authmachine_membership_even_with_registry_payload() {
+        let lifecycle = Arc::new(RuntimeAuthLeaseHandle::new());
+        let authority =
+            RuntimeOAuthFlowHandle::new_with_auth_lease(Duration::from_secs(60), lifecycle.clone());
+        let target = target();
+        let provider = OAuthProviderIdentity::OpenAiChatGpt;
+        let redirect_uri = "http://127.0.0.1/callback";
+        let state = authority
+            .start(
+                target.clone(),
+                provider,
+                redirect_uri.to_string(),
+                "verifier".to_string(),
+            )
+            .expect("browser flow admitted");
+        assert!(lifecycle.has_oauth_browser_flow_for_test(&target, &state));
+        authority
+            .registry
+            .verify(&state, &target, provider, redirect_uri)
+            .expect("registry projection still has the browser payload");
+
+        authority
+            .expire_browser(&target, &state)
+            .expect("test removes AuthMachine OAuth membership only");
+        assert!(
+            !lifecycle.has_oauth_browser_flow_for_test(&target, &state),
+            "AuthMachine membership is the canonical consume precondition"
+        );
+        authority
+            .registry
+            .verify(&state, &target, provider, redirect_uri)
+            .expect("registry payload remains after AuthMachine membership removal");
+
+        assert!(matches!(
+            authority.consume(&state, &target, provider, redirect_uri),
+            Err(OAuthFlowError::LifecycleRejected {
+                operation: "verify_oauth_browser_flow",
+                ..
+            })
+        ));
+    }
 }

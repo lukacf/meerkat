@@ -2366,23 +2366,18 @@ pub(crate) async fn machine_reset(
 
 pub(crate) fn machine_prepare_bindings_projection(
     driver: &mut DriverEntry,
+    accepted_phase: crate::meerkat_machine::dsl::MeerkatPhase,
 ) -> Result<(), RuntimeDriverError> {
-    match driver.runtime_state() {
-        RuntimeState::Initializing | RuntimeState::Idle => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
-            Ok(())
-        }
-        RuntimeState::Attached => {
-            driver.set_control_projection(RuntimeState::Attached, None, None);
+    let accepted_runtime_state =
+        crate::meerkat_machine::dsl_authority::write_back_phase(accepted_phase);
+    match accepted_runtime_state {
+        RuntimeState::Initializing | RuntimeState::Idle | RuntimeState::Attached => {
+            driver.set_control_projection(accepted_runtime_state, None, None);
             Ok(())
         }
         RuntimeState::Running | RuntimeState::Retired | RuntimeState::Stopped => Ok(()),
-        from => Err(RuntimeDriverError::Internal(
-            crate::runtime_state::RuntimeStateTransitionError {
-                from,
-                to: RuntimeState::Attached,
-            }
-            .to_string(),
+        RuntimeState::Destroyed => Err(RuntimeDriverError::Internal(
+            "PrepareBindings DSL transition accepted a destroyed lifecycle phase".to_string(),
         )),
     }
 }

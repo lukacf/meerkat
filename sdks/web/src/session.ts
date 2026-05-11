@@ -10,12 +10,12 @@ import type {
 } from './types.js';
 
 // WASM function signatures (bound at construction)
-type StartTurnFn = (handle: number, prompt: string) => Promise<string>;
-type GetSessionStateFn = (handle: number) => string;
-type DestroySessionFn = (handle: number) => void;
-type PollEventsFn = (handle: number) => string;
+type StartTurnFn = (sessionId: string, prompt: string) => Promise<string>;
+type GetSessionStateFn = (sessionId: string) => string;
+type DestroySessionFn = (sessionId: string) => void;
+type PollEventsFn = (sessionId: string) => string;
 type AppendSystemContextFn = (
-  handle: number,
+  sessionId: string,
   request_json: string,
 ) => Promise<string>;
 
@@ -56,8 +56,8 @@ function normalizeSessionEvents(raw: unknown): SessionEvent[] {
 
 /** A direct (non-mob) agent session. */
 export class Session {
-  /** @internal — browser-local façade handle, not the authoritative session ID. */
-  readonly handle: number;
+  /** Authoritative runtime session ID for direct browser session control. */
+  readonly sessionId: string;
 
   private startTurnFn: StartTurnFn;
   private getStateFn: GetSessionStateFn;
@@ -67,14 +67,14 @@ export class Session {
 
   /** @internal — use MeerkatRuntime.createSession() instead. */
   constructor(
-    handle: number,
+    sessionId: string,
     startTurnFn: StartTurnFn,
     getStateFn: GetSessionStateFn,
     destroyFn: DestroySessionFn,
     pollFn: PollEventsFn,
     appendSystemContextFn: AppendSystemContextFn,
   ) {
-    this.handle = handle;
+    this.sessionId = sessionId;
     this.startTurnFn = startTurnFn;
     this.getStateFn = getStateFn;
     this.destroyFn = destroyFn;
@@ -85,7 +85,7 @@ export class Session {
   /** Run a turn through the agent loop. */
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
     const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
-    const json = await this.startTurnFn(this.handle, promptStr);
+    const json = await this.startTurnFn(this.sessionId, promptStr);
     const parsed = JSON.parse(json) as Partial<TurnResult> & {
       text?: string;
       response?: string;
@@ -105,23 +105,18 @@ export class Session {
 
   /** Get the current runtime-backed session state. */
   getState(): SessionState {
-    return JSON.parse(this.getStateFn(this.handle)) as SessionState;
-  }
-
-  /** The authoritative runtime session ID behind this local browser handle. */
-  get sessionId(): string {
-    return this.getState().session_id;
+    return JSON.parse(this.getStateFn(this.sessionId)) as SessionState;
   }
 
   /** Poll buffered agent events from the last turn. */
   pollEvents(): SessionEvent[] {
-    const json = this.pollFn(this.handle);
+    const json = this.pollFn(this.sessionId);
     const parsed: unknown = JSON.parse(json);
     return normalizeSessionEvents(parsed);
   }
 
   /**
-   * Observe session events through the direct handle's buffered event source.
+   * Observe session events through the direct session's buffered event source.
    *
    * This is the standalone observation API for direct WASM sessions. It uses
    * the same underlying event buffer as `pollEvents()`, so callers should use
@@ -129,7 +124,7 @@ export class Session {
    */
   subscribe(): EventSubscription<SessionEvent> {
     return new EventSubscription<SessionEvent>(
-      () => this.pollFn(this.handle),
+      () => this.pollFn(this.sessionId),
       (raw) => raw.map((item) => normalizeSessionEvent(item)),
     );
   }
@@ -139,7 +134,7 @@ export class Session {
     options: AppendSystemContextOptions,
   ): Promise<AppendSystemContextResult> {
     const json = await this.appendSystemContextFn(
-      this.handle,
+      this.sessionId,
       JSON.stringify({
         text: options.text,
         source: options.source,
@@ -152,7 +147,7 @@ export class Session {
   /** Destroy the session and release resources. */
   destroy(): void {
     try {
-      this.destroyFn(this.handle);
+      this.destroyFn(this.sessionId);
     } catch (error) {
       if (isRuntimeNotInitializedError(error)) {
         return;
@@ -164,7 +159,7 @@ export class Session {
   /**
    * Deprecated compatibility surface.
    *
-   * Browser-local sessions no longer report lifecycle state from cached handle
+   * Browser-local sessions no longer report lifecycle state from cached object
    * flags. Use `getState()` and canonical runtime/session errors instead.
    */
   get isDestroyed(): boolean {

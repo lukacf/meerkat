@@ -10,8 +10,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use meerkat_core::{
-    AuthError, Provider, RealmConnectionSet, ResolvedAuthEnvelope, connection::AuthBindingRef,
-    handles::AuthLeaseHandle,
+    AuthError, ExternalAuthResolverId, Provider, RealmConnectionSet, ResolvedAuthEnvelope,
+    connection::AuthBindingRef, handles::AuthLeaseHandle,
 };
 
 use crate::provider_runtime::binding::{ResolvedConnection, ValidatedBinding};
@@ -50,7 +50,7 @@ pub type NowFn = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 #[derive(Clone)]
 pub struct ResolverEnvironment {
     pub env_lookup: EnvLookup,
-    pub external_resolvers: BTreeMap<String, Arc<dyn ExternalAuthResolverHandle>>,
+    pub external_resolvers: BTreeMap<ExternalAuthResolverId, Arc<dyn ExternalAuthResolverHandle>>,
     pub now: NowFn,
     pub force_refresh: bool,
     pub auth_lease_handle: Option<Arc<dyn AuthLeaseHandle>>,
@@ -114,10 +114,10 @@ impl ResolverEnvironment {
     /// Register an external auth resolver under a handle name.
     pub fn with_external_resolver(
         mut self,
-        handle: impl Into<String>,
+        handle: ExternalAuthResolverId,
         resolver: Arc<dyn ExternalAuthResolverHandle>,
     ) -> Self {
-        self.external_resolvers.insert(handle.into(), resolver);
+        self.external_resolvers.insert(handle, resolver);
         self
     }
 

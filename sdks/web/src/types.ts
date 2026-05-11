@@ -119,13 +119,12 @@ export interface AppendSystemContextOptions {
 
 /** Result of a runtime system-context append request. */
 export interface AppendSystemContextResult {
-  handle: number;
+  session_id: string;
   status: 'staged' | 'duplicate';
 }
 
 /** Runtime-backed state for a direct browser session façade. */
 export interface SessionState {
-  handle: number;
   session_id: string;
   mob_id: string;
   model: string;

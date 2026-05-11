@@ -964,10 +964,24 @@ where
             if content.is_empty() {
                 continue;
             }
+            let Some(source_message_index) = discarded.source_message_index else {
+                let attempted_entries = requests.len() + 1;
+                return crate::memory::MemoryIndexDelivery::Rejected {
+                    scope,
+                    attempted_entries,
+                    error: crate::memory::MemoryStoreError::Scope(
+                        "discarded memory entry has no canonical source message".to_string(),
+                    ),
+                };
+            };
             let metadata = crate::memory::MemoryMetadata {
                 session_id: session_id.clone(),
                 turn: discarded.source_turn,
                 indexed_at: crate::time_compat::SystemTime::now(),
+                source: Some(crate::memory::MemorySourceProvenance::for_message(
+                    session_id.clone(),
+                    source_message_index,
+                )),
             };
             let request =
                 match crate::memory::MemoryIndexRequest::new(scope.clone(), content, metadata) {
@@ -4122,6 +4136,16 @@ mod tests {
         assert!(
             metadata.iter().any(|metadata| metadata.turn == Some(0)),
             "discarded first turn must retain its source turn instead of compaction-time turn"
+        );
+        assert!(
+            memory_store.metadata().iter().all(|metadata| {
+                metadata.source.as_ref().is_some_and(|source| {
+                    source.session_id == *agent.session().id()
+                        && source.message_range.start_message_index
+                            <= source.message_range.end_message_index
+                })
+            }),
+            "compaction must stamp each indexed memory entry with source message provenance"
         );
         assert!(
             !agent

@@ -1477,8 +1477,11 @@ describe("RunResult parsing", () => {
         },
         quarantined: [
           {
-            source_uuid: "src-1",
-            skill_id: "extract/email",
+            key: {
+              source_uuid: "00000000-0000-4000-8000-000000000001",
+              skill_name: "extract/email",
+            },
+            identity_hint: "00000000-0000-4000-8000-000000000001/extract/email",
             location: "project",
             error_code: "bad_frontmatter",
             error_class: "ValidationError",
@@ -1501,8 +1504,11 @@ describe("RunResult parsing", () => {
       },
       quarantined: [
         {
-          sourceUuid: "src-1",
-          skillId: "extract/email",
+          key: {
+            sourceUuid: "00000000-0000-4000-8000-000000000001",
+            skillName: "extract/email",
+          },
+          identityHint: "00000000-0000-4000-8000-000000000001/extract/email",
           location: "project",
           errorCode: "bad_frontmatter",
           errorClass: "ValidationError",
@@ -2285,10 +2291,9 @@ describe("Parity wrappers", () => {
   it("uses canonical role_name for helper APIs while accepting profileName alias", async () => {
     const client = new MeerkatClient();
     const calls = [];
-    const expectedRef = makeMemberRef("mob-1", "generated-helper");
     client.request = async (method, params) => {
       calls.push({ method, params });
-      const agentIdentity = params.agent_identity ?? "generated-helper";
+      const agentIdentity = params.agent_identity;
       return {
         output: "ok",
         tokens_used: 1,
@@ -2297,21 +2302,39 @@ describe("Parity wrappers", () => {
       };
     };
 
-    const spawnByRole = await client.spawnMobHelper("mob-1", "help", { roleName: "worker" });
-    const spawnByProfile = await client.spawnMobHelper("mob-1", "help", { profileName: "legacy-worker" });
-    const forkByRole = await client.forkMobHelper("mob-1", "a", "help", { roleName: "worker" });
-    const forkByProfile = await client.forkMobHelper("mob-1", "a", "help", { profileName: "legacy-worker" });
+    const spawnByRole = await client.spawnMobHelper("mob-1", "help", {
+      agentIdentity: "spawn-role",
+      roleName: "worker",
+    });
+    const spawnByProfile = await client.spawnMobHelper("mob-1", "help", {
+      agentIdentity: "spawn-profile",
+      profileName: "legacy-worker",
+    });
+    const forkByRole = await client.forkMobHelper("mob-1", "a", "help", {
+      agentIdentity: "fork-role",
+      roleName: "worker",
+    });
+    const forkByProfile = await client.forkMobHelper("mob-1", "a", "help", {
+      agentIdentity: "fork-profile",
+      profileName: "legacy-worker",
+    });
 
     assert.equal(calls[0].params.role_name, "worker");
     assert.equal(calls[1].params.role_name, "legacy-worker");
     assert.equal(calls[2].params.role_name, "worker");
     assert.equal(calls[3].params.role_name, "legacy-worker");
+    assert.deepEqual(calls.map((call) => call.params.agent_identity), [
+      "spawn-role",
+      "spawn-profile",
+      "fork-role",
+      "fork-profile",
+    ]);
     // App-facing helper receipts expose only `member_ref`; binding-era
     // `agent_runtime_id` / `fence_token` are retired per dogma #10.
-    assert.equal(spawnByRole.memberRef, expectedRef);
-    assert.equal(spawnByProfile.memberRef, expectedRef);
-    assert.equal(forkByRole.memberRef, expectedRef);
-    assert.equal(forkByProfile.memberRef, expectedRef);
+    assert.equal(spawnByRole.memberRef, makeMemberRef("mob-1", "spawn-role"));
+    assert.equal(spawnByProfile.memberRef, makeMemberRef("mob-1", "spawn-profile"));
+    assert.equal(forkByRole.memberRef, makeMemberRef("mob-1", "fork-role"));
+    assert.equal(forkByProfile.memberRef, makeMemberRef("mob-1", "fork-profile"));
     assert.equal(spawnByRole.agentRuntimeId, undefined);
     assert.equal(spawnByRole.fenceToken, undefined);
     assert.equal(forkByRole.agentRuntimeId, undefined);

@@ -932,7 +932,7 @@ impl MobBuilder {
             &definition.id,
             supervisor_authority,
         )?);
-        let mut roster = Roster::project(&mob_events);
+        let mut roster = Roster::try_project(&mob_events).map_err(MobError::Internal)?;
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
         let seeded_restore_diagnostics = HashMap::new();
@@ -1362,7 +1362,7 @@ impl MobBuilder {
                     Some(peer_id_a),
                     Some(key_a.clone()),
                 );
-            } else if entry.wired_to.is_empty() {
+            } else if entry.wired_to.is_empty() && entry.external_peer_specs.is_empty() {
                 continue;
             }
             let mut desired_specs = Vec::new();
@@ -1407,12 +1407,10 @@ impl MobBuilder {
                 );
             }
 
+            desired_specs.extend(entry.external_peer_specs.values().cloned());
+
             for peer_identity in &entry.wired_to {
                 let peer_meerkat_id = MeerkatId::from(peer_identity.as_str());
-                if let Some(spec) = entry.external_peer_specs.get(&peer_meerkat_id) {
-                    desired_specs.push(spec.clone());
-                    continue;
-                }
                 let peer_entry = roster.get(&peer_meerkat_id).cloned().ok_or_else(|| {
                     MobError::WiringError(format!(
                         "resume wiring target '{}' missing for '{}'",

@@ -12,13 +12,13 @@
 //! - `init_runtime_from_config(config_json)` — bare-bones bootstrap without mobpack
 //! - `runtime_version()` → crate version string (for JS/WASM version mismatch detection)
 //!
-//! ### Session (runtime-backed session-handle façades)
-//! - `create_session(mobpack_bytes, config_json)` → handle
-//! - `start_turn(handle, prompt)` → JSON result
-//! - `get_session_state(handle)` → JSON
-//! - `destroy_session(handle)`
+//! ### Session (runtime-backed canonical session façades)
+//! - `create_session(mobpack_bytes, config_json)` → session_id
+//! - `start_turn(session_id, prompt)` → JSON result
+//! - `get_session_state(session_id)` → JSON
+//! - `destroy_session(session_id)`
 //! - `inspect_mobpack(mobpack_bytes)` → JSON
-//! - `poll_events(handle)` → JSON
+//! - `poll_events(session_id)` → JSON
 //!
 //! ### Mob lifecycle (delegates to `MobMcpState`)
 //! - `mob_create(definition_json)` → mob_id
@@ -44,10 +44,10 @@
 //! - `mob_cancel_flow(mob_id, run_id)`
 //!
 //! ### Event Streaming
-//! - `mob_member_subscribe(mob_id, agent_identity)` → handle (per-member)
-//! - `mob_subscribe_events(mob_id)` → handle (mob-wide)
-//! - `poll_subscription(handle)` → JSON events
-//! - `close_subscription(handle)`
+//! - `mob_member_subscribe(mob_id, agent_identity)` → subscription_ref (per-member)
+//! - `mob_subscribe_events(mob_id)` → subscription_ref (mob-wide)
+//! - `poll_subscription(subscription_ref)` → JSON events
+//! - `close_subscription(subscription_ref)`
 //!
 //! ### Comms (placeholder)
 //! - `comms_peers(session_id)` → JSON
@@ -72,7 +72,6 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Read;
 use std::sync::Arc;
-use uuid::Uuid;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
@@ -254,7 +253,7 @@ fn default_max_sessions() -> usize {
 // ═══════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════
-// Runtime-backed browser session-handle façade
+// Runtime-backed browser session façade
 // ═══════════════════════════════════════════════════════════
 
 type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
@@ -262,7 +261,6 @@ type WasmSessionEventReceiver = crate::tokio::sync::broadcast::Receiver<
 >;
 
 struct RuntimeHandleSession {
-    session_id: meerkat_core::SessionId,
     mob_id: String,
     event_rx: WasmSessionEventReceiver,
 }
@@ -277,9 +275,8 @@ struct RuntimeState {
     mob_state: Arc<MobMcpState>,
     /// Concrete session service — needed for subscribe_session_events_raw.
     session_service: Arc<WasmSessionService>,
-    /// Opaque browser-local handles mapped to runtime-owned sessions.
-    sessions: BTreeMap<u32, RuntimeHandleSession>,
-    next_handle: u32,
+    /// Runtime-owned sessions keyed by their canonical session_id string.
+    sessions: BTreeMap<String, RuntimeHandleSession>,
     #[cfg(target_arch = "wasm32")]
     js_tools: Vec<JsToolEntry>,
 }
@@ -401,7 +398,10 @@ fn build_service_infrastructure(
     // work whether or not the host page has (yet) installed a callback.
     #[cfg(target_arch = "wasm32")]
     let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
-        crate::external_auth::WASM_EXTERNAL_AUTH_RESOLVER_ID,
+        meerkat_core::ExternalAuthResolverId::parse(
+            crate::external_auth::WASM_EXTERNAL_AUTH_RESOLVER_ID,
+        )
+        .map_err(|e| err_str("invalid_config", e))?,
         std::sync::Arc::new(crate::external_auth::WasmExternalAuthResolver),
     );
     #[cfg(not(target_arch = "wasm32"))]
@@ -435,7 +435,6 @@ fn clear_subscription_registry() {
     SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
         registry.subscriptions.clear();
-        registry.next_handle = 1;
     });
 }
 
@@ -446,9 +445,9 @@ fn install_runtime_state(state: RuntimeState) {
     });
 }
 
-/// Tear down the embedded runtime and release all local handles/subscriptions.
+/// Tear down the embedded runtime and release all owned sessions/subscriptions.
 ///
-/// Existing `Session`, `Mob`, and subscription handles become invalid after
+/// Existing `Session`, `Mob`, and subscription refs become invalid after
 /// this call.
 #[wasm_bindgen]
 pub fn destroy_runtime() -> Result<(), JsValue> {
@@ -601,11 +600,20 @@ fn err_session_control(e: meerkat_core::SessionControlError) -> JsValue {
     }
 }
 
-fn err_invalid_session_handle(handle: u32) -> JsValue {
+fn err_invalid_session_id(session_id: &str) -> JsValue {
     err_js(
-        "invalid_session_handle",
-        &format!("unknown browser session handle: {handle}"),
+        "invalid_session_id",
+        &format!("unknown runtime session_id for this browser runtime: {session_id}"),
     )
+}
+
+fn parse_runtime_session_id(session_id: &str) -> Result<meerkat_core::SessionId, JsValue> {
+    meerkat_core::SessionId::parse(session_id).map_err(|_| {
+        err_js(
+            "invalid_session_id",
+            &format!("session_id is not a valid runtime session UUID: {session_id}"),
+        )
+    })
 }
 
 async fn resolve_mob_member_bridge_session_id(
@@ -1128,7 +1136,6 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
-        next_handle: 1,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1184,7 +1191,6 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         mob_state,
         session_service,
         sessions: BTreeMap::new(),
-        next_handle: 1,
         #[cfg(target_arch = "wasm32")]
         js_tools: Vec::new(),
     });
@@ -1199,17 +1205,8 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
 }
 
 // ═══════════════════════════════════════════════════════════
-// Exported WASM API — Session (runtime-backed session-handle façades)
+// Exported WASM API — Session (runtime-backed canonical session façades)
 // ═══════════════════════════════════════════════════════════
-
-fn next_runtime_handle(state: &mut RuntimeState) -> u32 {
-    let handle = state.next_handle.max(1);
-    state.next_handle = handle.wrapping_add(1);
-    while state.next_handle == 0 || state.sessions.contains_key(&state.next_handle) {
-        state.next_handle = state.next_handle.wrapping_add(1);
-    }
-    handle
-}
 
 fn build_session_request_with_auth_binding(
     auth_binding: Option<&meerkat_contracts::WireAuthBindingRef>,
@@ -1259,7 +1256,7 @@ fn create_runtime_backed_session(
     config: SessionConfig,
     system_prompt: Option<String>,
     mob_id: String,
-) -> Result<u32, JsValue> {
+) -> Result<String, JsValue> {
     let session_service = with_runtime_state(|state| Ok(state.session_service.clone()))?;
     let model = config.model.clone();
     let request = build_session_request_with_auth_binding(
@@ -1282,26 +1279,22 @@ fn create_runtime_backed_session(
         }
     };
 
+    let session_id_key = session_id.to_string();
     with_runtime_state_mut(|state| {
-        let handle = next_runtime_handle(state);
         state.sessions.insert(
-            handle,
-            RuntimeHandleSession {
-                session_id,
-                mob_id,
-                event_rx,
-            },
+            session_id_key.clone(),
+            RuntimeHandleSession { mob_id, event_rx },
         );
-        Ok(handle)
+        Ok(session_id_key)
     })
 }
 
 /// Create a session from a mobpack + config.
 ///
 /// Allocates a real session through the initialized runtime-backed session
-/// service, then returns a browser-local session handle for convenience.
+/// service, then returns the canonical runtime-owned `session_id`.
 #[wasm_bindgen]
-pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, JsValue> {
+pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<String, JsValue> {
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
@@ -1316,7 +1309,7 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<u32, Js
 
 /// Create a standalone session through initialized runtime state.
 #[wasm_bindgen]
-pub fn create_session_simple(config_json: &str) -> Result<u32, JsValue> {
+pub fn create_session_simple(config_json: &str) -> Result<String, JsValue> {
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = config.system_prompt.clone();
@@ -1359,22 +1352,26 @@ fn merge_runtime_system_context_state(
     agent_state
 }
 
-/// Append runtime system context to a browser session handle.
+/// Append runtime system context to a canonical runtime session.
 #[wasm_bindgen]
-pub async fn append_system_context(handle: u32, request_json: &str) -> Result<JsValue, JsValue> {
+pub async fn append_system_context(
+    session_id: &str,
+    request_json: &str,
+) -> Result<JsValue, JsValue> {
     let req: AppendSystemContextOptions =
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
+    let parsed_session_id = parse_runtime_session_id(session_id)?;
 
-    let (session_service, session_id) = with_runtime_state(|state| {
-        let session = state
+    let session_service = with_runtime_state(|state| {
+        state
             .sessions
-            .get(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((state.session_service.clone(), session.session_id.clone()))
+            .get(session_id)
+            .ok_or_else(|| err_invalid_session_id(session_id))?;
+        Ok(state.session_service.clone())
     })?;
     let status = session_service
         .append_system_context(
-            &session_id,
+            &parsed_session_id,
             meerkat_core::AppendSystemContextRequest {
                 text: req.text,
                 source: req.source,
@@ -1387,8 +1384,7 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 
     Ok(JsValue::from_str(
         &serde_json::json!({
-            "handle": handle,
-            "session_id": session_id.to_string(),
+            "session_id": parsed_session_id.to_string(),
             "status": status,
         })
         .to_string(),
@@ -1403,13 +1399,14 @@ pub async fn append_system_context(handle: u32, request_json: &str) -> Result<Js
 /// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
 /// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
 #[wasm_bindgen]
-pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
-    let (session_service, session_id) = with_runtime_state(|state| {
-        let session = state
+pub async fn start_turn(session_id: &str, prompt: &str) -> Result<JsValue, JsValue> {
+    let parsed_session_id = parse_runtime_session_id(session_id)?;
+    let session_service = with_runtime_state(|state| {
+        state
             .sessions
-            .get(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((state.session_service.clone(), session.session_id.clone()))
+            .get(session_id)
+            .ok_or_else(|| err_invalid_session_id(session_id))?;
+        Ok(state.session_service.clone())
     })?;
 
     // Parse the prompt as structured ContentInput (supports both plain strings
@@ -1420,7 +1417,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
 
     let run_result = session_service
         .start_turn(
-            &session_id,
+            &parsed_session_id,
             meerkat_core::service::StartTurnRequest {
                 prompt: content_input,
                 system_prompt: None,
@@ -1450,7 +1447,7 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
             let result_json = serde_json::json!({
                 "text": "",
                 "usage": { "input_tokens": 0, "output_tokens": 0 },
-                "session_id": session_id.to_string(),
+                "session_id": parsed_session_id.to_string(),
                 "status": "failed",
                 "error": error_msg,
             });
@@ -1462,23 +1459,19 @@ pub async fn start_turn(handle: u32, prompt: &str) -> Result<JsValue, JsValue> {
 
 /// Get current session state.
 #[wasm_bindgen]
-pub fn get_session_state(handle: u32) -> Result<String, JsValue> {
-    let (session_service, session_id, mob_id) = with_runtime_state(|state| {
+pub fn get_session_state(session_id: &str) -> Result<String, JsValue> {
+    let parsed_session_id = parse_runtime_session_id(session_id)?;
+    let (session_service, mob_id) = with_runtime_state(|state| {
         let session = state
             .sessions
-            .get(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((
-            state.session_service.clone(),
-            session.session_id.clone(),
-            session.mob_id.clone(),
-        ))
+            .get(session_id)
+            .ok_or_else(|| err_invalid_session_id(session_id))?;
+        Ok((state.session_service.clone(), session.mob_id.clone()))
     })?;
-    let view =
-        futures::executor::block_on(session_service.read(&session_id)).map_err(err_session)?;
+    let view = futures::executor::block_on(session_service.read(&parsed_session_id))
+        .map_err(err_session)?;
     let state = serde_json::json!({
-        "handle": handle,
-        "session_id": session_id.to_string(),
+        "session_id": parsed_session_id.to_string(),
         "mob_id": mob_id,
         "model": view.state.model,
         "usage": view.billing.usage,
@@ -1518,22 +1511,19 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
 
 /// Remove a session.
 #[wasm_bindgen]
-pub fn destroy_session(handle: u32) -> Result<(), JsValue> {
-    let (session_service, mob_state, session_id) = with_runtime_state(|state| {
-        let session = state
+pub fn destroy_session(session_id: &str) -> Result<(), JsValue> {
+    let parsed_session_id = parse_runtime_session_id(session_id)?;
+    let (session_service, mob_state) = with_runtime_state(|state| {
+        state
             .sessions
-            .get(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
-        Ok((
-            state.session_service.clone(),
-            state.mob_state.clone(),
-            session.session_id.clone(),
-        ))
+            .get(session_id)
+            .ok_or_else(|| err_invalid_session_id(session_id))?;
+        Ok((state.session_service.clone(), state.mob_state.clone()))
     })?;
     futures::executor::block_on(destroy_session_with_services(
         session_service,
         mob_state,
-        session_id,
+        parsed_session_id,
     ))
     .map_err(err_web_destroy_session)
 }
@@ -1583,12 +1573,13 @@ async fn destroy_session_with_services(
 /// Returns a JSON array of `AgentEvent` objects. Each call drains the buffer;
 /// subsequent calls return `[]` until the next `start_turn` produces more events.
 #[wasm_bindgen]
-pub fn poll_events(handle: u32) -> Result<String, JsValue> {
+pub fn poll_events(session_id: &str) -> Result<String, JsValue> {
+    parse_runtime_session_id(session_id)?;
     with_runtime_state_mut(|state| {
         let session = state
             .sessions
-            .get_mut(&handle)
-            .ok_or_else(|| err_invalid_session_handle(handle))?;
+            .get_mut(session_id)
+            .ok_or_else(|| err_invalid_session_id(session_id))?;
         let mut events = Vec::new();
         loop {
             match session.event_rx.try_recv() {
@@ -1764,7 +1755,6 @@ pub async fn mob_spawn(mob_id: &str, specs_json: &str) -> Result<JsValue, JsValu
 #[serde(deny_unknown_fields)]
 struct SpawnSpecInput {
     profile: String,
-    #[serde(alias = "meerkat_id")]
     agent_identity: String,
     #[serde(default)]
     initial_message: Option<meerkat_core::types::ContentInput>,
@@ -1778,10 +1768,6 @@ struct SpawnSpecInput {
     /// Opaque application context passed through to the agent build pipeline.
     #[serde(default)]
     context: Option<serde_json::Value>,
-    /// Legacy 0.6 pre-release SDKs exposed `generation` even though the
-    /// runtime owns member generations. Accept and ignore it for raw JS callers.
-    #[serde(default, rename = "generation")]
-    _generation: Option<u64>,
     /// Additional instruction sections appended to the system prompt.
     #[serde(default)]
     additional_instructions: Option<Vec<String>>,
@@ -2073,8 +2059,7 @@ struct MobMemberSendOptions {
 #[derive(Debug, serde::Deserialize)]
 struct MobSpawnHelperOptions {
     prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
+    agent_identity: String,
     #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
@@ -2089,8 +2074,7 @@ struct MobSpawnHelperOptions {
 struct MobForkHelperOptions {
     source_member_id: String,
     prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
+    agent_identity: String,
     #[serde(default)]
     role_name: Option<String>,
     #[serde(default)]
@@ -2150,7 +2134,21 @@ pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsV
         .mob_member_status(&id, &mid)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&snapshot).map_err(|e| err_str("serialize", e))?;
+    let mut value = serde_json::to_value(&snapshot).map_err(|e| err_str("serialize", e))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert(
+            "member_ref".to_string(),
+            serde_json::Value::String(
+                meerkat_contracts::WireMemberRef::encode(
+                    id.as_str(),
+                    snapshot.agent_identity().as_str(),
+                )
+                .as_str()
+                .to_string(),
+            ),
+        );
+    }
+    let json = serde_json::to_string(&value).map_err(|e| err_str("serialize", e))?;
     Ok(JsValue::from_str(&json))
 }
 
@@ -2223,11 +2221,7 @@ pub async fn mob_spawn_helper(mob_id: &str, request_json: &str) -> Result<JsValu
         serde_json::from_str(request_json).map_err(|e| err_str("invalid_request", e))?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("helper-{}", Uuid::new_v4())),
-    );
+    let identity = AgentIdentity::from(request.agent_identity);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role_name) = request.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role_name));
@@ -2254,11 +2248,7 @@ pub async fn mob_fork_helper(mob_id: &str, request_json: &str) -> Result<JsValue
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let source_member_id = AgentIdentity::from(request.source_member_id.as_str());
-    let identity = AgentIdentity::from(
-        request
-            .agent_identity
-            .unwrap_or_else(|| format!("fork-{}", Uuid::new_v4())),
-    );
+    let identity = AgentIdentity::from(request.agent_identity);
     let fork_context = request
         .fork_context
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
@@ -2361,26 +2351,39 @@ struct EventSubscription {
 
 #[derive(Default)]
 struct SubscriptionRegistry {
-    next_handle: u32,
-    subscriptions: BTreeMap<u32, EventSubscription>,
+    subscriptions: BTreeMap<String, EventSubscription>,
 }
 
 thread_local! {
     static SUBSCRIPTIONS: RefCell<SubscriptionRegistry> = const { RefCell::new(SubscriptionRegistry {
-        next_handle: 1,
         subscriptions: BTreeMap::new(),
     }) };
 }
 
+fn member_subscription_ref(session_id: &meerkat_core::SessionId) -> String {
+    format!("session:{session_id}:subscription:{}", uuid::Uuid::new_v4())
+}
+
+fn mob_subscription_ref(mob_id: &MobId) -> String {
+    format!("mob:{mob_id}:subscription:{}", uuid::Uuid::new_v4())
+}
+
+fn err_invalid_subscription_ref(subscription_ref: &str) -> JsValue {
+    err_js(
+        "invalid_subscription_ref",
+        &format!("unknown runtime subscription_ref: {subscription_ref}"),
+    )
+}
+
 /// Subscribe to a mob member's session event stream.
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns an owner-scoped subscription ref. Use `poll_subscription(ref)` to
+/// drain buffered events. Each call returns all events since the last poll.
 ///
 /// The subscription captures ALL agent activity: text deltas, tool calls
 /// (including comms send_message/peers), turn completions, etc.
 #[wasm_bindgen]
-pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<u32, JsValue> {
+pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
@@ -2405,37 +2408,30 @@ pub async fn mob_member_subscribe(mob_id: &str, agent_identity: &str) -> Result<
         .await
         .map_err(|e| err_str("subscribe_error", e))?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
+    let subscription_ref = member_subscription_ref(&bridge_session_id);
+    SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
         registry.subscriptions.insert(
-            h,
+            subscription_ref.clone(),
             EventSubscription {
                 inner: SubscriptionInner::Member(std::cell::RefCell::new(raw_rx)),
             },
         );
-        h
     });
 
-    Ok(handle)
+    Ok(subscription_ref)
 }
 
 /// Subscribe to mob-wide events (all members, continuously updated).
 ///
-/// Returns a subscription handle. Use `poll_subscription(handle)` to drain
-/// buffered events. Each call returns all events since the last poll.
+/// Returns an owner-scoped subscription ref. Use `poll_subscription(ref)` to
+/// drain buffered events. Each call returns all events since the last poll.
 ///
 /// Unlike `mob_member_subscribe` which streams a single member's agent events,
 /// this streams [`AttributedEvent`]s tagged with source runtime identity and role
 /// for every member in the mob, automatically tracking roster changes.
 #[wasm_bindgen]
-pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
+pub async fn mob_subscribe_events(mob_id: &str) -> Result<String, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let mob_id_typed = MobId::from(mob_id);
 
@@ -2444,25 +2440,18 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
         .await
         .map_err(err_mob)?;
 
-    let handle = SUBSCRIPTIONS.with(|cell| {
+    let subscription_ref = mob_subscription_ref(&mob_id_typed);
+    SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        let h = registry.next_handle;
-        registry.next_handle = registry.next_handle.wrapping_add(1);
-        while registry.next_handle == 0
-            || registry.subscriptions.contains_key(&registry.next_handle)
-        {
-            registry.next_handle = registry.next_handle.wrapping_add(1);
-        }
         registry.subscriptions.insert(
-            h,
+            subscription_ref.clone(),
             EventSubscription {
                 inner: SubscriptionInner::MobWide(std::cell::RefCell::new(router_handle)),
             },
         );
-        h
     });
 
-    Ok(handle)
+    Ok(subscription_ref)
 }
 
 /// Poll a subscription for new events.
@@ -2477,15 +2466,13 @@ pub async fn mob_subscribe_events(mob_id: &str) -> Result<u32, JsValue> {
 /// (`mob_subscribe_events`), returns `AttributedEvent` objects with
 /// `source`, `profile`, and `envelope` fields.
 #[wasm_bindgen]
-pub fn poll_subscription(handle: u32) -> Result<String, JsValue> {
+pub fn poll_subscription(subscription_ref: &str) -> Result<String, JsValue> {
     SUBSCRIPTIONS.with(|cell| {
         let registry = cell.borrow();
-        let sub = registry.subscriptions.get(&handle).ok_or_else(|| {
-            err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
-            )
-        })?;
+        let sub = registry
+            .subscriptions
+            .get(subscription_ref)
+            .ok_or_else(|| err_invalid_subscription_ref(subscription_ref))?;
 
         let mut events: Vec<serde_json::Value> = Vec::new();
         match &sub.inner {
@@ -2554,15 +2541,13 @@ fn serialize_subscription_item<T: Serialize + ?Sized>(
 
 /// Close a subscription and free resources.
 #[wasm_bindgen]
-pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
+pub fn close_subscription(subscription_ref: &str) -> Result<(), JsValue> {
     SUBSCRIPTIONS.with(|cell| {
         let mut registry = cell.borrow_mut();
-        registry.subscriptions.remove(&handle).ok_or_else(|| {
-            err_js(
-                "invalid_handle",
-                &format!("unknown subscription handle: {handle}"),
-            )
-        })?;
+        registry
+            .subscriptions
+            .remove(subscription_ref)
+            .ok_or_else(|| err_invalid_subscription_ref(subscription_ref))?;
         Ok(())
     })
 }
@@ -2571,9 +2556,9 @@ pub fn close_subscription(handle: u32) -> Result<(), JsValue> {
 mod tests {
     use super::{
         EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        destroy_session_with_services, merge_runtime_system_context_state, mob_destroy_error_value,
-        parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
-        serialize_subscription_item,
+        destroy_session_with_services, member_subscription_ref, merge_runtime_system_context_state,
+        mob_destroy_error_value, mob_subscription_ref, parse_mob_lifecycle_action_arg,
+        parse_mobpack, poll_subscription, serialize_subscription_item,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2766,7 +2751,9 @@ capabilities = [{capability_values}]
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        definition.mark_owner_bridge_session_indexed(
+            meerkat_core::SessionId::parse(owner_session_id).expect("valid owner session id"),
+        );
         let storage = meerkat_mob::MobStorage::with_events(events);
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
             .with_session_service(mob_state.session_service())
@@ -3003,34 +2990,54 @@ capabilities = [{capability_values}]
         );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_accepts_legacy_meerkat_id_alias() {
+    fn spawn_spec_input_rejects_legacy_meerkat_id_alias() {
         let payload = json!([{
             "profile": "worker",
             "meerkat_id": "worker-1",
             "runtime_mode": "turn_driven",
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy meerkat_id alias should deserialize");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "legacy meerkat_id must fail closed at the browser boundary"
+        );
     }
 
-    #[allow(clippy::expect_used)]
     #[test]
-    fn spawn_spec_input_ignores_legacy_generation() {
+    fn spawn_spec_input_rejects_legacy_generation() {
         let payload = json!([{
             "profile": "worker",
             "agent_identity": "worker-1",
             "generation": 99,
         }]);
 
-        let specs: Vec<super::SpawnSpecInput> =
-            serde_json::from_value(payload).expect("legacy generation should be ignored");
-        assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].agent_identity, "worker-1");
+        let specs_result: Result<Vec<super::SpawnSpecInput>, _> = serde_json::from_value(payload);
+        assert!(
+            specs_result.is_err(),
+            "runtime-owned generation must fail closed at the browser boundary"
+        );
+    }
+
+    #[test]
+    fn helper_inputs_require_caller_supplied_identity() {
+        let spawn = serde_json::from_value::<super::MobSpawnHelperOptions>(json!({
+            "prompt": "help"
+        }));
+        assert!(
+            spawn.is_err(),
+            "spawn_helper must not fabricate helper identity at the browser boundary"
+        );
+
+        let fork = serde_json::from_value::<super::MobForkHelperOptions>(json!({
+            "source_member_id": "worker-1",
+            "prompt": "help"
+        }));
+        assert!(
+            fork.is_err(),
+            "fork_helper must not fabricate helper identity at the browser boundary"
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -3305,9 +3312,9 @@ capabilities = [{capability_values}]
 
     #[cfg(target_arch = "wasm32")]
     #[wasm_bindgen_test::wasm_bindgen_test(async)]
-    async fn append_system_context_export_stages_context_for_direct_session_handle() {
+    async fn append_system_context_export_stages_context_for_direct_session_id() {
         init_test_runtime();
-        let handle = create_session_simple(
+        let session_id = create_session_simple(
             &json!({
                 "model": "claude-sonnet-4-5",
                 "api_key": "sk-test"
@@ -3317,7 +3324,7 @@ capabilities = [{capability_values}]
         .expect("create session");
 
         let result = append_system_context(
-            handle,
+            &session_id,
             &json!({
                 "text": "Remember the browser-side coordinator.",
                 "source": "web",
@@ -3331,15 +3338,15 @@ capabilities = [{capability_values}]
         let parsed: serde_json::Value =
             serde_json::from_str(&result_json).expect("append result json");
 
-        assert_eq!(parsed["handle"], handle);
+        assert_eq!(parsed["session_id"], session_id);
         assert_eq!(parsed["status"], "staged");
     }
 
     #[cfg(target_arch = "wasm32")]
     #[test]
-    fn destroy_session_export_keeps_handle_as_canonical_projection() {
+    fn destroy_session_export_keeps_session_id_as_canonical_projection() {
         init_test_runtime();
-        let handle = create_session_simple(
+        let session_id = create_session_simple(
             &json!({
                 "model": "claude-sonnet-4-5",
                 "api_key": "sk-test"
@@ -3348,15 +3355,14 @@ capabilities = [{capability_values}]
         )
         .expect("create session");
 
-        let before = get_session_state(handle).expect("session state before destroy");
+        let before = get_session_state(&session_id).expect("session state before destroy");
         let before: serde_json::Value = serde_json::from_str(&before).expect("state json");
-        assert_eq!(before["handle"], handle);
-        assert!(before["session_id"].as_str().is_some());
+        assert_eq!(before["session_id"], session_id);
+        assert!(before.get("handle").is_none());
 
-        destroy_session(handle).expect("destroy session");
-        let after = get_session_state(handle).expect("canonical archived state after destroy");
+        destroy_session(&session_id).expect("destroy session");
+        let after = get_session_state(&session_id).expect("canonical archived state after destroy");
         let after: serde_json::Value = serde_json::from_str(&after).expect("state json");
-        assert_eq!(after["handle"], handle);
         assert_eq!(after["session_id"], before["session_id"]);
         assert_eq!(after["is_active"], false);
     }
@@ -3365,20 +3371,19 @@ capabilities = [{capability_values}]
     fn poll_subscription_empty_success_is_clean_empty_array() {
         let (_tx, rx) = crate::tokio::sync::broadcast::channel(1);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
+        let subscription_ref =
+            "session:00000000-0000-4000-8000-000000000101:subscription:test".to_string();
+        SUBSCRIPTIONS.with(|cell| {
             let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
             registry.subscriptions.insert(
-                handle,
+                subscription_ref.clone(),
                 EventSubscription {
                     inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
                 },
             );
-            handle
         });
 
-        let payload = poll_subscription(handle).expect("empty poll should succeed");
+        let payload = poll_subscription(&subscription_ref).expect("empty poll should succeed");
         let parsed: serde_json::Value =
             serde_json::from_str(&payload).expect("empty poll should be json");
         assert_eq!(
@@ -3387,8 +3392,29 @@ capabilities = [{capability_values}]
             "clean empty poll must remain a successful empty array"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&subscription_ref);
         assert!(close_result.is_ok());
+    }
+
+    #[test]
+    fn subscription_refs_keep_owner_and_unique_instance() {
+        let session_id = meerkat_core::SessionId::new();
+        let first_member_ref = member_subscription_ref(&session_id);
+        let second_member_ref = member_subscription_ref(&session_id);
+        let member_prefix = format!("session:{session_id}:subscription:");
+
+        assert_ne!(first_member_ref, second_member_ref);
+        assert!(first_member_ref.starts_with(&member_prefix));
+        assert!(second_member_ref.starts_with(&member_prefix));
+
+        let mob_id = MobId::from("mob-web-unit");
+        let first_mob_ref = mob_subscription_ref(&mob_id);
+        let second_mob_ref = mob_subscription_ref(&mob_id);
+        let mob_prefix = format!("mob:{mob_id}:subscription:");
+
+        assert_ne!(first_mob_ref, second_mob_ref);
+        assert!(first_mob_ref.starts_with(&mob_prefix));
+        assert!(second_mob_ref.starts_with(&mob_prefix));
     }
 
     #[test]
@@ -3458,21 +3484,19 @@ capabilities = [{capability_values}]
     #[wasm_bindgen_test::wasm_bindgen_test]
     #[allow(clippy::expect_used)]
     fn poll_subscription_fails_closed_when_projection_serialization_fails() {
-        let handle = SUBSCRIPTIONS.with(|cell| {
+        let subscription_ref = "test:projection-failure".to_string();
+        SUBSCRIPTIONS.with(|cell| {
             let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
             registry.subscriptions.insert(
-                handle,
+                subscription_ref.clone(),
                 EventSubscription {
                     inner: SubscriptionInner::InjectedProjectionFailure,
                 },
             );
-            handle
         });
 
-        let error =
-            poll_subscription(handle).expect_err("projection failure must fail public poll");
+        let error = poll_subscription(&subscription_ref)
+            .expect_err("projection failure must fail public poll");
         let error_json = error.as_string().expect("typed error json");
         let parsed: serde_json::Value =
             serde_json::from_str(&error_json).expect("typed error should be json");
@@ -3485,7 +3509,7 @@ capabilities = [{capability_values}]
             "projection failure should surface the serialization cause"
         );
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&subscription_ref);
         assert!(close_result.is_ok());
     }
 
@@ -3503,7 +3527,7 @@ capabilities = [{capability_values}]
         ))
         .unwrap_or(0);
         tx.send(meerkat_core::EventEnvelope::new_session(
-            session_id,
+            session_id.clone(),
             2,
             None,
             meerkat_core::AgentEvent::TextDelta {
@@ -3512,20 +3536,18 @@ capabilities = [{capability_values}]
         ))
         .unwrap_or(0);
 
-        let handle = SUBSCRIPTIONS.with(|cell| {
+        let subscription_ref = member_subscription_ref(&session_id);
+        SUBSCRIPTIONS.with(|cell| {
             let mut registry = cell.borrow_mut();
-            let handle = registry.next_handle;
-            registry.next_handle = registry.next_handle.wrapping_add(1);
             registry.subscriptions.insert(
-                handle,
+                subscription_ref.clone(),
                 EventSubscription {
                     inner: SubscriptionInner::Member(std::cell::RefCell::new(rx)),
                 },
             );
-            handle
         });
 
-        let payload_result = poll_subscription(handle);
+        let payload_result = poll_subscription(&subscription_ref);
         assert!(payload_result.is_ok());
         let payload = match payload_result {
             Ok(payload) => payload,
@@ -3548,7 +3570,7 @@ capabilities = [{capability_values}]
         assert_eq!(items[1]["payload"]["type"], "text_delta");
         assert_eq!(items[1]["payload"]["delta"], "second");
 
-        let close_result = close_subscription(handle);
+        let close_result = close_subscription(&subscription_ref);
         assert!(close_result.is_ok());
     }
 }

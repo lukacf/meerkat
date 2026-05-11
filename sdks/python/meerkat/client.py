@@ -1661,6 +1661,11 @@ class MeerkatClient:
                 "status",
                 "Invalid mob/member_status response",
             ),
+            "member_ref": self._require_string_field(
+                result,
+                "member_ref",
+                "Invalid mob/member_status response",
+            ),
             **(
                 {"output_preview": str(result["output_preview"])}
                 if result.get("output_preview") is not None
@@ -3085,10 +3090,21 @@ class MeerkatClient:
             for item in raw_quarantined:
                 if not isinstance(item, dict):
                     continue
+                raw_key = item.get("key")
+                key = (
+                    SkillKey(
+                        source_uuid=str(raw_key.get("source_uuid", "")),
+                        skill_name=str(raw_key.get("skill_name", "")),
+                    )
+                    if isinstance(raw_key, dict)
+                    and isinstance(raw_key.get("source_uuid"), str)
+                    and isinstance(raw_key.get("skill_name"), str)
+                    else None
+                )
                 quarantined_items.append(
                     SkillQuarantineDiagnostic(
-                        source_uuid=str(item.get("source_uuid", "")),
-                        skill_id=str(item.get("skill_id", "")),
+                        key=key,
+                        identity_hint=str(item.get("identity_hint", "")),
                         location=str(item.get("location", "")),
                         error_code=str(item.get("error_code", "")),
                         error_class=str(item.get("error_class", "")),

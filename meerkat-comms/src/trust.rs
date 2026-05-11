@@ -1,6 +1,6 @@
 //! Trust management for Meerkat comms.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
@@ -40,6 +40,14 @@ pub enum TrustError {
         peer_id: PeerId,
         derived_peer_id: PeerId,
     },
+    /// A legacy trusted peer record carried a display name that cannot be
+    /// represented as a typed [`PeerName`].
+    #[error("invalid trusted peer name {name:?}: {reason}")]
+    InvalidPeerName { name: String, reason: String },
+    /// A legacy trusted peer record carried an address that cannot be
+    /// represented as a typed [`PeerAddress`].
+    #[error("invalid trusted peer address {address:?}: {reason}")]
+    InvalidPeerAddress { address: String, reason: String },
 }
 
 /// Error resolving a [`PeerName`] to a routing-key [`PeerId`].
@@ -104,10 +112,10 @@ impl TrustEntry {
 /// lookups by name go through [`resolve_name`](Self::resolve_name) which
 /// returns a typed ambiguity error when the name maps to more than one entry.
 ///
-/// This type is the dogma-pure replacement for the legacy [`TrustedPeers`]
-/// `Vec<TrustedPeer>` collection. The two are intentionally parallel for
-/// Wave-B: consumers still own `TrustedPeers` in Wave-B's allowlist, but all
-/// new code keys trust by `PeerId` through this store.
+/// This type is the dogma-pure owner for trust semantics. Legacy
+/// [`TrustedPeers`] values are compatibility projections that must
+/// canonicalize through this store before runtime routing, admission, or
+/// directory projection can use them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TrustStore {
     entries: BTreeMap<PeerId, TrustEntry>,
@@ -232,6 +240,44 @@ impl TrustedPeer {
     pub(crate) fn has_raw_sendable_identity(&self) -> bool {
         self.validate().is_ok()
     }
+
+    pub fn to_trust_entry(&self) -> Result<TrustEntry, TrustError> {
+        self.to_trust_entry_with_peer_id(self.pubkey.to_peer_id())
+    }
+
+    pub fn to_trust_entry_with_peer_id(&self, peer_id: PeerId) -> Result<TrustEntry, TrustError> {
+        self.validate()?;
+        let name =
+            PeerName::new(self.name.clone()).map_err(|reason| TrustError::InvalidPeerName {
+                name: self.name.clone(),
+                reason,
+            })?;
+        let address =
+            PeerAddress::parse(&self.addr).map_err(|reason| TrustError::InvalidPeerAddress {
+                address: self.addr.clone(),
+                reason: reason.to_string(),
+            })?;
+        let entry = TrustEntry {
+            peer_id,
+            name,
+            pubkey: self.pubkey,
+            address,
+            meta: self.meta.clone(),
+        };
+        entry.validate()?;
+        Ok(entry)
+    }
+}
+
+impl From<&TrustEntry> for TrustedPeer {
+    fn from(entry: &TrustEntry) -> Self {
+        Self {
+            name: entry.name.as_string(),
+            pubkey: entry.pubkey,
+            addr: entry.address.to_string(),
+            meta: entry.meta.clone(),
+        }
+    }
 }
 
 // Custom serde to serialize pubkey as "ed25519:..." string per spec
@@ -280,7 +326,12 @@ impl<'de> Deserialize<'de> for TrustedPeer {
     }
 }
 
-/// Collection of trusted peers.
+/// Compatibility serialization view over the canonical [`TrustStore`].
+///
+/// The on-disk and older constructor shape remains `peers: Vec<TrustedPeer>`,
+/// but runtime decisions must canonicalize this projection through
+/// [`canonical_store`](Self::canonical_store) / [`canonical_entries`](Self::canonical_entries)
+/// before resolving identity, routing, or admission.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustedPeers {
     /// List of trusted peers.
@@ -346,13 +397,27 @@ impl TrustedPeers {
         Ok(())
     }
 
+    /// Build the canonical typed trust store from this compatibility
+    /// projection.
+    pub fn canonical_store(&self) -> Result<TrustStore, TrustError> {
+        let mut store = TrustStore::new();
+        for peer in &self.peers {
+            store.insert(peer.to_trust_entry()?)?;
+        }
+        Ok(store)
+    }
+
+    /// Return canonical trust entries sorted by [`PeerId`].
+    pub fn canonical_entries(&self) -> Result<Vec<TrustEntry>, TrustError> {
+        Ok(self.canonical_store()?.entries().cloned().collect())
+    }
+
     /// Check if a public key is in the trusted list.
     pub fn is_trusted(&self, pubkey: &PubKey) -> bool {
         !pubkey.is_zero()
             && self
-                .peers
-                .iter()
-                .any(|p| !p.pubkey.is_zero() && &p.pubkey == pubkey)
+                .canonical_store()
+                .is_ok_and(|store| store.contains(&pubkey.to_peer_id()))
     }
 
     /// Get a peer by their public key.
@@ -360,9 +425,12 @@ impl TrustedPeers {
         if pubkey.is_zero() {
             return None;
         }
+        let peer_id = pubkey.to_peer_id();
+        let store = self.canonical_store().ok()?;
+        store.get(&peer_id)?;
         self.peers
             .iter()
-            .find(|p| !p.pubkey.is_zero() && &p.pubkey == pubkey)
+            .find(|p| !p.pubkey.is_zero() && p.pubkey.to_peer_id() == peer_id)
     }
 
     /// Remove a peer by pubkey.
@@ -378,34 +446,33 @@ impl TrustedPeers {
 
     /// Remove a peer by canonical [`PeerId`].
     pub fn remove_by_peer_id(&mut self, peer_id: &PeerId) -> Option<TrustedPeer> {
-        let index = self
-            .peers
-            .iter()
-            .position(|p| crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id)?;
-        Some(self.peers.remove(index))
+        let mut removed = Vec::new();
+        self.peers.retain(|peer| {
+            let matches = !peer.pubkey.is_zero() && peer.pubkey.to_peer_id() == *peer_id;
+            if matches {
+                removed.push(peer.clone());
+                false
+            } else {
+                true
+            }
+        });
+        removed.into_iter().next()
     }
 
     /// Insert or replace a peer, keyed by `pubkey`.
     pub fn upsert(&mut self, peer: TrustedPeer) -> Result<(), TrustError> {
-        peer.validate()?;
+        peer.to_trust_entry()?;
         if let Some(existing) = self.peers.iter_mut().find(|p| p.pubkey == peer.pubkey) {
             *existing = peer;
         } else {
             self.peers.push(peer);
         }
+        self.canonical_store()?;
         Ok(())
     }
 
     pub fn validate(&self) -> Result<(), TrustError> {
-        let mut peer_ids = BTreeSet::new();
-        for peer in &self.peers {
-            peer.validate()?;
-            let peer_id = peer.pubkey.to_peer_id();
-            if !peer_ids.insert(peer_id) {
-                return Err(TrustError::DuplicatePeerId { peer_id });
-            }
-        }
-        Ok(())
+        self.canonical_store().map(|_| ())
     }
 
     /// Lookup helper used by tests and legacy callers.
@@ -428,15 +495,10 @@ impl TrustedPeers {
     /// unambiguous even when multiple entries share a [`crate::peer_meta::PeerMeta`]
     /// display name.
     pub fn find_by_peer_id(&self, peer_id: &PeerId) -> Option<&TrustedPeer> {
-        let mut matches = self.peers.iter().filter(|p| {
-            !p.pubkey.is_zero() && crate::router::peer_id_from_pubkey(&p.pubkey) == *peer_id
-        });
-        let peer = matches.next()?;
-        if matches.next().is_some() {
-            None
-        } else {
-            Some(peer)
-        }
+        self.canonical_store().ok()?.get(peer_id)?;
+        self.peers
+            .iter()
+            .find(|p| !p.pubkey.is_zero() && p.pubkey.to_peer_id() == *peer_id)
     }
 }
 

@@ -1279,6 +1279,7 @@ impl MobMcpState {
         &self,
         bridge_session_id: &str,
     ) -> Option<MobId> {
+        let bridge_session_id = SessionId::parse(bridge_session_id).ok()?;
         if !self
             .ensure_restored_best_effort("find_implicit_mob_for_bridge_session")
             .await
@@ -1289,7 +1290,7 @@ impl MobMcpState {
         mobs.iter()
             .find(|(_, m)| {
                 let def = m.handle.definition();
-                def.is_implicit && def.has_owner_bridge_session_index(bridge_session_id)
+                def.is_implicit && def.has_owner_bridge_session_index(&bridge_session_id)
             })
             .map(|(id, _)| id.clone())
     }
@@ -1312,6 +1313,9 @@ impl MobMcpState {
     /// (both implicit and explicit).
     #[doc(hidden)]
     pub async fn find_mobs_for_bridge_session(&self, bridge_session_id: &str) -> Vec<MobId> {
+        let Ok(bridge_session_id) = SessionId::parse(bridge_session_id) else {
+            return Vec::new();
+        };
         if !self
             .ensure_restored_best_effort("find_mobs_for_bridge_session")
             .await
@@ -1323,7 +1327,7 @@ impl MobMcpState {
             .filter_map(|(id, m)| {
                 if m.handle
                     .definition()
-                    .has_owner_bridge_session_index(bridge_session_id)
+                    .has_owner_bridge_session_index(&bridge_session_id)
                 {
                     Some(id.clone())
                 } else {
@@ -1334,6 +1338,9 @@ impl MobMcpState {
     }
 
     async fn find_bridge_session_scoped_mobs(&self, bridge_session_id: &str) -> Vec<MobId> {
+        let Ok(bridge_session_id) = SessionId::parse(bridge_session_id) else {
+            return Vec::new();
+        };
         if !self
             .ensure_restored_best_effort("find_bridge_session_scoped_mobs")
             .await
@@ -1345,7 +1352,7 @@ impl MobMcpState {
             .filter_map(|(id, m)| {
                 if m.handle
                     .definition()
-                    .is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
+                    .is_cleanup_scoped_to_owner_bridge_session(&bridge_session_id)
                 {
                     Some(id.clone())
                 } else {
@@ -1369,12 +1376,15 @@ impl MobMcpState {
         bridge_session_id: &str,
         model: &str,
     ) -> bool {
+        let Ok(bridge_session_id) = SessionId::parse(bridge_session_id) else {
+            return false;
+        };
         let delegate_profile = ProfileName::from("delegate");
         let mobs = self.mobs.read().await;
         mobs.get(mob_id).is_some_and(|managed| {
             let definition = managed.handle.definition();
             definition.is_implicit
-                && definition.has_owner_bridge_session_index(bridge_session_id)
+                && definition.has_owner_bridge_session_index(&bridge_session_id)
                 && definition
                     .resolve_inline_profile(&delegate_profile)
                     .is_some_and(|profile| profile.model == model)
@@ -1401,23 +1411,29 @@ impl MobMcpState {
         {
             return Ok((cached_mob_id.clone(), false));
         }
+        let bridge_session_id = SessionId::parse(bridge_session_id).map_err(|err| {
+            MobError::WiringError(format!(
+                "invalid owner bridge session id for implicit mob: {err}"
+            ))
+        })?;
+        let bridge_session_key = bridge_session_id.to_string();
 
         // Get or create a per-owner-bridge-session lock
         let session_lock = {
             let mut locks = self.implicit_mob_locks.lock().await;
             locks
-                .entry(bridge_session_id.to_string())
+                .entry(bridge_session_key.clone())
                 .or_insert_with(|| Arc::new(Mutex::new(())))
                 .clone()
         };
         let _guard = session_lock.lock().await;
 
         if let Some(mob_id) = self
-            .find_implicit_mob_for_bridge_session(bridge_session_id)
+            .find_implicit_mob_for_bridge_session(&bridge_session_key)
             .await
         {
             if self
-                .implicit_mob_matches_session_model(&mob_id, bridge_session_id, model)
+                .implicit_mob_matches_session_model(&mob_id, &bridge_session_key, model)
                 .await
             {
                 return Ok((mob_id, false));
@@ -1428,7 +1444,7 @@ impl MobMcpState {
         }
 
         let mob_id = self
-            .mob_create_definition(MobDefinition::implicit(bridge_session_id, model))
+            .mob_create_definition(MobDefinition::implicit(&bridge_session_id, model))
             .await?;
         Ok((mob_id, true))
     }
@@ -1516,7 +1532,7 @@ impl MobMcpState {
 
     async fn scavenge_orphaned_bridge_session_scoped_mobs_inner(&self) -> Vec<MobId> {
         // Collect bridge-session-scoped cleanup candidates under a read lock.
-        let candidates: Vec<(MobId, String)> = {
+        let candidates: Vec<(MobId, SessionId)> = {
             let mobs = self.mobs.read().await;
             mobs.iter()
                 .filter_map(|(id, m)| {
@@ -1526,7 +1542,7 @@ impl MobMcpState {
                     {
                         definition
                             .owner_bridge_session_index()
-                            .map(|sid| (id.clone(), sid.to_string()))
+                            .map(|sid| (id.clone(), sid.clone()))
                     } else {
                         None
                     }
@@ -1536,10 +1552,6 @@ impl MobMcpState {
 
         let mut scavenged = Vec::new();
         for (mob_id, bridge_session_id) in candidates {
-            let bridge_session_id = match SessionId::parse(&bridge_session_id) {
-                Ok(id) => id,
-                Err(_) => continue,
-            };
             let is_orphan = match self.session_service.read(&bridge_session_id).await {
                 Ok(_) => false,
                 Err(SessionError::NotFound { .. }) => true,
@@ -5753,7 +5765,9 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mut definition = explicit_definition("bridge-session-partial-destroy");
-        definition.mark_owner_bridge_session_indexed(&sid);
+        definition.mark_owner_bridge_session_indexed(
+            SessionId::parse(&sid).expect("valid owner session id"),
+        );
         let mob_id = state
             .mob_create_definition(definition)
             .await
@@ -5814,7 +5828,7 @@ mod tests {
             .await;
 
         let mut definition = explicit_definition("archive-helper-partial-destroy");
-        definition.mark_owner_bridge_session_indexed(&owner_session_id.to_string());
+        definition.mark_owner_bridge_session_indexed(owner_session_id.clone());
         let mob_id = state
             .mob_create_definition(definition)
             .await
@@ -5919,7 +5933,7 @@ mod tests {
             .expect("parent member bridge session");
 
         let mut child_definition = explicit_definition("archive-helper-live-member-child");
-        child_definition.mark_owner_bridge_session_indexed(&member_session_id.to_string());
+        child_definition.mark_owner_bridge_session_indexed(member_session_id.clone());
         let child_mob_id = state
             .mob_create_definition(child_definition)
             .await
@@ -5995,14 +6009,18 @@ mod tests {
         let sid = SessionId::new().to_string();
 
         let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        manual.set_owner_bridge_session_lookup_index(
+            SessionId::parse(&sid).expect("valid owner session id"),
+        );
         let manual_id = state
             .mob_create_definition(manual)
             .await
             .expect("create manual owner-indexed mob");
 
         let mut bridge_session_scoped = explicit_definition("bridge-session-scoped-owner");
-        bridge_session_scoped.mark_owner_bridge_session_indexed(&sid);
+        bridge_session_scoped.mark_owner_bridge_session_indexed(
+            SessionId::parse(&sid).expect("valid owner session id"),
+        );
         let bridge_session_scoped_id = state
             .mob_create_definition(bridge_session_scoped)
             .await
@@ -6094,7 +6112,9 @@ mod tests {
 
         // Also create a manual owner-indexed explicit mob that should survive scavenging.
         let mut manual = explicit_definition("manual-owner-index");
-        manual.set_owner_bridge_session_lookup_index(sid.clone());
+        manual.set_owner_bridge_session_lookup_index(
+            SessionId::parse(&sid).expect("valid owner session id"),
+        );
         let manual_id = state
             .mob_create_definition(manual)
             .await
@@ -6149,7 +6169,9 @@ mod tests {
         let sid = result.session_id.to_string();
 
         let mut bridge_owned = explicit_definition("bridge-owned-orphan");
-        bridge_owned.mark_owner_bridge_session_indexed(&sid);
+        bridge_owned.mark_owner_bridge_session_indexed(
+            SessionId::parse(&sid).expect("valid owner session id"),
+        );
         let bridge_owned_id = state
             .mob_create_definition(bridge_owned)
             .await
@@ -6185,9 +6207,10 @@ mod tests {
             handle.definition().wiring.auto_wire_orchestrator,
             "implicit mob must have auto_wire_orchestrator set"
         );
+        let parsed_sid = SessionId::parse(&sid).expect("valid owner session id");
         assert_eq!(
             handle.definition().owner_bridge_session_index(),
-            Some(sid.as_str()),
+            Some(&parsed_sid),
             "implicit mob must have correct owner_bridge_session_id"
         );
     }

@@ -14113,10 +14113,7 @@ async fn test_resume_restores_external_wiring_from_event_log() {
         .await
         .expect("resumed member");
     assert_eq!(
-        entry
-            .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
+        entry.external_peer_specs.get(&external.peer_id).cloned(),
         Some(external)
     );
 }
@@ -15272,15 +15269,13 @@ async fn test_wire_external_adds_trusted_peer_and_tracks_projection() {
         .await
         .expect("member should exist");
     assert!(
-        entry_l
+        !entry_l
             .wired_to
-            .contains(&AgentIdentity::from(external.name.as_str()))
+            .contains(&AgentIdentity::from(external.name.as_str())),
+        "external peers must not be projected as member identities"
     );
     assert_eq!(
-        entry_l
-            .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
+        entry_l.external_peer_specs.get(&external.peer_id).cloned(),
         Some(external.clone())
     );
 
@@ -15356,10 +15351,7 @@ async fn test_respawn_restores_external_wiring_from_roster_spec() {
     );
 
     assert_eq!(
-        entry
-            .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
+        entry.external_peer_specs.get(&external.peer_id).cloned(),
         Some(external)
     );
     assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
@@ -15402,7 +15394,7 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
     assert!(
         !entry_before
             .external_peer_specs
-            .contains_key(&AgentIdentity::from(external.name.as_str())),
+            .contains_key(&external.peer_id),
         "test setup must leave roster projection empty so MobMachine is the only topology source"
     );
 
@@ -15427,10 +15419,7 @@ async fn test_respawn_restores_external_wiring_from_mob_machine_edge() {
         "respawn should restore external trust from MobMachine topology"
     );
     assert_eq!(
-        entry
-            .external_peer_specs
-            .get(&MeerkatId::from(external.name.as_str()))
-            .cloned(),
+        entry.external_peer_specs.get(&external.peer_id).cloned(),
         Some(external)
     );
     assert_eq!(entry.agent_runtime_id, receipt.agent_runtime_id);
@@ -15476,11 +15465,7 @@ async fn test_unwire_external_removes_trust_and_projection() {
             .wired_to
             .contains(&AgentIdentity::from(external.name.as_str()))
     );
-    assert!(
-        !entry
-            .external_peer_specs
-            .contains_key(&MeerkatId::from(external.name.as_str()))
-    );
+    assert!(!entry.external_peer_specs.contains_key(&external.peer_id));
 
     let trusted = service.trusted_peer_names(&sid_l).await;
     assert!(
@@ -15550,7 +15535,7 @@ async fn test_wire_external_binding_resolves_inside_mob_authority() {
         .expect("member should exist");
     let descriptor = entry
         .external_peer_specs
-        .get(&AgentIdentity::from("external-worker"))
+        .get(&PeerId::from_ed25519_pubkey(&[7u8; 32]))
         .expect("external binding should project descriptor");
     let expected_pubkey = [7u8; 32];
     assert_eq!(descriptor.pubkey, expected_pubkey);
@@ -15595,9 +15580,10 @@ async fn test_wire_external_binding_rejects_zero_pubkey_before_trust_install() {
         .await
         .expect("member should exist");
     assert!(
-        !entry
+        entry
             .external_peer_specs
-            .contains_key(&AgentIdentity::from("external-worker")),
+            .values()
+            .all(|spec| spec.name.as_str() != "external-worker"),
         "failed external binding must not project an external edge"
     );
 

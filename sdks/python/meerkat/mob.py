@@ -102,6 +102,7 @@ MobMemberSnapshot = TypedDict(
     "MobMemberSnapshot",
     {
         "status": str,
+        "member_ref": MobMemberRef,
         "output_preview": NotRequired[str],
         "error": NotRequired[str],
         "tokens_used": int,

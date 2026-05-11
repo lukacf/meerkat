@@ -187,6 +187,7 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
 
     status = GeneratedMobMemberStatusResult(
         status="active",
+        member_ref="opaque-member-ref",
         tokens_used=0,
         is_final=False,
     )
@@ -545,8 +546,11 @@ def test_run_result_skill_diagnostics():
         ),
         quarantined=[
             SkillQuarantineDiagnostic(
-                source_uuid="src-1",
-                skill_id="extract/email",
+                key=SkillKey(
+                    source_uuid="00000000-0000-4000-8000-000000000001",
+                    skill_name="extract/email",
+                ),
+                identity_hint="00000000-0000-4000-8000-000000000001/extract/email",
                 location="project",
                 error_code="bad_frontmatter",
                 error_class="ValidationError",
@@ -583,8 +587,11 @@ def test_parse_run_result_skill_diagnostics():
             },
             "quarantined": [
                 {
-                    "source_uuid": "src-1",
-                    "skill_id": "extract/email",
+                    "key": {
+                        "source_uuid": "00000000-0000-4000-8000-000000000001",
+                        "skill_name": "extract/email",
+                    },
+                    "identity_hint": "00000000-0000-4000-8000-000000000001/extract/email",
                     "location": "project",
                     "error_code": "bad_frontmatter",
                     "error_class": "ValidationError",
@@ -598,7 +605,14 @@ def test_parse_run_result_skill_diagnostics():
     result = MeerkatClient._parse_run_result(raw)
     assert result.skill_diagnostics is not None
     assert result.skill_diagnostics.source_health.state == "healthy"
-    assert result.skill_diagnostics.quarantined[0].skill_id == "extract/email"
+    assert result.skill_diagnostics.quarantined[0].key == SkillKey(
+        source_uuid="00000000-0000-4000-8000-000000000001",
+        skill_name="extract/email",
+    )
+    assert (
+        result.skill_diagnostics.quarantined[0].identity_hint
+        == "00000000-0000-4000-8000-000000000001/extract/email"
+    )
 
 
 def test_parse_run_result_extraction_error():
@@ -2357,6 +2371,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         if method == "mob/member_status":
             return {
                 "status": "active",
+                "member_ref": _make_member_ref("mob-1", "agent-a"),
                 "tokens_used": 5,
                 "is_final": False,
                 "agent_runtime_id": {"identity": "agent-a", "generation": 1},
@@ -2462,6 +2477,7 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
     status = await client.mob_member_status("mob-1", "agent-a")
     assert "agent_runtime_id" not in status
     assert "fence_token" not in status
+    assert status["member_ref"] == expected_agent_a_ref
     assert status["resolved_capabilities"]["realtime"] is True
 
     client._request = fake_request  # type: ignore[method-assign]

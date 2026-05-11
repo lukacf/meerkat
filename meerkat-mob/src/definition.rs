@@ -13,7 +13,7 @@ use crate::MobBackendKind;
 use crate::ids::{BranchId, FlowId, FlowNodeId, LoopId, MobId, ProfileName, StepId};
 use crate::profile::{Profile, ProfileBinding};
 use indexmap::IndexMap;
-use meerkat_core::types::ContentInput;
+use meerkat_core::types::{ContentInput, SessionId};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -373,7 +373,7 @@ pub struct MobDefinition {
     pub event_router: Option<EventRouterConfig>,
     /// Canonical identity-first owner bridge session binding for lookup/indexing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) owner_bridge_session_id: Option<String>,
+    pub(crate) owner_bridge_session_id: Option<SessionId>,
     /// Canonical cleanup policy for session-indexed mobs.
     #[serde(default, skip_serializing_if = "SessionCleanupPolicy::is_manual")]
     pub session_cleanup_policy: SessionCleanupPolicy,
@@ -454,7 +454,7 @@ impl MobDefinition {
     /// also has `auto_wire_orchestrator = true` so spawned members are
     /// automatically wired to the lead agent.
     #[doc(hidden)]
-    pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
+    pub fn implicit(bridge_session_id: &SessionId, model: &str) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
         let mut profiles = BTreeMap::new();
         profiles.insert(
@@ -495,7 +495,7 @@ impl MobDefinition {
             session_cleanup_policy: SessionCleanupPolicy::Manual,
             is_implicit: true,
         };
-        definition.mark_owner_bridge_session_indexed(bridge_session_id);
+        definition.mark_owner_bridge_session_indexed(bridge_session_id.clone());
         definition
     }
 
@@ -528,14 +528,14 @@ impl MobDefinition {
     }
 
     #[doc(hidden)]
-    pub fn owner_bridge_session_index(&self) -> Option<&str> {
-        self.owner_bridge_session_id.as_deref()
+    pub fn owner_bridge_session_index(&self) -> Option<&SessionId> {
+        self.owner_bridge_session_id.as_ref()
     }
 
     /// Assign bridge-session lookup ownership without changing cleanup semantics.
     #[doc(hidden)]
-    pub fn set_owner_bridge_session_lookup_index(&mut self, bridge_session_id: impl Into<String>) {
-        self.owner_bridge_session_id = Some(bridge_session_id.into());
+    pub fn set_owner_bridge_session_lookup_index(&mut self, bridge_session_id: SessionId) {
+        self.owner_bridge_session_id = Some(bridge_session_id);
     }
 
     /// Clear any bridge-session lookup ownership without changing other flags.
@@ -545,39 +545,39 @@ impl MobDefinition {
     }
 
     #[doc(hidden)]
-    pub fn has_owner_bridge_session_index(&self, bridge_session_id: &str) -> bool {
+    pub fn has_owner_bridge_session_index(&self, bridge_session_id: &SessionId) -> bool {
         self.owner_bridge_session_index() == Some(bridge_session_id)
     }
 
     #[doc(hidden)]
-    pub fn is_indexed_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
+    pub fn is_indexed_to_owner_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
     }
 
     #[doc(hidden)]
-    pub fn is_cleanup_scoped_to_owner_bridge_session(&self, bridge_session_id: &str) -> bool {
+    pub fn is_cleanup_scoped_to_owner_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
             && self.session_cleanup_policy == SessionCleanupPolicy::DestroyOnOwnerArchive
     }
 
     #[doc(hidden)]
-    pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: &str) {
-        self.set_owner_bridge_session_lookup_index(bridge_session_id.to_string());
+    pub fn mark_owner_bridge_session_indexed(&mut self, bridge_session_id: SessionId) {
+        self.set_owner_bridge_session_lookup_index(bridge_session_id);
         self.session_cleanup_policy = SessionCleanupPolicy::DestroyOnOwnerArchive;
     }
 
     #[doc(hidden)]
-    pub fn is_owned_by_bridge_session(&self, bridge_session_id: &str) -> bool {
+    pub fn is_owned_by_bridge_session(&self, bridge_session_id: &SessionId) -> bool {
         self.has_owner_bridge_session_index(bridge_session_id)
     }
 
     #[doc(hidden)]
-    pub fn is_bridge_session_scoped_to(&self, bridge_session_id: &str) -> bool {
+    pub fn is_bridge_session_scoped_to(&self, bridge_session_id: &SessionId) -> bool {
         self.is_cleanup_scoped_to_owner_bridge_session(bridge_session_id)
     }
 
     #[doc(hidden)]
-    pub fn mark_bridge_session_scoped(&mut self, bridge_session_id: &str) {
+    pub fn mark_bridge_session_scoped(&mut self, bridge_session_id: SessionId) {
         self.mark_owner_bridge_session_indexed(bridge_session_id);
     }
 
@@ -806,20 +806,21 @@ id = "minimal"
 
     #[test]
     fn test_owner_bridge_session_index_is_canonical() {
-        let mut def = MobDefinition::implicit("bridge-session", "gpt-5.4");
+        let bridge_session_id = SessionId::new();
+        let mut def = MobDefinition::implicit(&bridge_session_id, "gpt-5.4");
         assert_eq!(
-            def.owner_bridge_session_id.as_deref(),
-            Some("bridge-session"),
+            def.owner_bridge_session_id.as_ref(),
+            Some(&bridge_session_id),
             "owner bridge session id should be populated"
         );
-        assert!(def.has_owner_bridge_session_index("bridge-session"));
-        assert!(def.is_indexed_to_owner_bridge_session("bridge-session"));
-        assert!(def.is_cleanup_scoped_to_owner_bridge_session("bridge-session"));
-        assert!(def.is_owned_by_bridge_session("bridge-session"));
-        assert!(def.is_bridge_session_scoped_to("bridge-session"));
+        assert!(def.has_owner_bridge_session_index(&bridge_session_id));
+        assert!(def.is_indexed_to_owner_bridge_session(&bridge_session_id));
+        assert!(def.is_cleanup_scoped_to_owner_bridge_session(&bridge_session_id));
+        assert!(def.is_owned_by_bridge_session(&bridge_session_id));
+        assert!(def.is_bridge_session_scoped_to(&bridge_session_id));
 
         def.owner_bridge_session_id = None;
-        assert!(!def.has_owner_bridge_session_index("bridge-session"));
+        assert!(!def.has_owner_bridge_session_index(&bridge_session_id));
     }
 
     #[test]

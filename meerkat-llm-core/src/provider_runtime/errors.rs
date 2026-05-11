@@ -28,7 +28,7 @@ pub enum ProviderAuthError {
     #[error("source resolution failed: {0}")]
     SourceResolutionFailed(String),
     #[error("external resolver not registered: {0}")]
-    ExternalResolverMissing(String),
+    ExternalResolverMissing(meerkat_core::ExternalAuthResolverId),
     #[error("no runtime registered for provider: {0:?}")]
     NoRuntimeRegistered(meerkat_core::Provider),
 }

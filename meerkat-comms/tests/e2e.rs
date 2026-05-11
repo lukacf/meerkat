@@ -15,9 +15,9 @@ use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::TrustedPeerDescriptor;
 use meerkat_core::handles::PeerInteractionHandle;
 use meerkat_core::{
-    BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ContentBlock, ContentInput,
-    DslTransitionError, ImageData, InboundPeerRequestState, InteractionStreamState,
-    OutboundPeerRequestState, PeerCorrelationId, ResponseStatus, ToolDispatchContext,
+    BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError, ContentBlock, DslTransitionError,
+    ImageData, InboundPeerRequestState, InteractionStreamState, OutboundPeerRequestState,
+    PeerCorrelationId, ResponseStatus, ToolDispatchContext,
 };
 use parking_lot::RwLock;
 use serde_json::json;
@@ -465,7 +465,7 @@ async fn integration_real_uds_message_exchange() {
 
 #[tokio::test]
 #[ignore = "lane:e2e-smoke"]
-async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
+async fn e2e_smoke_mcp_multimodal_blob_request_response_loop() {
     let _lock = INPROC_REGISTRY_LOCK.lock().await;
     meerkat_comms::InprocRegistry::global().clear();
 
@@ -564,19 +564,6 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
         other => panic!("expected B message, got {other:?}"),
     }
 
-    let request_context =
-        ToolDispatchContext::from_current_turn_input(&ContentInput::Blocks(vec![
-            ContentBlock::Text {
-                text: "not an image".to_string(),
-            },
-            ContentBlock::Image {
-                media_type: "image/png".to_string(),
-                data: ImageData::Inline {
-                    data: "Y3VycmVudC10dXJuLWltYWdl".to_string(),
-                },
-            },
-        ]));
-
     handle_tools_call_with_context(
         &ctx_a,
         "send_request",
@@ -584,17 +571,17 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             "peer_id": peer_b_id,
             "display_name": name_b,
             "intent": "checksum_token",
-            "params": {"subject": "describe-current-turn-and-answer-with-image"},
+            "params": {"subject": "describe-blob-and-answer-with-image"},
             "blocks": [
                 {"type": "text", "text": "Request body text block"},
-                {"type": "image_ref", "source": "current_turn", "index": 0}
+                {"type": "image_ref", "source": "blob", "blob_id": message_blob.blob_id, "media_type": "image/png"}
             ],
             "handling_mode": "steer"
         }),
-        &request_context,
+        &ToolDispatchContext::default(),
     )
     .await
-    .expect("send current-turn image request");
+    .expect("send blob-backed image request");
 
     let b_requests = CoreCommsRuntime::drain_inbox_interactions(runtime_b.as_ref()).await;
     assert_eq!(b_requests.len(), 1);
@@ -606,17 +593,14 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             blocks,
         } => {
             assert_eq!(intent, "checksum_token");
-            assert_eq!(
-                params["subject"],
-                "describe-current-turn-and-answer-with-image"
-            );
+            assert_eq!(params["subject"], "describe-blob-and-answer-with-image");
             let blocks = blocks.as_ref().expect("request blocks");
             assert!(matches!(
                 &blocks[1],
                 ContentBlock::Image {
                     data: ImageData::Inline { data },
                     ..
-                } if data == "Y3VycmVudC10dXJuLWltYWdl"
+                } if data == "bWVzc2FnZS1ibG9i"
             ));
         }
         other => panic!("expected B request, got {other:?}"),
@@ -633,11 +617,11 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
             "display_name": name_a,
             "in_reply_to": request_id.0.to_string(),
             "status": "completed",
-            "result": {
-                "request_intent": "checksum_token",
-                "request_subject": "describe-current-turn-and-answer-with-image",
-                "token": "blob-current-turn-response-ok"
-            },
+                "result": {
+                    "request_intent": "checksum_token",
+                    "request_subject": "describe-blob-and-answer-with-image",
+                    "token": "blob-response-ok"
+                },
             "blocks": [
                 {"type": "text", "text": "B response text block"},
                 {"type": "image_ref", "source": "blob", "blob_id": response_blob.blob_id, "media_type": "image/png"}
@@ -660,7 +644,7 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
         } => {
             assert_eq!(*in_reply_to, request_id);
             assert_eq!(*status, ResponseStatus::Completed);
-            assert_eq!(result["token"], "blob-current-turn-response-ok");
+            assert_eq!(result["token"], "blob-response-ok");
             let blocks = blocks.as_ref().expect("response blocks");
             assert!(matches!(
                 &blocks[1],

@@ -98,6 +98,10 @@ slug_newtype!(
     ProfileId,
     "Opaque slug identifying an auth profile override on a connection."
 );
+slug_newtype!(
+    ExternalAuthResolverId,
+    "Opaque slug identifying a host-owned external auth resolver."
+);
 
 /// Session-facing reference to a binding inside a realm.
 ///
@@ -174,7 +178,7 @@ pub enum CredentialSourceSpec {
         fallback: Vec<String>,
     },
     ExternalResolver {
-        handle: String,
+        handle: ExternalAuthResolverId,
     },
     PlatformDefault,
     /// External command that prints a bearer token on stdout. Reference:
@@ -999,8 +1003,10 @@ auth_profile = "default_profile"
         assert!(RealmId::parse("").is_err());
         assert!(BindingId::parse("bad space").is_err());
         assert!(ProfileId::parse("bad:colon").is_err());
+        assert!(ExternalAuthResolverId::parse("bad space").is_err());
         assert!(RealmId::parse("dev").is_ok());
         assert!(BindingId::parse("openai_default.v1").is_ok());
+        assert!(ExternalAuthResolverId::parse("desktop").is_ok());
     }
 
     #[test]
@@ -1015,7 +1021,7 @@ auth_profile = "default_profile"
                 fallback: Vec::new(),
             },
             CredentialSourceSpec::ExternalResolver {
-                handle: "desktop".into(),
+                handle: ExternalAuthResolverId::parse("desktop").unwrap(),
             },
             CredentialSourceSpec::PlatformDefault,
         ] {
@@ -1032,6 +1038,16 @@ auth_profile = "default_profile"
         assert!(
             err.to_string().contains("nonexistent") || err.to_string().contains("unknown variant"),
             "serde error should mention unknown variant: {err}",
+        );
+    }
+
+    #[test]
+    fn credential_source_external_resolver_rejects_untyped_handle_slug() {
+        let bad = r#"{"kind":"external_resolver","handle":"bad space"}"#;
+        let err = serde_json::from_str::<CredentialSourceSpec>(bad).unwrap_err();
+        assert!(
+            err.to_string().contains("invalid character"),
+            "external resolver handles must be parsed as typed resolver ids: {err}"
         );
     }
 

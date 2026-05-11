@@ -6,10 +6,10 @@
 //! A mob of 4 agents (3 different LLM providers) plays Pictionary:
 //!
 //! - **Test harness** generates images via Gemini flash-image-preview (raw reqwest)
-//! - **Test harness** injects images into the artist as current-turn multimodal content
-//!   via `MemberHandle::send(ContentInput::Blocks)`
-//! - **Artist** forwards the current-turn image through the agent-facing `send_message`
-//!   tool using typed `image_ref` blocks
+//! - **Test harness** stores images in the canonical blob store and injects them
+//!   into the artist via `MemberHandle::send(ContentInput::Blocks)`
+//! - **Artist** forwards the blob-backed image through the agent-facing
+//!   `send_message` tool using typed `image_ref` blocks
 //! - **Guesser A** (Claude Opus 4.6) — lead guesser, literal/shapes perspective
 //! - **Guesser B** (Gemini 3.1 Pro) — emotions/mood perspective
 //! - **Guesser C** (GPT-5.4) — context/narrative perspective
@@ -26,7 +26,10 @@
 //! ```
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
-use meerkat_core::types::{ContentBlock, ContentInput, HandlingMode};
+use meerkat_core::{
+    BlobRef, BlobStore, ImageData,
+    types::{ContentBlock, ContentInput, HandlingMode},
+};
 use meerkat_mob::{
     AgentIdentity, MemberHandle, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode,
     MobSessionService, MobStorage, Profile, ProfileBinding, ProfileName, SpawnMemberSpec,
@@ -212,8 +215,15 @@ fn pictionary_definition() -> MobDefinition {
     definition
 }
 
-async fn setup_mob()
--> Result<(MobHandle, Arc<dyn MobSessionService>, TempDir), Box<dyn std::error::Error>> {
+async fn setup_mob() -> Result<
+    (
+        MobHandle,
+        Arc<dyn MobSessionService>,
+        Arc<dyn BlobStore>,
+        TempDir,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let temp_dir = TempDir::new()?;
     let store_path = temp_dir.path().join("sessions");
     std::fs::create_dir_all(&store_path)?;
@@ -234,7 +244,7 @@ async fn setup_mob()
         16,
         store_dyn,
         Some(runtime_store),
-        blob_store,
+        blob_store.clone(),
     ));
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
 
@@ -250,7 +260,7 @@ async fn setup_mob()
         .create()
         .await?;
 
-    Ok((handle, mob_service, temp_dir))
+    Ok((handle, mob_service, blob_store, temp_dir))
 }
 
 async fn spawn_and_wait(handle: &MobHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -532,7 +542,7 @@ fn artist_forward_text_block(label: &str) -> String {
     )
 }
 
-fn artist_forward_instruction(label: &str, attempt: usize) -> String {
+fn artist_forward_instruction(label: &str, blob_ref: &BlobRef, attempt: usize) -> String {
     let retry_note = if attempt == 1 {
         "This is the only task for this turn."
     } else {
@@ -542,7 +552,12 @@ fn artist_forward_instruction(label: &str, attempt: usize) -> String {
     let text = artist_forward_text_block(label);
     let blocks_example = serde_json::json!([
         { "type": "text", "text": text },
-        { "type": "image_ref", "source": "current_turn", "index": 0 }
+        {
+            "type": "image_ref",
+            "source": "blob",
+            "blob_id": blob_ref.blob_id.as_str(),
+            "media_type": blob_ref.media_type.as_str()
+        }
     ])
     .to_string();
     format!(
@@ -554,7 +569,7 @@ fn artist_forward_instruction(label: &str, attempt: usize) -> String {
          handling_mode \"steer\", body \"{body}\", and blocks exactly:\n\
          {blocks_example}\n\n\
          Do not reveal the secret word, describe the image, or guess it yourself. Only forward \
-         the attached image block through the comms tool."
+         the blob-backed image block through the comms tool."
     )
 }
 
@@ -562,29 +577,38 @@ fn artist_forward_blocks(
     label: &str,
     media_type: &str,
     image_data: &str,
+    blob_ref: &BlobRef,
     attempt: usize,
 ) -> Vec<ContentBlock> {
     vec![
         ContentBlock::Text {
-            text: artist_forward_instruction(label, attempt),
+            text: artist_forward_instruction(label, blob_ref, attempt),
         },
         ContentBlock::Image {
             media_type: media_type.to_string(),
-            data: image_data.to_string().into(),
+            data: ImageData::Inline {
+                data: image_data.to_string(),
+            },
         },
     ]
 }
 
 #[test]
-fn artist_forward_instruction_uses_typed_current_turn_image_ref() {
-    let prompt = artist_forward_instruction("Round \"quoted\"", 1);
+fn artist_forward_instruction_uses_blob_image_ref() {
+    let blob_ref = BlobRef {
+        blob_id: "sha256:test-image".into(),
+        media_type: "image/png".to_string(),
+    };
+    let prompt = artist_forward_instruction("Round \"quoted\"", &blob_ref, 1);
     assert!(prompt.contains("send_message"));
     assert!(prompt.contains("\"type\":\"image_ref\""));
-    assert!(prompt.contains("\"source\":\"current_turn\""));
-    assert!(prompt.contains("\"index\":0"));
+    assert!(prompt.contains("\"source\":\"blob\""));
+    assert!(prompt.contains("\"blob_id\":\"sha256:test-image\""));
+    assert!(prompt.contains("\"media_type\":\"image/png\""));
+    assert!(!prompt.contains("\"source\":\"current_turn\""));
     assert!(!prompt.contains("current_turn:image"));
 
-    let blocks = artist_forward_blocks("Round \"quoted\"", "image/png", "abc123", 1);
+    let blocks = artist_forward_blocks("Round \"quoted\"", "image/png", "abc123", &blob_ref, 1);
     assert_eq!(blocks.len(), 2);
     assert!(matches!(blocks.first(), Some(ContentBlock::Text { .. })));
     assert!(matches!(blocks.get(1), Some(ContentBlock::Image { .. })));
@@ -594,6 +618,7 @@ struct ArtistForwardImage<'a> {
     label: &'a str,
     media_type: &'a str,
     data: &'a str,
+    blob_ref: &'a BlobRef,
 }
 
 async fn ensure_artist_image_delivery(
@@ -616,6 +641,7 @@ async fn ensure_artist_image_delivery(
                 image.label,
                 image.media_type,
                 image.data,
+                image.blob_ref,
                 attempt,
             )),
             HandlingMode::Steer,
@@ -655,6 +681,7 @@ async fn ensure_artist_image_delivery(
                             image.label,
                             image.media_type,
                             image.data,
+                            image.blob_ref,
                             attempt,
                         )),
                         HandlingMode::Steer,
@@ -1028,7 +1055,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
     println!("============================================================\n");
 
     let t = Instant::now();
-    let (handle, service, _tmp) = setup_mob().await.expect("mob setup failed");
+    let (handle, service, blob_store, _tmp) = setup_mob().await.expect("mob setup failed");
     spawn_and_wait(&handle).await.expect("member spawn failed");
     assert!(
         wait_for_comms_mesh_ready(&handle, service.as_ref(), Duration::from_secs(60)).await,
@@ -1084,6 +1111,10 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             img_data.len(),
             t.elapsed().as_secs_f64()
         );
+        let blob_ref = blob_store
+            .put_image(&mime, &img_data)
+            .await
+            .expect("store pictionary image in canonical blob store");
 
         // 2. Brief the artist on the secret word
         let t = Instant::now();
@@ -1116,6 +1147,7 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                 label,
                 media_type: &mime,
                 data: &img_data,
+                blob_ref: &blob_ref,
             },
             Duration::from_secs(90),
         )

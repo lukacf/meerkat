@@ -34,6 +34,42 @@ use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
+fn rpc_session_stream_id(session_id: &SessionId, nonce: Uuid) -> String {
+    format!("session:{session_id}:{nonce}")
+}
+
+fn parse_rpc_session_stream_id(raw: &str) -> Result<(SessionId, Uuid), String> {
+    let mut parts = raw.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("session"), Some(session_id), Some(nonce), None) => {
+            let session_id = SessionId::parse(session_id)
+                .map_err(|err| format!("Invalid session stream_id owner: {err}"))?;
+            let nonce =
+                Uuid::parse_str(nonce).map_err(|err| format!("Invalid stream nonce: {err}"))?;
+            Ok((session_id, nonce))
+        }
+        _ => Err("stream_id must be a session-owned stream handle".to_string()),
+    }
+}
+
+#[cfg(feature = "mob")]
+fn rpc_mob_stream_id(mob_id: &meerkat_mob::MobId, nonce: Uuid) -> String {
+    format!("mob:{mob_id}:{nonce}")
+}
+
+#[cfg(feature = "mob")]
+fn parse_rpc_mob_stream_id(raw: &str) -> Result<(meerkat_mob::MobId, Uuid), String> {
+    let mut parts = raw.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("mob"), Some(mob_id), Some(nonce), None) => {
+            let nonce =
+                Uuid::parse_str(nonce).map_err(|err| format!("Invalid stream nonce: {err}"))?;
+            Ok((meerkat_mob::MobId::from(mob_id), nonce))
+        }
+        _ => Err("stream_id must be a mob-owned stream handle".to_string()),
+    }
+}
+
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
@@ -388,13 +424,13 @@ impl NotificationSink {
     /// direct session events.
     async fn emit_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &str,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id,
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -410,7 +446,7 @@ impl NotificationSink {
     /// Emit a scoped session stream event notification with scope metadata.
     pub async fn emit_scoped_session_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &str,
         sequence: u64,
         session_id: &SessionId,
         event: &EventEnvelope<AgentEvent>,
@@ -418,7 +454,7 @@ impl NotificationSink {
         scope_path: &[meerkat_core::event::StreamScopeFrame],
     ) {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id,
             "sequence": sequence,
             "session_id": session_id.to_string(),
             "event": event,
@@ -432,13 +468,13 @@ impl NotificationSink {
     /// Emit an explicit terminal notification for a standalone session stream.
     pub async fn emit_session_stream_end(
         &self,
-        stream_id: &Uuid,
+        stream_id: &str,
         session_id: &SessionId,
         outcome: &str,
         detail: Option<&str>,
     ) {
         let mut params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id,
             "session_id": session_id.to_string(),
             "ended": true,
             "outcome": outcome,
@@ -460,13 +496,15 @@ impl NotificationSink {
     /// For per-member streams the event is the raw [`EventEnvelope<AgentEvent>`].
     async fn emit_mob_stream_event(
         &self,
-        stream_id: &Uuid,
+        stream_id: &str,
         sequence: u64,
+        mob_id: &meerkat_mob::MobId,
         event: &serde_json::Value,
     ) -> StreamEmitStatus {
         let params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id,
             "sequence": sequence,
+            "mob_id": mob_id.to_string(),
             "event": event,
         });
         let notification = RpcNotification::new("mob/stream_event", params);
@@ -478,9 +516,16 @@ impl NotificationSink {
     }
 
     #[cfg(feature = "mob")]
-    async fn emit_mob_stream_end(&self, stream_id: &Uuid, outcome: &str, detail: Option<&str>) {
+    async fn emit_mob_stream_end(
+        &self,
+        stream_id: &str,
+        mob_id: &meerkat_mob::MobId,
+        outcome: &str,
+        detail: Option<&str>,
+    ) {
         let mut params = serde_json::json!({
-            "stream_id": stream_id.to_string(),
+            "stream_id": stream_id,
+            "mob_id": mob_id.to_string(),
             "ended": true,
             "outcome": outcome,
         });
@@ -504,7 +549,7 @@ struct StreamForwarder {
 enum StreamTerminal {
     Session(SessionId),
     #[cfg(feature = "mob")]
-    Mob,
+    Mob(meerkat_mob::MobId),
 }
 
 enum StreamForwarderState {
@@ -521,8 +566,8 @@ enum StreamForwarderState {
 /// stream IDs may lose `already_closed` tracking, which is acceptable — the
 /// alternative is unbounded growth.
 struct ClosedStreamSet {
-    entries: std::collections::VecDeque<Uuid>,
-    set: HashSet<Uuid>,
+    entries: std::collections::VecDeque<String>,
+    set: HashSet<String>,
 }
 
 const CLOSED_STREAM_SET_MAX: usize = 1024;
@@ -536,8 +581,8 @@ impl ClosedStreamSet {
     }
 
     /// Insert a stream ID. Returns false if already present.
-    fn insert(&mut self, id: Uuid) -> bool {
-        if !self.set.insert(id) {
+    fn insert(&mut self, id: String) -> bool {
+        if !self.set.insert(id.clone()) {
             return false;
         }
         self.entries.push_back(id);
@@ -550,7 +595,7 @@ impl ClosedStreamSet {
     }
 
     /// Check and remove a stream ID. Returns true if it was present.
-    fn remove(&mut self, id: &Uuid) -> bool {
+    fn remove(&mut self, id: &str) -> bool {
         if self.set.remove(id) {
             self.entries.retain(|e| e != id);
             true
@@ -2194,13 +2239,15 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_nonce = Uuid::new_v4();
+        let stream_id = rpc_session_stream_id(&session_id, stream_nonce);
         self.closed_session_streams.lock().await.remove(&stream_id);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_session_streams = self.active_session_streams.clone();
         let closed_session_streams = self.closed_session_streams.clone();
-        let stream_id_for_task = stream_id;
+        let stream_nonce_for_task = stream_nonce;
+        let stream_id_for_task = stream_id.clone();
         let session_id_for_task = session_id.clone();
 
         let task = tokio::spawn(async move {
@@ -2224,14 +2271,14 @@ impl MethodRouter {
                                     let should_emit = {
                                         let mut streams = active_session_streams.lock().await;
                                         if streams
-                                            .get(&stream_id_for_task)
+                                            .get(&stream_nonce_for_task)
                                             .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                         {
-                                            streams.remove(&stream_id_for_task);
+                                            streams.remove(&stream_nonce_for_task);
                                             closed_session_streams
                                                 .lock()
                                                 .await
-                                                .insert(stream_id_for_task);
+                                                .insert(stream_id_for_task.clone());
                                             true
                                         } else {
                                             false
@@ -2254,14 +2301,14 @@ impl MethodRouter {
                                 let should_emit = {
                                     let mut streams = active_session_streams.lock().await;
                                     if streams
-                                        .get(&stream_id_for_task)
+                                        .get(&stream_nonce_for_task)
                                         .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                     {
-                                        streams.remove(&stream_id_for_task);
+                                        streams.remove(&stream_nonce_for_task);
                                         closed_session_streams
                                             .lock()
                                             .await
-                                            .insert(stream_id_for_task);
+                                            .insert(stream_id_for_task.clone());
                                         true
                                     } else {
                                         false
@@ -2286,7 +2333,7 @@ impl MethodRouter {
         });
 
         self.active_session_streams.lock().await.insert(
-            stream_id,
+            stream_nonce,
             StreamForwarder {
                 terminal: StreamTerminal::Session(session_id.clone()),
                 state: StreamForwarderState::Active {
@@ -2297,7 +2344,7 @@ impl MethodRouter {
         );
 
         let result = meerkat_contracts::SessionStreamOpenResult {
-            stream_id: stream_id.to_string(),
+            stream_id,
             session_id: session_id.to_string(),
             opened: true,
         };
@@ -2322,27 +2369,54 @@ impl MethodRouter {
                 Err(resp) => return resp.with_id(id),
             };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
-                return RpcResponse::error(
-                    id,
-                    error::INVALID_PARAMS,
-                    format!("Invalid stream_id: {}", params.stream_id),
-                );
-            }
+        let (declared_session_id, stream_nonce) =
+            match parse_rpc_session_stream_id(&params.stream_id) {
+                Ok(parsed) => parsed,
+                Err(reason) => {
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        format!("Invalid stream_id: {} ({reason})", params.stream_id),
+                    );
+                }
+            };
+
+        let owner_matches = {
+            let active_session_streams = self.active_session_streams.lock().await;
+            active_session_streams
+                .get(&stream_nonce)
+                .map(|stream| match &stream.terminal {
+                    StreamTerminal::Session(session_id) => session_id == &declared_session_id,
+                    #[cfg(feature = "mob")]
+                    StreamTerminal::Mob(_) => false,
+                })
         };
+        if owner_matches == Some(false) {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "Invalid stream_id: {} (stream owner does not match active session)",
+                    params.stream_id
+                ),
+            );
+        }
+
+        let stream_id = params.stream_id.clone();
 
         let closed_terminal = {
             let mut active_session_streams = self.active_session_streams.lock().await;
-            match active_session_streams.remove(&stream_id) {
+            match active_session_streams.remove(&stream_nonce) {
                 Some(mut stream) => match &mut stream.state {
                     StreamForwarderState::Active { stop_tx, task } => {
                         if let Some(stop_tx) = stop_tx.take() {
                             let _ = stop_tx.send(());
                         }
                         task.abort();
-                        self.closed_session_streams.lock().await.insert(stream_id);
+                        self.closed_session_streams
+                            .lock()
+                            .await
+                            .insert(stream_id.clone());
                         Some(stream.terminal)
                     }
                 },
@@ -2357,14 +2431,14 @@ impl MethodRouter {
                 false
             }
             #[cfg(feature = "mob")]
-            Some(StreamTerminal::Mob) => {
+            Some(StreamTerminal::Mob(_)) => {
                 unreachable!("session stream stored mob terminal metadata")
             }
             None => self.closed_session_streams.lock().await.remove(&stream_id),
         };
 
         let result = meerkat_contracts::SessionStreamCloseResult {
-            stream_id: stream_id.to_string(),
+            stream_id,
             closed: true,
             already_closed,
         };
@@ -2411,15 +2485,18 @@ impl MethodRouter {
             }
         };
 
-        let stream_id = Uuid::new_v4();
+        let stream_nonce = Uuid::new_v4();
+        let stream_id = rpc_mob_stream_id(&mob_id, stream_nonce);
         self.closed_mob_streams.lock().await.remove(&stream_id);
         let (stop_tx, stop_rx) = oneshot::channel::<()>();
         let notification_sink = self.notification_sink.clone();
         let active_mob_streams = self.active_mob_streams.clone();
         let closed_mob_streams = self.closed_mob_streams.clone();
-        let stream_id_for_task = stream_id;
 
         if let Some(agent_identity) = params.agent_identity {
+            let stream_nonce_for_task = stream_nonce;
+            let stream_id_for_task = stream_id.clone();
+            let mob_id_for_task = mob_id.clone();
             // Per-member stream: subscribe to a specific member's agent events.
             let identity = meerkat_mob::AgentIdentity::from(agent_identity.as_str());
             let stream: meerkat_core::comms::EventStream =
@@ -2454,6 +2531,7 @@ impl MethodRouter {
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            &mob_id_for_task,
                                             &event_json,
                                         )
                                         .await;
@@ -2461,11 +2539,11 @@ impl MethodRouter {
                                         let should_emit = {
                                             let mut streams = active_mob_streams.lock().await;
                                             if streams
-                                                .get(&stream_id_for_task)
+                                                .get(&stream_nonce_for_task)
                                                 .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                             {
-                                                streams.remove(&stream_id_for_task);
-                                                closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                                streams.remove(&stream_nonce_for_task);
+                                                closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
                                                 true
                                             } else {
                                                 false
@@ -2475,6 +2553,7 @@ impl MethodRouter {
                                             notification_sink
                                                 .emit_mob_stream_end(
                                                     &stream_id_for_task,
+                                                    &mob_id_for_task,
                                                     "terminal_error",
                                                     Some("transport stream notification queue overflow"),
                                                 )
@@ -2487,11 +2566,11 @@ impl MethodRouter {
                                     let should_emit = {
                                         let mut streams = active_mob_streams.lock().await;
                                         if streams
-                                            .get(&stream_id_for_task)
+                                            .get(&stream_nonce_for_task)
                                             .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                         {
-                                            streams.remove(&stream_id_for_task);
-                                            closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                            streams.remove(&stream_nonce_for_task);
+                                            closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
                                             true
                                         } else {
                                             false
@@ -2499,7 +2578,7 @@ impl MethodRouter {
                                     };
                                     if should_emit {
                                         notification_sink
-                                            .emit_mob_stream_end(&stream_id_for_task, "remote_end", None)
+                                            .emit_mob_stream_end(&stream_id_for_task, &mob_id_for_task, "remote_end", None)
                                             .await;
                                     }
                                     break;
@@ -2511,9 +2590,9 @@ impl MethodRouter {
             });
 
             self.active_mob_streams.lock().await.insert(
-                stream_id,
+                stream_nonce,
                 StreamForwarder {
-                    terminal: StreamTerminal::Mob,
+                    terminal: StreamTerminal::Mob(mob_id.clone()),
                     state: StreamForwarderState::Active {
                         stop_tx: Some(stop_tx),
                         task,
@@ -2521,6 +2600,9 @@ impl MethodRouter {
                 },
             );
         } else {
+            let stream_nonce_for_task = stream_nonce;
+            let stream_id_for_task = stream_id.clone();
+            let mob_id_for_task = mob_id.clone();
             // Mob-wide stream: subscribe to all members' events (attributed).
             let mut router_handle = handle.subscribe_mob_events().await;
 
@@ -2543,6 +2625,7 @@ impl MethodRouter {
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
                                             sequence,
+                                            &mob_id_for_task,
                                             &event_json,
                                         )
                                         .await;
@@ -2550,11 +2633,11 @@ impl MethodRouter {
                                         let should_emit = {
                                             let mut streams = active_mob_streams.lock().await;
                                             if streams
-                                                .get(&stream_id_for_task)
+                                                .get(&stream_nonce_for_task)
                                                 .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                             {
-                                                streams.remove(&stream_id_for_task);
-                                                closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                                streams.remove(&stream_nonce_for_task);
+                                                closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
                                                 true
                                             } else {
                                                 false
@@ -2564,6 +2647,7 @@ impl MethodRouter {
                                             notification_sink
                                                 .emit_mob_stream_end(
                                                     &stream_id_for_task,
+                                                    &mob_id_for_task,
                                                     "terminal_error",
                                                     Some("transport stream notification queue overflow"),
                                                 )
@@ -2576,11 +2660,11 @@ impl MethodRouter {
                                     let should_emit = {
                                         let mut streams = active_mob_streams.lock().await;
                                         if streams
-                                            .get(&stream_id_for_task)
+                                            .get(&stream_nonce_for_task)
                                             .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
                                         {
-                                            streams.remove(&stream_id_for_task);
-                                            closed_mob_streams.lock().await.insert(stream_id_for_task);
+                                            streams.remove(&stream_nonce_for_task);
+                                            closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
                                             true
                                         } else {
                                             false
@@ -2588,7 +2672,7 @@ impl MethodRouter {
                                     };
                                     if should_emit {
                                         notification_sink
-                                            .emit_mob_stream_end(&stream_id_for_task, "remote_end", None)
+                                            .emit_mob_stream_end(&stream_id_for_task, &mob_id_for_task, "remote_end", None)
                                             .await;
                                     }
                                     break;
@@ -2600,9 +2684,9 @@ impl MethodRouter {
             });
 
             self.active_mob_streams.lock().await.insert(
-                stream_id,
+                stream_nonce,
                 StreamForwarder {
-                    terminal: StreamTerminal::Mob,
+                    terminal: StreamTerminal::Mob(mob_id.clone()),
                     state: StreamForwarderState::Active {
                         stop_tx: Some(stop_tx),
                         task,
@@ -2614,7 +2698,7 @@ impl MethodRouter {
         RpcResponse::success(
             id,
             json!({
-                "stream_id": stream_id.to_string(),
+                "stream_id": stream_id,
                 "opened": true,
             }),
         )
@@ -2639,27 +2723,52 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
 
-        let stream_id = match Uuid::parse_str(&params.stream_id) {
-            Ok(stream_id) => stream_id,
-            Err(_) => {
+        let (declared_mob_id, stream_nonce) = match parse_rpc_mob_stream_id(&params.stream_id) {
+            Ok(parsed) => parsed,
+            Err(reason) => {
                 return RpcResponse::error(
                     id,
                     error::INVALID_PARAMS,
-                    format!("Invalid stream_id: {}", params.stream_id),
+                    format!("Invalid stream_id: {} ({reason})", params.stream_id),
                 );
             }
         };
 
+        let owner_matches = {
+            let active_mob_streams = self.active_mob_streams.lock().await;
+            active_mob_streams
+                .get(&stream_nonce)
+                .map(|stream| match &stream.terminal {
+                    StreamTerminal::Mob(mob_id) => mob_id == &declared_mob_id,
+                    StreamTerminal::Session(_) => false,
+                })
+        };
+        if owner_matches == Some(false) {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!(
+                    "Invalid stream_id: {} (stream owner does not match active mob)",
+                    params.stream_id
+                ),
+            );
+        }
+
+        let stream_id = params.stream_id.clone();
+
         let closed_terminal = {
             let mut active_mob_streams = self.active_mob_streams.lock().await;
-            match active_mob_streams.remove(&stream_id) {
+            match active_mob_streams.remove(&stream_nonce) {
                 Some(mut stream) => match &mut stream.state {
                     StreamForwarderState::Active { stop_tx, task } => {
                         if let Some(stop_tx) = stop_tx.take() {
                             let _ = stop_tx.send(());
                         }
                         task.abort();
-                        self.closed_mob_streams.lock().await.insert(stream_id);
+                        self.closed_mob_streams
+                            .lock()
+                            .await
+                            .insert(stream_id.clone());
                         Some(stream.terminal)
                     }
                 },
@@ -2667,9 +2776,9 @@ impl MethodRouter {
             }
         };
         let already_closed = match closed_terminal {
-            Some(StreamTerminal::Mob) => {
+            Some(StreamTerminal::Mob(mob_id)) => {
                 self.notification_sink
-                    .emit_mob_stream_end(&stream_id, "explicit_close", None)
+                    .emit_mob_stream_end(&stream_id, &mob_id, "explicit_close", None)
                     .await;
                 false
             }
@@ -2682,7 +2791,7 @@ impl MethodRouter {
         RpcResponse::success(
             id,
             json!({
-                "stream_id": stream_id.to_string(),
+                "stream_id": stream_id,
                 "closed": true,
                 "already_closed": already_closed,
             }),
@@ -3672,7 +3781,9 @@ args = [{}]
         );
         let mut definition = meerkat_mob::MobDefinition::explicit(mob_id.clone());
         definition.profiles = profiles;
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        definition.mark_owner_bridge_session_indexed(
+            SessionId::parse(owner_session_id).expect("valid owner session id"),
+        );
         let events = Arc::new(RouterFailClearEventStore::new());
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
@@ -4327,6 +4438,10 @@ args = [{}]
             .unwrap();
         let opened = result_value(&open_resp);
         let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+        assert!(
+            stream_id.starts_with(&format!("session:{session_id}:")),
+            "session stream ids must be owner-scoped, got {stream_id}"
+        );
         assert_eq!(router.active_session_streams.lock().await.len(), 1);
 
         let close_resp = router
@@ -4420,6 +4535,71 @@ args = [{}]
             extra_notification.is_err(),
             "idempotent close must not emit a second terminal notification"
         );
+    }
+
+    #[tokio::test]
+    async fn session_stream_close_rejects_raw_or_forged_local_handles() {
+        let (router, _notif_rx) = test_router().await;
+
+        let raw_close = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": "00000000-0000-0000-0000-000000000000" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&raw_close), error::INVALID_PARAMS);
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({ "prompt": "hello" }),
+            ))
+            .await
+            .unwrap();
+        let session_id = result_value(&create_resp)["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let open_resp = router
+            .dispatch(make_request(
+                "session/stream_open",
+                serde_json::json!({ "session_id": session_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let nonce = stream_id
+            .rsplit(':')
+            .next()
+            .expect("owner-scoped stream id carries nonce");
+        let forged = format!("session:{}:{nonce}", SessionId::new());
+
+        let forged_close = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": forged }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&forged_close), error::INVALID_PARAMS);
+        assert_eq!(
+            router.active_session_streams.lock().await.len(),
+            1,
+            "forged owner must not close the real stream"
+        );
+
+        let real_close = router
+            .dispatch(make_request(
+                "session/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&real_close)["already_closed"], false);
     }
 
     #[tokio::test]
@@ -4848,6 +5028,10 @@ args = [{}]
             "binding-era fence_token must not leak to app-facing mob/member_status"
         );
         assert_eq!(status["status"], "active");
+        assert!(
+            status["member_ref"].as_str().is_some_and(|s| !s.is_empty()),
+            "mob/member_status must return the server-resolved opaque member_ref"
+        );
         assert!(status["tokens_used"].is_number());
         assert!(status["is_final"].is_boolean());
     }
@@ -5715,12 +5899,12 @@ args = [{}]
         );
 
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 1, &session_id, &envelope)
+            sink.emit_session_stream_event("session:test:one", 1, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Delivered
         );
         assert!(
-            sink.emit_session_stream_event(&Uuid::new_v4(), 2, &session_id, &envelope)
+            sink.emit_session_stream_event("session:test:two", 2, &session_id, &envelope)
                 .await
                 == StreamEmitStatus::Overflow,
             "second send should surface overflow to the caller"
@@ -5735,7 +5919,7 @@ args = [{}]
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
         let session_id = SessionId::new();
-        let stream_id = Uuid::new_v4();
+        let stream_id = rpc_session_stream_id(&session_id, Uuid::new_v4());
         let envelope = EventEnvelope::new_session(
             session_id.clone(),
             1,
@@ -5855,7 +6039,8 @@ args = [{}]
     async fn mob_stream_overflow_emits_terminal_error_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
-        let stream_id = Uuid::new_v4();
+        let mob_id = meerkat_mob::MobId::from("test-mob");
+        let stream_id = rpc_mob_stream_id(&mob_id, Uuid::new_v4());
         let event = serde_json::json!({
             "event_id": "e1",
             "payload": {
@@ -5865,19 +6050,23 @@ args = [{}]
         });
 
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 1, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 1, &mob_id, &event)
+                .await,
             StreamEmitStatus::Delivered
         );
         assert_eq!(
-            sink.emit_mob_stream_event(&stream_id, 2, &event).await,
+            sink.emit_mob_stream_event(&stream_id, 2, &mob_id, &event)
+                .await,
             StreamEmitStatus::Overflow
         );
 
         let terminal = tokio::spawn({
             let sink = sink.clone();
+            let mob_id = mob_id.clone();
             async move {
                 sink.emit_mob_stream_end(
                     &stream_id,
+                    &mob_id,
                     "terminal_error",
                     Some("transport stream notification queue overflow"),
                 )
@@ -6284,6 +6473,10 @@ args = [{}]
             .unwrap();
         let opened = result_value(&open_resp);
         let stream_id = opened["stream_id"].as_str().unwrap().to_string();
+        assert!(
+            stream_id.starts_with(&format!("mob:{mob_id}:")),
+            "mob stream ids must be owner-scoped, got {stream_id}"
+        );
         assert_eq!(router.active_mob_streams.lock().await.len(), 1);
 
         let close_resp = router
@@ -6377,13 +6570,89 @@ args = [{}]
 
     #[cfg(feature = "mob")]
     #[tokio::test]
+    async fn mob_stream_close_rejects_raw_or_forged_local_handles() {
+        let (router, _notif_rx) = test_router().await;
+
+        let raw_close = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": "00000000-0000-0000-0000-000000000000" }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&raw_close), error::INVALID_PARAMS);
+
+        let create_resp = router
+            .dispatch(make_request(
+                "mob/create",
+                serde_json::json!({
+                    "definition": {
+                        "id": "test_mob_forged_stream",
+                        "profiles": {
+                            "worker": {
+                                "model": "claude-sonnet-4-6",
+                                "tools": { "comms": true }
+                            }
+                        }
+                    }
+                }),
+            ))
+            .await
+            .unwrap();
+        let mob_id = result_value(&create_resp)["mob_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let open_resp = router
+            .dispatch(make_request(
+                "mob/stream_open",
+                serde_json::json!({ "mob_id": mob_id }),
+            ))
+            .await
+            .unwrap();
+        let stream_id = result_value(&open_resp)["stream_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let nonce = stream_id
+            .rsplit(':')
+            .next()
+            .expect("owner-scoped stream id carries nonce");
+        let forged = format!("mob:other-mob:{nonce}");
+
+        let forged_close = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": forged }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(error_code(&forged_close), error::INVALID_PARAMS);
+        assert_eq!(
+            router.active_mob_streams.lock().await.len(),
+            1,
+            "forged owner must not close the real mob stream"
+        );
+
+        let real_close = router
+            .dispatch(make_request(
+                "mob/stream_close",
+                serde_json::json!({ "stream_id": stream_id }),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(result_value(&real_close)["already_closed"], false);
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
     async fn mob_stream_close_unknown_returns_not_already_closed() {
         let (router, _notif_rx) = test_router().await;
 
         let close_resp = router
             .dispatch(make_request(
                 "mob/stream_close",
-                serde_json::json!({ "stream_id": "00000000-0000-0000-0000-000000000000" }),
+                serde_json::json!({ "stream_id": "mob:missing-mob:00000000-0000-0000-0000-000000000000" }),
             ))
             .await
             .unwrap();

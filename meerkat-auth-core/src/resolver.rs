@@ -1372,7 +1372,7 @@ mod tests {
             provider: Provider::Gemini,
             auth_method: "external_authorizer".into(),
             source: CredentialSourceSpec::ExternalResolver {
-                handle: "host".into(),
+                handle: meerkat_core::ExternalAuthResolverId::parse("host").unwrap(),
             },
             constraints: Default::default(),
             metadata_defaults: meerkat_core::AuthMetadataDefaults {
@@ -1745,12 +1745,12 @@ mod tests {
     async fn simple_secret_external_static_headers_fails_closed() {
         let binding = simple_secret_binding(
             CredentialSourceSpec::ExternalResolver {
-                handle: "host".into(),
+                handle: meerkat_core::ExternalAuthResolverId::parse("host").unwrap(),
             },
             "api_key",
         );
         let env = ResolverEnvironment::testing().with_external_resolver(
-            "host",
+            meerkat_core::ExternalAuthResolverId::parse("host").unwrap(),
             Arc::new(StaticEnvelopeResolver(
                 ResolvedAuthEnvelope::StaticHeaders {
                     headers: vec![("Authorization".into(), "Bearer sk-y".into())],

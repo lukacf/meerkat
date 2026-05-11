@@ -102,15 +102,13 @@ pub fn parse_remote_catalog(
                 descriptors.push(descriptor);
             }
             Err((key, message)) => {
-                if let Some(key) = key {
-                    quarantined.push(quarantine(
-                        key,
-                        entry_location,
-                        "invalid_remote_skill",
-                        "parse",
-                        message,
-                    ));
-                }
+                quarantined.push(quarantine(
+                    key,
+                    entry_location,
+                    "invalid_remote_skill",
+                    "parse",
+                    message,
+                ));
             }
         }
     }
@@ -162,7 +160,7 @@ fn parse_remote_entry(
 ) -> Result<(SkillDescriptor, Option<SkillDocument>), (Option<SkillKey>, String)> {
     let skill_name = SkillName::parse(&entry.name).map_err(|e| {
         (
-            fallback_key(configured_source_uuid),
+            None,
             format!("invalid remote skill name '{}': {e}", entry.name),
         )
     })?;
@@ -241,14 +239,8 @@ pub fn load_cached(cache: &RemoteCache, key: &SkillKey) -> Result<SkillDocument,
         .ok_or_else(|| SkillError::NotFound { key: key.clone() })
 }
 
-fn fallback_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
-    SkillName::parse("invalid-skill")
-        .ok()
-        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
-}
-
 fn quarantine(
-    key: SkillKey,
+    key: Option<SkillKey>,
     location: String,
     error_code: &str,
     error_class: &str,
@@ -258,8 +250,13 @@ fn quarantine(
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
+    let identity_hint = key
+        .as_ref()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| location.clone());
     SkillQuarantineDiagnostic {
         key,
+        identity_hint,
         location,
         error_code: error_code.to_string(),
         error_class: error_class.to_string(),
@@ -275,5 +272,35 @@ pub fn cache_from_catalog(parsed: ParsedRemoteCatalog) -> RemoteCache {
         documents: parsed.documents,
         quarantined: parsed.quarantined,
         refreshed_at: Some(SystemTime::now()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_remote_skill_name_quarantine_has_no_fabricated_key() {
+        let source_uuid = SourceUuid::parse("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb").unwrap();
+        let parsed = parse_remote_catalog(
+            r#"[{"name":"Bad Skill","description":"bad"}]"#,
+            &source_uuid,
+            SkillScope::Project,
+            "memory://remote",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.quarantined.len(), 1);
+        assert_eq!(parsed.quarantined[0].key, None);
+        assert!(
+            parsed.quarantined[0]
+                .identity_hint
+                .contains("memory://remote")
+        );
+        assert!(
+            !parsed.quarantined[0]
+                .identity_hint
+                .contains("invalid-skill")
+        );
     }
 }

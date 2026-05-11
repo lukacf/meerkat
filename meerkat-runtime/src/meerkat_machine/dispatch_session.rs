@@ -218,7 +218,7 @@ impl MeerkatMachine {
 
         Ok(MeerkatMachineCommandResult::Bindings(
             meerkat_core::SessionRuntimeBindings::__from_runtime_authority(
-                session_id,
+                session_id.clone(),
                 epoch_id,
                 ops_lifecycle as Arc<dyn meerkat_core::OpsLifecycleRegistry>,
                 cursor_state,
@@ -237,6 +237,7 @@ impl MeerkatMachine {
                 ))),
                 Arc::new(crate::handles::RuntimeSessionAdmissionHandle::new(
                     Arc::clone(&shared_handle_authority),
+                    session_id,
                 )),
                 Arc::new(crate::handles::RuntimeModelRoutingHandle::new(Arc::clone(
                     &shared_handle_authority,

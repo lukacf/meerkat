@@ -498,11 +498,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         crate::wire::WireBackendKind::SelfHosted,
         crate::wire::WireBackendKind::OpenAiCompatible,
     ])?;
+    let other_backend_kinds =
+        serialized_contract_values(&[crate::wire::WireBackendKind::OtherApi])?;
     let backend_kinds = unique_contract_values(&[
         &openai_backend_kinds,
         &anthropic_backend_kinds,
         &google_backend_kinds,
         &self_hosted_backend_kinds,
+        &other_backend_kinds,
     ]);
 
     let openai_auth_methods = serialized_contract_values(&[
@@ -539,17 +542,29 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         crate::wire::WireAuthMethod::StaticBearer,
         crate::wire::WireAuthMethod::None,
     ])?;
+    let other_auth_methods = serialized_contract_values(&[
+        crate::wire::WireAuthMethod::ApiKey,
+        crate::wire::WireAuthMethod::StaticBearer,
+        crate::wire::WireAuthMethod::None,
+    ])?;
     let auth_methods = unique_contract_values(&[
         &openai_auth_methods,
         &anthropic_auth_methods,
         &google_auth_methods,
         &self_hosted_auth_methods,
+        &other_auth_methods,
     ]);
 
-    let providers: Vec<&'static str> = meerkat_core::Provider::ALL_CONCRETE
-        .iter()
-        .map(meerkat_core::Provider::as_str)
-        .collect();
+    let providers: Vec<&'static str> = [
+        meerkat_core::Provider::Anthropic,
+        meerkat_core::Provider::OpenAI,
+        meerkat_core::Provider::Gemini,
+        meerkat_core::Provider::SelfHosted,
+        meerkat_core::Provider::Other,
+    ]
+    .iter()
+    .map(meerkat_core::Provider::as_str)
+    .collect();
     let auth_status_states: Vec<&'static str> = meerkat_core::AuthStatusPhase::ALL
         .iter()
         .copied()
@@ -576,12 +591,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
             "anthropic": anthropic_backend_kinds,
             "gemini": google_backend_kinds,
             "self_hosted": self_hosted_backend_kinds,
+            "other": other_backend_kinds,
         },
         "provider_auth_methods": {
             "openai": openai_auth_methods,
             "anthropic": anthropic_auth_methods,
             "gemini": google_auth_methods,
             "self_hosted": self_hosted_auth_methods,
+            "other": other_auth_methods,
         }
     });
     write_pretty_json(
@@ -1031,7 +1048,7 @@ mod tests {
 
         assert_eq!(
             contracts["providers"],
-            serde_json::json!(["anthropic", "openai", "gemini", "self_hosted"])
+            serde_json::json!(["anthropic", "openai", "gemini", "self_hosted", "other"])
         );
         assert!(
             contracts["backend_kinds"]
@@ -1075,6 +1092,14 @@ mod tests {
                 .expect("openai auth methods")
                 .contains(&serde_json::json!("azure_api_key")),
             "provider auth relation map must include Azure OpenAI api-key auth"
+        );
+        assert_eq!(
+            contracts["provider_backend_kinds"]["other"],
+            serde_json::json!(["other_api"])
+        );
+        assert_eq!(
+            contracts["provider_auth_methods"]["other"],
+            serde_json::json!(["api_key", "static_bearer", "none"])
         );
         assert!(
             contracts["provider_auth_methods"]["openai"]

@@ -19,7 +19,7 @@ use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 use crate::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
-    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, SelfHostedAuthMethod,
+    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, OtherBackendKind, SelfHostedAuthMethod,
     SelfHostedBackendKind,
 };
 
@@ -1341,8 +1341,8 @@ where
             options: serde_json::Value::Null,
         },
         Provider::Other => EnvDefaultSpec {
-            backend_kind: "other_api",
-            auth_method: "api_key",
+            backend_kind: OtherBackendKind::OtherApi.as_str(),
+            auth_method: OtherAuthMethod::ApiKey.as_str(),
             env_var: "RKAT_OTHER_API_KEY",
             fallback: vec![],
             base_url: None,

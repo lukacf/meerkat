@@ -2585,7 +2585,7 @@ the colon-joined form cannot travel across wire boundaries."""
 @dataclass
 class WireBackendProfile:
     """Wire projection of [`meerkat_core::BackendProfile`]."""
-    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible']
+    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible', 'other_api']
     id: str
     provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     base_url: Optional[str] = None

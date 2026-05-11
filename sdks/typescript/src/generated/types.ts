@@ -2850,7 +2850,7 @@ export interface WireAuthBindingRef {
 }
 
 export interface WireBackendProfile {
-  backend_kind: "open_ai_api" | "chatgpt_backend" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible";
+  backend_kind: "open_ai_api" | "chatgpt_backend" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible" | "other_api";
   base_url?: string;
   id: string;
   provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";

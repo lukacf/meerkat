@@ -1003,7 +1003,7 @@ where
         self.require_runtime_execution_kind()?;
 
         // Reset state for new run (allows multi-turn on same agent).
-        self.extraction_state.reset();
+        self.extraction_authority.reset();
         self.terminal_error_detail = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
@@ -1123,7 +1123,7 @@ where
         self.require_runtime_execution_kind()?;
 
         // Reset state for new run (allows multi-turn on same agent).
-        self.extraction_state.reset();
+        self.extraction_authority.reset();
         self.terminal_error_detail = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;

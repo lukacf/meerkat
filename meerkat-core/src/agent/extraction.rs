@@ -1,34 +1,35 @@
-//! Structured output extraction utilities.
+//! Structured output extraction authority.
 //!
 //! Extraction is integrated into the main state machine loop in `state.rs`.
-//! This module provides the constant prompt and helper functions used by the
-//! extraction path: markdown code-fence stripping and named object wrapper
-//! unwrapping.
+//! This module owns the structured-output prompt, validation normalization,
+//! retry prompt, warnings, and projected result for that post-run phase.
 
 use crate::error::AgentError;
 use crate::schema::SchemaWarning;
-use crate::types::OutputSchema;
+use crate::turn_execution_authority::StructuredOutputFailureReason;
+use crate::types::{ExtractionError, OutputSchema};
 use serde_json::Value;
 
 /// Default prompt for the structured output extraction turn.
-pub const DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON matching \
+const DEFAULT_EXTRACTION_PROMPT: &str = "Provide the final output as valid JSON matching \
     the required schema. Output ONLY the JSON, no additional text or markdown formatting.";
 
 #[derive(Debug, Default)]
-pub(crate) struct ExtractionState {
+pub(crate) struct StructuredOutputExtractionAuthority {
     primary_output: Option<String>,
     result: Option<Value>,
     schema_warnings: Option<Vec<SchemaWarning>>,
 }
 
-impl ExtractionState {
+impl StructuredOutputExtractionAuthority {
     pub(super) fn reset(&mut self) {
         self.primary_output = None;
         self.result = None;
         self.schema_warnings = None;
     }
 
-    pub(super) fn set_primary_output(&mut self, output: String) {
+    pub(super) fn begin_extraction(&mut self, output: String) {
+        self.reset();
         self.primary_output = Some(output);
     }
 
@@ -36,7 +37,7 @@ impl ExtractionState {
         self.primary_output.as_deref()
     }
 
-    pub(super) fn set_schema_warnings(&mut self, warnings: Vec<SchemaWarning>) {
+    pub(super) fn record_schema_warnings(&mut self, warnings: Vec<SchemaWarning>) {
         self.schema_warnings = if warnings.is_empty() {
             None
         } else {
@@ -44,30 +45,95 @@ impl ExtractionState {
         };
     }
 
-    pub(super) fn record_success(&mut self, value: Value) {
-        self.result = Some(value);
+    pub(super) fn initial_prompt(&self, configured_prompt: Option<&str>) -> String {
+        configured_prompt
+            .map(str::to_owned)
+            .unwrap_or_else(|| DEFAULT_EXTRACTION_PROMPT.to_string())
     }
 
-    pub(super) fn take_result(&mut self) -> Option<Value> {
-        self.result.take()
+    pub(super) fn validate_and_record_response(
+        &mut self,
+        content: &str,
+        output_schema: &OutputSchema,
+        compiled_schema: &Value,
+    ) -> Result<ExtractionValidation, AgentError> {
+        match validate_response_text(content, output_schema, compiled_schema)? {
+            ValidationOutcome::Passed(value) => {
+                self.result = Some(value);
+                Ok(ExtractionValidation::Passed)
+            }
+            ValidationOutcome::Failed(failure) => Ok(ExtractionValidation::Failed(failure)),
+        }
     }
 
-    pub(super) fn take_schema_warnings(&mut self) -> Option<Vec<SchemaWarning>> {
-        self.schema_warnings.take()
+    pub(super) fn finish_success(
+        &mut self,
+    ) -> Result<StructuredOutputExtractionSuccess, AgentError> {
+        let structured_output = self.result.take().ok_or_else(|| {
+            AgentError::InternalError(
+                "structured output extraction finished without a recorded result".to_string(),
+            )
+        })?;
+        Ok(StructuredOutputExtractionSuccess {
+            text: self.primary_output.clone().unwrap_or_default(),
+            structured_output,
+            schema_warnings: self.schema_warnings.take(),
+        })
+    }
+
+    pub(super) fn finish_failure(
+        &mut self,
+        attempts: u32,
+        reason: String,
+    ) -> StructuredOutputExtractionFailure {
+        let extraction_error = ExtractionError {
+            last_output: self.primary_output.clone().unwrap_or_default(),
+            attempts,
+            reason,
+        };
+        StructuredOutputExtractionFailure {
+            extraction_error,
+            schema_warnings: self.schema_warnings.take(),
+        }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum ExtractionValidation {
-    Passed(Value),
-    Failed { error: String, retry_prompt: String },
+    Passed,
+    Failed(StructuredOutputValidationFailure),
 }
 
-pub(super) fn validate_response_text(
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StructuredOutputValidationFailure {
+    pub(super) reason: StructuredOutputFailureReason,
+    pub(super) retry_prompt: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StructuredOutputExtractionSuccess {
+    pub(super) text: String,
+    pub(super) structured_output: Value,
+    pub(super) schema_warnings: Option<Vec<SchemaWarning>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct StructuredOutputExtractionFailure {
+    pub(super) extraction_error: ExtractionError,
+    pub(super) schema_warnings: Option<Vec<SchemaWarning>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ValidationOutcome {
+    Passed(Value),
+    Failed(StructuredOutputValidationFailure),
+}
+
+fn validate_response_text(
     content: &str,
     output_schema: &OutputSchema,
     compiled_schema: &Value,
-) -> Result<ExtractionValidation, AgentError> {
+) -> Result<ValidationOutcome, AgentError> {
     let json_content = strip_code_fences(content.trim());
     let parsed = match serde_json::from_str::<Value>(json_content) {
         Ok(parsed) => parsed,
@@ -97,18 +163,18 @@ pub(super) fn validate_response_text(
         );
     }
 
-    Ok(ExtractionValidation::Passed(normalized))
+    Ok(ValidationOutcome::Passed(normalized))
 }
 
-fn invalid_validation(error: String) -> ExtractionValidation {
+fn invalid_validation(error: String) -> ValidationOutcome {
     let retry_prompt = retry_prompt_for_error(&error);
-    ExtractionValidation::Failed {
-        error,
+    ValidationOutcome::Failed(StructuredOutputValidationFailure {
+        reason: StructuredOutputFailureReason::new(error),
         retry_prompt,
-    }
+    })
 }
 
-pub(super) fn retry_prompt_for_error(error: &str) -> String {
+fn retry_prompt_for_error(error: &str) -> String {
     format!(
         "The previous output was invalid: {error}. \
         Please provide valid JSON matching the schema. \
@@ -119,7 +185,7 @@ pub(super) fn retry_prompt_for_error(error: &str) -> String {
 /// Strip markdown code fences from JSON content.
 ///
 /// LLMs sometimes wrap JSON in ```json ... ``` even when asked not to.
-pub(super) fn strip_code_fences(content: &str) -> &str {
+fn strip_code_fences(content: &str) -> &str {
     let trimmed = content.trim();
 
     // Check for ```json or ``` at start
@@ -144,7 +210,7 @@ pub(super) fn strip_code_fences(content: &str) -> &str {
 /// (for example, `{"advisor": {...actual schema object...}}`).
 /// When the envelope key is the schema name and the inner object clearly
 /// matches the root schema shape better than the wrapped object, unwrap it.
-pub(super) fn unwrap_named_object_wrapper(parsed: Value, output_schema: &OutputSchema) -> Value {
+fn unwrap_named_object_wrapper(parsed: Value, output_schema: &OutputSchema) -> Value {
     let Some(wrapper_key) = output_schema.name.as_deref() else {
         return parsed;
     };
@@ -282,28 +348,28 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_response_text_returns_retry_prompt_for_invalid_json()
+    fn authority_returns_typed_retry_prompt_for_invalid_json()
     -> Result<(), Box<dyn std::error::Error>> {
         let schema = OutputSchema::new(json!({
             "type": "object",
             "properties": { "answer": { "type": "string" } },
             "required": ["answer"]
         }))?;
+        let mut authority = StructuredOutputExtractionAuthority::default();
 
-        let result = validate_response_text("not json {{{", &schema, schema.schema.as_value())?;
+        let result = authority.validate_and_record_response(
+            "not json {{{",
+            &schema,
+            schema.schema.as_value(),
+        )?;
 
         match result {
-            ExtractionValidation::Failed {
-                error,
-                retry_prompt,
-            } => {
-                assert!(error.contains("Invalid JSON"));
-                assert!(retry_prompt.contains(&error));
-                assert!(retry_prompt.contains("Output ONLY the JSON"));
+            ExtractionValidation::Failed(failure) => {
+                assert!(failure.reason.message().contains("Invalid JSON"));
+                assert!(failure.retry_prompt.contains(failure.reason.message()));
+                assert!(failure.retry_prompt.contains("Output ONLY the JSON"));
             }
-            ExtractionValidation::Passed(value) => {
-                panic!("expected invalid JSON failure, got {value:?}")
-            }
+            ExtractionValidation::Passed => panic!("expected invalid JSON failure"),
         }
         Ok(())
     }
@@ -321,10 +387,15 @@ mod tests {
             validate_response_text(r#"{"count":"wrong"}"#, &schema, schema.schema.as_value())?;
 
         match result {
-            ExtractionValidation::Failed { error, .. } => {
-                assert!(error.contains("Schema validation failed"));
+            ValidationOutcome::Failed(failure) => {
+                assert!(
+                    failure
+                        .reason
+                        .message()
+                        .contains("Schema validation failed")
+                );
             }
-            ExtractionValidation::Passed(value) => {
+            ValidationOutcome::Passed(value) => {
                 panic!("expected schema failure, got {value:?}")
             }
         }
@@ -349,8 +420,33 @@ mod tests {
 
         assert_eq!(
             result,
-            ExtractionValidation::Passed(json!({"response": "hello"}))
+            ValidationOutcome::Passed(json!({"response": "hello"}))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn authority_records_success_and_projects_result() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "response": { "type": "string" } },
+            "required": ["response"]
+        }))?
+        .with_name("advisor");
+        let mut authority = StructuredOutputExtractionAuthority::default();
+        authority.begin_extraction("main answer".to_string());
+
+        let validation = authority.validate_and_record_response(
+            "```json\n{\"advisor\":{\"response\":\"hello\"}}\n```",
+            &schema,
+            schema.schema.as_value(),
+        )?;
+
+        assert_eq!(validation, ExtractionValidation::Passed);
+        let success = authority.finish_success()?;
+        assert_eq!(success.text, "main answer");
+        assert_eq!(success.structured_output, json!({"response": "hello"}));
+        assert_eq!(success.schema_warnings, None);
         Ok(())
     }
 }

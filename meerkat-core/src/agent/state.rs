@@ -19,8 +19,9 @@ use crate::retry::LlmRetryLifecycleAuthority;
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
-    TurnFailureReason, TurnPhase, TurnTerminalCauseKind, TurnTerminalOutcome,
+    ContentShape, StructuredOutputFailureReason, TurnExecutionEffect, TurnExecutionInput,
+    TurnExecutionTransition, TurnFailureReason, TurnPhase, TurnTerminalCauseKind,
+    TurnTerminalOutcome,
 };
 use crate::types::{
     BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
@@ -278,7 +279,7 @@ where
     fn turn_in_extraction_flow(&self) -> Result<bool, AgentError> {
         let snapshot = self.runtime_turn_authority_snapshot()?;
         Ok(matches!(snapshot.turn_phase, TurnPhase::Extracting)
-            || (self.extraction_state.primary_output().is_some()
+            || (self.extraction_authority.primary_output().is_some()
                 && matches!(
                     snapshot.turn_phase,
                     TurnPhase::CallingLlm | TurnPhase::DrainingBoundary
@@ -866,22 +867,19 @@ where
         reason: String,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) -> Result<RunResult, AgentError> {
+        let failure_reason = StructuredOutputFailureReason::new(reason);
         let transition = self.apply_turn_input(TurnExecutionInput::ExtractionFailed {
             run_id: run_id.clone(),
-            error: reason.clone(),
+            failure: failure_reason.clone(),
         })?;
         self.execute_turn_effects(&transition, turn_count, event_tx)
             .await;
 
-        let extraction_error = crate::types::ExtractionError {
-            last_output: self
-                .extraction_state
-                .primary_output()
-                .unwrap_or_default()
-                .to_string(),
-            attempts: self.turn_extraction_attempts()?,
-            reason,
-        };
+        let attempts = self.turn_extraction_attempts()?;
+        let failure = self
+            .extraction_authority
+            .finish_failure(attempts, failure_reason.into_message());
+        let extraction_error = failure.extraction_error;
         let result = RunResult {
             text: extraction_error.last_output.clone(),
             session_id: self.session.id().clone(),
@@ -891,7 +889,7 @@ where
             terminal_cause_kind: None,
             structured_output: None,
             extraction_error: Some(extraction_error.clone()),
-            schema_warnings: self.extraction_state.take_schema_warnings(),
+            schema_warnings: failure.schema_warnings,
             skill_diagnostics: self.collect_skill_diagnostics().await,
         };
         if let Err(e) = self.store.save(&self.session).await {
@@ -947,7 +945,7 @@ where
         let max_turns = self.config.max_turns.unwrap_or(100);
         let mut tool_call_count = 0u32;
         let mut event_stream_open = true;
-        self.extraction_state.reset();
+        self.extraction_authority.reset();
 
         // --- Authority lifecycle: start a conversation run ---
         let run_id = self
@@ -2138,7 +2136,7 @@ where
                                     .await;
                             }
                         };
-                        let validation = super::extraction::validate_response_text(
+                        let validation = self.extraction_authority.validate_and_record_response(
                             &assistant_text,
                             output_schema,
                             &compiled.schema,
@@ -2159,15 +2157,14 @@ where
                         };
 
                         match validation {
-                            super::extraction::ExtractionValidation::Failed {
-                                error,
-                                retry_prompt,
-                            } => {
+                            super::extraction::ExtractionValidation::Failed(failure) => {
+                                let failure_reason = failure.reason;
+                                let retry_prompt = failure.retry_prompt;
                                 // Validation failed — authority decides retry vs exhaust
                                 let t = self.apply_turn_input(
                                     TurnExecutionInput::ExtractionValidationFailed {
                                         run_id: run_id.clone(),
-                                        error: error.clone(),
+                                        failure: failure_reason.clone(),
                                     },
                                 )?;
 
@@ -2185,15 +2182,11 @@ where
                                 // post-run outcome and must not terminalize the
                                 // run as failed.
                                 self.execute_turn_effects(&t, turn_count, &event_tx).await;
-                                let extraction_error = crate::types::ExtractionError {
-                                    last_output: self
-                                        .extraction_state
-                                        .primary_output()
-                                        .unwrap_or_default()
-                                        .to_string(),
-                                    attempts: self.turn_extraction_attempts()?,
-                                    reason: error,
-                                };
+                                let attempts = self.turn_extraction_attempts()?;
+                                let failure = self
+                                    .extraction_authority
+                                    .finish_failure(attempts, failure_reason.into_message());
+                                let extraction_error = failure.extraction_error;
                                 let result = RunResult {
                                     text: extraction_error.last_output.clone(),
                                     session_id: self.session.id().clone(),
@@ -2203,7 +2196,7 @@ where
                                     terminal_cause_kind: None,
                                     structured_output: None,
                                     extraction_error: Some(extraction_error.clone()),
-                                    schema_warnings: self.extraction_state.take_schema_warnings(),
+                                    schema_warnings: failure.schema_warnings,
                                     skill_diagnostics: self.collect_skill_diagnostics().await,
                                 };
                                 if let Err(e) = self.store.save(&self.session).await {
@@ -2216,27 +2209,20 @@ where
                                 .await;
                                 return Ok(result);
                             }
-                            super::extraction::ExtractionValidation::Passed(normalized) => {
-                                self.extraction_state.record_success(normalized);
-                            }
+                            super::extraction::ExtractionValidation::Passed => {}
                         }
 
-                        let structured_output = self.extraction_state.take_result();
-                        let schema_warnings = self.extraction_state.take_schema_warnings();
+                        let success = self.extraction_authority.finish_success()?;
                         let result = RunResult {
-                            text: self
-                                .extraction_state
-                                .primary_output()
-                                .unwrap_or_default()
-                                .to_string(),
+                            text: success.text,
                             session_id: self.session.id().clone(),
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
                             tool_calls: tool_call_count,
                             terminal_cause_kind: None,
-                            structured_output,
+                            structured_output: Some(success.structured_output),
                             extraction_error: None,
-                            schema_warnings,
+                            schema_warnings: success.schema_warnings,
                             skill_diagnostics: self.collect_skill_diagnostics().await,
                         };
                         // Validation passed — complete via authority
@@ -2289,8 +2275,8 @@ where
 
                             // The main agentic turn has committed. Extraction
                             // is a separate post-run validation phase.
-                            self.extraction_state.reset();
-                            self.extraction_state.set_primary_output(final_text.clone());
+                            self.extraction_authority
+                                .begin_extraction(final_text.clone());
 
                             let mut result = RunResult {
                                 text: final_text.clone(),
@@ -2332,14 +2318,13 @@ where
                                         .await;
                                 }
                             };
-                            self.extraction_state
-                                .set_schema_warnings(compiled.warnings.clone());
+                            self.extraction_authority
+                                .record_schema_warnings(compiled.warnings.clone());
 
                             // Push extraction prompt as user message
-                            let prompt =
-                                self.config.extraction_prompt.clone().unwrap_or_else(|| {
-                                    super::extraction::DEFAULT_EXTRACTION_PROMPT.to_string()
-                                });
+                            let prompt = self
+                                .extraction_authority
+                                .initial_prompt(self.config.extraction_prompt.as_deref());
                             self.session.push(Message::User(UserMessage::text(prompt)));
 
                             // Authority: DrainingBoundary -> Extracting -> CallingLlm

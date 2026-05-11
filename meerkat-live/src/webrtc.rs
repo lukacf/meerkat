@@ -128,6 +128,8 @@ struct LiveWebrtcPeer {
     outgoing_audio: Arc<OutgoingAudioControl>,
 }
 
+type LiveWebrtcPeerRegistry = Arc<Mutex<HashMap<LiveChannelId, LiveWebrtcPeer>>>;
+
 /// Shared state for the live WebRTC transport.
 ///
 /// This is composable transport state. It does not open provider sessions and
@@ -136,7 +138,7 @@ struct LiveWebrtcPeer {
 pub struct LiveWebrtcState {
     host: Arc<LiveAdapterHost>,
     pending_tokens: Mutex<HashMap<LiveTokenString, PendingToken>>,
-    peers: Mutex<HashMap<LiveChannelId, LiveWebrtcPeer>>,
+    peers: LiveWebrtcPeerRegistry,
     token_ttl: Duration,
 }
 
@@ -189,7 +191,7 @@ impl LiveWebrtcState {
         Self {
             host,
             pending_tokens: Mutex::new(HashMap::new()),
-            peers: Mutex::new(HashMap::new()),
+            peers: Arc::new(Mutex::new(HashMap::new())),
             token_ttl,
         }
     }
@@ -266,6 +268,7 @@ impl LiveWebrtcState {
             Arc::clone(&self.host),
             channel_id.clone(),
             Arc::clone(&peer),
+            Arc::clone(&self.peers),
             outgoing_audio_tx,
             Arc::clone(&outgoing_audio_control),
         );
@@ -358,6 +361,11 @@ impl LiveWebrtcState {
     async fn pending_token_count(&self) -> usize {
         self.pending_tokens.lock().await.len()
     }
+
+    #[cfg(test)]
+    async fn peer_count(&self) -> usize {
+        self.peers.lock().await.len()
+    }
 }
 
 fn reap_expired(map: &mut HashMap<LiveTokenString, PendingToken>) {
@@ -369,6 +377,7 @@ fn install_data_channel_handler(
     host: Arc<LiveAdapterHost>,
     channel_id: LiveChannelId,
     peer: Arc<RTCPeerConnection>,
+    peer_registry: LiveWebrtcPeerRegistry,
     outgoing_audio_tx: mpsc::Sender<OutgoingAudioPacket>,
     outgoing_audio_control: Arc<OutgoingAudioControl>,
 ) {
@@ -380,6 +389,7 @@ fn install_data_channel_handler(
         let host_for_observations = Arc::clone(&host);
         let channel_for_observations = channel_id.clone();
         let peer_for_observations = Arc::clone(&peer_for_callback);
+        let peer_registry_for_observations = Arc::clone(&peer_registry);
         let outgoing_audio_for_observations = outgoing_audio_tx.clone();
         let outgoing_audio_control_for_observations = Arc::clone(&outgoing_audio_control);
 
@@ -416,6 +426,7 @@ fn install_data_channel_handler(
                 let host = Arc::clone(&host_for_observations);
                 let channel_id = channel_for_observations.clone();
                 let peer = Arc::clone(&peer_for_observations);
+                let peer_registry = Arc::clone(&peer_registry_for_observations);
                 let outgoing_audio_tx = outgoing_audio_for_observations.clone();
                 let outgoing_audio_control = Arc::clone(&outgoing_audio_control_for_observations);
                 Box::pin(async move {
@@ -425,6 +436,7 @@ fn install_data_channel_handler(
                             channel_id,
                             data_channel,
                             peer,
+                            peer_registry,
                             outgoing_audio_tx,
                             outgoing_audio_control,
                         )
@@ -503,6 +515,7 @@ async fn pump_observations_to_data_channel(
     channel_id: LiveChannelId,
     data_channel: Arc<RTCDataChannel>,
     peer: Arc<RTCPeerConnection>,
+    peer_registry: LiveWebrtcPeerRegistry,
     outgoing_audio_tx: mpsc::Sender<OutgoingAudioPacket>,
     outgoing_audio_control: Arc<OutgoingAudioControl>,
 ) {
@@ -510,6 +523,7 @@ async fn pump_observations_to_data_channel(
         Ok(bridge) => bridge,
         Err(err) => {
             tracing::warn!(channel = %channel_id, error = %err, "failed to initialize WebRTC output audio bridge");
+            close_and_deregister_peer(&peer_registry, &channel_id, &data_channel, &peer).await;
             return;
         }
     };
@@ -569,8 +583,6 @@ async fn pump_observations_to_data_channel(
                     reason = %live_adapter_error_code_slug(&code),
                     "WebRTC live channel reached terminal observation"
                 );
-                let _ = data_channel.close().await;
-                let _ = peer.close().await;
                 break;
             }
             Ok(ObservationOutcome::CommandRejected { code, message }) => {
@@ -597,6 +609,23 @@ async fn pump_observations_to_data_channel(
                 break;
             }
         }
+    }
+
+    close_and_deregister_peer(&peer_registry, &channel_id, &data_channel, &peer).await;
+}
+
+async fn close_and_deregister_peer(
+    peer_registry: &LiveWebrtcPeerRegistry,
+    channel_id: &LiveChannelId,
+    data_channel: &RTCDataChannel,
+    peer: &RTCPeerConnection,
+) {
+    let registered_peer = peer_registry.lock().await.remove(channel_id);
+    let _ = data_channel.close().await;
+    if let Some(registered_peer) = registered_peer {
+        let _ = registered_peer.peer.close().await;
+    } else {
+        let _ = peer.close().await;
     }
 }
 
@@ -1087,6 +1116,73 @@ mod tests {
 
         state.close_peer(&channel_id).await;
         browser_peer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn webrtc_peer_deregisters_when_observation_stream_closes() {
+        let host = Arc::new(LiveAdapterHost::new(Arc::new(NoOpProjectionSink)));
+        let channel_id = host.open_channel(SessionId::new()).await.unwrap();
+        let (adapter, _command_rx, observation_tx) = RecordingAdapter::new();
+        host.attach_adapter(&channel_id, adapter).await.unwrap();
+        host.apply_status_update(&channel_id, LiveAdapterStatus::Ready)
+            .await
+            .unwrap();
+
+        let state = LiveWebrtcState::new(Arc::clone(&host));
+        let token = state.mint_token(channel_id.clone()).await;
+        let browser_peer = new_browser_peer().await;
+
+        let data_channel = browser_peer
+            .create_data_channel("meerkat.live", None)
+            .await
+            .unwrap();
+        let (open_tx, mut open_rx) = mpsc::channel::<()>(1);
+        data_channel.on_open(Box::new(move || {
+            let open_tx = open_tx.clone();
+            Box::pin(async move {
+                let _ = open_tx.send(()).await;
+            })
+        }));
+
+        let outbound_audio: Arc<dyn TrackLocal + Send + Sync> =
+            Arc::new(TrackLocalStaticSample::new(
+                RTCRtpCodecCapability {
+                    mime_type: MIME_TYPE_OPUS.to_owned(),
+                    clock_rate: BROWSER_OPUS_SAMPLE_RATE,
+                    channels: 1,
+                    ..Default::default()
+                },
+                "audio".to_owned(),
+                "browser-test".to_owned(),
+            ));
+        browser_peer
+            .add_track(Arc::clone(&outbound_audio))
+            .await
+            .unwrap();
+
+        connect_browser_peer(&browser_peer, &state, &channel_id, &token).await;
+        tokio::time::timeout(Duration::from_secs(5), open_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.peer_count().await, 1);
+
+        drop(observation_tx);
+        wait_for_peer_count(&state, 0).await;
+        browser_peer.close().await.unwrap();
+    }
+
+    async fn wait_for_peer_count(state: &LiveWebrtcState, expected: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.peer_count().await == expected {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     fn make_opus_packet() -> Vec<u8> {

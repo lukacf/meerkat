@@ -6540,7 +6540,7 @@ args = [{}]
         );
     }
 
-    async fn archived_session_read_remains_available_and_mutations_reject_inner() {
+    async fn archived_session_read_fails_closed_and_mutations_reject_inner() {
         let (router, _notif_rx) = test_router().await;
 
         let create_resp = router
@@ -6575,11 +6575,9 @@ args = [{}]
             .await
             .unwrap();
         assert!(
-            read_resp.error.is_none(),
-            "archived session should remain readable"
+            read_resp.error.is_some(),
+            "archived session must not be readable from an ephemeral archive cache"
         );
-        let read = result_value(&read_resp);
-        assert_eq!(read["session_id"], session_id);
 
         let stream_resp = router
             .dispatch(make_request(
@@ -8351,8 +8349,8 @@ args = [{}]
     }
 
     #[tokio::test]
-    async fn archived_session_read_remains_available_and_mutations_reject() {
-        Box::pin(archived_session_read_remains_available_and_mutations_reject_inner()).await;
+    async fn archived_session_read_fails_closed_and_mutations_reject() {
+        Box::pin(archived_session_read_fails_closed_and_mutations_reject_inner()).await;
     }
 
     /// 7. `turn/start` returns a result for an existing session.

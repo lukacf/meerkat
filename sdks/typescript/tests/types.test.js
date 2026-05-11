@@ -1379,6 +1379,26 @@ describe("Session wrappers", () => {
     });
   });
 
+  it("resolved model capabilities do not default missing or malformed bits", () => {
+    assert.equal(MeerkatClient.parseResolvedModelCapabilities(undefined), undefined);
+    assert.equal(
+      MeerkatClient.parseResolvedModelCapabilities({ vision: true }),
+      undefined,
+    );
+    assert.equal(
+      MeerkatClient.parseResolvedModelCapabilities({
+        vision: "true",
+        image_input: false,
+        image_tool_results: false,
+        inline_video: false,
+        realtime: false,
+        web_search: false,
+        image_generation: false,
+      }),
+      undefined,
+    );
+  });
+
   it("session/deferred injectContext call public wrapper", async () => {
     const calls = [];
     const client = new MeerkatClient();

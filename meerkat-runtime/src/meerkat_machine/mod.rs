@@ -52,7 +52,7 @@ use crate::meerkat_machine_types::{
 };
 use crate::runtime_state::RuntimeState;
 use crate::service_ext::{RuntimeMode, SessionServiceRuntimeExt};
-use crate::store::RuntimeStore;
+use crate::store::{RuntimeStore, RuntimeStoreError};
 use crate::tokio;
 use crate::tokio::sync::{Mutex, RwLock, mpsc};
 #[cfg(test)]
@@ -1182,11 +1182,21 @@ impl MeerkatMachine {
         &self,
         session_id: &SessionId,
         runtime_id: &LogicalRuntimeId,
-    ) -> (
-        Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
-        meerkat_core::RuntimeEpochId,
-        Arc<meerkat_core::EpochCursorState>,
-    ) {
+    ) -> Result<
+        (
+            Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>,
+            meerkat_core::RuntimeEpochId,
+            Arc<meerkat_core::EpochCursorState>,
+        ),
+        RuntimeDriverError,
+    > {
+        let fresh = || {
+            (
+                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
+                meerkat_core::RuntimeEpochId::new(),
+                Arc::new(meerkat_core::EpochCursorState::new()),
+            )
+        };
         if let Some(ref store) = self.store {
             match store.load_ops_lifecycle(runtime_id).await {
                 Ok(Some(snapshot)) => {
@@ -1206,39 +1216,30 @@ impl MeerkatMachine {
                         recovered_ops = recovered_ops_count,
                         "ops lifecycle recovered from durable store (same epoch)"
                     );
-                    return (
+                    Ok((
                         Arc::new(registry),
                         recovered_epoch,
                         Arc::new(recovered_cursors),
-                    );
+                    ))
                 }
-                Ok(None) => {}
-                Err(err) => {
-                    tracing::warn!(
+                Ok(None) => {
+                    tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
+                    Ok(fresh())
+                }
+                Err(RuntimeStoreError::Unsupported(op)) if op == "load_ops_lifecycle" => {
+                    tracing::debug!(
                         %session_id,
                         %runtime_id,
-                        error = %err,
-                        "failed to load ops lifecycle; epoch rotated"
+                        "runtime store does not support durable ops lifecycle; fresh epoch"
                     );
-                    return (
-                        Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                        meerkat_core::RuntimeEpochId::new(),
-                        Arc::new(meerkat_core::EpochCursorState::new()),
-                    );
+                    Ok(fresh())
                 }
+                Err(err) => Err(RuntimeDriverError::Internal(format!(
+                    "failed to load ops lifecycle for runtime {runtime_id}: {err}"
+                ))),
             }
-            tracing::debug!(%session_id, "no persisted ops lifecycle; fresh epoch");
-            (
-                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                meerkat_core::RuntimeEpochId::new(),
-                Arc::new(meerkat_core::EpochCursorState::new()),
-            )
         } else {
-            (
-                Arc::new(crate::ops_lifecycle::RuntimeOpsLifecycleRegistry::new()),
-                meerkat_core::RuntimeEpochId::new(),
-                Arc::new(meerkat_core::EpochCursorState::new()),
-            )
+            Ok(fresh())
         }
     }
 

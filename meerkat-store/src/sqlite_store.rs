@@ -107,6 +107,23 @@ pub fn write_session_snapshot_in_txn(
     Ok(())
 }
 
+fn read_session_snapshot_in_txn(
+    tx: &Transaction<'_>,
+    session_id: &SessionId,
+) -> Result<Option<Session>, StoreError> {
+    tx.query_row(
+        "SELECT session_json FROM sessions WHERE session_id = ?1",
+        params![session_id.to_string()],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .optional()?
+    .map(|bytes| {
+        meerkat_core::session_migrations::deserialize_session_migrating(&bytes)
+            .map_err(|err| StoreError::Internal(err.to_string()))
+    })
+    .transpose()
+}
+
 /// SQLite-backed session store with one connection per operation.
 pub struct SqliteSessionStore {
     path: PathBuf,
@@ -134,6 +151,9 @@ impl SqliteSessionStore {
         tokio::task::spawn_blocking(move || {
             let mut conn = open_connection(&path)?;
             let tx = begin_immediate_transaction(&mut conn)?;
+            let previous = read_session_snapshot_in_txn(&tx, session.id())?;
+            meerkat_core::session_store::append_only_save_guard(&session, previous.as_ref())
+                .map_err(|err| StoreError::Internal(err.to_string()))?;
             write_session_snapshot_in_txn(&tx, &session)?;
             tx.commit()?;
             Ok(())

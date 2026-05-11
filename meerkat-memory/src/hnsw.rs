@@ -1,8 +1,10 @@
-//! HnswMemoryStore — HNSW-backed semantic memory store.
+//! HnswMemoryStore — SQLite-owned semantic memory store with an HNSW projection.
 //!
-//! Uses `hnsw_rs` for approximate nearest-neighbor search and SQLite for
-//! metadata persistence. Embeddings use a simple bag-of-words TF approach
-//! with cosine distance — upgrade to a proper embedding model for production.
+//! SQLite owns metadata and text truth. `hnsw_rs` is maintained as a
+//! rebuildable projection, but search ranks the SQLite contents directly so a
+//! stale in-memory index cannot change recall behavior. Embeddings use a
+//! simple bag-of-words TF approach with cosine distance — upgrade to a proper
+//! embedding model for production.
 //!
 //! Index stored at `.rkat/memory/`.
 
@@ -337,7 +339,7 @@ impl MemoryStore for HnswMemoryStore {
         .map_err(|e| MemoryStoreError::Index(format!("index task join failed: {e}")))?;
 
         if let Err(error) = insert_result {
-            self.next_id.store(next_id, Ordering::Release);
+            self.next_id.store(point_id, Ordering::Release);
             return Err(error);
         }
 
@@ -360,61 +362,46 @@ impl MemoryStore for HnswMemoryStore {
         let query = query.to_owned();
         let scope = scope.clone();
         let db_path = self.db_path.clone();
-        let indices = Arc::clone(&self.indices);
 
         tokio::task::spawn_blocking(move || {
             let embedding = text_to_embedding(&query);
-            let neighbors = {
-                let indices = indices
-                    .read()
-                    .map_err(|_| MemoryStoreError::Index("HNSW index lock poisoned".to_string()))?;
-                let Some(index) = indices.get(scope.session_id()) else {
-                    return Ok(Vec::new());
-                };
-                index
-                    .index
-                    .search(&embedding, limit, limit.max(EF_CONSTRUCTION))
-            };
-
             let conn = open_connection(&db_path)?;
-            let mut results = Vec::with_capacity(neighbors.len());
-            for neighbor in &neighbors {
-                let point_id = i64::try_from(neighbor.d_id)
-                    .map_err(|_| MemoryStoreError::Index("point ID out of range".to_string()))?;
-
-                let content = match conn
-                    .query_row(
-                        "SELECT content FROM memory_text WHERE point_id = ?1",
-                        params![point_id],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
-                {
-                    Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                    None => continue,
-                };
-
-                let metadata = match conn
-                    .query_row(
-                        "SELECT metadata_json FROM memory_metadata WHERE point_id = ?1",
-                        params![point_id],
-                        |row| row.get::<_, Vec<u8>>(0),
-                    )
-                    .optional()
-                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?
-                {
-                    Some(bytes) => serde_json::from_slice(&bytes)
-                        .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?,
-                    None => continue,
-                };
+            let mut stmt = conn
+                .prepare(
+                    "SELECT text.content, metadata.metadata_json
+                     FROM memory_text AS text
+                     INNER JOIN memory_metadata AS metadata
+                         ON metadata.point_id = text.point_id
+                     ORDER BY text.point_id ASC",
+                )
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            let mut rows = stmt
+                .query([])
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+            let mut results = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .map_err(|e| MemoryStoreError::Index(e.to_string()))?
+            {
+                let content_bytes = row
+                    .get::<_, Vec<u8>>(0)
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                let metadata_bytes = row
+                    .get::<_, Vec<u8>>(1)
+                    .map_err(|e| MemoryStoreError::Index(e.to_string()))?;
+                let content = String::from_utf8_lossy(&content_bytes).into_owned();
+                let metadata: MemoryMetadata = serde_json::from_slice(&metadata_bytes)
+                    .map_err(|e| MemoryStoreError::Embedding(e.to_string()))?;
                 if !scope.includes(&metadata) {
                     continue;
                 }
 
-                // HNSW distance is cosine distance (0 = identical, 2 = opposite).
-                // Convert to a 0..1 similarity score.
-                let score = 1.0 - (neighbor.distance / 2.0);
+                let candidate = text_to_embedding(&content);
+                let score = embedding
+                    .iter()
+                    .zip(candidate.iter())
+                    .map(|(left, right)| left * right)
+                    .sum::<f32>();
 
                 results.push(MemoryResult {
                     content,
@@ -422,6 +409,8 @@ impl MemoryStore for HnswMemoryStore {
                     score,
                 });
             }
+            results.sort_by(|left, right| right.score.total_cmp(&left.score));
+            results.truncate(limit);
 
             Ok::<Vec<MemoryResult>, MemoryStoreError>(results)
         })
@@ -595,6 +584,28 @@ mod tests {
             results[0].content.contains("scoped survivor"),
             "scoped candidates must be ranked before the limit is applied"
         );
+    }
+
+    #[tokio::test]
+    async fn hnsw_stale_empty_projection_does_not_change_search_truth() {
+        let dir = TempDir::new().unwrap();
+        let store = HnswMemoryStore::open(dir.path().join("memory")).unwrap();
+        let session_id = SessionId::new();
+        let scope = MemorySearchScope::for_session(session_id.clone());
+
+        store
+            .index_scoped(request("projection stale recall survivor", &session_id))
+            .await
+            .unwrap();
+        store.indices.write().unwrap().clear();
+
+        let results = store
+            .search(&scope, "projection stale recall", 1)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("survivor"));
     }
 
     #[tokio::test]

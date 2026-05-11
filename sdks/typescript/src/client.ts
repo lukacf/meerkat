@@ -2988,14 +2988,26 @@ export class MeerkatClient {
       return undefined;
     }
     const raw = data as Record<string, unknown>;
+    const fields = [
+      "vision",
+      "image_input",
+      "image_tool_results",
+      "inline_video",
+      "realtime",
+      "web_search",
+      "image_generation",
+    ] as const;
+    if (fields.some((field) => typeof raw[field] !== "boolean")) {
+      return undefined;
+    }
     return {
-      vision: Boolean(raw.vision),
-      imageInput: Boolean(raw.image_input),
-      imageToolResults: Boolean(raw.image_tool_results),
-      inlineVideo: Boolean(raw.inline_video),
-      realtime: Boolean(raw.realtime),
-      webSearch: Boolean(raw.web_search),
-      imageGeneration: Boolean(raw.image_generation),
+      vision: raw.vision as boolean,
+      imageInput: raw.image_input as boolean,
+      imageToolResults: raw.image_tool_results as boolean,
+      inlineVideo: raw.inline_video as boolean,
+      realtime: raw.realtime as boolean,
+      webSearch: raw.web_search as boolean,
+      imageGeneration: raw.image_generation as boolean,
     };
   }
 

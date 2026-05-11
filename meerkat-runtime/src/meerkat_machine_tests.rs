@@ -12618,6 +12618,83 @@ async fn register_session_rejects_destroyed_session() {
 }
 
 #[tokio::test]
+async fn prepare_bindings_rejects_destroyed_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::PrepareBindings {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("prepare_bindings should reject a destroyed session");
+    assert!(
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::Destroyed)
+        ),
+        "expected Destroyed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_bindings_rejects_durable_destroyed_session_without_registration() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let session_id = SessionId::new();
+
+    machine.register_session(session_id.clone()).await;
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+    assert_eq!(
+        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load persisted runtime state"),
+        Some(RuntimeState::Destroyed)
+    );
+
+    let recovered = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let err = recovered
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::PrepareBindings {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("prepare_bindings should reject durable destroyed state");
+    assert!(
+        matches!(
+            err,
+            MeerkatMachineCommandError::Driver(RuntimeDriverError::Destroyed)
+        ),
+        "expected Destroyed, got {err:?}"
+    );
+    assert!(
+        !recovered.contains_session(&session_id).await,
+        "destroyed durable state must be rejected before registration bookkeeping is recreated"
+    );
+}
+
+#[tokio::test]
 async fn unregister_session_rejects_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();

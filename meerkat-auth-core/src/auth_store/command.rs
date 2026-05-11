@@ -1,15 +1,15 @@
 //! External-command credential source.
 //!
 //! Reference-CLI parity: Codex `external_bearer.rs:17-157`. The command is
-//! spawned, stdout is captured as a bearer token, and optionally cached for
-//! `refresh_interval_ms`. Stderr is captured for diagnostics.
+//! spawned and stdout is captured as a bearer token. Stderr is captured for
+//! diagnostics. Freshness is owned by the AuthMachine lease path; the command
+//! source does not keep process-local token truth.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -41,38 +41,25 @@ pub enum CommandCredentialError {
     InvalidUtf8(String),
 }
 
-/// Runs the command, caches the resulting token for
-/// `refresh_interval_ms` if set. Multiple concurrent callers on the same
-/// runner observe the cached value.
+/// Runs the command for each resolution. `refresh_interval_ms` remains part of
+/// the persisted source spec for compatibility, but it is not an authoritative
+/// freshness cache here.
 pub struct CommandCredentialRunner {
     spec: CommandCredentialSpec,
-    cache: Mutex<Option<(PersistedTokens, Instant)>>,
 }
 
 impl CommandCredentialRunner {
     pub fn new(spec: CommandCredentialSpec) -> Self {
-        Self {
-            spec,
-            cache: Mutex::new(None),
-        }
+        Self { spec }
     }
 
     pub fn spec(&self) -> &CommandCredentialSpec {
         &self.spec
     }
 
-    /// Resolve a token. Uses cached value if within `refresh_interval_ms`.
+    /// Resolve a token by invoking the configured command.
     pub async fn resolve(&self) -> Result<PersistedTokens, CommandCredentialError> {
-        if let Some(interval_ms) = self.spec.refresh_interval_ms
-            && let Some((cached, at)) = self.cache.lock().as_ref()
-            && at.elapsed() < Duration::from_millis(interval_ms)
-        {
-            return Ok(cached.clone());
-        }
-
-        let tokens = self.run_once().await?;
-        *self.cache.lock() = Some((tokens.clone(), Instant::now()));
-        Ok(tokens)
+        self.run_once().await
     }
 
     async fn run_once(&self) -> Result<PersistedTokens, CommandCredentialError> {
@@ -149,13 +136,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_runner_caches_within_interval() {
-        let mut spec = spec_echo("first");
+    async fn command_runner_does_not_cache_within_interval() {
+        let temp = tempfile::tempdir().unwrap();
+        let counter = temp.path().join("counter");
+        let mut spec = CommandCredentialSpec {
+            program: "/bin/sh".into(),
+            args: vec![
+                "-c".into(),
+                "n=$(cat \"$1\" 2>/dev/null || printf 0); n=$((n + 1)); printf '%s' \"$n\" > \"$1\"; printf 'tok-%s' \"$n\"".into(),
+                "sh".into(),
+                counter.to_string_lossy().into_owned(),
+            ],
+            cwd: None,
+            env: HashMap::new(),
+            timeout_ms: 5_000,
+            refresh_interval_ms: None,
+        };
         spec.refresh_interval_ms = Some(60_000);
         let runner = CommandCredentialRunner::new(spec);
         let a = runner.resolve().await.unwrap();
         let b = runner.resolve().await.unwrap();
-        assert_eq!(a.primary_secret, b.primary_secret);
+        assert_eq!(a.primary_secret.as_deref(), Some("tok-1"));
+        assert_eq!(b.primary_secret.as_deref(), Some("tok-2"));
     }
 
     #[tokio::test]

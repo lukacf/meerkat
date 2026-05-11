@@ -84,6 +84,20 @@ impl MeerkatMachine {
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
+        match self.existing_session_runtime_state(&session_id).await {
+            Some(RuntimeState::Destroyed) => return Err(RuntimeDriverError::Destroyed),
+            Some(_) => {}
+            None => {
+                let runtime_id = Self::logical_runtime_id(&session_id);
+                if matches!(
+                    self.durable_runtime_state_for_registration(&runtime_id)
+                        .await?,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+            }
+        }
         let inserted_by_call = self.register_session_inner(session_id.clone()).await?;
         let (
             driver_handle,

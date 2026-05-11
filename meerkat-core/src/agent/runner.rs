@@ -17,9 +17,7 @@ use crate::tool_scope::{
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceSnapshot, ToolFilter, ToolScopeRevision,
     ToolScopeStageError,
 };
-use crate::turn_execution_authority::{
-    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
-};
+use crate::turn_execution_authority::TurnTerminalCauseKind;
 use crate::types::{ContentInput, Message, RunResult, ToolCallView, ToolNameSet};
 use async_trait::async_trait;
 use serde_json::value::to_raw_value;
@@ -66,15 +64,11 @@ fn runtime_execution_snapshot(
 ) -> Option<crate::AgentExecutionSnapshot> {
     let snapshot = handle.snapshot();
     let turn_phase = snapshot.turn_phase;
-    // Typed handle contract: primitive_kind / terminal_outcome are
-    // `Option<TurnPrimitiveKind>` / `Option<TurnTerminalOutcome>`. `None`
-    // on the handle means "no primitive / no terminal outcome recorded
-    // yet"; collapse to the typed `None` variant for downstream
-    // consumers.
-    let primitive_kind = snapshot.primitive_kind.unwrap_or(TurnPrimitiveKind::None);
-    let terminal_outcome = snapshot
-        .terminal_outcome
-        .unwrap_or(TurnTerminalOutcome::None);
+    // Preserve absence as absence. The `None` enum variants are terminal or
+    // primitive facts when explicitly published by the turn machine, not
+    // fallbacks for missing owner state.
+    let primitive_kind = snapshot.primitive_kind;
+    let terminal_outcome = snapshot.terminal_outcome;
     let pending_operation_ids = if snapshot.pending_op_refs.is_empty() {
         None
     } else {
@@ -924,7 +918,7 @@ where
         // Skill refs are text-only so they operate on the text projection.
         let user_input = if user_input.has_non_text_content() {
             // For multimodal input, prepend skill text to the text blocks only.
-            let skill_text = self.apply_skill_ref(String::new()).await;
+            let skill_text = self.apply_skill_ref(String::new(), event_tx.as_ref()).await;
             if skill_text.is_empty() {
                 user_input
             } else {
@@ -934,7 +928,9 @@ where
                 ContentInput::Blocks(blocks)
             }
         } else {
-            let text = self.apply_skill_ref(user_input.text_content()).await;
+            let text = self
+                .apply_skill_ref(user_input.text_content(), event_tx.as_ref())
+                .await;
             ContentInput::Text(text)
         };
 
@@ -1093,7 +1089,11 @@ where
     ///
     /// Compatibility slash refs are handled at transport/resolver boundaries;
     /// core runtime no longer parses slash refs directly.
-    async fn apply_skill_ref(&mut self, user_input: String) -> String {
+    async fn apply_skill_ref(
+        &mut self,
+        user_input: String,
+        event_tx: Option<&mpsc::Sender<AgentEvent>>,
+    ) -> String {
         let engine = match &self.skill_engine {
             Some(e) => e.clone(),
             None => return user_input,
@@ -1108,12 +1108,31 @@ where
             let canonical_keys: Vec<crate::skills::SkillKey> = refs.into_iter().collect();
             match engine.resolve_and_render(&canonical_keys).await {
                 Ok(resolved) => {
+                    let skills = resolved
+                        .iter()
+                        .map(|skill| skill.key.clone())
+                        .collect::<Vec<_>>();
                     for skill in &resolved {
                         tracing::info!(
                             skill_key = %skill.key,
                             "Per-turn skill activation via skill_references"
                         );
                         prefix_parts.push(skill.rendered_body.clone());
+                    }
+                    let injection_bytes = prefix_parts.join("\n\n").len();
+                    if !crate::event_tap::tap_emit(
+                        &self.event_tap,
+                        event_tx,
+                        AgentEvent::SkillsResolved {
+                            skills,
+                            injection_bytes,
+                        },
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "event stream receiver dropped before typed SkillsResolved event"
+                        );
                     }
                 }
                 Err(e) => {

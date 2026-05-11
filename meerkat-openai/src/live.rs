@@ -1104,7 +1104,7 @@ const OPENAI_REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
 pub(crate) const OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
 /// Channel count OpenAI Realtime negotiates for PCM audio (mono).
 pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
-const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
+const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 1_500;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
 fn openai_realtime_client_event_id(prefix: &str) -> String {

@@ -138,24 +138,15 @@ pub fn build_compaction_context(
     }
 }
 
-/// Best-effort count of prior LLM boundaries for older sessions that do not
-/// yet carry explicit cadence metadata.
-fn infer_session_boundary_index(messages: &[Message]) -> u64 {
-    messages
-        .iter()
-        .filter(|message| matches!(message, Message::BlockAssistant(_) | Message::Assistant(_)))
-        .count() as u64
-}
-
 /// Load persisted compaction cadence from session metadata, falling back to
-/// transcript-derived history for pre-migration sessions.
+/// an explicit zero cadence when metadata is absent.
 pub fn load_compaction_cadence(session: &Session) -> SessionCompactionCadence {
     session
         .metadata()
         .get(SESSION_COMPACTION_CADENCE_KEY)
         .and_then(|value| serde_json::from_value::<SessionCompactionCadence>(value.clone()).ok())
-        .unwrap_or_else(|| SessionCompactionCadence {
-            session_boundary_index: infer_session_boundary_index(session.messages()),
+        .unwrap_or(SessionCompactionCadence {
+            session_boundary_index: 0,
             last_compaction_boundary_index: None,
         })
 }
@@ -272,11 +263,12 @@ where
 
     // 4. Rebuild history — extract system prompt from messages directly
     let result = compactor.rebuild_history(messages, &summary_text);
+    let discarded = annotate_compaction_discards(messages, result.discarded);
     let messages_after = result.messages.len();
 
     Ok(CompactionOutcome {
         new_messages: result.messages,
-        discarded: result.discarded,
+        discarded,
         summary_usage,
         session_boundary_index,
         messages_before: message_count,
@@ -284,12 +276,71 @@ where
     })
 }
 
+/// A message discarded by compaction together with the session turn that
+/// originally produced it. The source turn is owned by the transcript order;
+/// compaction timing is intentionally not used as a fallback.
+#[derive(Debug, Clone)]
+pub struct CompactionDiscard {
+    pub message: Message,
+    pub source_turn: Option<u32>,
+}
+
+fn transcript_source_turns(messages: &[Message]) -> Vec<Option<u32>> {
+    let mut current_turn = 0u32;
+    messages
+        .iter()
+        .map(|message| match message {
+            Message::User(_) => Some(current_turn),
+            Message::Assistant(_) | Message::BlockAssistant(_) => {
+                let source_turn = Some(current_turn);
+                current_turn = current_turn.saturating_add(1);
+                source_turn
+            }
+            Message::System(_) | Message::SystemNotice(_) | Message::ToolResults { .. } => None,
+        })
+        .collect()
+}
+
+fn annotate_compaction_discards(
+    messages: &[Message],
+    discarded: Vec<Message>,
+) -> Vec<CompactionDiscard> {
+    let source_turns = transcript_source_turns(messages);
+    let message_keys = messages
+        .iter()
+        .map(serde_json::to_vec)
+        .map(Result::ok)
+        .collect::<Vec<_>>();
+    let mut consumed = vec![false; messages.len()];
+    discarded
+        .into_iter()
+        .map(|message| {
+            let source_turn = serde_json::to_vec(&message)
+                .ok()
+                .and_then(|discard_key| {
+                    message_keys.iter().enumerate().find_map(|(index, key)| {
+                        (!consumed[index] && key.as_ref() == Some(&discard_key)).then_some(index)
+                    })
+                })
+                .map(|index| {
+                    consumed[index] = true;
+                    source_turns[index]
+                })
+                .unwrap_or(None);
+            CompactionDiscard {
+                message,
+                source_turn,
+            }
+        })
+        .collect()
+}
+
 /// Result of a successful compaction.
 pub struct CompactionOutcome {
     /// New session messages to replace current history.
     pub new_messages: Vec<Message>,
     /// Messages that were discarded (for future memory indexing).
-    pub discarded: Vec<Message>,
+    pub discarded: Vec<CompactionDiscard>,
     /// Usage from the summary LLM call.
     pub summary_usage: Usage,
     /// Session boundary index at which compaction occurred.
@@ -310,7 +361,7 @@ mod tests {
     };
 
     #[test]
-    fn load_compaction_cadence_infers_boundary_count_from_existing_history() {
+    fn load_compaction_cadence_does_not_infer_boundary_count_from_existing_history() {
         let mut session = Session::new();
         session.push(Message::User(UserMessage::text("first")));
         session.push(Message::BlockAssistant(BlockAssistantMessage::new(
@@ -331,8 +382,27 @@ mod tests {
         session.record_usage(Usage::default());
 
         let cadence = load_compaction_cadence(&session);
-        assert_eq!(cadence.session_boundary_index, 2);
+        assert_eq!(cadence.session_boundary_index, 0);
         assert_eq!(cadence.last_compaction_boundary_index, None);
+    }
+
+    #[test]
+    fn compaction_discard_annotation_preserves_source_turn() {
+        let first = Message::User(UserMessage::text("first"));
+        let first_reply = Message::BlockAssistant(BlockAssistantMessage::new(
+            vec![AssistantBlock::Text {
+                text: "first reply".to_string(),
+                meta: None,
+            }],
+            StopReason::EndTurn,
+        ));
+        let second = Message::User(UserMessage::text("second"));
+        let transcript = vec![first.clone(), first_reply, second.clone()];
+
+        let discarded = annotate_compaction_discards(&transcript, vec![first, second]);
+
+        assert_eq!(discarded[0].source_turn, Some(0));
+        assert_eq!(discarded[1].source_turn, Some(1));
     }
 
     #[test]

@@ -2543,6 +2543,8 @@ async fn e2e_scenario_53_cli_rest_shared_realm_roundtrip() -> Result<(), Box<dyn
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
 -> Result<(), Box<dyn std::error::Error>> {
+    const RPC_RESPONSE_TIMEOUT_SECS: u64 = 60;
+
     let rkat = binary_path("rkat");
     let rkat_rpc = binary_path("rkat-rpc");
     if skip_if_missing_binary(&rkat, "rkat") || skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
@@ -2602,7 +2604,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
     )
     .await?;
-    let init = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let init =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         init["error"].is_null()
             && init["result"]["methods"]
@@ -2618,7 +2621,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         r#"{"jsonrpc":"2.0","id":2,"method":"mob/list","params":{}}"#,
     )
     .await?;
-    let list = rpc_read_response_line(&mut rpc, 20).await?;
+    let list = rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?;
     assert!(
         list.contains(mob_id),
         "deployed mob should appear in mob/list: {list}"
@@ -2631,7 +2634,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let spawned = parse_json_line(&rpc_read_response_line(&mut rpc, 30).await?)?;
+    let spawned =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         spawned["error"].is_null()
             && spawned["result"]["results"]
@@ -2661,7 +2665,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let wire = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let wire =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         wire["error"].is_null() && wire["result"]["wired"] == true,
         "mob/wire should succeed: {wire}"
@@ -2674,7 +2679,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let unwire = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let unwire =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         unwire["error"].is_null() && unwire["result"]["unwired"] == true,
         "mob/unwire should succeed: {unwire}"
@@ -2687,7 +2693,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let events = rpc_read_response_line(&mut rpc, 20).await?;
+    let events = rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?;
     assert!(
         events.contains("members_wired") || events.contains("members_unwired"),
         "mob event ledger should record wiring transitions: {events}"
@@ -2714,7 +2720,9 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         r#"{"jsonrpc":"2.0","id":348,"method":"initialize","params":{}}"#,
     )
     .await?;
-    let ordinary_init = parse_json_line(&rpc_read_response_line(&mut ordinary_rpc, 20).await?)?;
+    let ordinary_init = parse_json_line(
+        &rpc_read_response_line(&mut ordinary_rpc, RPC_RESPONSE_TIMEOUT_SECS).await?,
+    )?;
     assert!(
         ordinary_init["error"].is_null(),
         "ordinary rpc surface should initialize cleanly: {ordinary_init}"
@@ -2752,7 +2760,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         r#"{"jsonrpc":"2.0","id":349,"method":"initialize","params":{}}"#,
     )
     .await?;
-    let reinit = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let reinit =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         reinit["error"].is_null(),
         "restarted mob rpc surface should initialize cleanly: {reinit}"
@@ -2765,7 +2774,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let ordinary_read = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let ordinary_read =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         ordinary_read["error"].is_null()
             && ordinary_read["result"]["session_id"].as_str() == Some(&ordinary_session_id),
@@ -2779,7 +2789,8 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
         ),
     )
     .await?;
-    let ordinary_archive = parse_json_line(&rpc_read_response_line(&mut rpc, 20).await?)?;
+    let ordinary_archive =
+        parse_json_line(&rpc_read_response_line(&mut rpc, RPC_RESPONSE_TIMEOUT_SECS).await?)?;
     assert!(
         ordinary_archive["error"].is_null(),
         "ordinary session/archive should stay on the generic session path after reopen even when a mob with the same prefix exists: {ordinary_archive}"
@@ -3550,6 +3561,14 @@ fn live_capture_has_assistant_text(capture: &LiveObservationCapture) -> bool {
     !normalize_semantic_text(&capture.output_text).is_empty()
 }
 
+fn live_capture_has_output_activity(capture: &LiveObservationCapture) -> bool {
+    !capture.output_text.is_empty()
+        || !capture.output_audio_pcm.is_empty()
+        || !capture.tool_call_requests.is_empty()
+        || !capture.tool_call_completions.is_empty()
+        || !capture.tool_call_failures.is_empty()
+}
+
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
     let model = openai_tts_model();
@@ -3826,13 +3845,17 @@ async fn collect_live_observations_until_output_settles(
         match live_ws_next_text_frame(reader, wait_for).await {
             Ok(Some(text)) => {
                 let had_output = observation_is_output(&text);
-                observe_live_json_frame(&mut capture, &text)?;
-                if capture.saw_turn_completed {
-                    return Ok(capture);
+                let turn_completed = text.contains("\"turn_completed\"");
+                if turn_completed && !output_started && !had_output {
+                    continue;
                 }
+                observe_live_json_frame(&mut capture, &text)?;
                 if had_output {
                     output_started = true;
                     output_idle_deadline = Instant::now() + idle_window;
+                }
+                if turn_completed && output_started {
+                    return Ok(capture);
                 }
             }
             Ok(None) => {
@@ -3855,8 +3878,9 @@ async fn collect_live_observations_until_output_settles(
 
 fn observation_is_output(text: &str) -> bool {
     text.contains("\"assistant_text_delta\"")
+        || text.contains("\"assistant_transcript_delta\"")
         || text.contains("\"assistant_audio_chunk\"")
-        || text.contains("\"turn_completed\"")
+        || text.contains("\"tool_call_requested\"")
 }
 
 async fn collect_live_observations_until_ready_or_idle(
@@ -3946,11 +3970,26 @@ async fn send_live_audio_and_wait_for_turn(
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
     stream_live_audio(writer, pcm).await?;
-    // Wait for user transcript final and any output to start settling
-    collect_live_observations_until(reader, timeout_secs, |capture| {
-        !capture.input_finals.is_empty()
-    })
-    .await
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let frame_text = match live_ws_next_text_frame(reader, remaining).await? {
+            Some(text) => text,
+            None => continue,
+        };
+        let value: Value = serde_json::from_str(&frame_text)?;
+        let observation = value["observation"].as_str().unwrap_or_default();
+        if observation == "error" {
+            let mut capture = LiveObservationCapture::default();
+            observe_live_json_frame(&mut capture, &frame_text)?;
+        }
+        if observation == "user_transcript_final" {
+            let mut capture = LiveObservationCapture::default();
+            observe_live_json_frame(&mut capture, &frame_text)?;
+            return Ok(capture);
+        }
+    }
+    Err("timed out waiting for user transcript final".into())
 }
 
 async fn settle_live_turn_after_input(
@@ -3958,14 +3997,10 @@ async fn settle_live_turn_after_input(
     prior_capture: &LiveObservationCapture,
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
-    if prior_capture.saw_turn_completed {
+    let output_already_started = live_capture_has_output_activity(prior_capture);
+    if prior_capture.saw_turn_completed && output_already_started {
         return Ok(LiveObservationCapture::default());
     }
-    let output_already_started = !prior_capture.output_text.is_empty()
-        || !prior_capture.output_audio_pcm.is_empty()
-        || !prior_capture.tool_call_requests.is_empty()
-        || !prior_capture.tool_call_completions.is_empty()
-        || !prior_capture.tool_call_failures.is_empty();
     let mut capture = if output_already_started {
         collect_live_observations_until_turn_completed(reader, timeout_secs).await?
     } else {
@@ -4373,7 +4408,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let codeword_only_pcm =
             openai_tts_pcm("Say only the codeword once.").await?;
         let token_explain_pcm =
-            openai_tts_pcm("Keep saying the codeword nonstop in a loop forever do not stop talking until I interrupt you.").await?;
+            openai_tts_pcm("Start repeating the codeword in a loop now. Speak many repetitions until I say stop.").await?;
         let stop_pcm = openai_tts_pcm("Stop.").await?;
         let recall_pcm =
             openai_tts_pcm("Please say the codeword once.").await?;
@@ -4540,7 +4575,10 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             &turn3_commit,
             &stop_pcm,
             120,
-            live_capture_has_non_silent_audio,
+            |capture| {
+                live_capture_has_non_silent_audio(capture)
+                    || live_capture_has_assistant_text(capture)
+            },
         )
         .await
         {

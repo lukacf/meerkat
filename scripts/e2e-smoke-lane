@@ -100,20 +100,24 @@ host_can_execute_binary() {
   return 1
 }
 
-buildbuddy_wasm_pack_bin() {
-  local output_base candidate repo
-  output_base="$(buildbuddy_output_base)"
+host_wasm_pack_repo() {
   case "$(uname -s):$(uname -m)" in
     Darwin:arm64 | Darwin:aarch64)
-      repo="wasm_pack_darwin_arm64"
+      printf '%s\n' "wasm_pack_darwin_arm64"
       ;;
     Linux:x86_64 | Linux:amd64)
-      repo="wasm_pack_linux_x86_64"
+      printf '%s\n' "wasm_pack_linux_x86_64"
       ;;
     *)
       return 1
       ;;
   esac
+}
+
+buildbuddy_wasm_pack_bin() {
+  local output_base candidate repo
+  output_base="$(buildbuddy_output_base)"
+  repo="$(host_wasm_pack_repo)" || return 1
   for candidate in \
     "${output_base}/external/+http_archive+${repo}/wasm-pack" \
     "${output_base}/external/${repo}/wasm-pack" \

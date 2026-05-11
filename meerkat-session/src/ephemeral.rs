@@ -41,7 +41,7 @@ use crate::tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot,
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore, mpsc, oneshot, watch};
 
-use crate::turn_admission::{TurnAdmissionPhase, TurnAdmissionSlot};
+use crate::turn_admission::{TurnAdmissionPhase, TurnAdmissionSlot, TurnServiceLifecycleAuthority};
 
 /// Capacity for the internal agent event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -196,10 +196,10 @@ struct SessionSummaryCache {
 struct SessionHandle {
     command_tx: mpsc::Sender<SessionCommand>,
     state_tx: watch::Sender<SessionState>,
-    state_rx: watch::Receiver<SessionState>,
     summary_rx: watch::Receiver<SessionSummaryCache>,
     llm_identity_rx: watch::Receiver<SessionLlmIdentity>,
-    /// Canonical owner for session turn admission lifecycle.
+    /// Mechanical queue gate for turn admission. Runtime-backed public
+    /// lifecycle is projected from `turn_state_handle`, not this slot.
     turn_admission: Arc<std::sync::Mutex<TurnAdmissionSlot>>,
     created_at: SystemTime,
     /// Key-value labels attached at session creation.
@@ -2099,11 +2099,18 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         Ok(handle.session_event_tx.subscribe())
     }
 
-    fn is_session_state_active(state: SessionState) -> bool {
-        matches!(
-            state,
-            SessionState::Admitted | SessionState::Running | SessionState::Completing
-        )
+    fn project_service_lifecycle(
+        handle: &SessionHandle,
+    ) -> crate::turn_admission::TurnServiceLifecycleProjection {
+        let admission = {
+            let slot = lock_turn_admission(&handle.turn_admission);
+            slot.snapshot()
+        };
+        let turn_state = handle
+            .turn_state_handle
+            .as_ref()
+            .map(|turn_state_handle| turn_state_handle.snapshot());
+        TurnServiceLifecycleAuthority::project(admission, turn_state.as_ref())
     }
 
     fn request_start_turn(id: &SessionId, handle: &SessionHandle) -> Result<(), SessionError> {
@@ -2233,7 +2240,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let session_context = agent.session_context_handle();
         // Create session task channels
         let (command_tx, command_rx) = mpsc::channel::<SessionCommand>(COMMAND_CHANNEL_CAPACITY);
-        let (state_tx, state_rx) = watch::channel(SessionState::Idle);
+        let (state_tx, _state_rx) = watch::channel(SessionState::Idle);
         let state_tx_handle = state_tx.clone();
         let (summary_tx, summary_rx) = watch::channel(SessionSummaryCache {
             updated_at: created_at,
@@ -2290,7 +2297,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         let handle = SessionHandle {
             command_tx: command_tx.clone(),
             state_tx: state_tx_handle,
-            state_rx,
             summary_rx,
             llm_identity_rx,
             turn_admission: Arc::clone(&turn_admission),
@@ -2555,6 +2561,24 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             ));
         }
 
+        if let Some(turn_state_handle) = handle.turn_state_handle.as_ref() {
+            let snapshot = turn_state_handle.snapshot();
+            if !TurnServiceLifecycleAuthority::runtime_boundary_cancel_is_active(&snapshot) {
+                return Err(SessionError::NotRunning { id: id.clone() });
+            }
+            turn_state_handle
+                .request_cancel_after_boundary()
+                .map_err(|err| {
+                    tracing::debug!(
+                        error = %err,
+                        "turn-state cancel-after-boundary request rejected"
+                    );
+                    SessionError::NotRunning { id: id.clone() }
+                })?;
+            wake_interrupt_notify(&handle.interrupt_notify);
+            return Ok(());
+        }
+
         {
             let slot = lock_turn_admission(&handle.turn_admission);
             let phase = slot.phase();
@@ -2563,22 +2587,6 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 TurnAdmissionPhase::Admitted | TurnAdmissionPhase::Running
             ) {
                 return Err(SessionError::NotRunning { id: id.clone() });
-            }
-            if let Some(turn_state_handle) = handle.turn_state_handle.as_ref() {
-                if phase != TurnAdmissionPhase::Running {
-                    return Err(SessionError::NotRunning { id: id.clone() });
-                }
-                turn_state_handle
-                    .request_cancel_after_boundary()
-                    .map_err(|err| {
-                        tracing::debug!(
-                            error = %err,
-                            "turn-state cancel-after-boundary request rejected"
-                        );
-                        SessionError::NotRunning { id: id.clone() }
-                    })?;
-                wake_interrupt_notify(&handle.interrupt_notify);
-                return Ok(());
             }
             if let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
             {
@@ -2610,7 +2618,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         // Serve live reads from the service-owned summary/watch state instead
         // of round-tripping through the session task. This keeps read-side
         // snapshots responsive on sync surfaces such as wasm exports.
-        let state = *handle.state_rx.borrow();
+        let lifecycle = Self::project_service_lifecycle(handle);
         let summary = handle.summary_rx.borrow().clone();
         Ok(SessionView {
             state: SessionInfo {
@@ -2618,7 +2626,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                 created_at: handle.created_at,
                 updated_at: summary.updated_at,
                 message_count: summary.message_count,
-                is_active: Self::is_session_state_active(state),
+                is_active: lifecycle.is_active,
                 model: handle.llm_identity_rx.borrow().model.clone(),
                 provider: handle.llm_identity_rx.borrow().provider,
                 last_assistant_text: summary.last_assistant_text,
@@ -2636,7 +2644,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let mut summaries: Vec<SessionSummary> = sessions
             .iter()
             .map(|(session_id, h)| {
-                let state = *h.state_rx.borrow();
+                let lifecycle = Self::project_service_lifecycle(h);
                 let cache = h.summary_rx.borrow();
                 SessionSummary {
                     session_id: session_id.clone(),
@@ -2644,7 +2652,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
                     updated_at: cache.updated_at,
                     message_count: cache.message_count,
                     total_tokens: cache.total_tokens,
-                    is_active: Self::is_session_state_active(state),
+                    is_active: lifecycle.is_active,
                     labels: h.labels.clone(),
                 }
             })
@@ -4782,6 +4790,65 @@ mod admission_window_tests {
         assert!(
             !cancel_after_boundary.load(Ordering::SeqCst),
             "runtime-backed admitted turn must not use the standalone legacy flag"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_backed_public_activity_follows_turn_state_authority() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_after_boundary = Arc::new(AtomicBool::new(false));
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut builder = probe_builder(
+            Arc::clone(&run_calls),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&cancel_after_boundary),
+        );
+        builder.turn_state_handle =
+            Some(Arc::clone(&turn_state) as Arc<dyn meerkat_core::TurnStateHandle>);
+        let service = EphemeralSessionService::new(builder, 1);
+        let result = service
+            .create_session(create_request())
+            .await
+            .expect("create deferred session");
+
+        {
+            let sessions = service.sessions.read().await;
+            let handle = sessions.get(&result.session_id).expect("session handle");
+            EphemeralSessionService::<AdmissionProbeBuilder>::request_start_turn(
+                &result.session_id,
+                handle,
+            )
+            .expect("admit turn before command delivery");
+        }
+
+        let admitted_view = service
+            .read(&result.session_id)
+            .await
+            .expect("read admitted runtime-backed session");
+        assert!(
+            !admitted_view.state.is_active,
+            "runtime-backed public activity must not be sourced from the shell admission gate"
+        );
+
+        turn_state
+            .start_conversation_run(
+                RunId::new(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .expect("machine admits active turn");
+
+        let running_view = service
+            .read(&result.session_id)
+            .await
+            .expect("read machine-active runtime-backed session");
+        assert!(
+            running_view.state.is_active,
+            "runtime-backed public activity should follow the machine-owned turn phase"
         );
     }
 

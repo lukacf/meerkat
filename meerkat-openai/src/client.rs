@@ -5,9 +5,7 @@
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use meerkat_core::lifecycle::run_primitive::{
-    OpenAiProviderTag, ProviderTag, ReasoningEffort as TypedReasoningEffort,
-};
+use meerkat_core::lifecycle::run_primitive::{OpenAiProviderTag, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
@@ -504,11 +502,7 @@ impl OpenAiClient {
 
         if let Some(tag) = openai_tag(request) {
             if reasoning_enabled && let Some(effort) = tag.reasoning_effort {
-                let s = match effort {
-                    TypedReasoningEffort::Low => "low",
-                    TypedReasoningEffort::Medium => "medium",
-                    TypedReasoningEffort::High => "high",
-                };
+                let s = effort.as_legacy_str();
                 body["reasoning"]["effort"] = Value::String(s.to_string());
             }
 
@@ -901,14 +895,23 @@ impl OpenAiClient {
         );
         Self::apply_image_output_options(&mut tool, &plan.output);
         Self::apply_openai_image_provider_params(&mut tool, &plan.provider_params, true);
+        let mut tools = Vec::new();
+        if let Some(web_search_tool) = Self::openai_image_web_search_tool(&plan.provider_params) {
+            tools.push(web_search_tool);
+        }
+        tools.push(serde_json::Value::Object(tool));
         let body = serde_json::json!({
             "model": request.model,
             "input": input,
             "instructions": "You are an image-generation agent. The user's input is always a request to produce one or more images. Call the image_generation tool to produce each image. Never reply in text instead of calling the tool. If the request cannot be fulfilled, refuse briefly and explicitly so the caller can see the reason.",
-            "tools": [serde_json::Value::Object(tool)],
+            "tools": tools,
             "tool_choice": "required",
             "stream": false,
         });
+        let mut body = body;
+        if let Some(effort) = plan.provider_params.reasoning_effort {
+            body["reasoning"] = serde_json::json!({ "effort": effort.as_legacy_str() });
+        }
         let endpoint = self.responses_endpoint();
         let response = self.post_json_to_openai(&endpoint, &body).await?;
         self.normalize_openai_image_response(request, response, true)
@@ -996,6 +999,22 @@ impl OpenAiClient {
                 "action".to_string(),
                 serde_json::Value::String(action.as_wire_value().to_string()),
             );
+        }
+    }
+
+    fn openai_image_web_search_tool(
+        params: &OpenAiImageProviderParams,
+    ) -> Option<serde_json::Value> {
+        let value = params.web_search.as_ref()?;
+        match value {
+            Value::Bool(false) | Value::Null => None,
+            Value::Bool(true) => Some(serde_json::json!({"type": "web_search"})),
+            Value::Object(map) => {
+                let mut tool = map.clone();
+                tool.insert("type".to_string(), Value::String("web_search".to_string()));
+                Some(Value::Object(tool))
+            }
+            _ => None,
         }
     }
 
@@ -2551,6 +2570,89 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn openai_hosted_image_executor_sends_web_search_and_reasoning()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "id": "resp_img_1",
+            "output": [{"type": "image_generation_call", "id": "ig_1", "result": "aGVsbG8="}]
+        });
+        let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let mut plan = hosted_openai_plan_json();
+        plan["provider_plan"]["provider_params"] = serde_json::json!({
+            "reasoning_effort": "xhigh",
+            "web_search": {
+                "search_context_size": "low",
+                "external_web_access": false,
+                "filters": { "allowed_domains": ["example.com"] },
+                "return_token_budget": "default"
+            }
+        });
+
+        client
+            .execute_image_generation(image_executor_request_json(plan))
+            .await?;
+
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured OpenAI image request");
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tools"][0]["search_context_size"], "low");
+        assert_eq!(body["tools"][0]["external_web_access"], false);
+        assert_eq!(
+            body["tools"][0]["filters"]["allowed_domains"][0],
+            "example.com"
+        );
+        assert_eq!(body["tools"][1]["type"], "image_generation");
+        assert_eq!(body["tools"][1]["model"], "gpt-image-2");
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_hosted_image_web_search_boolean_and_null_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (web_search, expect_search_tool) in [
+            (serde_json::json!(true), true),
+            (serde_json::json!({}), true),
+            (serde_json::json!(false), false),
+            (serde_json::Value::Null, false),
+        ] {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let response = serde_json::json!({
+                "id": "resp_img_1",
+                "output": [{"type": "image_generation_call", "id": "ig_1", "result": "aGVsbG8="}]
+            });
+            let (base_url, handle) = spawn_openai_image_stub(response, seen.clone()).await;
+            let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+            let mut plan = hosted_openai_plan_json();
+            plan["provider_plan"]["provider_params"] = serde_json::json!({
+                "web_search": web_search
+            });
+
+            client
+                .execute_image_generation(image_executor_request_json(plan))
+                .await?;
+
+            let bodies = seen.lock().expect("seen mutex");
+            let body = bodies.first().expect("captured OpenAI image request");
+            let tools = body["tools"].as_array().expect("tools array");
+            if expect_search_tool {
+                assert_eq!(tools.len(), 2);
+                assert_eq!(tools[0]["type"], "web_search");
+                assert_eq!(tools[1]["type"], "image_generation");
+            } else {
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0]["type"], "image_generation");
+            }
+            handle.abort();
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_request_uses_responses_api_endpoint_format() {
         let client = OpenAiClient::new("test-key".to_string());
@@ -2856,6 +2958,40 @@ mod tests {
         let body = client.build_request_body(&request).expect("build request");
 
         assert_eq!(body["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn test_request_reasoning_effort_none_override_for_catalog_reasoning_model() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::None);
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["reasoning"]["effort"], "none");
+    }
+
+    #[test]
+    fn test_request_reasoning_effort_xhigh_override() {
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::XHigh);
+        });
+
+        let body = client.build_request_body(&request).expect("build request");
+
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
     }
 
     #[test]

@@ -63,6 +63,21 @@ function logEvent(text) {
   }
 }
 
+function waitForIceGatheringComplete(peerConnection) {
+  if (peerConnection.iceGatheringState === "complete") {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    const onStateChange = () => {
+      if (peerConnection.iceGatheringState === "complete") {
+        peerConnection.removeEventListener("icegatheringstatechange", onStateChange);
+        resolve();
+      }
+    };
+    peerConnection.addEventListener("icegatheringstatechange", onStateChange);
+  });
+}
+
 function setTransportField(id, value) {
   $(id).textContent = value || "-";
 }
@@ -431,6 +446,8 @@ async function start() {
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    await waitForIceGatheringComplete(pc);
+    const gatheredOffer = pc.localDescription;
     setStatus("pending", "signaling");
     const open = await openPromise;
     activeChannelId = open.channel_id;
@@ -440,10 +457,10 @@ async function start() {
       body: JSON.stringify({
         channel_id: open.channel_id,
         token: open.transport.token,
-        offer_sdp: offer.sdp,
+        offer_sdp: gatheredOffer.sdp,
       }),
     });
-    $("sdp-state").textContent = `${offer.sdp.length}/${answer.answer_sdp.length}`;
+    $("sdp-state").textContent = `${gatheredOffer.sdp.length}/${answer.answer_sdp.length}`;
     await pc.setRemoteDescription({ type: "answer", sdp: answer.answer_sdp });
     setLiveControls(true);
     pollTimer = setInterval(pollState, 1200);

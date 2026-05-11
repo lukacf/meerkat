@@ -11,6 +11,7 @@ use meerkat_core::image_generation::{
     ProviderId,
 };
 use meerkat_core::lifecycle::run_primitive::ModelId;
+use meerkat_core::lifecycle::run_primitive::ReasoningEffort;
 use meerkat_core::model_profile::catalog::{
     ImageGenerationModelProfile, ImageGenerationModelRoute, OpenAiImageGenerationRequestShape,
 };
@@ -117,6 +118,12 @@ pub struct OpenAiImageProviderParams {
     pub moderation: Option<OpenAiImageModeration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<OpenAiImageAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_search: Option<serde_json::Value>,
+    #[serde(skip)]
+    web_search_present: bool,
 }
 
 impl OpenAiImageProviderParams {
@@ -125,6 +132,13 @@ impl OpenAiImageProviderParams {
             && self.output_compression.is_none()
             && self.moderation.is_none()
             && self.action.is_none()
+            && self.reasoning_effort.is_none()
+            && self.web_search.is_none()
+            && !self.web_search_present
+    }
+
+    fn has_hosted_only_fields(&self) -> bool {
+        self.reasoning_effort.is_some() || self.web_search.is_some() || self.web_search_present
     }
 }
 
@@ -227,7 +241,9 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
 - Models: provider:"openai" uses the catalog OpenAI image default; supported image targets and their hosted-tool vs Images API routes are owned by the shared model catalog.
 - Use Meerkat's universal size, quality, format, count, and intent fields for normal requests; the adapter lowers format to OpenAI output_format.
 - provider_params is only for advanced OpenAI-specific overrides. For the current hosted gpt-image-2 route, public callers should normally use {"background":"auto"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
+- Hosted gpt-image-2 route only: provider_params may also include {"reasoning_effort":"none"|"low"|"medium"|"high"|"xhigh","web_search":true|false|null|{...}}. Use this for current/fresh image-only requests instead of searching separately first; object web_search values are lowered to the OpenAI hosted web_search tool with type:"web_search".
 - action applies only to the hosted Responses image tool and is usually omitted in favor of the top-level Meerkat intent. Images API requests reject action.
+- Images API requests reject reasoning_effort and web_search.
 - background:"transparent" is model-dependent; gpt-image-2 rejects it."#,
         )
     }
@@ -260,6 +276,9 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
             if provider_params.action.is_some() {
+                return Err(ImageOperationDenialReason::ProjectionUnsupported);
+            }
+            if provider_params.has_hosted_only_fields() {
                 return Err(ImageOperationDenialReason::ProjectionUnsupported);
             }
             if matches!(request_shape, OpenAiImageGenerationRequestShape::DallE)
@@ -353,11 +372,20 @@ fn openai_image_provider_params(
     let Some(value) = request.provider_params.as_ref() else {
         return Ok(OpenAiImageProviderParams::default());
     };
-    let params: OpenAiImageProviderParams = serde_json::from_value(value.clone())
+    let web_search_present = value
+        .as_object()
+        .is_some_and(|object| object.contains_key("web_search"));
+    let mut params: OpenAiImageProviderParams = serde_json::from_value(value.clone())
         .map_err(|_| ImageOperationDenialReason::ProjectionUnsupported)?;
+    params.web_search_present = web_search_present;
     if params
         .output_compression
         .is_some_and(|compression| compression > 100)
+    {
+        return Err(ImageOperationDenialReason::ProjectionUnsupported);
+    }
+    if let Some(web_search) = params.web_search.as_ref()
+        && !(web_search.is_null() || web_search.is_boolean() || web_search.is_object())
     {
         return Err(ImageOperationDenialReason::ProjectionUnsupported);
     }
@@ -476,6 +504,73 @@ mod tests {
             result,
             Err(ImageOperationDenialReason::ProjectionUnsupported)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn profile_rejects_hosted_only_params_on_images_api_route()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for params in [
+            json!({"web_search": true}),
+            json!({"web_search": null}),
+            json!({"reasoning_effort": "xhigh"}),
+        ] {
+            let request = generate_request(params)?;
+            let profile = openai_image_profile("gpt-image-1");
+
+            let result = OpenAiImageGenerationProfile.resolve_execution_plan(
+                operation_id()?,
+                &profile,
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            );
+
+            assert!(matches!(
+                result,
+                Err(ImageOperationDenialReason::ProjectionUnsupported)
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn profile_accepts_hosted_web_search_and_reasoning_params()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let request = generate_request(json!({
+            "web_search": {
+                "search_context_size": "low",
+                "external_web_access": false
+            },
+            "reasoning_effort": "none"
+        }))?;
+        let profile = default_image_generation_model(Provider::OpenAI)
+            .expect("OpenAI default image profile must be cataloged");
+
+        let resolution = OpenAiImageGenerationProfile
+            .resolve_execution_plan(
+                operation_id()?,
+                &profile,
+                &request,
+                capabilities(),
+                NonZeroU32::MIN,
+            )
+            .map_err(|err| std::io::Error::other(format!("resolve plan: {err:?}")))?;
+
+        let plan: OpenAiResponsesImagePlan =
+            serde_json::from_value(resolution.execution_plan.provider_plan)?;
+        assert_eq!(
+            plan.provider_params.reasoning_effort,
+            Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::None)
+        );
+        assert_eq!(
+            plan.provider_params
+                .web_search
+                .as_ref()
+                .and_then(|value| value.get("search_context_size"))
+                .and_then(serde_json::Value::as_str),
+            Some("low")
+        );
         Ok(())
     }
 

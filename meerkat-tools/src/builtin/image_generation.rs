@@ -142,6 +142,7 @@ Routing and defaults:
 - On non-image-capable session providers, auto is unsupported; set provider:"openai" or provider:"gemini".
 - provider:"openai" or provider:"gemini" uses that provider's registered image default.
 - To force a model, pass provider plus model. Passing only model is accepted when the catalog identifies a configured provider for that model.
+- For image-only requests that need current or recent information, pass the freshness requirement in the prompt and, when using OpenAI hosted image generation, prefer provider_params.web_search here instead of doing a separate manual web search first.
 
 Supported request fields:
 - intent: "generate" for a new image, "edit" only with source_images. If omitted and prompt is present, intent defaults to "generate".

@@ -329,9 +329,15 @@ impl SqliteMobEventBus {
         let thread_bus = Arc::downgrade(self);
         let thread_builder = thread::Builder::new().name("sqlite-mob-event-watch".to_string());
         if let Err(error) = thread_builder.spawn(move || {
-            while wake_rx.recv().is_ok() {
-                thread::sleep(Duration::from_millis(10));
-                while wake_rx.try_recv().is_ok() {}
+            loop {
+                match wake_rx.recv_timeout(Duration::from_millis(100)) {
+                    Ok(()) => {
+                        thread::sleep(Duration::from_millis(10));
+                        while wake_rx.try_recv().is_ok() {}
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
                 let Some(bus) = thread_bus.upgrade() else {
                     break;
                 };

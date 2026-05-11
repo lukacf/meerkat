@@ -1718,7 +1718,9 @@ struct GeminiUsage {
 mod tests {
     use super::*;
     use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
-    use meerkat_core::lifecycle::run_primitive::GeminiThinkingLevel;
+    use meerkat_core::lifecycle::run_primitive::{
+        GeminiThinkingLevel, OpenAiProviderTag, ReasoningEffort,
+    };
     use meerkat_core::{
         AssistantBlock, AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ContentBlock,
         ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
@@ -2455,6 +2457,27 @@ mod tests {
 
         assert!(generation_config.get("thinkingConfig").is_none());
         assert!(generation_config.get("topK").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn test_openai_reasoning_effort_provider_tag_does_not_affect_gemini_body()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-flash-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_provider_params(ProviderTag::OpenAi(OpenAiProviderTag {
+            reasoning_effort: Some(ReasoningEffort::XHigh),
+            ..Default::default()
+        }));
+
+        let body = client.build_request_body(&request)?;
+        let generation_config = body.get("generationConfig").ok_or("missing config")?;
+
+        assert!(generation_config.get("thinkingConfig").is_none());
+        assert!(!body.to_string().contains("xhigh"));
         Ok(())
     }
 

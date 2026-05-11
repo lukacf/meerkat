@@ -82,15 +82,20 @@ fn buildbuddy_workflow_is_gcp_only() {
     assert_eq!(
         defined,
         vec![
+            "audit-submit",
             "control-plane-up",
             "executors-down",
             "executors-up",
+            "feature-submit",
             "gate",
             "governance-submit",
+            "minimal-feature-submit",
             "native-submit",
             "prebuild-submit",
             "static-submit",
-            "wasm-feature-submit",
+            "wasm-check-submit",
+            "wasm-feature-changes",
+            "wasm-sdk-submit",
         ],
     );
     assert!(buildbuddy.contains("MEERKAT_BAZEL_BACKEND: gcp-buildbuddy"));

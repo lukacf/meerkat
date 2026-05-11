@@ -188,3 +188,33 @@ fn wire_metadata_provider_tag_preserves_provider_native_fields() {
     );
     assert!(legacy["web_search"].is_null());
 }
+
+#[test]
+fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
+    for effort in ["none", "xhigh"] {
+        let provider_params = ProviderParamsOverride::from_legacy_provider_value(
+            "openai",
+            &serde_json::json!({ "reasoning_effort": effort }),
+        );
+        let meta = RuntimeTurnMetadata {
+            provider_params: Some(TurnMetadataOverride::Set(provider_params)),
+            ..Default::default()
+        };
+
+        let wire: WireRuntimeTurnMetadata = meta.into();
+        let json = serde_json::to_value(&wire).expect("serialize wire metadata");
+        assert_eq!(
+            json["provider_params"]["value"]["provider_tag"]["reasoning_effort"],
+            serde_json::json!(effort)
+        );
+
+        let parsed_wire: WireRuntimeTurnMetadata =
+            serde_json::from_value(json).expect("deserialize wire metadata");
+        let round_tripped: RuntimeTurnMetadata = parsed_wire.into();
+        let Some(TurnMetadataOverride::Set(provider_params)) = round_tripped.provider_params else {
+            panic!("provider params set override should survive wire round trip");
+        };
+        let legacy = provider_params.to_legacy_provider_value();
+        assert_eq!(legacy["reasoning_effort"], serde_json::json!(effort));
+    }
+}

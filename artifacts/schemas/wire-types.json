@@ -11396,9 +11396,11 @@
       "WireReasoningEffort": {
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
         "enum": [
+          "none",
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ],
         "type": "string"
       },

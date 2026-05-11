@@ -1169,6 +1169,95 @@ pub enum TranscriptEditRunningBehavior {
     Reject,
 }
 
+/// Machine/seam-owned lifecycle classification for transcript fork/edit
+/// admission. Callers may observe mechanics, but the admission decision lives
+/// behind [`TranscriptEditAuthority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEditSourceLifecycle {
+    /// The source is materialized and has no machine-owned active work.
+    MaterializedIdle,
+    /// The source is materialized but has active work, so reject-mode edits
+    /// must not fork an unstable transcript.
+    MaterializedActive,
+    /// The source is not a materialized session and cannot be transcript-edited.
+    NotMaterialized,
+}
+
+/// Typed admission request for transcript fork/edit operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEditAdmissionRequest {
+    pub session_id: SessionId,
+    pub running_behavior: TranscriptEditRunningBehavior,
+    pub lifecycle: TranscriptEditSourceLifecycle,
+}
+
+/// Typed transcript-edit admission failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TranscriptEditAdmissionError {
+    #[error("session {session_id} is active; transcript fork uses running_behavior=reject")]
+    SourceActive { session_id: SessionId },
+    #[error(
+        "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+    )]
+    SourceNotMaterialized { session_id: SessionId },
+}
+
+impl TranscriptEditAdmissionError {
+    /// Convert admission failures into the existing session-service error
+    /// surface without letting callers re-decide transcript-edit legality.
+    pub fn into_session_error(self) -> SessionError {
+        match self {
+            Self::SourceActive { session_id } | Self::SourceNotMaterialized { session_id } => {
+                SessionError::Busy { id: session_id }
+            }
+        }
+    }
+}
+
+/// Named owner for transcript fork/edit admission and branch construction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TranscriptEditAuthority;
+
+impl TranscriptEditAuthority {
+    pub fn admit(
+        request: TranscriptEditAdmissionRequest,
+    ) -> Result<(), TranscriptEditAdmissionError> {
+        match request.lifecycle {
+            TranscriptEditSourceLifecycle::MaterializedIdle => Ok(()),
+            TranscriptEditSourceLifecycle::MaterializedActive => match request.running_behavior {
+                TranscriptEditRunningBehavior::Reject => {
+                    Err(TranscriptEditAdmissionError::SourceActive {
+                        session_id: request.session_id,
+                    })
+                }
+            },
+            TranscriptEditSourceLifecycle::NotMaterialized => {
+                Err(TranscriptEditAdmissionError::SourceNotMaterialized {
+                    session_id: request.session_id,
+                })
+            }
+        }
+    }
+
+    pub fn fork_at(source: &Session, message_index: usize) -> Result<Session, TranscriptEditError> {
+        if message_index > source.messages().len() {
+            return Err(TranscriptEditError::MessageIndexOutOfBounds {
+                message_index,
+                message_count: source.messages().len(),
+            });
+        }
+        Ok(source.fork_at(message_index))
+    }
+
+    pub fn fork_replace(
+        source: &Session,
+        message_index: usize,
+        replacement: TranscriptReplacement,
+    ) -> Result<Session, TranscriptEditError> {
+        source.fork_replacing(message_index, replacement)
+    }
+}
+
 /// Request to fork a session at a transcript message index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1540,6 +1629,51 @@ mod tests {
             .await
             .expect_err("default implementation should fail loudly");
         assert!(matches!(err, SessionError::Unsupported(name) if name == "has_live_session"));
+    }
+
+    #[test]
+    fn transcript_edit_authority_rejects_non_idle_sources() {
+        let active_id = SessionId::new();
+        let active = TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+            session_id: active_id.clone(),
+            running_behavior: TranscriptEditRunningBehavior::Reject,
+            lifecycle: TranscriptEditSourceLifecycle::MaterializedActive,
+        });
+        assert!(matches!(
+            active,
+            Err(TranscriptEditAdmissionError::SourceActive { session_id })
+                if session_id == active_id
+        ));
+
+        let staged_id = SessionId::new();
+        let staged = TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+            session_id: staged_id.clone(),
+            running_behavior: TranscriptEditRunningBehavior::Reject,
+            lifecycle: TranscriptEditSourceLifecycle::NotMaterialized,
+        });
+        assert!(matches!(
+            staged,
+            Err(TranscriptEditAdmissionError::SourceNotMaterialized { session_id })
+                if session_id == staged_id
+        ));
+    }
+
+    #[test]
+    fn transcript_edit_authority_owns_fork_bounds() {
+        let session = Session::new();
+        let forked = TranscriptEditAuthority::fork_at(&session, 0).expect("empty fork");
+        assert_ne!(forked.id(), session.id());
+        assert_eq!(forked.messages().len(), 0);
+
+        let err = TranscriptEditAuthority::fork_at(&session, 1)
+            .expect_err("authority must reject out-of-bounds fork");
+        assert!(matches!(
+            err,
+            TranscriptEditError::MessageIndexOutOfBounds {
+                message_index: 1,
+                message_count: 0,
+            }
+        ));
     }
 
     #[test]

@@ -48,6 +48,7 @@ use meerkat_core::service::{
     SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
     SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
     SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
+    TranscriptEditAdmissionRequest, TranscriptEditAuthority, TranscriptEditSourceLifecycle,
 };
 use meerkat_core::types::{RunResult, SessionId, ToolResult};
 use meerkat_core::{DeferredFirstTurnPhase, SessionDeferredTurnState};
@@ -1059,11 +1060,20 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
     async fn source_session_for_transcript_edit(
         &self,
         id: &SessionId,
+        running_behavior: meerkat_core::TranscriptEditRunningBehavior,
     ) -> Result<Session, SessionError> {
         match self.inner.join_active_runtime_context_admission(id).await {
             Ok(Some(active_admission)) => {
                 drop(active_admission);
-                return Err(SessionError::Busy { id: id.clone() });
+                TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+                    session_id: id.clone(),
+                    running_behavior,
+                    lifecycle: TranscriptEditSourceLifecycle::MaterializedActive,
+                })
+                .map_err(meerkat_core::TranscriptEditAdmissionError::into_session_error)?;
+                return Err(SessionError::Agent(AgentError::InternalError(
+                    "transcript edit authority admitted an active materialized session".to_string(),
+                )));
             }
             Ok(None) | Err(SessionError::NotFound { .. }) => {}
             Err(error) => return Err(error),
@@ -1071,8 +1081,23 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
 
         let view = self.read(id).await?;
         if view.state.is_active {
-            return Err(SessionError::Busy { id: id.clone() });
+            TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+                session_id: id.clone(),
+                running_behavior,
+                lifecycle: TranscriptEditSourceLifecycle::MaterializedActive,
+            })
+            .map_err(meerkat_core::TranscriptEditAdmissionError::into_session_error)?;
+            return Err(SessionError::Agent(AgentError::InternalError(
+                "transcript edit authority admitted an active session projection".to_string(),
+            )));
         }
+
+        TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+            session_id: id.clone(),
+            running_behavior,
+            lifecycle: TranscriptEditSourceLifecycle::MaterializedIdle,
+        })
+        .map_err(meerkat_core::TranscriptEditAdmissionError::into_session_error)?;
 
         let session = match self.export_session_with_labels(id).await {
             Ok(session) => session,
@@ -3095,17 +3120,11 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         id: &SessionId,
         req: SessionForkAtRequest,
     ) -> Result<SessionForkResult, SessionError> {
-        let _ = req.running_behavior;
-        let source = self.source_session_for_transcript_edit(id).await?;
-        if req.message_index > source.messages().len() {
-            return Err(meerkat_core::TranscriptEditError::MessageIndexOutOfBounds {
-                message_index: req.message_index,
-                message_count: source.messages().len(),
-            }
-            .into_session_error());
-        }
-
-        let forked = source.fork_at(req.message_index);
+        let source = self
+            .source_session_for_transcript_edit(id, req.running_behavior)
+            .await?;
+        let forked = TranscriptEditAuthority::fork_at(&source, req.message_index)
+            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
         self.persist_transcript_fork(id.clone(), forked).await
     }
 
@@ -3114,11 +3133,12 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceTranscriptEditExt
         id: &SessionId,
         req: SessionForkReplaceRequest,
     ) -> Result<SessionForkResult, SessionError> {
-        let _ = req.running_behavior;
-        let source = self.source_session_for_transcript_edit(id).await?;
-        let forked = source
-            .fork_replacing(req.message_index, req.replacement)
-            .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
+        let source = self
+            .source_session_for_transcript_edit(id, req.running_behavior)
+            .await?;
+        let forked =
+            TranscriptEditAuthority::fork_replace(&source, req.message_index, req.replacement)
+                .map_err(meerkat_core::TranscriptEditError::into_session_error)?;
         self.persist_transcript_fork(id.clone(), forked).await
     }
 }

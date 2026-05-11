@@ -8,7 +8,7 @@ use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
 use crate::peer_directory_reachability_authority::{
-    PeerDirectoryReachabilityAuthority, ReachabilityKey,
+    PeerDirectoryReachabilityAuthority, PeerDirectoryReachabilityInput, ReachabilityKey,
 };
 use crate::peer_response_routing_authority::PeerResponseRoutingAuthority;
 #[cfg(target_arch = "wasm32")]
@@ -2189,9 +2189,11 @@ impl CommsRuntime {
     }
 
     fn reconcile_peer_directory(&self, peers: &[ResolvedPeer]) {
-        self.peer_directory_reachability
-            .lock()
-            .reconcile_resolved_directory(peers.iter().map(ResolvedPeer::reachability_key));
+        self.peer_directory_reachability.lock().apply(
+            PeerDirectoryReachabilityInput::DirectoryResolved {
+                keys: peers.iter().map(ResolvedPeer::reachability_key).collect(),
+            },
+        );
     }
 
     async fn for_each_resolved_peer<F>(&self, mut on_peer: F) -> usize
@@ -2375,26 +2377,32 @@ impl CommsRuntime {
         match result {
             Ok(envelope_id) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability
-                        .lock()
-                        .record_send_succeeded(&peer.reachability_key());
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendSucceeded {
+                            key: peer.reachability_key(),
+                        },
+                    );
                 }
                 Ok(envelope_id)
             }
             Err(crate::router::SendError::PeerNotFound(peer_id)) => {
                 if let Some(resolved_peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &resolved_peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: resolved_peer.reachability_key(),
+                            reason: PeerReachabilityReason::OfflineOrNoAck,
+                        },
                     );
                 }
                 Err(SendError::PeerNotFound(peer_id.to_string()))
             }
             Err(crate::router::SendError::PeerOffline) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::OfflineOrNoAck,
+                        },
                     );
                 }
                 Err(SendError::PeerOffline)
@@ -2408,9 +2416,11 @@ impl CommsRuntime {
                 // at the transport layer, so we record `AdmissionDropped`
                 // rather than `OfflineOrNoAck`.
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::AdmissionDropped,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::AdmissionDropped,
+                        },
                     );
                 }
                 Err(SendError::AdmissionDropped {
@@ -2421,9 +2431,11 @@ impl CommsRuntime {
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
             ) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::TransportError,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::TransportError,
+                        },
                     );
                 }
                 Err(SendError::Internal(error.to_string()))

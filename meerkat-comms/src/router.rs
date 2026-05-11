@@ -100,11 +100,6 @@ pub struct Router {
     /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
-    /// Canonical peer IDs supplied at descriptor registration time, keyed by
-    /// signing pubkey. This preserves explicit `PeerId`s for descriptor
-    /// registrations where the runtime owns a stable routing id in addition
-    /// to the peer's signing key.
-    trusted_peer_ids: Arc<RwLock<std::collections::HashMap<crate::identity::PubKey, PeerId>>>,
     /// Directory-filter side-channel for private (control-plane) trust
     /// edges. Membership here is additive to `trusted_peers`: the peer
     /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
@@ -135,7 +130,6 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
@@ -155,7 +149,6 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            trusted_peer_ids: Arc::new(RwLock::new(std::collections::HashMap::new())),
             private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
             config,
             require_peer_auth,
@@ -192,11 +185,7 @@ impl Router {
     }
 
     pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
-        self.trusted_peer_ids
-            .read()
-            .get(pubkey)
-            .copied()
-            .unwrap_or_else(|| peer_id_from_pubkey(pubkey))
+        peer_id_from_pubkey(pubkey)
     }
 
     /// Scope in-process routing to a namespace.
@@ -229,62 +218,44 @@ impl Router {
         peer_id: PeerId,
         peer: TrustedPeer,
     ) -> Result<(), TrustError> {
-        let pubkey = peer.pubkey;
+        peer.to_trust_entry_with_peer_id(peer_id)?;
         self.trusted_peers.write().upsert(peer)?;
-        self.trusted_peer_ids.write().insert(pubkey, peer_id);
         Ok(())
     }
 
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
-        let peer_ids = self.trusted_peer_ids.read().clone();
-        let removed_pubkeys = {
-            let mut trusted = self.trusted_peers.write();
-            let mut removed_pubkeys = Vec::new();
-            trusted.peers.retain(|peer| {
-                let matches = peer_ids
-                    .get(&peer.pubkey)
-                    .copied()
-                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id;
-                if matches {
-                    removed_pubkeys.push(peer.pubkey);
-                    false
-                } else {
-                    true
-                }
-            });
-            removed_pubkeys
-        };
-        if removed_pubkeys.is_empty() {
+        if self
+            .trusted_peers
+            .write()
+            .remove_by_peer_id(peer_id)
+            .is_none()
+        {
             return false;
         }
-        let mut trusted_peer_ids = self.trusted_peer_ids.write();
-        for pubkey in removed_pubkeys {
-            trusted_peer_ids.remove(&pubkey);
-        }
-        drop(trusted_peer_ids);
         self.private_peer_ids.write().remove(peer_id);
         true
     }
 
     fn trusted_peer_by_peer_id(&self, peer_id: &PeerId) -> TrustedPeerLookup {
-        let peer_ids = self.trusted_peer_ids.read().clone();
         let trusted = self.trusted_peers.read();
-        let mut matches = trusted.peers.iter().filter(|peer| {
-            !peer.pubkey.is_zero()
-                && peer_ids
-                    .get(&peer.pubkey)
-                    .copied()
-                    .unwrap_or_else(|| peer_id_from_pubkey(&peer.pubkey))
-                    == *peer_id
-        });
-        let Some(peer) = matches.next() else {
-            return TrustedPeerLookup::Missing;
-        };
-        if matches.next().is_some() {
-            TrustedPeerLookup::Ambiguous
-        } else {
-            TrustedPeerLookup::Resolved(peer.clone())
+        match trusted.canonical_store() {
+            Ok(store) if !store.contains(peer_id) => TrustedPeerLookup::Missing,
+            Ok(_) => trusted
+                .find_by_peer_id(peer_id)
+                .cloned()
+                .map(TrustedPeerLookup::Resolved)
+                .unwrap_or(TrustedPeerLookup::Missing),
+            Err(TrustError::DuplicatePeerId { peer_id: duplicate }) if duplicate == *peer_id => {
+                TrustedPeerLookup::Ambiguous
+            }
+            Err(error) => {
+                tracing::warn!(
+                    peer_id = %peer_id,
+                    error = %error,
+                    "trusted peer lookup rejected non-canonical trust projection"
+                );
+                TrustedPeerLookup::Missing
+            }
         }
     }
 

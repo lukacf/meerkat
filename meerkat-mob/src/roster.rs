@@ -90,7 +90,7 @@ pub struct RosterEntry {
     /// Lifecycle state (Active or Retiring).
     #[serde(default)]
     pub state: MemberState,
-    /// Set of peer identities this member is wired to.
+    /// Set of local member identities this member is wired to.
     pub wired_to: BTreeSet<AgentIdentity>,
     /// Application-defined labels for this member.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -112,9 +112,9 @@ pub struct RosterEntry {
     /// Transport/auth signing public key for this member's comms runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) transport_public_key: Option<String>,
-    /// Trusted specs for external peers keyed by their projected peer name.
+    /// Trusted specs for external peers keyed by canonical comms peer id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerDescriptor>,
+    pub(crate) external_peer_specs: BTreeMap<PeerId, TrustedPeerDescriptor>,
     /// Effective profile override from `SpawnTooling::Profile` resolution.
     ///
     /// When a member is spawned with an explicit tooling profile (inline or realm),
@@ -161,20 +161,36 @@ impl Roster {
 
     /// Build a roster from a sequence of mob events.
     pub fn project(events: &[MobEvent]) -> Self {
+        Self::try_project(events).expect("roster projection requires canonical member refs")
+    }
+
+    /// Build a roster from a sequence of mob events, failing when replay data
+    /// lacks canonical bridge/member ownership.
+    pub fn try_project(events: &[MobEvent]) -> Result<Self, String> {
         let mut roster = Self::new();
         for event in events {
-            roster.apply(event);
+            roster.try_apply(event)?;
         }
-        roster
+        Ok(roster)
     }
 
     /// Apply a single event to update roster state.
     pub fn apply(&mut self, event: &MobEvent) {
+        self.try_apply(event)
+            .expect("roster projection requires canonical member refs");
+    }
+
+    /// Apply a single event to update roster state, failing on missing
+    /// canonical member ownership instead of synthesizing a local placeholder.
+    pub fn try_apply(&mut self, event: &MobEvent) -> Result<(), String> {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
-                let member_ref = member_spawned.bridge_member_ref.clone().unwrap_or_else(|| {
-                    MemberRef::from_bridge_session_id(SessionId::from_uuid(uuid::Uuid::nil()))
-                });
+                let Some(member_ref) = member_spawned.bridge_member_ref.clone() else {
+                    return Err(format!(
+                        "MemberSpawned for '{}' is missing canonical bridge_member_ref",
+                        member_spawned.agent_identity
+                    ));
+                };
                 self.add(RosterAddEntry {
                     agent_identity: member_spawned.agent_identity.clone(),
                     generation: member_spawned.generation,
@@ -231,10 +247,9 @@ impl Roster {
             }
             MobEventKind::ExternalPeerWired { local, spec } => {
                 // External wire: project the descriptor into the local
-                // member's `external_peer_specs` and add the external
-                // peer's name (as AgentIdentity) to `wired_to`. Resume
-                // path replays these events to reinstate trust without
-                // consulting a live comms runtime.
+                // member's `external_peer_specs` by canonical `PeerId`.
+                // External peers do not enter `wired_to`, which is reserved
+                // for local mob member identities.
                 if let Err(reason) =
                     TrustedPeerDescriptor::validate_pubkey_for_peer_id(spec.peer_id, &spec.pubkey)
                 {
@@ -245,21 +260,23 @@ impl Roster {
                         reason = %reason,
                         "skipping invalid ExternalPeerWired descriptor during roster projection"
                     );
-                    return;
+                    return Ok(());
                 }
                 if let Some(entry) = self.entries.get_mut(local) {
-                    let external_identity = AgentIdentity::from(spec.name.as_str());
-                    entry.wired_to.insert(external_identity.clone());
-                    entry
-                        .external_peer_specs
-                        .insert(external_identity, spec.clone());
+                    entry.external_peer_specs.insert(spec.peer_id, spec.clone());
                 }
             }
             MobEventKind::ExternalPeerUnwired { local, peer_name } => {
                 if let Some(entry) = self.entries.get_mut(local) {
-                    let external_identity = AgentIdentity::from(peer_name.as_str());
-                    entry.wired_to.remove(&external_identity);
-                    entry.external_peer_specs.remove(&external_identity);
+                    let peer_id = entry
+                        .external_peer_specs
+                        .iter()
+                        .find_map(|(peer_id, spec)| {
+                            (spec.name.as_str() == peer_name.as_str()).then_some(*peer_id)
+                        });
+                    if let Some(peer_id) = peer_id {
+                        entry.external_peer_specs.remove(&peer_id);
+                    }
                 }
             }
             MobEventKind::MobReset => {
@@ -267,6 +284,7 @@ impl Roster {
             }
             _ => {}
         }
+        Ok(())
     }
 
     /// Add a member to the roster.
@@ -602,6 +620,21 @@ impl RosterEntry {
         self.peer_id
     }
 
+    pub(crate) fn external_peer_spec_by_name(
+        &self,
+        peer_name: &meerkat_core::comms::PeerName,
+    ) -> Option<&TrustedPeerDescriptor> {
+        self.external_peer_specs
+            .values()
+            .find(|spec| spec.name.as_str() == peer_name.as_str())
+    }
+
+    pub(crate) fn has_external_peer_name(&self, peer_name: &str) -> bool {
+        self.external_peer_specs
+            .values()
+            .any(|spec| spec.name.as_str() == peer_name)
+    }
+
     /// Transport/auth public key for comms wiring, if known.
     pub fn transport_public_key(&self) -> Option<&str> {
         self.transport_public_key.as_deref()
@@ -915,14 +948,8 @@ mod tests {
             entry.external_peer_specs.is_empty(),
             "invalid external peer specs must not hydrate resume trust state"
         );
-        assert!(
-            !entry.wired_to.contains(&zero_pubkey_external),
-            "zero-pubkey external peer specs must not project as wired edges"
-        );
-        assert!(
-            !entry.wired_to.contains(&mismatch_external),
-            "invalid external peer specs must not project as wired edges"
-        );
+        assert!(!entry.wired_to.contains(&zero_pubkey_external));
+        assert!(!entry.wired_to.contains(&mismatch_external));
     }
 
     #[test]
@@ -963,8 +990,11 @@ mod tests {
             .get_by_identity(&local)
             .expect("local member should project");
 
-        assert!(entry.external_peer_specs.contains_key(&external));
-        assert!(entry.wired_to.contains(&external));
+        assert!(entry.external_peer_specs.contains_key(&peer_id));
+        assert!(
+            !entry.wired_to.contains(&external),
+            "external peers must not masquerade as AgentIdentity wiring endpoints"
+        );
     }
 
     #[test]
@@ -1294,13 +1324,16 @@ mod tests {
         let identity = AgentIdentity::from("researcher");
         let events = vec![make_event(
             1,
-            MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
-                identity.clone(),
-                Generation::INITIAL,
-                FenceToken::new(1),
-                AgentRuntimeId::initial(identity.clone()),
-                ProfileName::from("research"),
-            )),
+            MobEventKind::MemberSpawned(
+                crate::event::MemberSpawnedEvent::new(
+                    identity.clone(),
+                    Generation::INITIAL,
+                    FenceToken::new(1),
+                    AgentRuntimeId::initial(identity.clone()),
+                    ProfileName::from("research"),
+                )
+                .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session_id()))),
+            ),
         )];
         let roster = Roster::project(&events);
         assert!(roster.is_index_coherent());
@@ -1312,18 +1345,39 @@ mod tests {
     }
 
     #[test]
+    fn test_projection_rejects_member_spawned_without_bridge_member_ref() {
+        let identity = AgentIdentity::from("researcher");
+        let events = vec![make_event(
+            1,
+            MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
+                identity.clone(),
+                Generation::INITIAL,
+                FenceToken::new(1),
+                AgentRuntimeId::initial(identity),
+                ProfileName::from("research"),
+            )),
+        )];
+
+        let err = Roster::try_project(&events).expect_err("missing member ref must fail replay");
+        assert!(err.contains("missing canonical bridge_member_ref"));
+    }
+
+    #[test]
     fn test_member_reset_updates_generation() {
         let identity = AgentIdentity::from("worker-1");
         let events = vec![
             make_event(
                 1,
-                MobEventKind::MemberSpawned(crate::event::MemberSpawnedEvent::new(
-                    identity.clone(),
-                    Generation::INITIAL,
-                    FenceToken::new(1),
-                    AgentRuntimeId::initial(identity.clone()),
-                    ProfileName::from("worker"),
-                )),
+                MobEventKind::MemberSpawned(
+                    crate::event::MemberSpawnedEvent::new(
+                        identity.clone(),
+                        Generation::INITIAL,
+                        FenceToken::new(1),
+                        AgentRuntimeId::initial(identity.clone()),
+                        ProfileName::from("worker"),
+                    )
+                    .with_bridge_member_ref(Some(MemberRef::from_bridge_session_id(session_id()))),
+                ),
             ),
             make_event(
                 2,

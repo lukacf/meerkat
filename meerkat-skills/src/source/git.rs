@@ -191,28 +191,18 @@ impl GitSkillSource {
         let mut documents = std::collections::BTreeMap::new();
         let mut quarantined = Vec::new();
         for skill_dir in discover_skill_directories(&root) {
-            let Some(file_name) = skill_dir.file_name().and_then(|name| name.to_str()) else {
-                continue;
-            };
-            let skill_name = match SkillName::parse(file_name) {
-                Ok(skill_name) => skill_name,
+            let key = match skill_key_for_dir(&root, &self.config.source_uuid, &skill_dir) {
+                Ok(key) => key,
                 Err(err) => {
-                    if let Some(key) = invalid_skill_key(&self.config.source_uuid) {
-                        quarantined.push(quarantine(
-                            key,
-                            skill_dir.display().to_string(),
-                            err.to_string(),
-                        ));
-                    }
+                    quarantined.push(quarantine(None, skill_dir.display().to_string(), err));
                     continue;
                 }
             };
-            let key = SkillKey::new(self.config.source_uuid.clone(), skill_name);
             let content = match std::fs::read_to_string(skill_dir.join("SKILL.md")) {
                 Ok(content) => content,
                 Err(err) => {
                     quarantined.push(quarantine(
-                        key,
+                        Some(key),
                         skill_dir.display().to_string(),
                         err.to_string(),
                     ));
@@ -223,14 +213,14 @@ impl GitSkillSource {
                 key.clone(),
                 SkillScope::Project,
                 &content,
-                Some(key.skill_name.as_str()),
+                Some(key.skill_name.leaf_slug()),
             ) {
                 Ok(doc) => {
                     descriptors.push(doc.descriptor.clone());
                     documents.insert(doc.descriptor.key.clone(), doc);
                 }
                 Err(err) => quarantined.push(quarantine(
-                    key,
+                    Some(key),
                     skill_dir.display().to_string(),
                     err.to_string(),
                 )),
@@ -373,19 +363,45 @@ fn stable_hash(input: &str) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-fn invalid_skill_key(source_uuid: &SourceUuid) -> Option<SkillKey> {
-    SkillName::parse("invalid-skill")
-        .ok()
-        .map(|skill_name| SkillKey::new(source_uuid.clone(), skill_name))
+fn skill_key_for_dir(
+    root: &Path,
+    source_uuid: &SourceUuid,
+    skill_dir: &Path,
+) -> Result<SkillKey, String> {
+    let relative = skill_dir
+        .strip_prefix(root)
+        .map_err(|err| format!("skill path is outside configured root: {err}"))?;
+    let mut segments = Vec::new();
+    for segment in relative.components() {
+        let Some(segment) = segment.as_os_str().to_str() else {
+            return Err(format!(
+                "skill path is not valid UTF-8: {}",
+                skill_dir.display()
+            ));
+        };
+        segments.push(segment);
+    }
+    let raw = segments.join("/");
+    let skill_name = SkillName::parse(&raw).map_err(|err| err.to_string())?;
+    Ok(SkillKey::new(source_uuid.clone(), skill_name))
 }
 
-fn quarantine(key: SkillKey, location: String, message: String) -> SkillQuarantineDiagnostic {
+fn quarantine(
+    key: Option<SkillKey>,
+    location: String,
+    message: String,
+) -> SkillQuarantineDiagnostic {
     let now = SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default();
+    let identity_hint = key
+        .as_ref()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| location.clone());
     SkillQuarantineDiagnostic {
         key,
+        identity_hint,
         location,
         error_code: "invalid_git_skill".to_string(),
         error_class: "parse".to_string(),
@@ -458,6 +474,39 @@ fn redact_sensitive_query(url: &str) -> String {
     match fragment {
         Some(fragment) => format!("{base}?{query}#{fragment}"),
         None => format!("{base}?{query}"),
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+
+    #[test]
+    fn skill_key_for_dir_uses_source_relative_path() {
+        let root = PathBuf::from("/repo/skills");
+        let source_uuid = SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7").unwrap();
+        let key = skill_key_for_dir(
+            &root,
+            &source_uuid,
+            &PathBuf::from("/repo/skills/team-a/shared/alpha"),
+        )
+        .unwrap();
+
+        assert_eq!(key.source_uuid, source_uuid);
+        assert_eq!(key.skill_name.as_str(), "team-a/shared/alpha");
+    }
+
+    #[test]
+    fn invalid_git_skill_path_quarantine_has_no_fabricated_key() {
+        let diagnostic = quarantine(
+            None,
+            "/repo/skills/Bad Skill".to_string(),
+            "invalid skill name".to_string(),
+        );
+
+        assert_eq!(diagnostic.key, None);
+        assert_eq!(diagnostic.identity_hint, "/repo/skills/Bad Skill");
+        assert!(!diagnostic.identity_hint.contains("invalid-skill"));
     }
 }
 

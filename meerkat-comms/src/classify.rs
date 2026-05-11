@@ -216,7 +216,7 @@ impl IngressClassificationContext {
                     MessageKind::Request { intent, params, .. } => {
                         if let Some(kind) = classification.lifecycle_kind {
                             let peer = lifecycle_peer.clone().unwrap_or_else(|| {
-                                meerkat_core::peer_lifecycle_subject(params, from_name.as_str())
+                                meerkat_core::peer_lifecycle_subject(params, &from_peer_id.as_str())
                             });
                             PeerIngressConvention::Lifecycle { kind, peer }
                         } else {
@@ -231,7 +231,7 @@ impl IngressClassificationContext {
                     }
                     MessageKind::Lifecycle { kind, params } => {
                         let peer = lifecycle_peer.clone().unwrap_or_else(|| {
-                            meerkat_core::peer_lifecycle_subject(params, from_name.as_str())
+                            meerkat_core::peer_lifecycle_subject(params, &from_peer_id.as_str())
                         });
                         PeerIngressConvention::Lifecycle { kind: *kind, peer }
                     }
@@ -1512,7 +1512,34 @@ mod tests {
         let item = InboxItem::External { envelope };
         let result = ctx.classify(&item).expect("should classify");
         assert_eq!(result.class, PeerInputClass::PeerLifecycleAdded);
-        assert_eq!(result.lifecycle_peer.as_deref(), Some("orchestrator"));
+        assert_eq!(result.lifecycle_peer, result.from_peer_id);
+    }
+
+    #[test]
+    fn classify_lifecycle_prefers_peer_spec_identity_over_legacy_peer() {
+        let sender = make_keypair();
+        let trusted = make_trusted_peers("orchestrator", &sender.public_key());
+        let ctx = make_context(true, trusted, vec![]);
+        let canonical_peer_id = meerkat_core::comms::PeerId::new().as_str();
+        let envelope = make_envelope(
+            &sender,
+            MessageKind::Request {
+                intent: "mob.peer_added".to_string(),
+                params: serde_json::json!({
+                    "peer": "legacy-agent",
+                    "peer_spec": { "peer_id": canonical_peer_id.clone() },
+                }),
+                blocks: None,
+                handling_mode: None,
+            },
+        );
+        let item = InboxItem::External { envelope };
+        let result = ctx.classify(&item).expect("should classify");
+        assert_eq!(result.class, PeerInputClass::PeerLifecycleAdded);
+        assert_eq!(
+            result.lifecycle_peer.as_deref(),
+            Some(canonical_peer_id.as_str())
+        );
     }
 
     #[test]

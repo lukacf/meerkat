@@ -23,6 +23,9 @@ impl MemoryOwner {
 
     fn includes(&self, metadata: &MemoryMetadata) -> bool {
         metadata.session_id == self.session_id
+            && metadata.source.as_ref().is_some_and(|source| {
+                source.session_id == self.session_id && source.message_range.is_valid()
+            })
     }
 }
 
@@ -35,6 +38,62 @@ pub struct MemoryMetadata {
     pub turn: Option<u32>,
     /// When the memory was indexed.
     pub indexed_at: crate::time_compat::SystemTime,
+    /// Canonical source message/range that produced this memory projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<MemorySourceProvenance>,
+}
+
+impl MemoryMetadata {
+    pub fn source_ref(&self) -> Option<String> {
+        self.source
+            .as_ref()
+            .map(MemorySourceProvenance::to_source_ref)
+    }
+}
+
+/// Canonical source range for one indexed memory entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemorySourceRange {
+    pub start_message_index: u64,
+    pub end_message_index: u64,
+}
+
+impl MemorySourceRange {
+    pub const fn for_message(message_index: u64) -> Self {
+        Self {
+            start_message_index: message_index,
+            end_message_index: message_index,
+        }
+    }
+
+    pub const fn is_valid(&self) -> bool {
+        self.start_message_index <= self.end_message_index
+    }
+}
+
+/// Canonical source provenance for one indexed memory entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemorySourceProvenance {
+    pub session_id: crate::types::SessionId,
+    pub message_range: MemorySourceRange,
+}
+
+impl MemorySourceProvenance {
+    pub fn for_message(session_id: crate::types::SessionId, message_index: u64) -> Self {
+        Self {
+            session_id,
+            message_range: MemorySourceRange::for_message(message_index),
+        }
+    }
+
+    pub fn to_source_ref(&self) -> String {
+        format!(
+            "memory:session:{}/messages:{}..{}",
+            self.session_id,
+            self.message_range.start_message_index,
+            self.message_range.end_message_index
+        )
+    }
 }
 
 /// A memory search result.
@@ -118,7 +177,7 @@ impl MemoryIndexRequest {
     ) -> Result<Self, MemoryStoreError> {
         if !scope.includes(&metadata) {
             return Err(MemoryStoreError::Scope(format!(
-                "memory metadata session {} is outside indexing scope {}",
+                "memory metadata session {} is outside indexing scope {} or lacks source provenance",
                 metadata.session_id,
                 scope.session_id()
             )));

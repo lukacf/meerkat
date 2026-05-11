@@ -22,7 +22,9 @@ use crate::error::ToolError;
 use crate::event::ExternalToolDelta;
 #[cfg(all(target_arch = "wasm32", test))]
 use crate::tokio;
-use crate::tool_catalog::{ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason};
+use crate::tool_catalog::{
+    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
+};
 use crate::types::{ToolCallView, ToolDef, ToolName};
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -100,6 +102,76 @@ impl ToolGateway {
             }
             other => other,
         }
+    }
+
+    fn same_canonical_tool_owner(left: &ToolDef, right: &ToolDef) -> bool {
+        match (left.provenance.as_ref(), right.provenance.as_ref()) {
+            (Some(left), Some(right)) => left == right,
+            _ => false,
+        }
+    }
+
+    fn collision_unavailable(entry: &mut ToolCatalogEntry) {
+        entry.callability =
+            ToolCallability::unavailable(ToolUnavailableReason::TemporarilyUnavailable);
+    }
+
+    fn precedence_resolved_entries(
+        entries: impl IntoIterator<Item = ToolCatalogEntry>,
+    ) -> Vec<ToolCatalogEntry> {
+        let mut first_index = std::collections::HashMap::<ToolName, usize>::new();
+        let mut collisions = std::collections::HashSet::<ToolName>::new();
+        let mut result = Vec::<ToolCatalogEntry>::new();
+
+        for entry in entries {
+            let name = entry.tool.name.clone();
+            if let Some(existing_index) = first_index.get(&name).copied() {
+                if !Self::same_canonical_tool_owner(&result[existing_index].tool, &entry.tool) {
+                    collisions.insert(name);
+                }
+                continue;
+            }
+            first_index.insert(name, result.len());
+            result.push(entry);
+        }
+
+        for name in collisions {
+            if let Some(index) = first_index.get(&name).copied() {
+                Self::collision_unavailable(&mut result[index]);
+            }
+        }
+
+        result
+    }
+
+    fn live_route_for_call<'a>(
+        &'a self,
+        name: &str,
+    ) -> Result<Option<(&'a dyn AgentToolDispatcher, ToolCatalogEntry)>, ToolError> {
+        let mut selected: Option<(&dyn AgentToolDispatcher, ToolCatalogEntry)> = None;
+        let mut collision = false;
+
+        for entry in &self.entries {
+            let catalog = Self::live_catalog_for_dispatcher(entry.dispatcher.as_ref());
+            for catalog_entry in catalog.iter().filter(|entry| entry.tool.name == name) {
+                if let Some((_, existing)) = selected.as_ref() {
+                    if !Self::same_canonical_tool_owner(&existing.tool, &catalog_entry.tool) {
+                        collision = true;
+                    }
+                } else {
+                    selected = Some((entry.dispatcher.as_ref(), catalog_entry.clone()));
+                }
+            }
+        }
+
+        if collision {
+            return Err(ToolError::unavailable(
+                name,
+                ToolUnavailableReason::TemporarilyUnavailable,
+            ));
+        }
+
+        Ok(selected)
     }
 }
 
@@ -188,35 +260,14 @@ impl AgentToolDispatcher for ToolGateway {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        for entry in &self.entries {
-            if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
-                if let Some(catalog_entry) = entry
-                    .dispatcher
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-                        return Err(ToolError::unavailable(call.name, reason));
-                    }
-                    return entry
-                        .dispatcher
-                        .dispatch(call)
-                        .await
-                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
-                }
-            } else if entry
-                .dispatcher
-                .tools()
-                .iter()
-                .any(|tool| tool.name == call.name)
-            {
-                return entry
-                    .dispatcher
-                    .dispatch(call)
-                    .await
-                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+        if let Some((dispatcher, catalog_entry)) = self.live_route_for_call(call.name)? {
+            if let Some(reason) = catalog_entry.callability.unavailable_reason() {
+                return Err(ToolError::unavailable(call.name, reason));
             }
+            return dispatcher
+                .dispatch(call)
+                .await
+                .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
         }
         Err(ToolError::not_found(call.name))
     }
@@ -226,35 +277,14 @@ impl AgentToolDispatcher for ToolGateway {
         call: ToolCallView<'_>,
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
-        for entry in &self.entries {
-            if entry.dispatcher.tool_catalog_capabilities().exact_catalog {
-                if let Some(catalog_entry) = entry
-                    .dispatcher
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = catalog_entry.callability.unavailable_reason() {
-                        return Err(ToolError::unavailable(call.name, reason));
-                    }
-                    return entry
-                        .dispatcher
-                        .dispatch_with_context(call, context)
-                        .await
-                        .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
-                }
-            } else if entry
-                .dispatcher
-                .tools()
-                .iter()
-                .any(|tool| tool.name == call.name)
-            {
-                return entry
-                    .dispatcher
-                    .dispatch_with_context(call, context)
-                    .await
-                    .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
+        if let Some((dispatcher, catalog_entry)) = self.live_route_for_call(call.name)? {
+            if let Some(reason) = catalog_entry.callability.unavailable_reason() {
+                return Err(ToolError::unavailable(call.name, reason));
             }
+            return dispatcher
+                .dispatch_with_context(call, context)
+                .await
+                .map_err(|err| Self::route_not_found_as_unavailable(call.name, err));
         }
         Err(ToolError::not_found(call.name))
     }
@@ -284,17 +314,13 @@ impl AgentToolDispatcher for ToolGateway {
     }
 
     fn tool_catalog(&self) -> Arc<[ToolCatalogEntry]> {
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for entry in &self.entries {
-            for catalog_entry in Self::live_catalog_for_dispatcher(entry.dispatcher.as_ref()).iter()
-            {
-                if seen.insert(catalog_entry.tool.name.clone()) {
-                    result.push(catalog_entry.clone());
-                }
-            }
-        }
-        result.into()
+        let entries = self.entries.iter().flat_map(|entry| {
+            Self::live_catalog_for_dispatcher(entry.dispatcher.as_ref())
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        Self::precedence_resolved_entries(entries).into()
     }
 
     fn capabilities(&self) -> crate::agent::DispatcherCapabilities {
@@ -442,7 +468,8 @@ impl AgentToolDispatcher for ToolGateway {
 /// enabling children with dynamic tool lists (e.g. callback tool dispatchers
 /// backed by a shared registry) to surface additions/removals between turns.
 ///
-/// First-dispatcher-wins on name collision (consistent with `ToolGateway`).
+/// Dynamic name collisions fail closed unless duplicate entries prove the same
+/// canonical provenance owner.
 pub struct DynamicToolComposite {
     dispatchers: Vec<Arc<dyn AgentToolDispatcher>>,
 }
@@ -450,6 +477,40 @@ pub struct DynamicToolComposite {
 impl DynamicToolComposite {
     pub fn new(dispatchers: Vec<Arc<dyn AgentToolDispatcher>>) -> Self {
         Self { dispatchers }
+    }
+
+    fn live_route_for_call<'a>(
+        &'a self,
+        name: &str,
+    ) -> Result<Option<(&'a dyn AgentToolDispatcher, ToolCatalogEntry)>, ToolError> {
+        let mut selected: Option<(&dyn AgentToolDispatcher, ToolCatalogEntry)> = None;
+        let mut collision = false;
+
+        for dispatcher in &self.dispatchers {
+            for catalog_entry in dispatcher
+                .tool_catalog()
+                .iter()
+                .filter(|entry| entry.tool.name == name)
+            {
+                if let Some((_, existing)) = selected.as_ref() {
+                    if !ToolGateway::same_canonical_tool_owner(&existing.tool, &catalog_entry.tool)
+                    {
+                        collision = true;
+                    }
+                } else {
+                    selected = Some((dispatcher.as_ref(), catalog_entry.clone()));
+                }
+            }
+        }
+
+        if collision {
+            return Err(ToolError::unavailable(
+                name,
+                ToolUnavailableReason::TemporarilyUnavailable,
+            ));
+        }
+
+        Ok(selected)
     }
 }
 
@@ -484,19 +545,14 @@ impl AgentToolDispatcher for DynamicToolComposite {
         call: crate::types::ToolCallView<'_>,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if self.tool_catalog_capabilities().exact_catalog {
-            for d in &self.dispatchers {
-                if let Some(entry) = d
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(crate::error::ToolError::unavailable(call.name, reason));
-                    }
-                    return d.dispatch(call).await.map_err(|err| {
-                        ToolGateway::route_not_found_as_unavailable(call.name, err)
-                    });
+            if let Some((dispatcher, entry)) = self.live_route_for_call(call.name)? {
+                if let Some(reason) = entry.callability.unavailable_reason() {
+                    return Err(crate::error::ToolError::unavailable(call.name, reason));
                 }
+                return dispatcher
+                    .dispatch(call)
+                    .await
+                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
             }
             return Err(crate::error::ToolError::not_found(call.name));
         }
@@ -518,19 +574,14 @@ impl AgentToolDispatcher for DynamicToolComposite {
         context: &crate::ToolDispatchContext,
     ) -> Result<crate::ops::ToolDispatchOutcome, crate::error::ToolError> {
         if self.tool_catalog_capabilities().exact_catalog {
-            for d in &self.dispatchers {
-                if let Some(entry) = d
-                    .tool_catalog()
-                    .iter()
-                    .find(|entry| entry.tool.name == call.name)
-                {
-                    if let Some(reason) = entry.callability.unavailable_reason() {
-                        return Err(crate::error::ToolError::unavailable(call.name, reason));
-                    }
-                    return d.dispatch_with_context(call, context).await.map_err(|err| {
-                        ToolGateway::route_not_found_as_unavailable(call.name, err)
-                    });
+            if let Some((dispatcher, entry)) = self.live_route_for_call(call.name)? {
+                if let Some(reason) = entry.callability.unavailable_reason() {
+                    return Err(crate::error::ToolError::unavailable(call.name, reason));
                 }
+                return dispatcher
+                    .dispatch_with_context(call, context)
+                    .await
+                    .map_err(|err| ToolGateway::route_not_found_as_unavailable(call.name, err));
             }
             return Err(crate::error::ToolError::not_found(call.name));
         }
@@ -611,16 +662,14 @@ impl AgentToolDispatcher for DynamicToolComposite {
                 .into();
         }
 
-        let mut seen = std::collections::HashSet::new();
-        let mut result = Vec::new();
-        for dispatcher in &self.dispatchers {
-            for entry in dispatcher.tool_catalog().iter() {
-                if seen.insert(entry.tool.name.clone()) {
-                    result.push(entry.clone());
-                }
-            }
-        }
-        result.into()
+        let entries = self.dispatchers.iter().flat_map(|dispatcher| {
+            dispatcher
+                .tool_catalog()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+        ToolGateway::precedence_resolved_entries(entries).into()
     }
 
     fn external_tool_surface_snapshot(&self) -> Option<crate::ExternalToolSurfaceSnapshot> {
@@ -1564,7 +1613,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_tool_composite_exact_catalog_keeps_first_winner_even_when_unavailable() {
+    fn dynamic_tool_composite_exact_catalog_marks_duplicate_owner_unavailable() {
         let first = Arc::new(ExactMockDispatcher::with_callability(
             "first",
             &[("shared", false)],
@@ -1600,6 +1649,38 @@ mod tests {
                 .expect("shared entry")
                 .currently_callable()
         );
+    }
+
+    #[tokio::test]
+    async fn dynamic_tool_composite_dispatch_rejects_duplicate_owner_route() {
+        let first = Arc::new(ExactMockDispatcher::with_callability(
+            "first",
+            &[("shared", true)],
+        ));
+        let second = Arc::new(ExactMockDispatcher::with_callability(
+            "second",
+            &[("shared", true)],
+        ));
+        let composite = DynamicToolComposite::new(vec![first, second]);
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "duplicate-1",
+            name: "shared",
+            args: &args_raw,
+        };
+
+        let err = composite
+            .dispatch(call)
+            .await
+            .expect_err("duplicate dynamic owners must fail closed");
+
+        assert!(matches!(
+            err,
+            ToolError::Unavailable {
+                reason: ToolUnavailableReason::TemporarilyUnavailable,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

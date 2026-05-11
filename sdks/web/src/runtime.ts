@@ -104,13 +104,13 @@ export interface WasmModule {
   ) => void;
   clear_tool_callbacks: () => void;
   destroy_runtime: () => void;
-  create_session_simple: (configJson: string) => number;
-  create_session: (mobpackBytes: Uint8Array, configJson: string) => number;
-  start_turn: (handle: number, prompt: string) => Promise<string>;
-  get_session_state: (handle: number) => string;
-  destroy_session: (handle: number) => void;
-  poll_events: (handle: number) => string;
-  append_system_context: (handle: number, requestJson: string) => Promise<string>;
+  create_session_simple: (configJson: string) => string;
+  create_session: (mobpackBytes: Uint8Array, configJson: string) => string;
+  start_turn: (sessionId: string, prompt: string) => Promise<string>;
+  get_session_state: (sessionId: string) => string;
+  destroy_session: (sessionId: string) => void;
+  poll_events: (sessionId: string) => string;
+  append_system_context: (sessionId: string, requestJson: string) => Promise<string>;
   inspect_mobpack: (mobpackBytes: Uint8Array) => string;
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
@@ -140,10 +140,10 @@ export interface WasmModule {
   mob_run_flow: (mobId: string, flowId: string, paramsJson: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
   mob_cancel_flow: (mobId: string, runId: string) => Promise<void>;
-  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<number>;
-  mob_subscribe_events: (mobId: string) => Promise<number>;
-  poll_subscription: (handle: number) => string;
-  close_subscription: (handle: number) => void;
+  mob_member_subscribe: (mobId: string, agentIdentity: string) => Promise<string>;
+  mob_subscribe_events: (mobId: string) => Promise<string>;
+  poll_subscription: (subscriptionRef: string) => string;
+  close_subscription: (subscriptionRef: string) => void;
   wire_cross_mob: (
     mobA: string,
     meerkatA: string,
@@ -299,7 +299,7 @@ export class MeerkatRuntime {
     wasm.clear_tool_callbacks();
   }
 
-  /** Tear down the embedded runtime and invalidate browser-side handles. */
+  /** Tear down the embedded runtime and invalidate browser-side sessions/subscriptions. */
   destroy(): void {
     if (this.destroyed) return;
     this.wasm.destroy_runtime();
@@ -384,11 +384,11 @@ export class MeerkatRuntime {
 
   /** Create a direct session façade backed by a real runtime session identity. */
   createSession(config: SessionConfig): Session {
-    const handle = this.wasm.create_session_simple(
+    const sessionId = this.wasm.create_session_simple(
       JSON.stringify(sessionToWasm(config)),
     );
     return new Session(
-      handle,
+      sessionId,
       this.wasm.start_turn,
       this.wasm.get_session_state,
       this.wasm.destroy_session,

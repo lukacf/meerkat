@@ -243,9 +243,22 @@ fn member_list_entry_wire(
 /// Runtime incarnation ids and fence tokens are bridge-internal binding atoms;
 /// `MobMemberSnapshot` intentionally keeps them out of generic serde, and this
 /// endpoint must not reinsert them.
-fn member_status_payload(snapshot: &MobMemberSnapshot) -> serde_json::Value {
+fn member_status_payload(mob_id: &MobId, snapshot: &MobMemberSnapshot) -> serde_json::Value {
     match serde_json::to_value(snapshot) {
-        Ok(value) => value,
+        Ok(mut value) => {
+            if let Some(object) = value.as_object_mut() {
+                let identity = snapshot.agent_identity().to_string();
+                object.insert(
+                    "member_ref".to_string(),
+                    serde_json::Value::String(
+                        meerkat_contracts::WireMemberRef::encode(mob_id.as_str(), &identity)
+                            .as_str()
+                            .to_string(),
+                    ),
+                );
+            }
+            value
+        }
         Err(error) => {
             tracing::error!(
                 ?error,
@@ -1615,7 +1628,7 @@ pub async fn handle_member_status(
         )
         .await
     {
-        Ok(snapshot) => RpcResponse::success(id, member_status_payload(&snapshot)),
+        Ok(snapshot) => RpcResponse::success(id, member_status_payload(&mob_id, &snapshot)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }

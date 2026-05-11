@@ -1699,6 +1699,7 @@ pub struct MobTurnStartParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobMemberStatusResult {
     pub status: WireMobMemberStatus,
+    pub member_ref: WireMemberRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1743,6 +1744,7 @@ mod member_status_capability_tests {
         };
         let result = MobMemberStatusResult {
             status: WireMobMemberStatus::Active,
+            member_ref: WireMemberRef::encode("mob-1", "worker-1"),
             output_preview: None,
             error: None,
             tokens_used: 0,

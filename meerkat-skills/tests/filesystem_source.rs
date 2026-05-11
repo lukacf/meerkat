@@ -4,7 +4,7 @@
 //! collection-md fallback, and invalid-ratio health transitions. In the
 //! wave-c retype the `FilesystemSkillSource` is narrower: it recursively
 //! scans `<root>/<skill_dir>/SKILL.md`, constructs a typed `SkillKey` from
-//! the configured `source_uuid` + directory slug, and fails `load()` for a
+//! the configured `source_uuid` + source-relative skill path, and fails `load()` for a
 //! mismatched source_uuid. The old "slash path parsing" and "collection.md
 //! fallback" paths are gone (source docstring at `meerkat-skills/src/source/
 //! filesystem.rs:3`). These tests cover the surface that actually exists in
@@ -79,7 +79,11 @@ async fn recursive_scan_finds_top_level_and_nested_skills() {
     sorted.sort();
     assert_eq!(
         sorted,
-        vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+        vec![
+            "alpha".to_string(),
+            "beta".to_string(),
+            "cat-a/sub/gamma".to_string(),
+        ],
         "recursive scan must surface top-level and nested SKILL.md dirs; got {names:?}",
     );
 
@@ -90,6 +94,38 @@ async fn recursive_scan_finds_top_level_and_nested_skills() {
         );
         assert_eq!(descriptor.scope, SkillScope::Project);
     }
+}
+
+#[tokio::test]
+async fn nested_skill_key_uses_source_relative_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source_uuid = SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f").unwrap();
+
+    write_nested_skill(tmp.path(), "team-a/shared", "alpha");
+    write_skill(tmp.path(), "alpha", "top-level alpha body");
+
+    let source = FilesystemSkillSource::new_with_identity(
+        tmp.path().to_path_buf(),
+        SkillScope::Project,
+        source_uuid.clone(),
+        Default::default(),
+    );
+
+    let nested_key = SkillKey {
+        source_uuid: source_uuid.clone(),
+        skill_name: SkillName::parse("team-a/shared/alpha").unwrap(),
+    };
+    let top_level_key = SkillKey {
+        source_uuid,
+        skill_name: SkillName::parse("alpha").unwrap(),
+    };
+
+    let nested = source.load(&nested_key).await.unwrap();
+    let top_level = source.load(&top_level_key).await.unwrap();
+
+    assert_eq!(nested.descriptor.key, nested_key);
+    assert_eq!(top_level.descriptor.key, top_level_key);
+    assert_ne!(nested.descriptor.key, top_level.descriptor.key);
 }
 
 #[tokio::test]

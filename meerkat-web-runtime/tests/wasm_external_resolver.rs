@@ -45,7 +45,7 @@ fn test_binding() -> ValidatedBinding {
         provider: Provider::OpenAI,
         auth_method: "external_authorizer".into(),
         source: CredentialSourceSpec::ExternalResolver {
-            handle: "wasm_host".into(),
+            handle: meerkat_core::ExternalAuthResolverId::parse("wasm_host").unwrap(),
         },
         constraints: Default::default(),
         metadata_defaults: Default::default(),
@@ -409,7 +409,8 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
             provider: "self_hosted".to_string(),
             auth_method: "static_bearer".to_string(),
             source: meerkat_core::CredentialSourceSpec::ExternalResolver {
-                handle: WASM_EXTERNAL_AUTH_RESOLVER_ID.to_string(),
+                handle: meerkat_core::ExternalAuthResolverId::parse(WASM_EXTERNAL_AUTH_RESOLVER_ID)
+                    .unwrap(),
             },
             constraints: Default::default(),
             metadata_defaults: Default::default(),
@@ -432,7 +433,7 @@ async fn self_hosted_auth_binding_uses_registered_wasm_external_resolver() {
         profile: None,
     };
     let factory = meerkat::AgentFactory::minimal().with_external_auth_resolver(
-        WASM_EXTERNAL_AUTH_RESOLVER_ID,
+        meerkat_core::ExternalAuthResolverId::parse(WASM_EXTERNAL_AUTH_RESOLVER_ID).unwrap(),
         Arc::new(WasmExternalAuthResolver),
     );
     let mut build = meerkat::AgentBuildConfig::new("gemma-4-e2b");

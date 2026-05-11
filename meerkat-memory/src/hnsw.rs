@@ -451,7 +451,9 @@ fn text_to_embedding(text: &str) -> [f32; VOCAB_DIM] {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::{MemoryIndexRequest, MemoryIndexScope, MemoryMetadata};
+    use meerkat_core::memory::{
+        MemoryIndexRequest, MemoryIndexScope, MemoryMetadata, MemorySourceProvenance,
+    };
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
     use tempfile::TempDir;
@@ -461,6 +463,7 @@ mod tests {
             session_id: session_id.clone(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
+            source: Some(MemorySourceProvenance::for_message(session_id.clone(), 0)),
         }
     }
 

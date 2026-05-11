@@ -232,12 +232,11 @@ const sourceIdOnlyEventEnvelope: EventEnvelope = {
 };
 
 const appendSystemContextResult: AppendSystemContextResult = {
-  handle: 1,
+  session_id: '00000000-0000-0000-0000-000000000001',
   status: 'staged',
 };
 
 const sessionState: SessionState = {
-  handle: 1,
   session_id: '00000000-0000-0000-0000-000000000001',
   mob_id: '',
   model: 'claude-sonnet-4-5',
@@ -326,6 +325,10 @@ function handleEvent(event: AgentEvent): string {
       return event.delta;
     case 'text_complete':
       return event.content;
+    case 'server_tool_content':
+      return event.name;
+    case 'assistant_image_appended':
+      return event.image.image_id;
     case 'tool_call_requested':
       return `${event.name}:${event.id}`;
     case 'tool_result_received':
@@ -336,6 +339,10 @@ function handleEvent(event: AgentEvent): string {
       return `${event.stop_reason} ${event.usage.input_tokens}+${event.usage.output_tokens}`;
     case 'run_completed':
       return event.result;
+    case 'extraction_succeeded':
+      return String(event.structured_output);
+    case 'extraction_failed':
+      return event.reason;
     case 'run_failed':
       return event.error;
     case 'tool_execution_started':
@@ -430,15 +437,23 @@ const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'd
 declare const mob: Mob;
 const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
 const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
-const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.');
+const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.', {
+  agentIdentity: 'helper-1',
+});
 const helperWithConnectionResult: Promise<MobHelperResult> = mob.spawnHelper(
   'Summarize using the OpenAI binding.',
-  { authBinding: { realm: 'default', binding: 'openai', profile: 'work' } },
+  {
+    agentIdentity: 'helper-openai',
+    authBinding: { realm: 'default', binding: 'openai', profile: 'work' },
+  },
 );
 const forkedHelperResult: Promise<MobHelperResult> = mob.forkHelper(
   'worker-1',
   'Review the draft and suggest one improvement.',
-  { authBinding: { realm: 'default', binding: 'anthropic' } },
+  {
+    agentIdentity: 'fork-helper-1',
+    authBinding: { realm: 'default', binding: 'anthropic' },
+  },
 );
 const flowStatusResult: Promise<FlowStatus | null> = mob.flowStatus('run-1');
 const memberSubscription = mob.member('worker-1').subscribe();

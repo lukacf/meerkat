@@ -1,7 +1,7 @@
 //! Skill resource tools.
 //!
-//! Keyed by typed `SkillKey` (source_uuid + skill_name) — no slash-string
-//! parsing anywhere on the ingress path.
+//! Keyed by typed `SkillKey` objects — no decomposed sibling fields or
+//! slash-string parsing anywhere on the ingress path.
 
 use std::sync::Arc;
 
@@ -15,23 +15,27 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SkillListResourcesArgs {
+struct SkillKeyInput {
     source_uuid: String,
     skill_name: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SkillListResourcesArgs {
+    skill_key: SkillKeyInput,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SkillReadResourceArgs {
-    source_uuid: String,
-    skill_name: String,
+    skill_key: SkillKeyInput,
     path: String,
 }
 
-fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
-    let source_uuid =
-        SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
-    let skill_name =
-        SkillName::parse(skill_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+fn parse_key(input: &SkillKeyInput) -> Result<SkillKey, BuiltinToolError> {
+    let source_uuid = SourceUuid::parse(&input.source_uuid)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    let skill_name = SkillName::parse(&input.skill_name)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     Ok(SkillKey {
         source_uuid,
         skill_name,
@@ -68,8 +72,8 @@ impl BuiltinTool for SkillListResourcesTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "skill_list_resources".into(),
-            description:
-                "List resources exposed by a skill identified by (source_uuid, skill_name).".into(),
+            description: "List resources exposed by a skill identified by canonical skill_key."
+                .into(),
             input_schema: crate::schema::schema_for::<SkillListResourcesArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -85,7 +89,7 @@ impl BuiltinTool for SkillListResourcesTool {
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let args: SkillListResourcesArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
-        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
+        let raw_key = parse_key(&args.skill_key)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -98,8 +102,7 @@ impl BuiltinTool for SkillListResourcesTool {
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         Ok(ToolOutput::Json(json!({
-            "source_uuid": key.source_uuid.to_string(),
-            "skill_name": key.skill_name.as_str(),
+            "skill_key": &key,
             "artifacts": artifacts,
         })))
     }
@@ -116,8 +119,7 @@ impl BuiltinTool for SkillReadResourceTool {
         ToolDef {
             name: "skill_read_resource".into(),
             description:
-                "Read a resource at `path` from a skill identified by (source_uuid, skill_name)."
-                    .into(),
+                "Read a resource at `path` from a skill identified by canonical skill_key.".into(),
             input_schema: crate::schema::schema_for::<SkillReadResourceArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -133,7 +135,7 @@ impl BuiltinTool for SkillReadResourceTool {
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let args: SkillReadResourceArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
-        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
+        let raw_key = parse_key(&args.skill_key)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -146,8 +148,7 @@ impl BuiltinTool for SkillReadResourceTool {
             .await
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
         Ok(ToolOutput::Json(json!({
-            "source_uuid": key.source_uuid.to_string(),
-            "skill_name": key.skill_name.as_str(),
+            "skill_key": &key,
             "artifact": artifact,
         })))
     }

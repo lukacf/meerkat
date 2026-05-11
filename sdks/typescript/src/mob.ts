@@ -60,6 +60,7 @@ export interface MobRespawnResult {
 
 export interface MobMemberSnapshot {
   status: string;
+  memberRef?: MobMemberRef;
   outputPreview?: string;
   error?: string;
   tokensUsed: number;
@@ -192,7 +193,7 @@ export class Mob {
 
   async spawnHelper(
     prompt: string,
-    options?: { agentIdentity?: string; roleName?: string; profileName?: string },
+    options: { agentIdentity: string; roleName?: string; profileName?: string },
   ): Promise<MobHelperResult> {
     return this.client.spawnMobHelper(this.mobId, prompt, options);
   }
@@ -200,8 +201,8 @@ export class Mob {
   async forkHelper(
     sourceMemberId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       roleName?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;

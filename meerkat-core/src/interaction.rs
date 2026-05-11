@@ -750,7 +750,7 @@ impl PeerIngressMachinePolicy {
                 let classification = self.classify_request_intent(intent);
                 let lifecycle_peer = classification
                     .lifecycle_kind
-                    .map(|_| peer_lifecycle_subject(params, facts.from_peer.as_str()));
+                    .map(|_| peer_lifecycle_subject(params, &facts.from_peer_id.as_str()));
                 let rendered_text = render_peer_ingress_admitted_text(facts, &classification);
                 PeerIngressAdmission {
                     classification,
@@ -764,7 +764,10 @@ impl PeerIngressMachinePolicy {
                 PeerIngressAdmission {
                     rendered_text: render_peer_ingress_admitted_text(facts, &classification),
                     classification,
-                    lifecycle_peer: Some(peer_lifecycle_subject(params, facts.from_peer.as_str())),
+                    lifecycle_peer: Some(peer_lifecycle_subject(
+                        params,
+                        &facts.from_peer_id.as_str(),
+                    )),
                     request_id: None,
                 }
             }
@@ -846,6 +849,25 @@ pub fn render_peer_ingress_admitted_text(
 
 /// Extract the lifecycle subject from typed request/lifecycle parameters.
 pub fn peer_lifecycle_subject(params: &Value, fallback_peer: &str) -> String {
+    params
+        .get("peer_spec")
+        .and_then(|spec| spec.get("peer_id"))
+        .and_then(Value::as_str)
+        .filter(|peer_id| !peer_id.is_empty())
+        .filter(|peer_id| PeerId::parse(peer_id).is_ok())
+        .or_else(|| {
+            params
+                .get("peer")
+                .and_then(Value::as_str)
+                .filter(|peer| !peer.is_empty())
+        })
+        .unwrap_or(fallback_peer)
+        .to_string()
+}
+
+/// Extract the legacy display lifecycle subject without treating it as a
+/// canonical owner. Runtime-backed ingress should prefer [`peer_lifecycle_subject`].
+pub fn legacy_peer_lifecycle_subject(params: &Value, fallback_peer: &str) -> String {
     params
         .get("peer")
         .and_then(Value::as_str)

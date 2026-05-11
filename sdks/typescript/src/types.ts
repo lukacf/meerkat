@@ -68,8 +68,8 @@ export interface SourceHealthSnapshot {
 
 /** Diagnostic details for a single quarantined skill entry. */
 export interface SkillQuarantineDiagnostic {
-  readonly sourceUuid: string;
-  readonly skillId: string;
+  readonly key?: SkillKey;
+  readonly identityHint: string;
   readonly location: string;
   readonly errorCode: string;
   readonly errorClass: string;

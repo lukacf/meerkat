@@ -34,9 +34,9 @@ fn builtin_skill_tools_have_no_slash_string_parsing() {
 }
 
 #[test]
-fn builtin_skill_tools_accept_typed_source_uuid_and_skill_name() {
-    // Every skill tool must accept the `source_uuid` + `skill_name` tuple as
-    // its ingress shape — not a single `id` string.
+fn builtin_skill_tools_accept_typed_skill_key_object() {
+    // Every skill tool must accept one `skill_key` object as its ingress shape,
+    // not a single `id` string or decomposed sibling key fields.
     for file in [
         "src/builtin/skills/load.rs",
         "src/builtin/skills/resources.rs",
@@ -44,12 +44,16 @@ fn builtin_skill_tools_accept_typed_source_uuid_and_skill_name() {
     ] {
         let body = read(file);
         assert!(
+            body.contains("skill_key: SkillKeyInput"),
+            "{file} must expose skill identity as one skill_key object",
+        );
+        assert!(
             body.contains("SourceUuid::parse"),
-            "{file} must parse source_uuid via SourceUuid::parse at ingress",
+            "{file} must parse skill_key.source_uuid via SourceUuid::parse at ingress",
         );
         assert!(
             body.contains("SkillName::parse"),
-            "{file} must parse skill_name via SkillName::parse at ingress",
+            "{file} must parse skill_key.skill_name via SkillName::parse at ingress",
         );
     }
 }

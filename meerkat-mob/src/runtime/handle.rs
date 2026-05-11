@@ -172,7 +172,7 @@ pub struct MobMemberListEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) transport_public_key: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) external_peer_specs: BTreeMap<AgentIdentity, TrustedPeerDescriptor>,
+    pub(crate) external_peer_specs: BTreeMap<PeerId, TrustedPeerDescriptor>,
     #[serde(skip)]
     pub(crate) current_session_id: Option<SessionId>,
     #[serde(skip)]
@@ -1726,12 +1726,7 @@ impl MobHandle {
 
         for wired_peer in &entry.wired_to {
             let wired_peer_meerkat = MeerkatId::from(wired_peer);
-            let matched = if let Some(spec) = entry.external_peer_specs.get(&wired_peer_meerkat) {
-                peers_by_id
-                    .get(&spec.peer_id)
-                    .copied()
-                    .or_else(|| peers_by_name.get(spec.name.as_str()).copied())
-            } else {
+            let matched = {
                 let local_entry = roster_snapshot.get(&wired_peer_meerkat);
                 let live_peer_id = match local_entry
                     .and_then(|peer_entry| peer_entry.member_ref.bridge_session_id())
@@ -1756,6 +1751,25 @@ impl MobHandle {
                             .and_then(|name| peers_by_name.get(name.as_str()).copied())
                     })
             };
+
+            match matched {
+                Some(peer) => match peer.reachability {
+                    PeerReachability::Reachable => reachable_peer_count += 1,
+                    PeerReachability::Unknown => unknown_peer_count += 1,
+                    PeerReachability::Unreachable => unreachable_peers.push(MobUnreachablePeer {
+                        peer: peer.name.as_string(),
+                        reason: peer.last_unreachable_reason,
+                    }),
+                },
+                None => unknown_peer_count += 1,
+            }
+        }
+
+        for spec in entry.external_peer_specs.values() {
+            let matched = peers_by_id
+                .get(&spec.peer_id)
+                .copied()
+                .or_else(|| peers_by_name.get(spec.name.as_str()).copied());
 
             match matched {
                 Some(peer) => match peer.reachability {

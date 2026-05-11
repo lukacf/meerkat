@@ -43,6 +43,12 @@ use tokio::sync::mpsc;
 
 use futures::StreamExt;
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpToolHandler {
+    Callback,
+}
+
 fn runtime_driver_error_to_session_error(err: meerkat_runtime::RuntimeDriverError) -> SessionError {
     SessionError::Agent(meerkat_core::error::AgentError::InternalError(
         err.to_string(),
@@ -120,14 +126,29 @@ pub struct McpToolDef {
     pub description: String,
     /// JSON Schema for tool input
     pub input_schema: Value,
-    /// Handler type: "callback" means the tool result will be provided via meerkat_resume
-    #[serde(default)]
-    pub handler: Option<String>,
+    /// Handler type. Callback tools pause the agent until the MCP client returns a result.
+    pub handler: McpToolHandler,
 }
 
 impl McpToolDef {
-    pub fn handler_kind(&self) -> &str {
-        self.handler.as_deref().unwrap_or("callback")
+    pub fn handler_kind(&self) -> McpToolHandler {
+        self.handler
+    }
+
+    fn callback_tool_def(&self) -> ToolDef {
+        ToolDef {
+            name: self.name.clone().into(),
+            description: self.description.clone(),
+            input_schema: self.input_schema.clone(),
+            provenance: Some(mcp_callback_tool_provenance(&self.name)),
+        }
+    }
+}
+
+fn mcp_callback_tool_provenance(tool_name: &str) -> meerkat_core::types::ToolProvenance {
+    meerkat_core::types::ToolProvenance {
+        kind: meerkat_core::types::ToolSourceKind::Callback,
+        source_id: format!("mcp-server:{tool_name}").into(),
     }
 }
 
@@ -509,15 +530,67 @@ pub struct MeerkatMcpState {
 }
 
 struct SessionEventStreamHandle {
+    session_id: meerkat::SessionId,
     stream: Mutex<meerkat_core::EventStream>,
 }
 
 #[cfg(feature = "mob")]
 enum MobEventStreamInner {
     /// Per-member agent event stream.
-    Member(Mutex<meerkat_core::comms::EventStream>),
+    Member {
+        mob_id: meerkat_mob::MobId,
+        stream: Mutex<meerkat_core::comms::EventStream>,
+    },
     /// Mob-wide attributed event stream.
-    MobWide(Mutex<meerkat_mob::MobEventRouterHandle>),
+    MobWide {
+        mob_id: meerkat_mob::MobId,
+        router: Mutex<meerkat_mob::MobEventRouterHandle>,
+    },
+}
+
+#[cfg(feature = "mob")]
+impl MobEventStreamInner {
+    fn mob_id(&self) -> &meerkat_mob::MobId {
+        match self {
+            Self::Member { mob_id, .. } | Self::MobWide { mob_id, .. } => mob_id,
+        }
+    }
+}
+
+fn mcp_session_stream_id(session_id: &meerkat::SessionId) -> String {
+    format!("session:{session_id}:{}", meerkat::SessionId::new())
+}
+
+fn parse_mcp_session_stream_id(raw: &str) -> Result<meerkat::SessionId, String> {
+    let mut parts = raw.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("session"), Some(session_id), Some(nonce), None) => {
+            let session_id =
+                meerkat::SessionId::parse(session_id).map_err(invalid_session_id_message)?;
+            let _nonce = meerkat::SessionId::parse(nonce)
+                .map_err(|err| format!("invalid stream nonce: {err}"))?;
+            Ok(session_id)
+        }
+        _ => Err("stream_id must be a session-owned stream handle".to_string()),
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mcp_mob_stream_id(mob_id: &meerkat_mob::MobId) -> String {
+    format!("mob:{mob_id}:{}", meerkat::SessionId::new())
+}
+
+#[cfg(feature = "mob")]
+fn parse_mcp_mob_stream_id(raw: &str) -> Result<meerkat_mob::MobId, String> {
+    let mut parts = raw.split(':');
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some("mob"), Some(mob_id), Some(nonce), None) => {
+            let _nonce = meerkat::SessionId::parse(nonce)
+                .map_err(|err| format!("invalid stream nonce: {err}"))?;
+            Ok(meerkat_mob::MobId::from(mob_id))
+        }
+        _ => Err("stream_id must be a mob-owned stream handle".to_string()),
+    }
 }
 
 impl MeerkatMcpState {
@@ -1342,19 +1415,7 @@ async fn compose_run_external_tool_dispatchers(
 }
 
 fn recoverable_callback_tool_defs(tools: &[McpToolDef]) -> Vec<ToolDef> {
-    tools
-        .iter()
-        .filter(|tool| tool.handler_kind() == "callback")
-        .map(|tool| ToolDef {
-            name: tool.name.clone().into(),
-            description: tool.description.clone(),
-            input_schema: tool.input_schema.clone(),
-            provenance: Some(meerkat_core::types::ToolProvenance {
-                kind: meerkat_core::types::ToolSourceKind::Builtin,
-                source_id: "mcp-server".into(),
-            }),
-        })
-        .collect()
+    tools.iter().map(McpToolDef::callback_tool_def).collect()
 }
 
 fn post_commit_session_created_error(
@@ -2488,10 +2549,11 @@ async fn handle_meerkat_event_stream_open(
         .subscribe_session_events(&session_id)
         .await
         .map_err(|e| format!("Failed to open session event stream: {e}"))?;
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = mcp_session_stream_id(&session_id);
     state.session_event_streams.lock().await.insert(
         stream_id.clone(),
         Arc::new(SessionEventStreamHandle {
+            session_id: session_id.clone(),
             stream: Mutex::new(stream),
         }),
     );
@@ -2506,6 +2568,8 @@ async fn handle_meerkat_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamReadInput,
 ) -> Result<Value, String> {
+    let expected_session_id = parse_mcp_session_stream_id(&input.stream_id)
+        .map_err(|reason| format!("Invalid stream_id: {} ({reason})", input.stream_id))?;
     let handle = state
         .session_event_streams
         .lock()
@@ -2513,6 +2577,12 @@ async fn handle_meerkat_event_stream_read(
         .get(&input.stream_id)
         .cloned()
         .ok_or_else(|| format!("Stream not found: {}", input.stream_id))?;
+    if handle.session_id != expected_session_id {
+        return Err(format!(
+            "Invalid stream_id: {} (stream owner does not match active session)",
+            input.stream_id
+        ));
+    }
 
     let timeout_ms = if input.no_timeout {
         None
@@ -2570,11 +2640,18 @@ async fn handle_meerkat_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatSessionEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .session_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
+    let expected_session_id = parse_mcp_session_stream_id(&input.stream_id)
+        .map_err(|reason| format!("Invalid stream_id: {} ({reason})", input.stream_id))?;
+    let mut streams = state.session_event_streams.lock().await;
+    if let Some(handle) = streams.get(&input.stream_id)
+        && handle.session_id != expected_session_id
+    {
+        return Err(format!(
+            "Invalid stream_id: {} (stream owner does not match active session)",
+            input.stream_id
+        ));
+    }
+    let removed = streams.remove(&input.stream_id);
     Ok(wrap_tool_payload(json!({
         "stream_id": input.stream_id,
         "closed": removed.is_some()
@@ -2587,7 +2664,7 @@ async fn handle_meerkat_mob_event_stream_open(
     input: MeerkatMobEventStreamOpenInput,
 ) -> Result<Value, String> {
     let mob_id = meerkat_mob::MobId::from(input.mob_id.as_str());
-    let stream_id = meerkat::SessionId::new().to_string();
+    let stream_id = mcp_mob_stream_id(&mob_id);
 
     let inner = if let Some(member_id) = &input.member_id {
         let identity = meerkat_mob::AgentIdentity::from(member_id.as_str());
@@ -2596,14 +2673,20 @@ async fn handle_meerkat_mob_event_stream_open(
             .subscribe_agent_events(&mob_id, &identity)
             .await
             .map_err(|e| format!("Failed to subscribe to member events: {e}"))?;
-        MobEventStreamInner::Member(Mutex::new(stream))
+        MobEventStreamInner::Member {
+            mob_id: mob_id.clone(),
+            stream: Mutex::new(stream),
+        }
     } else {
         let router_handle = state
             .mob_state
             .subscribe_mob_events(&mob_id)
             .await
             .map_err(|e| format!("Failed to subscribe to mob events: {e}"))?;
-        MobEventStreamInner::MobWide(Mutex::new(router_handle))
+        MobEventStreamInner::MobWide {
+            mob_id: mob_id.clone(),
+            router: Mutex::new(router_handle),
+        }
     };
 
     state
@@ -2624,6 +2707,8 @@ async fn handle_meerkat_mob_event_stream_read(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamReadInput,
 ) -> Result<Value, String> {
+    let expected_mob_id = parse_mcp_mob_stream_id(&input.stream_id)
+        .map_err(|reason| format!("Invalid stream_id: {} ({reason})", input.stream_id))?;
     let handle = state
         .mob_event_streams
         .lock()
@@ -2631,6 +2716,12 @@ async fn handle_meerkat_mob_event_stream_read(
         .get(&input.stream_id)
         .cloned()
         .ok_or_else(|| format!("Mob event stream not found: {}", input.stream_id))?;
+    if handle.mob_id() != &expected_mob_id {
+        return Err(format!(
+            "Invalid stream_id: {} (stream owner does not match active mob)",
+            input.stream_id
+        ));
+    }
 
     let timeout_ms = if input.no_timeout {
         None
@@ -2639,9 +2730,9 @@ async fn handle_meerkat_mob_event_stream_read(
     };
 
     match handle.as_ref() {
-        MobEventStreamInner::Member(stream_mutex) => {
+        MobEventStreamInner::Member { stream, .. } => {
             let next_event = {
-                let mut stream = stream_mutex.lock().await;
+                let mut stream = stream.lock().await;
                 match timeout_ms {
                     None => stream.next().await,
                     Some(ms) => {
@@ -2685,9 +2776,9 @@ async fn handle_meerkat_mob_event_stream_read(
                 }
             }
         }
-        MobEventStreamInner::MobWide(router_mutex) => {
+        MobEventStreamInner::MobWide { router, .. } => {
             let next_event = {
-                let mut router_handle = router_mutex.lock().await;
+                let mut router_handle = router.lock().await;
                 match timeout_ms {
                     None => router_handle.event_rx.recv().await,
                     Some(ms) => {
@@ -2739,11 +2830,18 @@ async fn handle_meerkat_mob_event_stream_close(
     state: &MeerkatMcpState,
     input: MeerkatMobEventStreamCloseInput,
 ) -> Result<Value, String> {
-    let removed = state
-        .mob_event_streams
-        .lock()
-        .await
-        .remove(&input.stream_id);
+    let expected_mob_id = parse_mcp_mob_stream_id(&input.stream_id)
+        .map_err(|reason| format!("Invalid stream_id: {} ({reason})", input.stream_id))?;
+    let mut streams = state.mob_event_streams.lock().await;
+    if let Some(handle) = streams.get(&input.stream_id)
+        && handle.mob_id() != &expected_mob_id
+    {
+        return Err(format!(
+            "Invalid stream_id: {} (stream owner does not match active mob)",
+            input.stream_id
+        ));
+    }
+    let removed = streams.remove(&input.stream_id);
     Ok(wrap_tool_payload(json!({
         "stream_id": input.stream_id,
         "closed": removed.is_some()
@@ -3999,33 +4097,24 @@ use meerkat::{AgentToolDispatcher, Message, ToolDef};
 /// by returning a special error that signals the MCP client needs to handle the tool call
 pub struct MpcToolDispatcher {
     tools: Arc<[Arc<ToolDef>]>,
-    callback_tools: HashSet<String>,
+    callback_tools: BTreeMap<meerkat_core::types::ToolName, meerkat_core::types::ToolProvenance>,
 }
 
 impl MpcToolDispatcher {
     /// Create a new tool dispatcher from MCP tool definitions
     pub fn new(mcp_tools: &[McpToolDef]) -> Self {
+        let mut callback_tools = BTreeMap::new();
         let tools: Arc<[Arc<ToolDef>]> = mcp_tools
             .iter()
             .map(|t| {
-                Arc::new(ToolDef {
-                    name: t.name.clone().into(),
-                    description: t.description.clone(),
-                    input_schema: t.input_schema.clone(),
-                    provenance: Some(meerkat_core::types::ToolProvenance {
-                        kind: meerkat_core::types::ToolSourceKind::Builtin,
-                        source_id: "mcp-server".into(),
-                    }),
-                })
+                let tool = t.callback_tool_def();
+                if let Some(provenance) = tool.provenance.clone() {
+                    callback_tools.insert(tool.name.clone(), provenance);
+                }
+                Arc::new(tool)
             })
             .collect::<Vec<_>>()
             .into();
-
-        let callback_tools = mcp_tools
-            .iter()
-            .filter(|t| t.handler_kind() == "callback")
-            .map(|t| t.name.clone())
-            .collect();
 
         Self {
             tools,
@@ -4040,14 +4129,47 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         Arc::clone(&self.tools)
     }
 
+    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
+        meerkat_core::ToolCatalogCapabilities {
+            exact_catalog: true,
+            may_require_catalog_control_plane: false,
+        }
+    }
+
+    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
+        self.tools
+            .iter()
+            .map(|tool| {
+                if let Some(stable_owner_key) =
+                    meerkat_core::tool_catalog::stable_owner_key_for_tool(tool)
+                {
+                    meerkat_core::ToolCatalogEntry::session_deferred(
+                        Arc::clone(tool),
+                        true,
+                        stable_owner_key,
+                    )
+                } else {
+                    meerkat_core::ToolCatalogEntry::session_inline(Arc::clone(tool), true)
+                }
+            })
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     async fn dispatch(
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let args: Value = serde_json::from_str(call.args.get())
             .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-        // Check if this is a callback tool
-        if self.callback_tools.contains(call.name) {
+        let call_name = meerkat_core::types::ToolName::from(call.name);
+        let Some(expected_provenance) = self.callback_tools.get(&call_name) else {
+            return Err(ToolError::not_found(call.name));
+        };
+        let Some(tool) = self.tools.iter().find(|tool| tool.name == call.name) else {
+            return Err(ToolError::not_found(call.name));
+        };
+        if tool.provenance.as_ref() == Some(expected_provenance) {
             // Return a special error that signals the agent loop should pause
             Err(ToolError::callback_pending(call.name, args))
         } else {
@@ -4228,7 +4350,9 @@ mod tests {
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        definition.mark_owner_bridge_session_indexed(
+            meerkat::SessionId::parse(owner_session_id).expect("valid owner session id"),
+        );
         let events = Arc::new(McpFailClearEventStore::new());
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)
@@ -4771,6 +4895,7 @@ mod tests {
                 {
                     "name": "get_weather",
                     "description": "Get weather for a city",
+                    "handler": "callback",
                     "input_schema": {
                         "type": "object",
                         "properties": {
@@ -4786,7 +4911,24 @@ mod tests {
         assert_eq!(input.prompt, "Hello");
         assert_eq!(input.tools.len(), 1);
         assert_eq!(input.tools[0].name, "get_weather");
-        assert_eq!(input.tools[0].handler_kind(), "callback"); // default
+        assert_eq!(input.tools[0].handler_kind(), McpToolHandler::Callback);
+    }
+
+    #[test]
+    fn test_meerkat_run_input_rejects_callback_tool_without_handler() {
+        let input_json = json!({
+            "prompt": "Hello",
+            "tools": [
+                {
+                    "name": "get_weather",
+                    "description": "Get weather for a city",
+                    "input_schema": {"type": "object"}
+                }
+            ]
+        });
+
+        serde_json::from_value::<MeerkatRunInput>(input_json)
+            .expect_err("callback tool handler ownership must be explicit");
     }
 
     #[test]
@@ -4894,13 +5036,13 @@ mod tests {
                 name: "get_weather".into(),
                 description: "Get weather".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
-                handler: Some("callback".to_string()),
+                handler: McpToolHandler::Callback,
             },
             McpToolDef {
                 name: "search".into(),
                 description: "Search".to_string(),
                 input_schema: meerkat_tools::empty_object_schema(),
-                handler: Some("callback".to_string()),
+                handler: McpToolHandler::Callback,
             },
         ];
 
@@ -4910,6 +5052,34 @@ mod tests {
         assert_eq!(tool_defs.len(), 2);
         assert_eq!(tool_defs[0].name, "get_weather");
         assert_eq!(tool_defs[1].name, "search");
+        assert_eq!(
+            tool_defs[0]
+                .provenance
+                .as_ref()
+                .map(|p| (&p.kind, p.source_id.as_str())),
+            Some((
+                &meerkat_core::types::ToolSourceKind::Callback,
+                "mcp-server:get_weather"
+            ))
+        );
+        let catalog = dispatcher.tool_catalog();
+        assert!(matches!(
+            catalog[0].deferred_eligibility,
+            meerkat_core::ToolCatalogDeferredEligibility::DeferredEligible { .. }
+        ));
+    }
+
+    #[test]
+    fn test_mcp_tool_def_rejects_unknown_handler() {
+        let tool = json!({
+            "name": "get_weather",
+            "description": "Get weather",
+            "input_schema": {"type": "object"},
+            "handler": "builtin"
+        });
+
+        serde_json::from_value::<McpToolDef>(tool)
+            .expect_err("unknown handler strings must not become callback authority");
     }
 
     #[tokio::test]
@@ -4918,7 +5088,7 @@ mod tests {
             name: "get_weather".into(),
             description: "Get weather".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
-            handler: Some("callback".to_string()),
+            handler: McpToolHandler::Callback,
         }];
 
         let dispatcher = MpcToolDispatcher::new(&mcp_tools);
@@ -5235,13 +5405,13 @@ mod tests {
             name: "primary_callback".to_string(),
             description: "Primary callback".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
-            handler: Some("callback".to_string()),
+            handler: McpToolHandler::Callback,
         };
         let duplicate_secondary = McpToolDef {
             name: "duplicate_secondary".to_string(),
             description: "Duplicate secondary callback".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
-            handler: Some("callback".to_string()),
+            handler: McpToolHandler::Callback,
         };
         let primary =
             Arc::new(MpcToolDispatcher::new(&[primary_tool])) as Arc<dyn AgentToolDispatcher>;
@@ -6835,11 +7005,13 @@ mod tests {
     async fn test_event_stream_read_default_timeout_and_close_behavior() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-timeout-default".to_string();
+        let session_id = meerkat::SessionId::new();
+        let stream_id = mcp_session_stream_id(&session_id);
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
             stream_id.clone(),
             Arc::new(SessionEventStreamHandle {
+                session_id,
                 stream: Mutex::new(pending_stream),
             }),
         );
@@ -6857,7 +7029,7 @@ mod tests {
         let closed = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-timeout-default" }),
+            &json!({ "stream_id": stream_id }),
         ))
         .await
         .expect("close should succeed");
@@ -6866,14 +7038,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_event_stream_rejects_raw_local_stream_handle() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let err = Box::pin(handle_tools_call(
+            &state,
+            "meerkat_event_stream_close",
+            &json!({ "stream_id": "00000000-0000-0000-0000-000000000000" }),
+        ))
+        .await
+        .expect_err("raw UUID stream handles must fail closed");
+        assert!(
+            err.message.contains("session-owned stream handle"),
+            "unexpected error: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test]
     async fn test_event_stream_read_no_timeout_opt_in_blocks() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-no-timeout".to_string();
+        let session_id = meerkat::SessionId::new();
+        let stream_id = mcp_session_stream_id(&session_id);
         let pending_stream: meerkat_core::EventStream = Box::pin(stream::pending());
         state.session_event_streams.lock().await.insert(
             stream_id.clone(),
             Arc::new(SessionEventStreamHandle {
+                session_id,
                 stream: Mutex::new(pending_stream),
             }),
         );
@@ -6894,11 +7087,13 @@ mod tests {
     async fn test_event_stream_read_empty_stream_reports_closed_and_removes_entry() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let state = MeerkatMcpState::new_with_store(store).await;
-        let stream_id = "stream-closed".to_string();
+        let session_id = meerkat::SessionId::new();
+        let stream_id = mcp_session_stream_id(&session_id);
         let empty_stream: meerkat_core::EventStream = Box::pin(stream::empty());
         state.session_event_streams.lock().await.insert(
             stream_id.clone(),
             Arc::new(SessionEventStreamHandle {
+                session_id,
                 stream: Mutex::new(empty_stream),
             }),
         );
@@ -6916,7 +7111,7 @@ mod tests {
         let close = Box::pin(handle_tools_call(
             &state,
             "meerkat_event_stream_close",
-            &json!({ "stream_id": "stream-closed" }),
+            &json!({ "stream_id": stream_id }),
         ))
         .await
         .expect("close should succeed");

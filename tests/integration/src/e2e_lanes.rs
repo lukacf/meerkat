@@ -162,6 +162,11 @@ const WEB_RUNTIME_BUILD_IF_STALE: &[&str] = &[
     "wasm_dir=\"${MEERKAT_WEB_WASM_OUT_DIR:-../../../sdks/web/wasm}\"; if test \"${MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT:-0}\" = 1; then test -f \"${wasm_dir}/meerkat_web_runtime.js\" && test -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || { echo \"missing assumed prebuilt web WASM bundle in ${wasm_dir}\" >&2; exit 1; }; elif test ! -f \"${wasm_dir}/meerkat_web_runtime.js\" || test ! -f \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" || test -n \"$(find ../../../meerkat-web-runtime ../../../sdks/web/src ../../../sdks/web/scripts ../../../sdks/web/package.json ../../../sdks/web/tsconfig.json -type f -newer \"${wasm_dir}/meerkat_web_runtime_bg.wasm\" -print -quit)\"; then npm --prefix ../../../sdks/web run build; fi",
 ];
 
+const WEB_RUNTIME_E2E_ENV: &[(&str, &str)] = &[
+    ("CARGO_BUILD_JOBS", "1"),
+    ("MEERKAT_WEB_WASM_PROFILE", "dev"),
+];
+
 const MEERKAT_E2E_EXECUTION_MODE: &str = "MEERKAT_E2E_EXECUTION_MODE";
 const MEERKAT_E2E_ARTIFACT_MANIFEST: &str = "MEERKAT_E2E_ARTIFACT_MANIFEST";
 
@@ -3140,7 +3145,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: WEB_RUNTIME_E2E_ENV,
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -3172,7 +3177,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: WEB_RUNTIME_E2E_ENV,
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -3204,7 +3209,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: WEB_RUNTIME_E2E_ENV,
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -3236,7 +3241,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: WEB_RUNTIME_E2E_ENV,
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -3922,7 +3927,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             command: CommandSpec::CargoTest {
                 package: "meerkat-comms",
                 test_target: "e2e",
-                test_name: "e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop",
+                test_name: "e2e_smoke_mcp_multimodal_blob_request_response_loop",
                 features: &["integration-real-tests"],
                 all_features: false,
             },

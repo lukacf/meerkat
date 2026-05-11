@@ -2238,7 +2238,7 @@ mod tests {
                 provider: "openai".into(),
                 auth_method: "external_authorizer".into(),
                 source: CredentialSourceSpec::ExternalResolver {
-                    handle: "external-openai".into(),
+                    handle: meerkat_core::ExternalAuthResolverId::parse("external-openai").unwrap(),
                 },
                 constraints: Default::default(),
                 metadata_defaults: Default::default(),
@@ -2585,7 +2585,8 @@ mod tests {
             .config_runtime
             .set(
                 config_with_openai_oauth_binding(CredentialSourceSpec::ExternalResolver {
-                    handle: "external-chatgpt".into(),
+                    handle: meerkat_core::ExternalAuthResolverId::parse("external-chatgpt")
+                        .unwrap(),
                 }),
                 None,
             )
@@ -3907,7 +3908,8 @@ mod tests {
             .config_runtime
             .set(
                 config_with_openai_oauth_binding(CredentialSourceSpec::ExternalResolver {
-                    handle: "external-chatgpt".into(),
+                    handle: meerkat_core::ExternalAuthResolverId::parse("external-chatgpt")
+                        .unwrap(),
                 }),
                 None,
             )

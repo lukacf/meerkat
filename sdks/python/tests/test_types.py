@@ -1944,6 +1944,25 @@ async def test_client_read_session_parses_details_shape():
     }
 
 
+def test_resolved_model_capabilities_rejects_projection_defaults():
+    assert MeerkatClient._parse_resolved_model_capabilities(None) is None
+    assert MeerkatClient._parse_resolved_model_capabilities({"vision": True}) is None
+    assert (
+        MeerkatClient._parse_resolved_model_capabilities(
+            {
+                "vision": "true",
+                "image_input": False,
+                "image_tool_results": False,
+                "inline_video": False,
+                "realtime": False,
+                "web_search": False,
+                "image_generation": False,
+            }
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_methods():
     client = MeerkatClient()

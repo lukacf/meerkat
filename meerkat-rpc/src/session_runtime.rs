@@ -61,8 +61,8 @@ use meerkat_core::{
 use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
-    RuntimeState, SessionLlmCapabilitySurface, SessionLlmCapabilitySurfaceStatus,
-    SessionLlmReconfigureHost, SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
+    RuntimeState, SessionLlmCapabilitySurfaceStatus, SessionLlmReconfigureHost,
+    SessionLlmReconfigureRequest, SessionServiceRuntimeExt,
 };
 use tokio::sync::{Mutex, Notify, RwLock, broadcast, mpsc};
 
@@ -1152,24 +1152,6 @@ fn unsupported_model_capability_rpc_error(
         code: error::INVALID_PARAMS,
         message: evidence.to_string(),
         data: Some(evidence.details()),
-    }
-}
-
-fn profile_to_capability_surface(
-    profile: &meerkat_models::profile::ModelProfile,
-) -> SessionLlmCapabilitySurface {
-    SessionLlmCapabilitySurface {
-        supports_temperature: profile.supports_temperature,
-        supports_thinking: profile.supports_thinking,
-        supports_reasoning: profile.supports_reasoning,
-        inline_video: profile.inline_video,
-        vision: profile.vision,
-        image_input: profile.image_input,
-        image_tool_results: profile.image_tool_results,
-        supports_web_search: profile.supports_web_search,
-        image_generation: profile.image_generation,
-        realtime: profile.realtime,
-        call_timeout_secs: profile.call_timeout_secs,
     }
 }
 
@@ -3078,19 +3060,9 @@ impl SessionRuntime {
         })
     }
 
-    async fn wire_resolved_capabilities_for_identity(
-        &self,
-        identity: &SessionLlmIdentity,
-    ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
-        let registry = self.model_registry().await.ok()?;
-        let profile = registry.profile_for_provider(identity.provider, &identity.model)?;
-        Some(profile_to_capability_surface(&profile).to_wire_resolved())
-    }
-
     async fn wire_resolved_capabilities_for_session(
         &self,
         session_id: &SessionId,
-        identity: &SessionLlmIdentity,
     ) -> Option<meerkat_contracts::WireResolvedModelCapabilities> {
         if let Ok(Some(surface)) = self
             .runtime_adapter
@@ -3099,25 +3071,15 @@ impl SessionRuntime {
         {
             return Some(surface.to_wire_resolved());
         }
-
-        self.wire_resolved_capabilities_for_identity(identity).await
+        None
     }
 
     async fn attach_resolved_capabilities_to_wire_info(
         &self,
         info: &mut meerkat_contracts::WireSessionInfo,
     ) {
-        let provider = meerkat_core::Provider::parse_strict(&info.provider)
-            .unwrap_or(meerkat_core::Provider::Other);
-        let identity = SessionLlmIdentity {
-            model: info.model.clone(),
-            provider,
-            self_hosted_server_id: None,
-            provider_params: None,
-            auth_binding: None,
-        };
         info.resolved_capabilities = self
-            .wire_resolved_capabilities_for_session(&info.session_id, &identity)
+            .wire_resolved_capabilities_for_session(&info.session_id)
             .await;
     }
 
@@ -6487,9 +6449,7 @@ impl SessionRuntime {
                 model: info.effective_llm_identity.model.clone(),
                 provider: info.effective_llm_identity.provider.as_str().to_string(),
                 last_assistant_text: None,
-                resolved_capabilities: self
-                    .wire_resolved_capabilities_for_identity(&info.effective_llm_identity)
-                    .await,
+                resolved_capabilities: None,
                 labels: info.labels,
             };
             self.attach_resolved_capabilities_to_wire_info(&mut wire)
@@ -18570,7 +18530,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_session_read_reports_effective_llm_identity() {
+    async fn pending_session_read_reports_identity_without_capability_projection() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -18585,23 +18545,14 @@ mod tests {
             .expect("pending session should be readable");
         assert_eq!(info.model, "claude-sonnet-4-5");
         assert_eq!(info.provider, "anthropic");
-        let capabilities = info
-            .resolved_capabilities
-            .expect("pending sessions should expose resolved capabilities");
-        assert!(capabilities.vision);
-        assert!(capabilities.image_input);
-        assert!(capabilities.image_tool_results);
-        assert!(!capabilities.inline_video);
-        assert!(!capabilities.realtime);
-        assert!(capabilities.web_search);
         assert!(
-            !capabilities.image_generation,
-            "Anthropic sessions should not advertise auto image generation"
+            info.resolved_capabilities.is_none(),
+            "pending sessions must not project registry capabilities as runtime authority"
         );
     }
 
     #[tokio::test]
-    async fn pending_realtime_session_read_reports_realtime_capability() {
+    async fn pending_realtime_session_read_does_not_project_realtime_capability() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
 
@@ -18614,18 +18565,12 @@ mod tests {
             .read_session_rich(&session_id)
             .await
             .expect("pending realtime session should be readable");
-        let capabilities = info
-            .resolved_capabilities
-            .expect("realtime session should expose resolved capabilities");
         assert_eq!(info.model, "gpt-realtime-2");
         assert_eq!(info.provider, "openai");
-        assert!(capabilities.realtime);
-        // gpt-realtime-2 accepts text + audio + image input per
-        // OpenAI's model docs; the catalog row sets `vision: true`
-        // and the surface projection mirrors that as `image_input`.
-        assert!(capabilities.image_input);
-        assert!(!capabilities.image_tool_results);
-        assert!(!capabilities.web_search);
+        assert!(
+            info.resolved_capabilities.is_none(),
+            "pending realtime sessions must not project registry capabilities as runtime authority"
+        );
     }
 
     /// Wave-3 regression: a deferred session created with no first turn lives

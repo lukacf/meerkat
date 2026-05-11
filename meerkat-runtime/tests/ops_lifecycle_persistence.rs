@@ -9,7 +9,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreExecutorError}
 use meerkat_core::lifecycle::run_primitive::{RunApplyBoundary, RunPrimitive};
 use meerkat_core::lifecycle::{CoreExecutor, RunId};
 use meerkat_core::ops_lifecycle::{
-    OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
+    OperationKind, OperationResult, OperationSpec, OperationStatus, OpsLifecycleRegistry,
 };
 use meerkat_core::runtime_epoch::{EpochCursorState, RuntimeEpochId};
 use meerkat_core::types::SessionId;
@@ -581,6 +581,19 @@ async fn terminal_transition_surfaces_store_write_failure_after_persistence_requ
         store.persist_calls(),
         1,
         "terminal transition should wait for the accepted persistence request"
+    );
+    let snapshot = bindings
+        .ops_lifecycle()
+        .snapshot(&op_id)
+        .expect("operation should remain registered after rejected terminal persist");
+    assert_eq!(
+        snapshot.status,
+        OperationStatus::Running,
+        "persistence failure must roll back live terminal authority"
+    );
+    assert!(
+        snapshot.terminal_outcome.is_none(),
+        "persistence failure must not leave terminal outcome truth in live authority"
     );
 }
 

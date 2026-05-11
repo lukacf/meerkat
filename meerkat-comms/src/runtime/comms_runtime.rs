@@ -1275,7 +1275,7 @@ pub struct CommsRuntime {
     interaction_stream_registry: InteractionStreamRegistry,
     peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
     #[allow(dead_code)] // Kept for runtime inspection symmetry with IngressClassificationContext.
-    ingress_policy: Arc<meerkat_core::PeerIngressMachinePolicy>,
+    standalone_ingress: Arc<meerkat_core::PeerIngressCompatibilityAuthority>,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
@@ -1309,12 +1309,14 @@ pub struct CommsRuntime {
 }
 
 impl CommsRuntime {
-    fn ingress_policy_from_silent_intents(
+    fn standalone_ingress_from_silent_intents(
         silent_intents: &Arc<HashSet<String>>,
-    ) -> Arc<meerkat_core::PeerIngressMachinePolicy> {
-        Arc::new(meerkat_core::PeerIngressMachinePolicy::from_silent_intents(
-            silent_intents.iter().cloned(),
-        ))
+    ) -> Arc<meerkat_core::PeerIngressCompatibilityAuthority> {
+        Arc::new(
+            meerkat_core::PeerIngressCompatibilityAuthority::from_silent_intents(
+                silent_intents.iter().cloned(),
+            ),
+        )
     }
 
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
@@ -1376,7 +1378,7 @@ impl CommsRuntime {
         // Single source of truth for trust state — shared by the Router,
         // IngressClassificationContext, and callers of trusted_peers_shared().
         let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         // Build classified inbox using the same trusted_peers Arc
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
@@ -1385,7 +1387,7 @@ impl CommsRuntime {
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: config.inproc_namespace.clone(),
@@ -1423,7 +1425,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1470,14 +1472,14 @@ impl CommsRuntime {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(false));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
@@ -1539,7 +1541,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1607,14 +1609,14 @@ impl CommsRuntime {
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
         let public_key = keypair.public_key();
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(true));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
@@ -1667,7 +1669,7 @@ impl CommsRuntime {
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1721,7 +1723,7 @@ impl CommsRuntime {
 
     /// Require runtime-backed peer ingress to use the installed machine
     /// authority. When enabled, a missing `PeerCommsHandle` fails closed
-    /// instead of using the standalone compatibility policy.
+    /// instead of using the standalone compatibility authority.
     pub fn require_peer_comms_machine_authority(&self) {
         self.require_peer_comms_machine_authority
             .store(true, Ordering::SeqCst);

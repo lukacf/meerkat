@@ -98,11 +98,17 @@ impl LlmClient for RecordingToolClient {
                 .map(|tool| tool.name.to_string())
                 .collect(),
         );
-        Box::pin(stream::iter(vec![Ok(meerkat_client::LlmEvent::Done {
-            outcome: meerkat_client::LlmDoneOutcome::Success {
-                stop_reason: StopReason::EndTurn,
-            },
-        })]))
+        Box::pin(stream::iter(vec![
+            Ok(meerkat_client::LlmEvent::TextDelta {
+                delta: "tools recorded".to_string(),
+                meta: None,
+            }),
+            Ok(meerkat_client::LlmEvent::Done {
+                outcome: meerkat_client::LlmDoneOutcome::Success {
+                    stop_reason: StopReason::EndTurn,
+                },
+            }),
+        ]))
     }
 
     fn provider(&self) -> &'static str {

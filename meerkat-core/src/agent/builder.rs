@@ -12,10 +12,11 @@ use crate::session::{SESSION_TOOL_VISIBILITY_STATE_KEY, Session, SessionToolVisi
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
+#[cfg(test)]
+use crate::tool_scope::LocalToolVisibilityOwner;
 use crate::tool_scope::{
-    EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY,
-    LocalToolVisibilityOwner, ToolFilter, ToolScope, ToolVisibilityOwner,
-    validate_inherited_filter_witnesses,
+    EXTERNAL_TOOL_FILTER_METADATA_KEY, INHERITED_TOOL_FILTER_METADATA_KEY, ToolFilter, ToolScope,
+    ToolVisibilityOwner, validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
 use serde_json::Value;
@@ -358,7 +359,17 @@ impl AgentBuilder {
         T: AgentToolDispatcher + ?Sized,
         S: AgentSessionStore + ?Sized,
     {
-        self.build_inner(client, tools, store).await
+        self.with_test_standalone_visibility_owner()
+            .build_inner(client, tools, store)
+            .await
+    }
+
+    #[cfg(test)]
+    fn with_test_standalone_visibility_owner(mut self) -> Self {
+        if self.tool_visibility_owner.is_none() {
+            self.tool_visibility_owner = Some(Arc::new(LocalToolVisibilityOwner::new()));
+        }
+        self
     }
 
     #[cfg(meerkat_internal_agent_factory_build)]
@@ -406,13 +417,10 @@ impl AgentBuilder {
     {
         let runtime_tool_visibility_owner_required =
             self.requires_explicit_runtime_tool_visibility_owner();
-        let tool_visibility_owner = match self.tool_visibility_owner.clone() {
-            Some(owner) => owner,
-            None if runtime_tool_visibility_owner_required => {
-                return Err(AgentBuildPolicyError::MissingToolVisibilityOwner);
-            }
-            None => Arc::new(LocalToolVisibilityOwner::new()),
-        };
+        let tool_visibility_owner = self
+            .tool_visibility_owner
+            .clone()
+            .ok_or(AgentBuildPolicyError::MissingToolVisibilityOwner)?;
         let mut session = self.session.unwrap_or_default();
         let system_context_state = Arc::new(std::sync::Mutex::new(
             session.system_context_state().unwrap_or_default(),
@@ -1458,6 +1466,33 @@ mod tests {
             result,
             Err(AgentBuildPolicyError::MissingToolVisibilityOwner)
         ));
+    }
+
+    #[tokio::test]
+    async fn direct_builder_requires_explicit_visibility_owner() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let result = AgentBuilder::new().build_inner(client, tools, store).await;
+
+        assert!(matches!(
+            result,
+            Err(AgentBuildPolicyError::MissingToolVisibilityOwner)
+        ));
+    }
+
+    #[tokio::test]
+    async fn standalone_test_builder_installs_local_visibility_owner_explicitly() {
+        let client = Arc::new(MockClient);
+        let tools = Arc::new(MockTools);
+        let store = Arc::new(MockStore);
+
+        let result = AgentBuilder::new()
+            .try_build_standalone(client, tools, store)
+            .await;
+
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

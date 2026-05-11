@@ -267,21 +267,23 @@ impl MeerkatMachine {
                     None => None,
                 };
 
-                let state = self
-                    .existing_session_runtime_state(&session_id)
-                    .await
-                    .unwrap_or(RuntimeState::Destroyed);
-                if matches!(state, RuntimeState::Destroyed | RuntimeState::Running) {
-                    return Err(RuntimeControlPlaneError::InvalidState { state });
-                }
-                let previous_dsl_state = self
+                let previous_dsl_state = match self
                     .stage_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::Recycle,
                         "Recycle",
                     )
                     .await
-                    .map_err(RuntimeControlPlaneError::Internal)?;
+                {
+                    Ok(previous_dsl_state) => previous_dsl_state,
+                    Err(_) => {
+                        let state = self
+                            .existing_session_runtime_state(&session_id)
+                            .await
+                            .unwrap_or(RuntimeState::Destroyed);
+                        return Err(RuntimeControlPlaneError::InvalidState { state });
+                    }
+                };
 
                 let (transferred, active_after_recycle) = {
                     let mut drv = driver.lock().await;

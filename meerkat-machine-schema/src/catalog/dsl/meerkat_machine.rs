@@ -2839,11 +2839,17 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Idle
         }
 
-        // 7. PrepareBindings: different source→target mappings per phase
-        // Initializing → Initializing (no guard, emits RuntimeBound)
+        // 7. PrepareBindings: different source→target mappings per phase.
+        // The DSL owns binding legality and idempotence: an unbound session
+        // claims the runtime id and emits RuntimeBound, while an exact
+        // duplicate binding is a no-op self-loop. A conflicting runtime id has
+        // no matching transition and is rejected by the machine guard set.
+        // Initializing → Initializing (unbound, emits RuntimeBound)
         transition PrepareBindingsInitializing {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Initializing }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
@@ -2851,10 +2857,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Initializing
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
-        // Idle → Attached
+        transition PrepareBindingsInitializingIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Initializing }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Initializing
+        }
+        // Idle → Attached (unbound, emits RuntimeBound)
         transition PrepareBindingsIdle {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
@@ -2862,10 +2878,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Attached
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
-        // Attached → Attached
+        transition PrepareBindingsIdleIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Idle }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Idle
+        }
+        // Attached → Attached (unbound, emits RuntimeBound)
         transition PrepareBindingsAttached {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
@@ -2873,10 +2899,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Attached
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
-        // Running → Running
+        transition PrepareBindingsAttachedIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Attached }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Attached
+        }
+        // Running → Running (unbound, emits RuntimeBound)
         transition PrepareBindingsRunning {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
@@ -2884,10 +2920,20 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
-        // Retired → Retired
+        transition PrepareBindingsRunningIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Running
+        }
+        // Retired → Retired (unbound, emits RuntimeBound)
         transition PrepareBindingsRetired {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
@@ -2895,16 +2941,34 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Retired
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
         }
-        // Stopped → Stopped (inline in hand-written catalog)
+        transition PrepareBindingsRetiredIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Retired }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Retired
+        }
+        // Stopped → Stopped (unbound, emits RuntimeBound)
         transition PrepareBindingsStopped {
             on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
             guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_unbound" { self.active_runtime_id == None }
             update {
                 self.active_runtime_id = Some(agent_runtime_id);
                 self.active_fence_token = Some(fence_token);
             }
             to Stopped
             emit RuntimeBound { agent_runtime_id: self.active_runtime_id.get("value"), fence_token: self.active_fence_token.get("value") }
+        }
+        transition PrepareBindingsStoppedIdempotent {
+            on input PrepareBindings { agent_runtime_id, fence_token, generation, session_id }
+            guard { self.lifecycle_phase == Phase::Stopped }
+            guard "session_matches_current" { self.session_id == Some(session_id) }
+            guard "runtime_binding_idempotent" { self.active_runtime_id == Some(agent_runtime_id) }
+            update {}
+            to Stopped
         }
 
         // 8. SetPeerIngressContext: per-phase self-loop, guard session_registered

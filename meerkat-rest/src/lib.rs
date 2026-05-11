@@ -1791,6 +1791,7 @@ fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
         || req.output_schema.is_some()
         || req.structured_output_retries.is_some()
         || req.hooks_override.is_some()
+        || req.enable_web_search.is_some()
         || req.comms_name.is_some()
         || req.peer_meta.is_some()
 }
@@ -3963,6 +3964,7 @@ async fn create_session_inner(
         max_inline_peer_notifications: None,
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
+        initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
             provider: req.provider.is_some(),
@@ -4795,6 +4797,7 @@ async fn continue_session_inner(
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
+            initial_metadata_entries: std::collections::BTreeMap::new(),
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
@@ -7240,6 +7243,7 @@ mod tests {
                     provider: None,
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7437,6 +7441,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7498,6 +7503,7 @@ mod tests {
                     provider: None,
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7629,6 +7635,7 @@ mod tests {
                 provider: None,
                 max_tokens: Some(state.max_tokens.saturating_add(1)),
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7727,6 +7734,7 @@ mod tests {
                     provider: None,
                     max_tokens: Some(512),
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7854,6 +7862,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7924,6 +7933,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -9710,6 +9720,7 @@ mod tests {
             provider: None,
             max_tokens: None,
             hooks_override: None,
+            enable_web_search: None,
             skill_refs: None,
             flow_tool_overlay: None,
             additional_instructions: None,
@@ -9733,6 +9744,10 @@ mod tests {
             "additional instructions stay on the live path"
         );
         req.additional_instructions = None;
+
+        req.enable_web_search = Some(true);
+        assert!(rest_continue_requires_rebuild(&req));
+        req.enable_web_search = None;
 
         req.comms_name = Some("agent-a".to_string());
         assert!(rest_continue_requires_rebuild(&req));
@@ -9873,6 +9888,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -9950,6 +9966,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10036,6 +10053,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10122,6 +10140,7 @@ mod tests {
                 provider: Some(Provider::Anthropic),
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10200,6 +10219,7 @@ mod tests {
                     provider: Some(Provider::Anthropic),
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

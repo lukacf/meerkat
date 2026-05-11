@@ -36,6 +36,7 @@ use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal}
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
@@ -3727,6 +3728,93 @@ impl SessionRuntime {
             .and_then(|guard| guard.clone())
     }
 
+    async fn active_live_channel_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(
+        Arc<meerkat_live::LiveAdapterHost>,
+        meerkat_live::LiveChannelId,
+    )> {
+        let host = self.live_adapter_host()?;
+        for channel_id in host.active_channels().await {
+            if host
+                .channel_session(&channel_id)
+                .await
+                .is_ok_and(|bound| bound == *session_id)
+            {
+                return Some((host, channel_id));
+            }
+        }
+        None
+    }
+
+    fn live_text_from_runtime_primitive(primitive: &RunPrimitive) -> Option<String> {
+        let mut parts = Vec::new();
+        let prompt = primitive.extract_content_input().text_content();
+        if !prompt.trim().is_empty() {
+            parts.push(prompt);
+        }
+        if let RunPrimitive::StagedInput(staged) = primitive {
+            for append in &staged.context_appends {
+                let text = render_context_append_text(&append.content);
+                if !text.trim().is_empty() {
+                    parts.push(text);
+                }
+            }
+        }
+        let text = parts.join("\n\n").trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Project runtime-routed peer/external input into an active live adapter.
+    ///
+    /// A live-only session can receive peer ingress while the provider-hosted
+    /// realtime conversation is already open. In that case the runtime loop is
+    /// still the admission/receipt authority, but the apply side is the live
+    /// adapter, not a second vanilla LLM turn. The adapter will project the
+    /// resulting provider observations back into canonical session history.
+    pub(crate) async fn try_forward_runtime_primitive_to_live_adapter(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        primitive: &RunPrimitive,
+    ) -> Result<Option<CoreApplyOutput>, String> {
+        let Some((host, channel_id)) = self.active_live_channel_for_session(session_id).await
+        else {
+            return Ok(None);
+        };
+        let Some(text) = Self::live_text_from_runtime_primitive(primitive) else {
+            return Ok(None);
+        };
+
+        host.send_command(
+            &channel_id,
+            meerkat_core::live_adapter::LiveAdapterCommand::SendInput {
+                chunk: meerkat_core::live_adapter::LiveInputChunk::Text { text },
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let message_count = self
+            .load_persisted_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|session| session.messages().len())
+            .unwrap_or(0);
+
+        let receipt = RunBoundaryReceipt {
+            run_id,
+            boundary: primitive.apply_boundary(),
+            contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+            conversation_digest: None,
+            message_count,
+            sequence: 0,
+        };
+        Ok(Some(CoreApplyOutput::without_terminal(receipt, None)))
+    }
+
     /// Phase 4 R1: thin RPC shim — delegates to
     /// `LiveOrchestrator::propagate_config_to_live_channels`.
     ///
@@ -3821,6 +3909,70 @@ impl SessionRuntime {
         self.runtime_adapter
             .update_peer_ingress_context(session_id, true, Some(comms_runtime))
             .await;
+        Ok(())
+    }
+
+    /// Ensure a live controller session can receive ordinary peer ingress.
+    ///
+    /// `live/open` may be the first thing that materializes a deferred
+    /// keep-alive session. That path opens a provider-hosted session but does
+    /// not run a normal `turn/start`, so the usual turn-owned comms drain
+    /// reconciliation never fires. Keep this as runtime-owned wiring: live
+    /// transports only request an opened channel; MeerkatMachine remains the
+    /// peer-ingress lifecycle authority.
+    #[cfg(feature = "comms")]
+    pub async fn ensure_live_peer_ingress(
+        self: &Arc<Self>,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), RpcError> {
+        let keep_alive = self
+            .load_persisted_session(session_id)
+            .await?
+            .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
+            .unwrap_or(false);
+        let peer_ingress_enabled = self
+            .preserve_existing_peer_ingress(session_id, keep_alive)
+            .await;
+        if !peer_ingress_enabled {
+            return Ok(());
+        }
+
+        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+        if owner.is_mob_owned() {
+            tracing::debug!(
+                %session_id,
+                ?owner,
+                "live/open: mob-owned peer ingress already owns the session; skipping session-owned drain reconfigure"
+            );
+            return Ok(());
+        }
+
+        let comms_rt = self.service.comms_runtime(session_id).await;
+        if keep_alive
+            && comms_rt.is_none()
+            && !self.runtime_adapter.session_has_comms(session_id).await
+        {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "keep_alive requires a session created with comms_name".to_string(),
+                data: None,
+            });
+        }
+
+        self.ensure_runtime_executor(session_id).await?;
+        if let Some(comms_rt) = comms_rt {
+            self.runtime_adapter
+                .update_peer_ingress_context(session_id, true, Some(comms_rt))
+                .await;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "comms"))]
+    pub async fn ensure_live_peer_ingress(
+        self: &Arc<Self>,
+        _session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), RpcError> {
         Ok(())
     }
 

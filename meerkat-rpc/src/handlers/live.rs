@@ -152,16 +152,30 @@ fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuity
     }
 }
 
+pub struct LiveOpenHandlerContext<'a> {
+    pub host: &'a LiveAdapterHost,
+    pub live_ws: Option<&'a LiveWsState>,
+    pub live_ws_base_url: Option<&'a str>,
+    #[cfg(feature = "live-webrtc")]
+    pub live_webrtc: Option<&'a LiveWebrtcState>,
+    pub runtime: &'a Arc<SessionRuntime>,
+    pub session_factory: Option<&'a dyn RealtimeSessionFactory>,
+}
+
 pub async fn handle_live_open(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    host: &LiveAdapterHost,
-    live_ws: Option<&LiveWsState>,
-    live_ws_base_url: Option<&str>,
-    #[cfg(feature = "live-webrtc")] live_webrtc: Option<&LiveWebrtcState>,
-    runtime: &Arc<SessionRuntime>,
-    session_factory: Option<&dyn RealtimeSessionFactory>,
+    ctx: LiveOpenHandlerContext<'_>,
 ) -> RpcResponse {
+    let LiveOpenHandlerContext {
+        host,
+        live_ws,
+        live_ws_base_url,
+        #[cfg(feature = "live-webrtc")]
+        live_webrtc,
+        runtime,
+        session_factory,
+    } = ctx;
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
@@ -343,6 +357,11 @@ pub async fn handle_live_open(
                 );
             }
         }
+    }
+
+    if let Err(err) = runtime.ensure_live_peer_ingress(&session_id).await {
+        let _ = host.close_channel(&channel_id).await;
+        return RpcResponse::error(id, err.code, err.message);
     }
 
     #[cfg(feature = "live-webrtc")]

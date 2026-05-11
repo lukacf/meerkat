@@ -6658,6 +6658,7 @@ async fn run_agent(
             } else {
                 Some(instructions)
             },
+            initial_metadata_entries: std::collections::BTreeMap::new(),
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,

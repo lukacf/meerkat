@@ -707,8 +707,8 @@ impl LiveToolDispatcher for AgentLiveToolDispatcher {
 /// Runtime-owned host for live provider adapter sessions.
 ///
 /// This is NOT MeerkatMachine state (dogma: adapter must not become a
-/// second machine). It's a runtime orchestrator that:
-/// - Owns the map of active adapter channels and their adapters
+/// second machine). It is a runtime orchestrator that:
+/// - Delegates channel lifecycle and session occupancy to `LiveChannelAuthority`
 /// - Builds projection snapshots from canonical session state
 /// - Routes adapter observations to the right Meerkat API
 /// - Exposes transport bootstrap info for the surface API
@@ -760,12 +760,302 @@ pub struct LiveAdapterHost {
 pub const DEFAULT_LIVE_TOOL_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct HostInner {
+    channel_authority: LiveChannelAuthority,
+}
+
+/// Narrow owner for live channel lifecycle and session occupancy.
+///
+/// The WebSocket/RPC shell may drive mechanics, but it must not independently
+/// decide which session has an active live channel, when a channel id is
+/// minted, or when a closed channel stops blocking a rebinding. Those facts
+/// live here so every host path observes the same owner.
+#[derive(Default)]
+struct LiveChannelAuthority {
     /// `IndexMap` keeps insertion order stable for `active_channels` (which a
     /// few tests rely on as a deterministic projection).
     channels: IndexMap<LiveChannelId, ChannelState>,
     /// N80: O(1) reverse lookup so `open_channel` does not linear-scan the
     /// `channels` map under the host mutex when binding by `SessionId`.
     by_session: HashMap<SessionId, LiveChannelId>,
+}
+
+impl LiveChannelAuthority {
+    fn open_channel(
+        &mut self,
+        session_id: SessionId,
+    ) -> Result<LiveChannelId, LiveAdapterHostError> {
+        self.reap_retired();
+
+        // N80: O(1) reverse-map lookup instead of linear scan over the
+        // channels map. Only counts channels not in their post-close grace
+        // window; a closed channel must not block the next open.
+        if let Some(existing) = self.by_session.get(&session_id).cloned()
+            && let Some(channel) = self.channels.get(&existing)
+            && channel.retire_at.is_none()
+        {
+            return Err(LiveAdapterHostError::SessionAlreadyBound(session_id));
+        }
+
+        // G41: v4 UUID, globally unique across `rkat-rpc` restarts and
+        // co-tenant host instances. This authority owns minting so callers
+        // cannot invent a second id lifecycle outside the occupancy owner.
+        let channel_id = LiveChannelId::random_uuid();
+
+        self.channels.insert(
+            channel_id.clone(),
+            ChannelState {
+                session_id: session_id.clone(),
+                status: LiveAdapterStatus::Opening,
+                snapshot_version: 0,
+                adapter: None,
+                retire_at: None,
+                bound_llm_identity: None,
+                pending_synthetic_obs: None,
+            },
+        );
+        self.by_session.insert(session_id, channel_id.clone());
+
+        Ok(channel_id)
+    }
+
+    fn attach_adapter(
+        &mut self,
+        channel_id: &LiveChannelId,
+        adapter: Arc<dyn LiveAdapter>,
+    ) -> Result<(), LiveAdapterHostError> {
+        let channel = self.live_channel_mut(channel_id)?;
+        channel.adapter = Some(adapter);
+        Ok(())
+    }
+
+    fn set_llm_identity(
+        &mut self,
+        channel_id: &LiveChannelId,
+        identity: SessionLlmIdentity,
+    ) -> Result<(), LiveAdapterHostError> {
+        let channel = self.channel_mut(channel_id)?;
+        channel.bound_llm_identity = Some(identity);
+        Ok(())
+    }
+
+    fn llm_identity(
+        &self,
+        channel_id: &LiveChannelId,
+    ) -> Result<Option<SessionLlmIdentity>, LiveAdapterHostError> {
+        Ok(self.channel(channel_id)?.bound_llm_identity.clone())
+    }
+
+    fn adapter_for(
+        &self,
+        channel_id: &LiveChannelId,
+        require_ready: bool,
+    ) -> Result<Arc<dyn LiveAdapter>, LiveAdapterHostError> {
+        let channel = self.channel(channel_id)?;
+        if channel.retire_at.is_some() {
+            // Channel is in post-close grace: status reads still work, but
+            // commands/observations target a removed adapter.
+            return Err(LiveAdapterHostError::ChannelNotReady(
+                channel_id.clone(),
+                channel.status.clone(),
+            ));
+        }
+        if require_ready && !channel.status.accepts_commands() {
+            return Err(LiveAdapterHostError::ChannelNotReady(
+                channel_id.clone(),
+                channel.status.clone(),
+            ));
+        }
+        let adapter = channel
+            .adapter
+            .as_ref()
+            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
+        Ok(Arc::clone(adapter))
+    }
+
+    fn take_pending_synthetic_obs(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Option<LiveAdapterObservation> {
+        self.channels
+            .get_mut(channel_id)
+            .and_then(|channel| channel.pending_synthetic_obs.take())
+    }
+
+    fn retire_after_adapter_error(&mut self, channel_id: &LiveChannelId) {
+        if let Some(channel) = self.channels.get_mut(channel_id) {
+            Self::retire_channel(channel, true);
+        }
+    }
+
+    fn stage_synthetic_observation(
+        &mut self,
+        channel_id: &LiveChannelId,
+        synthetic: LiveAdapterObservation,
+    ) -> Result<Option<Arc<dyn LiveAdapter>>, LiveAdapterHostError> {
+        let channel = self
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        channel.pending_synthetic_obs = Some(synthetic);
+        Ok(channel.adapter.clone())
+    }
+
+    fn close_channel(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Result<Option<Arc<dyn LiveAdapter>>, LiveAdapterHostError> {
+        self.reap_retired();
+        let channel = self
+            .channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
+        let adapter = channel.adapter.take();
+        Self::retire_channel(channel, false);
+        Ok(adapter)
+    }
+
+    fn terminalize_channel(&mut self, channel_id: &LiveChannelId) {
+        if let Some(channel) = self.channels.get_mut(channel_id) {
+            Self::retire_channel(channel, false);
+        }
+    }
+
+    fn status(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Result<LiveAdapterStatus, LiveAdapterHostError> {
+        self.reap_retired();
+        Ok(self.channel(channel_id)?.status.clone())
+    }
+
+    fn session(&self, channel_id: &LiveChannelId) -> Result<SessionId, LiveAdapterHostError> {
+        Ok(self.channel(channel_id)?.session_id.clone())
+    }
+
+    fn apply_status_update(
+        &mut self,
+        channel_id: &LiveChannelId,
+        status: LiveAdapterStatus,
+    ) -> Result<(), LiveAdapterHostError> {
+        let channel = self.channel_mut(channel_id)?;
+        channel.status = status;
+        Ok(())
+    }
+
+    fn next_snapshot_version(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Result<u64, LiveAdapterHostError> {
+        let channel = self.channel_mut(channel_id)?;
+        channel.snapshot_version += 1;
+        Ok(channel.snapshot_version)
+    }
+
+    fn active_channels(&mut self) -> Vec<LiveChannelId> {
+        self.reap_retired();
+        // G7 (P2): exclude channels in their post-close TTL retention
+        // window. Retained-closed entries remain in `channels` so the
+        // reap path (G1) and post-close status reads (G42) keep working,
+        // but they no longer accept input.
+        self.channels
+            .iter()
+            .filter(|(_, ch)| ch.retire_at.is_none())
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
+    /// Reap channels whose post-close TTL has elapsed.
+    fn reap_retired(&mut self) {
+        let now = std::time::Instant::now();
+        let to_drop: Vec<LiveChannelId> = self
+            .channels
+            .iter()
+            .filter_map(|(id, ch)| match ch.retire_at {
+                Some(deadline) if deadline <= now => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        for id in to_drop {
+            if let Some(ch) = self.channels.shift_remove(&id) {
+                // G1 (P1): only clear the reverse mapping if it still
+                // points at the channel being reaped. After close + rebind,
+                // `by_session[S]` already names the new channel, and an
+                // unconditional remove would strand the rebound channel.
+                if self
+                    .by_session
+                    .get(&ch.session_id)
+                    .is_some_and(|current| current == &id)
+                {
+                    self.by_session.remove(&ch.session_id);
+                }
+            }
+        }
+    }
+
+    fn channel(&self, channel_id: &LiveChannelId) -> Result<&ChannelState, LiveAdapterHostError> {
+        self.channels
+            .get(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    fn channel_mut(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Result<&mut ChannelState, LiveAdapterHostError> {
+        self.channels
+            .get_mut(channel_id)
+            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+    }
+
+    fn live_channel_mut(
+        &mut self,
+        channel_id: &LiveChannelId,
+    ) -> Result<&mut ChannelState, LiveAdapterHostError> {
+        let channel = self.channel_mut(channel_id)?;
+        if channel.retire_at.is_some() {
+            return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
+        }
+        Ok(channel)
+    }
+
+    fn retire_channel(channel: &mut ChannelState, drop_adapter: bool) {
+        channel.status = LiveAdapterStatus::Closed;
+        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
+        if drop_adapter {
+            channel.adapter = None;
+        }
+    }
+
+    #[cfg(test)]
+    fn force_retired(&mut self, channel_id: &LiveChannelId) {
+        if let Some(channel) = self.channels.get_mut(channel_id) {
+            channel.retire_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
+        }
+    }
+
+    #[cfg(test)]
+    fn bound_channel_for_session(&self, session_id: &SessionId) -> Option<&LiveChannelId> {
+        self.by_session.get(session_id)
+    }
+
+    #[cfg(test)]
+    fn contains_channel(&self, channel_id: &LiveChannelId) -> bool {
+        self.channels.contains_key(channel_id)
+    }
+
+    #[cfg(test)]
+    fn channel_is_retired(&self, channel_id: &LiveChannelId) -> bool {
+        self.channels
+            .get(channel_id)
+            .is_some_and(|channel| channel.retire_at.is_some())
+    }
+
+    #[cfg(test)]
+    fn channel_has_adapter(&self, channel_id: &LiveChannelId) -> bool {
+        self.channels
+            .get(channel_id)
+            .is_some_and(|channel| channel.adapter.is_some())
+    }
 }
 
 impl LiveAdapterHost {
@@ -780,8 +1070,7 @@ impl LiveAdapterHost {
     pub fn new(projection_sink: Arc<dyn LiveProjectionSink>) -> Self {
         Self {
             inner: Mutex::new(HostInner {
-                channels: IndexMap::new(),
-                by_session: HashMap::new(),
+                channel_authority: LiveChannelAuthority::default(),
             }),
             projection_sink,
             tool_dispatcher: std::sync::Mutex::new(None),
@@ -887,38 +1176,7 @@ impl LiveAdapterHost {
         session_id: SessionId,
     ) -> Result<LiveChannelId, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        Self::reap_retired_locked(&mut inner);
-
-        // N80: O(1) reverse-map lookup instead of linear scan over the
-        // channels map. Only counts channels not in their post-close grace
-        // window — a closed channel must not block the next open.
-        if let Some(existing) = inner.by_session.get(&session_id).cloned()
-            && let Some(channel) = inner.channels.get(&existing)
-            && channel.retire_at.is_none()
-        {
-            return Err(LiveAdapterHostError::SessionAlreadyBound(session_id));
-        }
-
-        // G41: v4 UUID — globally-unique across `rkat-rpc` restarts and
-        // co-tenant host instances. Replaced the prior `live_{N}` shape
-        // (process-monotonic `AtomicU64`).
-        let channel_id = LiveChannelId::random_uuid();
-
-        inner.channels.insert(
-            channel_id.clone(),
-            ChannelState {
-                session_id: session_id.clone(),
-                status: LiveAdapterStatus::Opening,
-                snapshot_version: 0,
-                adapter: None,
-                retire_at: None,
-                bound_llm_identity: None,
-                pending_synthetic_obs: None,
-            },
-        );
-        inner.by_session.insert(session_id, channel_id.clone());
-
-        Ok(channel_id)
+        inner.channel_authority.open_channel(session_id)
     }
 
     /// Attach a live adapter to an open channel.
@@ -932,14 +1190,9 @@ impl LiveAdapterHost {
         adapter: Arc<dyn LiveAdapter>,
     ) -> Result<(), LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
-            return Err(LiveAdapterHostError::ChannelNotFound(channel_id.clone()));
-        }
-        channel.adapter = Some(adapter);
+        inner
+            .channel_authority
+            .attach_adapter(channel_id, adapter)?;
         // Intentionally NOT setting status to Ready (F32). Driven by
         // adapter observations.
         Ok(())
@@ -962,11 +1215,9 @@ impl LiveAdapterHost {
         identity: SessionLlmIdentity,
     ) -> Result<(), LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.bound_llm_identity = Some(identity);
+        inner
+            .channel_authority
+            .set_llm_identity(channel_id, identity)?;
         Ok(())
     }
 
@@ -981,11 +1232,7 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
     ) -> Result<Option<SessionLlmIdentity>, LiveAdapterHostError> {
         let inner = self.inner.lock().await;
-        inner
-            .channels
-            .get(channel_id)
-            .map(|ch| ch.bound_llm_identity.clone())
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+        inner.channel_authority.llm_identity(channel_id)
     }
 
     /// Send a command to the adapter on a channel.
@@ -1086,8 +1333,9 @@ impl LiveAdapterHost {
         // `inject_observation` is a no-op (e.g. test stubs).
         {
             let mut inner = self.inner.lock().await;
-            if let Some(channel) = inner.channels.get_mut(channel_id)
-                && let Some(obs) = channel.pending_synthetic_obs.take()
+            if let Some(obs) = inner
+                .channel_authority
+                .take_pending_synthetic_obs(channel_id)
             {
                 return Ok(Some(obs));
             }
@@ -1104,8 +1352,9 @@ impl LiveAdapterHost {
                 // check delivers the typed event before the consumer
                 // sees end-of-stream.
                 let mut inner = self.inner.lock().await;
-                if let Some(channel) = inner.channels.get_mut(channel_id)
-                    && let Some(obs) = channel.pending_synthetic_obs.take()
+                if let Some(obs) = inner
+                    .channel_authority
+                    .take_pending_synthetic_obs(channel_id)
                 {
                     return Ok(Some(obs));
                 }
@@ -1128,15 +1377,12 @@ impl LiveAdapterHost {
                 };
                 {
                     let mut inner = self.inner.lock().await;
-                    if let Some(channel) = inner.channels.get_mut(channel_id) {
-                        channel.status = LiveAdapterStatus::Closed;
-                        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-                        // Drop the adapter Arc so transport resources
-                        // are released even though we keep the channel
-                        // entry around for `live/status` reads until
-                        // the TTL elapses (G42).
-                        channel.adapter = None;
-                    }
+                    // Drop the adapter Arc so transport resources are
+                    // released even though we keep the channel entry around
+                    // for `live/status` reads until the TTL elapses (G42).
+                    inner
+                        .channel_authority
+                        .retire_after_adapter_error(channel_id);
                 }
                 // Surface the synthetic Error first; the WS pump will
                 // forward it to the client and close with a typed
@@ -1373,10 +1619,7 @@ impl LiveAdapterHost {
                 // truth and the channel is reapable.
                 {
                     let mut inner = self.inner.lock().await;
-                    if let Some(channel) = inner.channels.get_mut(channel_id) {
-                        channel.status = LiveAdapterStatus::Closed;
-                        channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-                    }
+                    inner.channel_authority.terminalize_channel(channel_id);
                 }
                 self.projection_sink
                     .signal_terminal_error(&session_id, code.clone(), message)
@@ -1511,29 +1754,9 @@ impl LiveAdapterHost {
         require_ready: bool,
     ) -> Result<Arc<dyn LiveAdapter>, LiveAdapterHostError> {
         let inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        if channel.retire_at.is_some() {
-            // Channel is in post-close grace: status reads still work, but
-            // commands/observations target a removed adapter.
-            return Err(LiveAdapterHostError::ChannelNotReady(
-                channel_id.clone(),
-                channel.status.clone(),
-            ));
-        }
-        if require_ready && !channel.status.accepts_commands() {
-            return Err(LiveAdapterHostError::ChannelNotReady(
-                channel_id.clone(),
-                channel.status.clone(),
-            ));
-        }
-        let adapter = channel
-            .adapter
-            .as_ref()
-            .ok_or_else(|| LiveAdapterHostError::NoAdapter(channel_id.clone()))?;
-        Ok(Arc::clone(adapter))
+        inner
+            .channel_authority
+            .adapter_for(channel_id, require_ready)
     }
 
     /// CC1 / R11 wire-signal: enqueue a synthetic terminal `Error`
@@ -1596,12 +1819,9 @@ impl LiveAdapterHost {
         // typed event.
         let adapter = {
             let mut inner = self.inner.lock().await;
-            let channel = inner
-                .channels
-                .get_mut(channel_id)
-                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-            channel.pending_synthetic_obs = Some(synthetic.clone());
-            channel.adapter.clone()
+            inner
+                .channel_authority
+                .stage_synthetic_observation(channel_id, synthetic.clone())?
         };
         if let Some(adapter) = adapter {
             // Best-effort: a half-closed adapter cannot accept the
@@ -1626,15 +1846,7 @@ impl LiveAdapterHost {
         // so post-close reads can report the terminal status.
         let adapter = {
             let mut inner = self.inner.lock().await;
-            Self::reap_retired_locked(&mut inner);
-            let channel = inner
-                .channels
-                .get_mut(channel_id)
-                .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-            let adapter = channel.adapter.take();
-            channel.status = LiveAdapterStatus::Closed;
-            channel.retire_at = Some(std::time::Instant::now() + CLOSED_CHANNEL_TTL);
-            adapter
+            inner.channel_authority.close_channel(channel_id)?
         };
         if let Some(adapter) = adapter {
             let _ = adapter.close().await;
@@ -1647,12 +1859,7 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
     ) -> Result<LiveAdapterStatus, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        Self::reap_retired_locked(&mut inner);
-        inner
-            .channels
-            .get(channel_id)
-            .map(|ch| ch.status.clone())
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+        inner.channel_authority.status(channel_id)
     }
 
     pub async fn channel_session(
@@ -1660,11 +1867,7 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
     ) -> Result<SessionId, LiveAdapterHostError> {
         let inner = self.inner.lock().await;
-        inner
-            .channels
-            .get(channel_id)
-            .map(|ch| ch.session_id.clone())
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))
+        inner.channel_authority.session(channel_id)
     }
 
     pub fn classify_observation(observation: &LiveAdapterObservation) -> ObservationRouting {
@@ -1730,12 +1933,9 @@ impl LiveAdapterHost {
         status: LiveAdapterStatus,
     ) -> Result<(), LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.status = status;
-        Ok(())
+        inner
+            .channel_authority
+            .apply_status_update(channel_id, status)
     }
 
     pub async fn next_snapshot_version(
@@ -1743,60 +1943,12 @@ impl LiveAdapterHost {
         channel_id: &LiveChannelId,
     ) -> Result<u64, LiveAdapterHostError> {
         let mut inner = self.inner.lock().await;
-        let channel = inner
-            .channels
-            .get_mut(channel_id)
-            .ok_or_else(|| LiveAdapterHostError::ChannelNotFound(channel_id.clone()))?;
-        channel.snapshot_version += 1;
-        Ok(channel.snapshot_version)
+        inner.channel_authority.next_snapshot_version(channel_id)
     }
 
     pub async fn active_channels(&self) -> Vec<LiveChannelId> {
         let mut inner = self.inner.lock().await;
-        Self::reap_retired_locked(&mut inner);
-        // G7 (P2): exclude channels in their post-close TTL retention
-        // window. Retained-closed entries remain in `channels` so the
-        // reap path (G1) and post-close status reads (G42) keep working,
-        // but they no longer accept input — callers like
-        // `propagate_config_to_live_channels` and UI listings must not
-        // see them as active. `retire_at == Some(_)` is the canonical
-        // discriminator (already gated on in `open_channel` rebind and
-        // `attach_adapter`).
-        inner
-            .channels
-            .iter()
-            .filter(|(_, ch)| ch.retire_at.is_none())
-            .map(|(id, _)| id.clone())
-            .collect()
-    }
-
-    /// Reap channels whose post-close TTL has elapsed.
-    fn reap_retired_locked(inner: &mut HostInner) {
-        let now = std::time::Instant::now();
-        let to_drop: Vec<LiveChannelId> = inner
-            .channels
-            .iter()
-            .filter_map(|(id, ch)| match ch.retire_at {
-                Some(deadline) if deadline <= now => Some(id.clone()),
-                _ => None,
-            })
-            .collect();
-        for id in to_drop {
-            if let Some(ch) = inner.channels.shift_remove(&id) {
-                // G1 (P1): only clear the reverse mapping if it still
-                // points at the channel being reaped. After close + rebind,
-                // `by_session[S]` already names the new channel, and an
-                // unconditional remove would strand the rebound channel
-                // (subsequent opens for S would then create duplicates).
-                if inner
-                    .by_session
-                    .get(&ch.session_id)
-                    .is_some_and(|current| current == &id)
-                {
-                    inner.by_session.remove(&ch.session_id);
-                }
-            }
-        }
+        inner.channel_authority.active_channels()
     }
 }
 
@@ -1962,6 +2114,36 @@ mod tests {
         assert!(matches!(err, LiveAdapterHostError::SessionAlreadyBound(id) if id == session_id));
     }
 
+    #[test]
+    fn live_channel_authority_owns_session_occupancy_and_rebind() {
+        let mut authority = LiveChannelAuthority::default();
+        let session_id = test_session_id();
+
+        let first = authority.open_channel(session_id.clone()).unwrap();
+        let duplicate = authority.open_channel(session_id.clone()).unwrap_err();
+        assert!(
+            matches!(duplicate, LiveAdapterHostError::SessionAlreadyBound(id) if id == session_id)
+        );
+
+        authority.close_channel(&first).unwrap();
+        let rebound = authority.open_channel(session_id.clone()).unwrap();
+        assert_ne!(first, rebound);
+        assert_eq!(
+            authority.bound_channel_for_session(&session_id),
+            Some(&rebound)
+        );
+
+        authority.force_retired(&first);
+        authority.reap_retired();
+        assert!(!authority.contains_channel(&first));
+        assert!(authority.contains_channel(&rebound));
+
+        let still_bound = authority.open_channel(session_id.clone()).unwrap_err();
+        assert!(
+            matches!(still_bound, LiveAdapterHostError::SessionAlreadyBound(id) if id == session_id)
+        );
+    }
+
     #[tokio::test]
     async fn close_channel_marks_closed_and_retains_for_status_reads() {
         let host = LiveAdapterHost::new(Arc::new(NoOpProjectionSink));
@@ -2001,10 +2183,7 @@ mod tests {
         // sweep. B remains active (no `retire_at` set).
         {
             let mut inner = host.inner.lock().await;
-            if let Some(channel) = inner.channels.get_mut(&ch_a) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-            }
+            inner.channel_authority.force_retired(&ch_a);
         }
 
         // `active_channels` invokes the reaper. Post-reap: B is still
@@ -2014,16 +2193,18 @@ mod tests {
         {
             let inner = host.inner.lock().await;
             assert_eq!(
-                inner.by_session.get(&session_id),
+                inner
+                    .channel_authority
+                    .bound_channel_for_session(&session_id),
                 Some(&ch_b),
                 "reap of retired A must not clear B's reverse mapping"
             );
             assert!(
-                !inner.channels.contains_key(&ch_a),
+                !inner.channel_authority.contains_channel(&ch_a),
                 "retired channel A must be dropped"
             );
             assert!(
-                inner.channels.contains_key(&ch_b),
+                inner.channel_authority.contains_channel(&ch_b),
                 "rebound channel B must remain"
             );
         }
@@ -2087,17 +2268,14 @@ mod tests {
         // `active_channels()`.
         {
             let mut inner = host.inner.lock().await;
-            if let Some(channel) = inner.channels.get_mut(&closing) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-            }
+            inner.channel_authority.force_retired(&closing);
         }
         let active_post_reap = host.active_channels().await;
         assert_eq!(active_post_reap, vec![live.clone()]);
         {
             let inner = host.inner.lock().await;
             assert!(
-                !inner.channels.contains_key(&closing),
+                !inner.channel_authority.contains_channel(&closing),
                 "post-reap, retired channel must be dropped from the map"
             );
         }
@@ -2564,16 +2742,16 @@ mod tests {
         assert_eq!(status, LiveAdapterStatus::Closed);
         {
             let inner = host.inner.lock().await;
-            let channel = inner
-                .channels
-                .get(&ch)
-                .expect("channel preserved for live/status until TTL elapses");
             assert!(
-                channel.retire_at.is_some(),
+                inner.channel_authority.contains_channel(&ch),
+                "channel preserved for live/status until TTL elapses"
+            );
+            assert!(
+                inner.channel_authority.channel_is_retired(&ch),
                 "R5-8: adapter Err must set retire_at"
             );
             assert!(
-                channel.adapter.is_none(),
+                !inner.channel_authority.channel_has_adapter(&ch),
                 "R5-8: adapter Err must drop the adapter Arc"
             );
         }
@@ -2625,13 +2803,12 @@ mod tests {
         assert_eq!(status, LiveAdapterStatus::Ready);
         {
             let inner = host.inner.lock().await;
-            let channel = inner.channels.get(&ch).expect("channel present");
             assert!(
-                channel.retire_at.is_none(),
+                !inner.channel_authority.channel_is_retired(&ch),
                 "CommandRejected must not retire the channel"
             );
             assert!(
-                channel.adapter.is_some(),
+                inner.channel_authority.channel_has_adapter(&ch),
                 "CommandRejected must not drop the adapter"
             );
         }
@@ -2662,10 +2839,7 @@ mod tests {
         // rebind without sleeping for `CLOSED_CHANNEL_TTL` seconds.
         {
             let mut inner = host.inner.lock().await;
-            if let Some(channel) = inner.channels.get_mut(&ch1) {
-                channel.retire_at =
-                    Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
-            }
+            inner.channel_authority.force_retired(&ch1);
         }
 
         let ch2 = host

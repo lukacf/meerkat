@@ -1189,7 +1189,11 @@ async fn e2e_pictionary_multimodal_comms_stress() {
                         }
                         meerkat_core::types::Message::SystemNotice(notice) => (
                             "system_notice",
-                            format!("{:?}: {}", notice.kind, notice.body),
+                            format!(
+                                "{:?}: {}",
+                                notice.kind,
+                                notice.body.as_deref().unwrap_or_default()
+                            ),
                         ),
                         meerkat_core::types::Message::User(u) => {
                             let has_img = meerkat_core::has_images(&u.content);

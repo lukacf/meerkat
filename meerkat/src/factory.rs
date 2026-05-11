@@ -42,18 +42,12 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 # Output
 - When the task is complete, provide a clear summary of what was accomplished.
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::RuntimeBuildMode;
 #[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::lifecycle::run_primitive::{
-    ModelId, OpaqueProviderBody, ProviderParamsOverride, ProviderTag,
-};
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::web_search::{
-    WebSearchEvidence, WebSearchNativeEvent, WebSearchRequest, WebSearchResult, WebSearchStatus,
-};
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
     AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
@@ -61,8 +55,6 @@ use meerkat_core::{
     SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
     ToolCategoryOverride,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use meerkat_core::{Message, RuntimeBuildMode, SystemMessage, UserMessage};
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
@@ -940,247 +932,6 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
-struct ProviderNativeWebSearchExecutor {
-    provider: Provider,
-    model: String,
-    client: Arc<dyn AgentLlmClient>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ProviderNativeWebSearchExecutor {
-    fn new(provider: Provider, model: String, client: Arc<dyn AgentLlmClient>) -> Self {
-        Self {
-            provider,
-            model,
-            client,
-        }
-    }
-
-    fn provider_tag(&self, provider_params: Option<serde_json::Value>) -> ProviderTag {
-        let body = merged_web_search_body(self.provider, provider_params);
-        match self.provider {
-            Provider::OpenAI => {
-                ProviderTag::OpenAi(meerkat_core::lifecycle::run_primitive::OpenAiProviderTag {
-                    web_search: Some(OpaqueProviderBody::from_value(&body)),
-                    ..Default::default()
-                })
-            }
-            Provider::Gemini => {
-                ProviderTag::Gemini(meerkat_core::lifecycle::run_primitive::GeminiProviderTag {
-                    google_search: Some(OpaqueProviderBody::from_value(&body)),
-                    ..Default::default()
-                })
-            }
-            Provider::Anthropic => ProviderTag::Anthropic(
-                meerkat_core::lifecycle::run_primitive::AnthropicProviderTag {
-                    web_search: Some(OpaqueProviderBody::from_value(&body)),
-                    ..Default::default()
-                },
-            ),
-            other => ProviderTag::Unknown {
-                bag: meerkat_core::lifecycle::run_primitive::StructuredProviderExtension {
-                    namespace: other.as_str().to_string(),
-                    key: "web_search".to_string(),
-                    body: body.to_string(),
-                },
-            },
-        }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
-impl meerkat_llm_core::WebSearchExecutor for ProviderNativeWebSearchExecutor {
-    async fn execute_web_search(
-        &self,
-        request: WebSearchRequest,
-    ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
-        let prompt = web_search_user_prompt(&request);
-        let messages = vec![
-            Message::System(SystemMessage::new(
-                "You are a web-search execution adapter for Meerkat. Use your \
-                 provider-native web search/grounding tool to answer the query. \
-                 Return a concise answer and include cited URLs when available. \
-                 Do not call non-search tools.",
-            )),
-            Message::User(UserMessage::text(prompt)),
-        ];
-        let provider_params = ProviderParamsOverride {
-            max_output_tokens: Some(2048),
-            provider_tag: Some(self.provider_tag(request.provider_params.clone())),
-            ..Default::default()
-        };
-        let result = self
-            .client
-            .stream_response(&messages, &[], 2048, None, Some(&provider_params))
-            .await
-            .map_err(|err| meerkat_llm_core::LlmError::Unknown {
-                message: err.to_string(),
-            })?;
-
-        let mut answer_parts = Vec::new();
-        let mut native_events = Vec::new();
-        let mut evidence = Vec::new();
-        for block in result.blocks() {
-            match block {
-                meerkat_core::AssistantBlock::Text { text, .. }
-                | meerkat_core::AssistantBlock::Transcript { text, .. } => {
-                    if !text.trim().is_empty() {
-                        answer_parts.push(text.trim().to_string());
-                    }
-                }
-                meerkat_core::AssistantBlock::ServerToolContent { name, content, .. } => {
-                    collect_evidence(content, &mut evidence);
-                    native_events.push(WebSearchNativeEvent {
-                        name: name.clone(),
-                        content: content.clone(),
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        Ok(WebSearchResult {
-            status: WebSearchStatus::Completed,
-            query: request.query,
-            provider: Some(self.provider),
-            model: Some(ModelId::new(self.model.clone())),
-            answer: (!answer_parts.is_empty()).then(|| answer_parts.join("\n\n")),
-            evidence,
-            native_events,
-            error: None,
-            checked_at: chrono::Utc::now(),
-        })
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-struct RoutingWebSearchExecutor {
-    executors: BTreeMap<String, ProviderNativeWebSearchExecutor>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl RoutingWebSearchExecutor {
-    fn new(executors: BTreeMap<String, ProviderNativeWebSearchExecutor>) -> Self {
-        Self { executors }
-    }
-
-    fn preferred_provider_keys() -> [&'static str; 3] {
-        ["openai", "gemini", "anthropic"]
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[async_trait::async_trait]
-impl meerkat_llm_core::WebSearchExecutor for RoutingWebSearchExecutor {
-    async fn execute_web_search(
-        &self,
-        request: WebSearchRequest,
-    ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
-        let selected = if let Some(provider) = request.provider {
-            self.executors.get(provider_key(provider)).ok_or_else(|| {
-                meerkat_llm_core::LlmError::InvalidRequest {
-                    message: format!(
-                        "requested web_search provider '{}' is not configured",
-                        provider.as_str()
-                    ),
-                }
-            })?
-        } else {
-            let mut selected = None;
-            for key in Self::preferred_provider_keys() {
-                if let Some(executor) = self.executors.get(key) {
-                    selected = Some(executor);
-                    break;
-                }
-            }
-            selected.ok_or_else(|| meerkat_llm_core::LlmError::InvalidRequest {
-                message: "no configured provider supports Meerkat web_search fallback".to_string(),
-            })?
-        };
-
-        selected.execute_web_search(request).await
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn merged_web_search_body(
-    provider: Provider,
-    provider_params: Option<serde_json::Value>,
-) -> serde_json::Value {
-    let mut body = match provider {
-        Provider::OpenAI => serde_json::json!({"type": "web_search"}),
-        Provider::Anthropic => {
-            serde_json::json!({"type": "web_search_20250305", "name": "web_search"})
-        }
-        Provider::Gemini => serde_json::json!({}),
-        _ => serde_json::json!({}),
-    };
-    if let Some(extra) = provider_params
-        && let (Some(base), Some(extra)) = (body.as_object_mut(), extra.as_object())
-    {
-        for (key, value) in extra {
-            base.insert(key.clone(), value.clone());
-        }
-    }
-    body
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn web_search_user_prompt(request: &WebSearchRequest) -> String {
-    let mut prompt = format!("Search query:\n{}", request.query);
-    if let Some(context) = request
-        .context
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        prompt.push_str("\n\nConversation context:\n");
-        prompt.push_str(context.trim());
-    }
-    prompt
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn collect_evidence(value: &serde_json::Value, out: &mut Vec<WebSearchEvidence>) {
-    match value {
-        serde_json::Value::Object(map) => {
-            let url = map
-                .get("url")
-                .or_else(|| map.get("uri"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            let title = map
-                .get("title")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            let summary = map
-                .get("summary")
-                .or_else(|| map.get("snippet"))
-                .or_else(|| map.get("text"))
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            if url.is_some() || title.is_some() || summary.is_some() {
-                out.push(WebSearchEvidence {
-                    title,
-                    url,
-                    summary,
-                });
-            }
-            for child in map.values() {
-                collect_evidence(child, out);
-            }
-        }
-        serde_json::Value::Array(items) => {
-            for child in items {
-                collect_evidence(child, out);
-            }
-        }
-        _ => {}
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
 struct CompositeImageGenerationPlanner {
     profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
 }
@@ -1823,76 +1574,78 @@ impl AgentFactory {
         &self,
         config: &Config,
         registry: &ModelRegistry,
+        search_provider: Provider,
         selected_realm: Option<&str>,
         runtime_build_mode: &RuntimeBuildMode,
     ) -> Result<Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>, BuildAgentError> {
-        let mut executors: BTreeMap<String, ProviderNativeWebSearchExecutor> = BTreeMap::new();
-        for search_provider in [Provider::OpenAI, Provider::Gemini, Provider::Anthropic] {
-            if !provider_web_search_enabled(config, search_provider) {
-                continue;
-            }
-            let Some(model) = registry.default_model(search_provider).map(str::to_string) else {
-                continue;
-            };
-            let Some(profile) = registry.profile_for_provider(search_provider, &model) else {
-                continue;
-            };
-            if !profile.supports_web_search {
-                continue;
-            }
-
-            let Ok((realm, _binding_id, auth_binding)) =
-                Self::resolve_web_search_binding_for_provider(
-                    config,
-                    search_provider,
-                    selected_realm,
-                )
-            else {
-                continue;
-            };
-            let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
-            if let Some(store) = self.token_store.clone() {
-                env = env.with_token_store(store);
-            }
-            if let Some(coord) = self.refresh_coord.clone() {
-                env = env.with_refresh_coordinator(coord);
-            }
-            if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
-                && !auth_binding.is_env_default()
-            {
-                env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
-            }
-            for (handle, resolver) in &self.external_auth_resolvers {
-                env = env.with_external_resolver(handle.clone(), resolver.clone());
-            }
-            let Ok(connection) = self
-                .provider_registry
-                .resolve(&realm, &auth_binding, &env)
-                .await
-            else {
-                continue;
-            };
-            if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
-                && !auth_binding.is_env_default()
-            {
-                Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
-                    .map_err(BuildAgentError::LlmClient)?;
-            }
-            let Ok(client) = self.provider_registry.build_client(connection) else {
-                continue;
-            };
-            let adapted: Arc<dyn AgentLlmClient> =
-                Arc::new(LlmClientAdapter::new(client, model.clone()));
-            executors.insert(
-                provider_key(search_provider).to_string(),
-                ProviderNativeWebSearchExecutor::new(search_provider, model, adapted),
-            );
+        if !provider_web_search_enabled(config, search_provider) {
+            return Ok(None);
+        }
+        let Some(model) = registry.default_model(search_provider).map(str::to_string) else {
+            return Ok(None);
+        };
+        let Some(profile) = registry.profile_for_provider(search_provider, &model) else {
+            return Ok(None);
+        };
+        if !profile.supports_web_search {
+            return Ok(None);
         }
 
-        Ok((!executors.is_empty()).then(|| {
-            Arc::new(RoutingWebSearchExecutor::new(executors))
-                as Arc<dyn meerkat_llm_core::WebSearchExecutor>
-        }))
+        let Ok((realm, _binding_id, auth_binding)) =
+            Self::resolve_web_search_binding_for_provider(config, search_provider, selected_realm)
+        else {
+            return Ok(None);
+        };
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        if let Some(store) = self.token_store.clone() {
+            env = env.with_token_store(store);
+        }
+        if let Some(coord) = self.refresh_coord.clone() {
+            env = env.with_refresh_coordinator(coord);
+        }
+        if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
+            && !auth_binding.is_env_default()
+        {
+            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        let Ok(connection) = self
+            .provider_registry
+            .resolve(&realm, &auth_binding, &env)
+            .await
+        else {
+            return Ok(None);
+        };
+        if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
+            && !auth_binding.is_env_default()
+        {
+            Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
+                .map_err(BuildAgentError::LlmClient)?;
+        }
+        let Ok(client) = self.provider_registry.build_client(connection) else {
+            return Ok(None);
+        };
+        let adapted: Arc<dyn AgentLlmClient> =
+            Arc::new(LlmClientAdapter::new(client, model.clone()));
+
+        let executor: Arc<dyn meerkat_llm_core::WebSearchExecutor> = match search_provider {
+            #[cfg(feature = "openai")]
+            Provider::OpenAI => {
+                Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(model, adapted))
+            }
+            #[cfg(feature = "gemini")]
+            Provider::Gemini => {
+                Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(model, adapted))
+            }
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic => Arc::new(meerkat_anthropic::AnthropicWebSearchExecutor::new(
+                model, adapted,
+            )),
+            _ => return Ok(None),
+        };
+        Ok(Some(executor))
     }
 
     /// Create a minimal factory for environments without filesystem access (e.g. wasm32).
@@ -3290,7 +3043,7 @@ impl AgentFactory {
         let resumed_self_hosted_server_id = resumed_session_metadata
             .as_ref()
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
-        let (mut provider, resolved_self_hosted_server_id) =
+        let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
         let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
             build_config
@@ -3368,87 +3121,71 @@ impl AgentFactory {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
                         }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
-                        let mut provider_attempts = vec![(provider, build_config.model.clone())];
-                        if build_config.provider.is_none() && !explicit_auth_binding {
-                            for fallback_provider in
-                                [Provider::Anthropic, Provider::Gemini, Provider::OpenAI]
-                            {
-                                if provider_attempts
-                                    .iter()
-                                    .any(|(attempt, _)| *attempt == fallback_provider)
-                                {
-                                    continue;
-                                }
-                                if let Some(default_model) =
-                                    registry.default_model(fallback_provider)
-                                {
-                                    provider_attempts
-                                        .push((fallback_provider, default_model.to_string()));
-                                }
-                            }
-                        }
                         let provider_registry = Arc::clone(&self.provider_registry);
                         let mut first_resolution_error: Option<String> = None;
                         let mut resolved = None;
-                        for (attempt_provider, attempt_model) in provider_attempts {
-                            let candidates = Self::resolve_realm_binding_candidates_for_provider(
-                                config,
-                                attempt_provider,
-                                build_config.auth_binding.as_ref(),
-                                build_config.realm_id.as_deref(),
-                            )
-                            .map_err(BuildAgentError::ConnectionResolution)?;
-                            for target in candidates {
-                                let resolved_auth_binding = target.auth_binding.clone();
-                                let lease_auth_binding = if resolved_auth_binding.is_env_default()
-                                    && !explicit_auth_binding
-                                {
-                                    None
-                                } else {
-                                    Some(resolved_auth_binding.clone())
-                                };
-                                let mut candidate_env = env.clone();
-                                if let RuntimeBuildMode::SessionOwned(bindings) =
-                                    &build_config.runtime_build_mode
-                                    && lease_auth_binding.is_some()
-                                {
-                                    candidate_env = candidate_env
-                                        .with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
-                                }
-                                match provider_registry
-                                    .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
-                                    .await
-                                {
-                                    Ok(connection) => {
-                                        let resolved_model =
-                                            if build_config.resume_override_mask.model {
-                                                attempt_model.clone()
-                                            } else {
-                                                target
-                                                    .binding
-                                                    .default_model
-                                                    .clone()
-                                                    .unwrap_or_else(|| attempt_model.clone())
-                                            };
-                                        resolved = Some((
-                                            connection,
-                                            resolved_auth_binding,
-                                            lease_auth_binding,
-                                            resolved_model,
+                        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+                            config,
+                            provider,
+                            build_config.auth_binding.as_ref(),
+                            build_config.realm_id.as_deref(),
+                        )
+                        .map_err(BuildAgentError::ConnectionResolution)?;
+                        for target in candidates {
+                            let resolved_auth_binding = target.auth_binding.clone();
+                            let lease_auth_binding = if resolved_auth_binding.is_env_default()
+                                && !explicit_auth_binding
+                            {
+                                None
+                            } else {
+                                Some(resolved_auth_binding.clone())
+                            };
+                            let mut candidate_env = env.clone();
+                            if let RuntimeBuildMode::SessionOwned(bindings) =
+                                &build_config.runtime_build_mode
+                                && lease_auth_binding.is_some()
+                            {
+                                candidate_env = candidate_env
+                                    .with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                            }
+                            match provider_registry
+                                .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
+                                .await
+                            {
+                                Ok(connection) => {
+                                    if connection.provider != provider {
+                                        return Err(BuildAgentError::ConnectionResolution(
+                                            format!(
+                                                "auth binding for provider '{}' resolved connection for provider '{}'",
+                                                provider.as_str(),
+                                                connection.provider.as_str()
+                                            ),
                                         ));
+                                    }
+                                    let resolved_model = if build_config.resume_override_mask.model
+                                    {
+                                        build_config.model.clone()
+                                    } else {
+                                        target
+                                            .binding
+                                            .default_model
+                                            .clone()
+                                            .unwrap_or_else(|| build_config.model.clone())
+                                    };
+                                    resolved = Some((
+                                        connection,
+                                        resolved_auth_binding,
+                                        lease_auth_binding,
+                                        resolved_model,
+                                    ));
+                                    break;
+                                }
+                                Err(err) => {
+                                    first_resolution_error.get_or_insert_with(|| err.to_string());
+                                    if explicit_auth_binding {
                                         break;
                                     }
-                                    Err(err) => {
-                                        first_resolution_error
-                                            .get_or_insert_with(|| err.to_string());
-                                        if explicit_auth_binding {
-                                            break;
-                                        }
-                                    }
                                 }
-                            }
-                            if resolved.is_some() || explicit_auth_binding {
-                                break;
                             }
                         }
                         let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
@@ -3463,7 +3200,6 @@ impl AgentFactory {
                                 )
                             })?;
                         build_config.model = resolved_model;
-                        provider = connection.provider;
 
                         // Publish immediately after resolve. Provider resolution can refresh and
                         // persist OAuth token bytes; AuthMachine must observe the returned lease
@@ -3641,6 +3377,7 @@ impl AgentFactory {
                 self.build_web_search_executor(
                     config,
                     &registry,
+                    provider,
                     build_config.realm_id.as_deref(),
                     &build_config.runtime_build_mode,
                 )
@@ -4835,15 +4572,6 @@ mod tests {
     use std::collections::HashMap;
     use tokio::sync::Mutex;
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn web_search_provider_preference_is_openai_gemini_anthropic() {
-        assert_eq!(
-            RoutingWebSearchExecutor::preferred_provider_keys(),
-            ["openai", "gemini", "anthropic"]
-        );
-    }
-
     struct NeverLlmClient;
 
     #[async_trait]
@@ -5858,7 +5586,7 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn build_agent_without_provider_or_auth_binding_uses_first_resolvable_provider() {
+    async fn build_agent_without_provider_or_auth_binding_does_not_probe_other_providers() {
         use async_trait::async_trait;
         use meerkat_llm_core::provider_runtime::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
@@ -5971,25 +5699,17 @@ mod tests {
         assert!(build.provider.is_none());
         assert!(build.auth_binding.is_none());
 
-        let agent = factory
-            .build_agent(build, &config)
-            .await
-            .expect("implicit provider selection should skip missing OpenAI env and use Anthropic");
-        let metadata = agent
-            .session()
-            .session_metadata()
-            .expect("metadata written");
-
-        assert_eq!(metadata.provider, Provider::Anthropic);
-        assert_eq!(metadata.model, "claude-sonnet-4-6");
-        assert_eq!(
-            metadata.auth_binding.as_ref().map(|auth_binding| {
-                (
-                    auth_binding.realm.as_str().to_string(),
-                    auth_binding.binding.as_str().to_string(),
-                )
-            }),
-            Some(("dev".to_string(), "default_anthropic".to_string()))
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => {
+                panic!("OpenAI model resolution must not silently probe Anthropic credentials")
+            }
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("openai")
+                || err.to_string().contains("OpenAI")
+                || err.to_string().contains("missing secret"),
+            "error should stay on selected OpenAI path, not switch providers: {err}"
         );
     }
 

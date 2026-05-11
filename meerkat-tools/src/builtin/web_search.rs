@@ -18,26 +18,23 @@ const WEB_SEARCH_TOOL_DOCUMENTATION: &str = r#"Search the web through Meerkat wh
 Use this tool when the user asks for current, recent, online, or cited information and no native provider web-search tool is available in this session.
 
 Request shape:
-{"query":"latest Meerkat release notes","provider":"openai"}
+{"query":"latest Meerkat release notes"}
 
 Fields:
 - query: required natural-language search/research query.
-- provider: optional provider override: "openai", "gemini", or "anthropic". If omitted, Meerkat chooses the first configured search provider in OpenAI, Gemini, Anthropic order.
-- provider_params: optional provider-native search-tool options. These are merged into the selected provider's native web-search body.
+- provider: optional provider assertion: "openai", "gemini", or "anthropic". If omitted, Meerkat uses the session's configured fallback provider. If present, it must match that provider.
 - context: optional brief context from the conversation to help disambiguate the query.
 
 Result shape follows the common provider-native search idea: status, provider, model, answer, evidence, and native_events. Treat native_events as provider-observed evidence, not Meerkat-owned truth."#;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WebSearchToolArgs {
     #[schemars(description = "Natural-language query to search for.")]
     query: String,
     #[serde(default)]
     #[schemars(description = "Optional provider override: openai, gemini, or anthropic.")]
     provider: Option<String>,
-    #[serde(default)]
-    #[schemars(description = "Optional provider-native search-tool options.")]
-    provider_params: Option<Value>,
     #[serde(default)]
     #[schemars(description = "Optional brief conversation context to disambiguate the search.")]
     context: Option<String>,
@@ -94,7 +91,7 @@ impl BuiltinTool for WebSearchTool {
             .execute_web_search(WebSearchRequest {
                 query,
                 provider,
-                provider_params: args.provider_params,
+                provider_params: None,
                 context: args.context.filter(|value| !value.trim().is_empty()),
             })
             .await
@@ -186,7 +183,6 @@ mod tests {
             .call(serde_json::json!({
                 "query": "today's news",
                 "provider": "gemini",
-                "provider_params": {"allowed_domains": ["example.com"]},
                 "context": "smoke test"
             }))
             .await
@@ -199,11 +195,21 @@ mod tests {
         assert_eq!(value["provider"], "gemini");
         let seen = executor.seen.lock().await;
         assert_eq!(seen[0].provider, Some(Provider::Gemini));
-        assert_eq!(
-            seen[0].provider_params,
-            Some(serde_json::json!({"allowed_domains": ["example.com"]}))
-        );
+        assert_eq!(seen[0].provider_params, None);
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn web_search_tool_rejects_provider_native_params() {
+        let tool = WebSearchTool::new(Arc::new(RecordingExecutor::default()));
+        let err = tool
+            .call(serde_json::json!({
+                "query": "today's news",
+                "provider_params": {"allowed_domains": ["example.com"]}
+            }))
+            .await
+            .expect_err("model-callable fallback search must not accept provider-native params");
+        assert!(err.to_string().contains("unknown field"));
     }
 
     #[tokio::test]

@@ -12,6 +12,8 @@ pub mod tokio {
 
 pub mod client;
 pub mod runtime;
+pub mod web_search;
 
 pub use client::AnthropicClient;
 pub use runtime::{AnthropicAuthMethod, AnthropicBackendKind, AnthropicProviderRuntime};
+pub use web_search::AnthropicWebSearchExecutor;

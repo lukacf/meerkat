@@ -510,18 +510,23 @@ impl From<WireReasoningMode> for meerkat_core::lifecycle::run_primitive::Reasoni
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireReasoningEffort {
+    None,
     Low,
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
 }
 
 impl From<meerkat_core::lifecycle::run_primitive::ReasoningEffort> for WireReasoningEffort {
     fn from(value: meerkat_core::lifecycle::run_primitive::ReasoningEffort) -> Self {
         use meerkat_core::lifecycle::run_primitive::ReasoningEffort as Core;
         match value {
+            Core::None => Self::None,
             Core::Low => Self::Low,
             Core::Medium => Self::Medium,
             Core::High => Self::High,
+            Core::XHigh => Self::XHigh,
         }
     }
 }
@@ -529,9 +534,11 @@ impl From<meerkat_core::lifecycle::run_primitive::ReasoningEffort> for WireReaso
 impl From<WireReasoningEffort> for meerkat_core::lifecycle::run_primitive::ReasoningEffort {
     fn from(value: WireReasoningEffort) -> Self {
         match value {
+            WireReasoningEffort::None => Self::None,
             WireReasoningEffort::Low => Self::Low,
             WireReasoningEffort::Medium => Self::Medium,
             WireReasoningEffort::High => Self::High,
+            WireReasoningEffort::XHigh => Self::XHigh,
         }
     }
 }

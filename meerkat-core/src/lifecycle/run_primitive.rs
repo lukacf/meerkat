@@ -246,9 +246,11 @@ impl ProviderTag {
         if namespace == "openai"
             && key == "reasoning_effort"
             && let Some(effort) = value.as_str().and_then(|s| match s {
+                "none" => Some(ReasoningEffort::None),
                 "low" => Some(ReasoningEffort::Low),
                 "medium" => Some(ReasoningEffort::Medium),
                 "high" => Some(ReasoningEffort::High),
+                "xhigh" => Some(ReasoningEffort::XHigh),
                 _ => None,
             })
         {
@@ -659,9 +661,11 @@ impl OpenAiProviderTag {
             match k.as_str() {
                 "reasoning_effort" => {
                     let effort = match v.as_str() {
+                        Some("none") => ReasoningEffort::None,
                         Some("low") => ReasoningEffort::Low,
                         Some("medium") => ReasoningEffort::Medium,
                         Some("high") => ReasoningEffort::High,
+                        Some("xhigh") => ReasoningEffort::XHigh,
                         _ => {
                             return Err(LegacyProviderParamsError::unknown_shape(
                                 "reasoning_effort",
@@ -852,10 +856,25 @@ impl std::error::Error for LegacyProviderParamsError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
+    None,
     Low,
     #[default]
     Medium,
     High,
+    #[serde(rename = "xhigh")]
+    XHigh,
+}
+
+impl ReasoningEffort {
+    pub fn as_legacy_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
 }
 
 /// Typed mode for generalized reasoning emission.
@@ -2294,6 +2313,33 @@ mod tests {
         assert_eq!(tag.seed, Some(42));
         assert!(matches!(tag.frequency_penalty, Some(v) if (v - 0.5).abs() < 1e-6));
         assert!(matches!(tag.presence_penalty, Some(v) if (v - 0.3).abs() < 1e-6));
+    }
+
+    #[test]
+    fn openai_from_legacy_value_projects_none_and_xhigh_reasoning() {
+        let none = OpenAiProviderTag::from_legacy_value(&serde_json::json!({
+            "reasoning_effort": "none"
+        }))
+        .expect("none projects");
+        assert_eq!(none.reasoning_effort, Some(ReasoningEffort::None));
+        let projected_none = ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(none)),
+            ..Default::default()
+        }
+        .to_legacy_provider_value();
+        assert_eq!(projected_none["reasoning_effort"], "none");
+
+        let xhigh = OpenAiProviderTag::from_legacy_value(&serde_json::json!({
+            "reasoning_effort": "xhigh"
+        }))
+        .expect("xhigh projects");
+        assert_eq!(xhigh.reasoning_effort, Some(ReasoningEffort::XHigh));
+        let projected_xhigh = ProviderParamsOverride {
+            provider_tag: Some(ProviderTag::OpenAi(xhigh)),
+            ..Default::default()
+        }
+        .to_legacy_provider_value();
+        assert_eq!(projected_xhigh["reasoning_effort"], "xhigh");
     }
 
     #[test]

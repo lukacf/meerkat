@@ -56,7 +56,7 @@ impl PeerDirectoryReachabilityAuthority {
     pub(crate) fn apply(&mut self, input: PeerDirectoryReachabilityInput) {
         match input {
             PeerDirectoryReachabilityInput::DirectoryResolved { keys } => {
-                self.reconcile_resolved_directory(keys)
+                self.reconcile_resolved_directory(keys);
             }
             PeerDirectoryReachabilityInput::SendSucceeded { key } => {
                 self.record_send_succeeded(&key);

@@ -286,19 +286,37 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrepareBindingsInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `PrepareBindingsInitializingIdempotent`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `PrepareBindingsIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `PrepareBindingsIdleIdempotent`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `PrepareBindingsAttached`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `PrepareBindingsAttachedIdempotent`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `PrepareBindingsRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `PrepareBindingsRunningIdempotent`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `PrepareBindingsRetired`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
+- `PrepareBindingsRetiredIdempotent`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
 - `PrepareBindingsStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `PrepareBindingsStoppedIdempotent`
   - anchors: `meerkat_machine`
   - scenarios: `session_registration_and_binding`
 - `SetPeerIngressContextIdle`

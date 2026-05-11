@@ -393,10 +393,10 @@ impl ToolCallArguments {
     }
 
     pub fn to_object_map(&self) -> serde_json::Map<String, Value> {
-        self.0
-            .as_object()
-            .expect("ToolCallArguments only stores JSON objects")
-            .clone()
+        match &self.0 {
+            Value::Object(object) => object.clone(),
+            _ => serde_json::Map::new(),
+        }
     }
 
     pub fn into_value(self) -> Value {

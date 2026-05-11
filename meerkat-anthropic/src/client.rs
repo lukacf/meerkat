@@ -1231,7 +1231,9 @@ impl LlmClient for AnthropicClient {
                                     let tool = current_server_tool_name
                                         .take()
                                         .map(|name| AnthropicServerToolKind::from_provider_name(&name))
-                                        .unwrap_or(AnthropicServerToolKind::Generic);
+                                        .unwrap_or_else(|| {
+                                            AnthropicServerToolKind::from_provider_name("server_tool")
+                                        });
                                     accumulated_server_tool_input.clear();
                                     saw_event = true;
                                     yield LlmEvent::ServerToolContent {
@@ -1979,6 +1981,45 @@ mod tests {
         assert_eq!(assistant_content[1]["id"], "tu_123");
         assert_eq!(assistant_content[1]["name"], "read_file");
         assert_eq!(assistant_content[1]["input"]["path"], "/tmp/test.txt");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_request_body_preserves_provider_defined_server_tool_name()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let assistant_msg = Message::BlockAssistant(BlockAssistantMessage {
+            blocks: vec![AssistantBlock::ServerToolContent {
+                id: Some("srvtoolu_code".to_string()),
+                content: ServerToolContent::AnthropicServerToolUse {
+                    tool: AnthropicServerToolKind::from_provider_name("code_execution"),
+                    input: serde_json::json!({"files": ["main.rs"]}),
+                },
+                meta: None,
+            }],
+            stop_reason: StopReason::ToolUse,
+            created_at: meerkat_core::types::message_timestamp_now(),
+        });
+
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![
+                Message::User(UserMessage::text("Run the server tool".to_string())),
+                assistant_msg,
+            ],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let assistant_content = messages[1]["content"].as_array().unwrap();
+
+        assert_eq!(assistant_content.len(), 1);
+        assert_eq!(assistant_content[0]["type"], "server_tool_use");
+        assert_eq!(assistant_content[0]["id"], "srvtoolu_code");
+        assert_eq!(assistant_content[0]["name"], "code_execution");
+        assert_eq!(assistant_content[0]["input"]["files"][0], "main.rs");
 
         Ok(())
     }
@@ -2801,15 +2842,59 @@ mod tests {
 
         assert_eq!(server_blocks.len(), 2);
         assert_eq!(server_blocks[0].0.as_deref(), Some("srvtoolu_1"));
-        let ServerToolContent::AnthropicServerToolUse { input, .. } = &server_blocks[0].1 else {
+        let ServerToolContent::AnthropicServerToolUse { tool, input } = &server_blocks[0].1 else {
             panic!("expected Anthropic server tool use");
         };
+        assert_eq!(tool, &AnthropicServerToolKind::WebSearch);
         assert_eq!(input["query"], "latest meerkat runtime");
         assert_eq!(server_blocks[1].0.as_deref(), Some("srvtoolu_1"));
         let ServerToolContent::AnthropicWebSearchToolResult { result } = &server_blocks[1].1 else {
             panic!("expected Anthropic web search result");
         };
         assert_eq!(result["content"][0]["url"], "https://example.com");
+    }
+
+    #[tokio::test]
+    async fn test_provider_defined_server_tool_block_preserves_name() {
+        let payload = [
+            r#"data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}"#,
+            r#"data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"srvtoolu_code","name":"code_execution"}}"#,
+            r#"data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"files\":[\"main.rs\"]}"}}"#,
+            r#"data: {"type":"content_block_stop"}"#,
+            r#"data: {"type":"message_delta","usage":{"output_tokens":5},"delta":{"stop_reason":"end_turn"}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_anthropic_stub_server(payload).await;
+        let client = AnthropicClient::builder("test-key".to_string())
+            .base_url(base_url)
+            .build()
+            .unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::User(UserMessage::text("run code".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut server_blocks = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ServerToolContent { id, content, .. } => {
+                    server_blocks.push((id, content));
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(server_blocks.len(), 1);
+        assert_eq!(server_blocks[0].0.as_deref(), Some("srvtoolu_code"));
+        let ServerToolContent::AnthropicServerToolUse { tool, input } = &server_blocks[0].1 else {
+            panic!("expected Anthropic server tool use");
+        };
+        assert_eq!(tool.provider_name(), "code_execution");
+        assert_eq!(input["files"][0], "main.rs");
     }
 
     /// Regression: Anthropic streaming error event must yield Done with error.

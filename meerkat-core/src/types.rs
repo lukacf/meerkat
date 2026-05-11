@@ -567,25 +567,27 @@ impl OpenAiWebSearchCallEventKind {
 
 #[non_exhaustive]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicServerToolKind {
     WebSearch,
-    Generic,
+    ProviderDefined { name: String },
 }
 
 impl AnthropicServerToolKind {
     pub fn from_provider_name(value: &str) -> Self {
         match value {
             "web_search" => Self::WebSearch,
-            _ => Self::Generic,
+            _ => Self::ProviderDefined {
+                name: value.to_string(),
+            },
         }
     }
 
-    pub const fn provider_name(self) -> &'static str {
+    pub fn provider_name(&self) -> &str {
         match self {
             Self::WebSearch => "web_search",
-            Self::Generic => "server_tool",
+            Self::ProviderDefined { name } => name,
         }
     }
 }
@@ -636,7 +638,7 @@ pub enum ServerToolContent {
 }
 
 impl ServerToolContent {
-    pub fn display_kind(&self) -> &'static str {
+    pub fn display_kind(&self) -> &str {
         match self {
             Self::OpenAiMessageAnnotations { .. } => "openai.message_annotations",
             Self::OpenAiResponseItem { item_kind, .. } => item_kind.response_item_type(),

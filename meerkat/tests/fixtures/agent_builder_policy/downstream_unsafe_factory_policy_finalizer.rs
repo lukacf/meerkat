@@ -34,8 +34,8 @@ impl AgentLlmClient for NoopClient {
     }
 
     fn provider(&self) -> meerkat_core::Provider {
-            meerkat_core::Provider::Other
-        }
+        meerkat_core::Provider::Other
+    }
 
     fn model(&self) -> &str {
         "mock-model"

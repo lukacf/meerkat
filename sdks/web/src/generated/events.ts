@@ -78,7 +78,11 @@ export type AgentErrorReport = {
   reason?: AgentErrorReason | null;
 };
 
-export type AnthropicServerToolKind = "web_search" | "generic";
+export type AnthropicServerToolKind = "web_search" | {
+  provider_defined: {
+  name: string;
+};
+};
 
 export interface AssistantImageEvent {
   blob_ref: BlobRef;

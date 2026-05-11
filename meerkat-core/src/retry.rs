@@ -6,6 +6,11 @@
 use crate::error::{AgentError, LlmFailureReason};
 #[cfg(test)]
 use crate::error::{LlmProviderError, LlmProviderErrorKind};
+use crate::event::AgentEvent;
+use crate::lifecycle::RunId;
+#[cfg(target_arch = "wasm32")]
+use crate::tokio;
+use crate::turn_execution_authority::TurnExecutionInput;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -109,6 +114,89 @@ impl LlmRetryPlan {
 pub struct LlmRetrySchedule {
     pub failure: LlmRetryFailure,
     pub plan: LlmRetryPlan,
+}
+
+/// Named owner for the LLM retry lifecycle around the turn machine.
+///
+/// The policy chooses whether a failure is retryable and builds the typed
+/// schedule. This authority packages that schedule into the exact machine
+/// inputs, public event projection, and continuation wait used by the agent
+/// shell so the loop does not re-derive retry semantics from public fields.
+#[derive(Debug, Clone)]
+pub struct LlmRetryLifecycleAuthority {
+    policy: RetryPolicy,
+}
+
+impl LlmRetryLifecycleAuthority {
+    #[must_use]
+    pub fn new(policy: RetryPolicy) -> Self {
+        Self { policy }
+    }
+
+    #[must_use]
+    pub fn policy(&self) -> &RetryPolicy {
+        &self.policy
+    }
+
+    #[must_use]
+    pub fn call_timeout(&self) -> Option<Duration> {
+        self.policy.call_timeout
+    }
+
+    #[must_use]
+    pub fn plan_recoverable_failure(
+        &self,
+        error: &AgentError,
+        attempt_index: u32,
+        remaining_budget: Option<Duration>,
+    ) -> Option<LlmRetryLifecycle> {
+        self.policy
+            .schedule_retry(error, attempt_index, remaining_budget)
+            .map(LlmRetryLifecycle::new)
+    }
+}
+
+/// Accepted retry lifecycle for one recoverable LLM failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmRetryLifecycle {
+    schedule: LlmRetrySchedule,
+}
+
+impl LlmRetryLifecycle {
+    #[must_use]
+    pub fn new(schedule: LlmRetrySchedule) -> Self {
+        Self { schedule }
+    }
+
+    #[must_use]
+    pub fn schedule(&self) -> &LlmRetrySchedule {
+        &self.schedule
+    }
+
+    #[must_use]
+    pub fn recoverable_failure_input(&self, run_id: RunId) -> TurnExecutionInput {
+        TurnExecutionInput::RecoverableFailure {
+            run_id,
+            retry: self.schedule.clone(),
+        }
+    }
+
+    #[must_use]
+    pub fn retry_requested_input(&self, run_id: RunId) -> TurnExecutionInput {
+        TurnExecutionInput::RetryRequested {
+            run_id,
+            retry_attempt: self.schedule.plan.attempt,
+        }
+    }
+
+    #[must_use]
+    pub fn retrying_event(&self) -> AgentEvent {
+        AgentEvent::retrying(self.schedule.clone())
+    }
+
+    pub async fn wait_for_continuation(&self) {
+        tokio::time::sleep(self.schedule.plan.selected_delay()).await;
+    }
 }
 
 /// Configuration for retry behavior
@@ -391,6 +479,53 @@ mod tests {
         assert_eq!(schedule.plan.retry_after_hint_ms, Some(60_000));
         assert_eq!(schedule.plan.selected_delay_ms, 45_000);
         assert!(schedule.plan.budget_capped);
+    }
+
+    #[test]
+    fn retry_lifecycle_authority_owns_inputs_and_event_projection() {
+        let authority = LlmRetryLifecycleAuthority::new(
+            RetryPolicy::default()
+                .with_max_retries(2)
+                .with_initial_delay(Duration::ZERO),
+        );
+        let error = AgentError::llm(
+            "mock",
+            LlmFailureReason::NetworkTimeout { duration_ms: 10 },
+            "network timeout",
+        );
+        let lifecycle = authority
+            .plan_recoverable_failure(&error, 0, Some(Duration::from_secs(1)))
+            .expect("network timeout should be retryable");
+        let run_id = RunId::new();
+
+        match lifecycle.recoverable_failure_input(run_id.clone()) {
+            TurnExecutionInput::RecoverableFailure {
+                run_id: input_run_id,
+                retry,
+            } => {
+                assert_eq!(input_run_id, run_id);
+                assert_eq!(retry.failure.kind, LlmRetryFailureKind::NetworkTimeout);
+                assert_eq!(retry.plan.attempt, 1);
+            }
+            other => panic!("unexpected recoverable input: {other:?}"),
+        }
+
+        match lifecycle.retry_requested_input(run_id.clone()) {
+            TurnExecutionInput::RetryRequested {
+                run_id: input_run_id,
+                retry_attempt,
+            } => {
+                assert_eq!(input_run_id, run_id);
+                assert_eq!(retry_attempt, 1);
+            }
+            other => panic!("unexpected retry input: {other:?}"),
+        }
+
+        let event = serde_json::to_value(lifecycle.retrying_event()).unwrap();
+        assert_eq!(event["attempt"], 1);
+        assert_eq!(event["max_attempts"], 2);
+        assert_eq!(event["error"], "network timeout");
+        assert_eq!(event["retry"]["failure"]["kind"], "network_timeout");
     }
 
     #[test]

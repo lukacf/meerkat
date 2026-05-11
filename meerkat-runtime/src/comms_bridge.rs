@@ -108,6 +108,10 @@ fn peer_input_from_ingress_fact(
 ) -> Result<Input, PeerIngressProjectionError> {
     let convention = map_ingress_convention(interaction.id, ingress, response_terminality)?;
     let durability = map_durability(&convention);
+    let handling_mode = match &convention {
+        PeerConvention::ResponseProgress { .. } => None,
+        _ => Some(interaction.handling_mode),
+    };
     let peer_id = ingress.canonical_peer_id_string().ok_or(
         PeerIngressProjectionError::MissingCanonicalPeerId {
             interaction_id: interaction.id,
@@ -141,7 +145,7 @@ fn peer_input_from_ingress_fact(
         body: peer_rendered_body(interaction),
         payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
-        handling_mode: Some(interaction.handling_mode),
+        handling_mode,
     }))
 }
 
@@ -1226,6 +1230,7 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
+            assert_eq!(p.handling_mode, None);
         } else {
             panic!("Expected PeerInput");
         }
@@ -1281,6 +1286,7 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
+            assert_eq!(p.handling_mode, None);
         } else {
             panic!("Expected PeerInput");
         }

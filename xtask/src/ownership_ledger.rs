@@ -10,7 +10,8 @@ use syn::{ImplItem, Item, ItemFn, ItemImpl, Type};
 
 use crate::public_contracts::repo_root;
 
-const DOC_PATH: &str = "docs/architecture/finite-ownership-ledger.md";
+const DOC_PATH: &str =
+    "docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md";
 const BASELINE_PATH: &str = "xtask/ownership-baseline.toml";
 
 #[derive(Debug, Clone, Args, Default)]

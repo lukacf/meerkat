@@ -1276,6 +1276,7 @@ impl MeerkatMachine {
                 | MeerkatMachineCommand::PrepareLocalSessionBindings { .. }
                 | MeerkatMachineCommand::InputState { .. }
                 | MeerkatMachineCommand::ListActiveInputs { .. }
+                | MeerkatMachineCommand::AdmitTranscriptEdit { .. }
                 | MeerkatMachineCommand::ReconfigureSessionLlmIdentity { .. }
                 | MeerkatMachineCommand::StagePersistentFilter { .. }
                 | MeerkatMachineCommand::RequestDeferredTools { .. }

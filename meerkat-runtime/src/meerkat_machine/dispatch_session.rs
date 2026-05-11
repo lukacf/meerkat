@@ -496,6 +496,42 @@ impl MeerkatMachine {
                     driver.as_driver().active_input_ids(),
                 ))
             }
+            MeerkatMachineCommand::AdmitTranscriptEdit {
+                session_id,
+                running_behavior,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions.get(&session_id).map(|entry| entry.driver.clone())
+                };
+                let lifecycle = if let Some(driver) = driver {
+                    let state = self
+                        .existing_session_visible_runtime_state(&session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed);
+                    let has_active_inputs = {
+                        let driver = driver.lock().await;
+                        !driver.as_driver().active_input_ids().is_empty()
+                    };
+                    if matches!(state, RuntimeState::Running) || has_active_inputs {
+                        meerkat_core::TranscriptEditSourceLifecycle::MaterializedActive
+                    } else {
+                        meerkat_core::TranscriptEditSourceLifecycle::MaterializedIdle
+                    }
+                } else {
+                    meerkat_core::TranscriptEditSourceLifecycle::NotMaterialized
+                };
+
+                Ok(MeerkatMachineCommandResult::TranscriptEditAdmission(
+                    meerkat_core::TranscriptEditAuthority::admit(
+                        meerkat_core::TranscriptEditAdmissionRequest {
+                            session_id,
+                            running_behavior,
+                            lifecycle,
+                        },
+                    ),
+                ))
+            }
             MeerkatMachineCommand::ReconfigureSessionLlmIdentity {
                 session_id,
                 previous_identity,

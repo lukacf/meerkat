@@ -9360,6 +9360,64 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
         ),
         "Respawn must surface the MobMachine stopped-phase rejection: {respawn:?}"
     );
+
+    let force_cancel = handle
+        .force_cancel_member(AgentIdentity::from("missing-force-cancel"))
+        .await;
+    assert!(
+        matches!(
+            force_cancel,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "ForceCancel must surface the MobMachine stopped-phase rejection before member lookup: {force_cancel:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_completed_unknown_retire_is_rejected_by_machine_admission() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.complete().await.expect("complete empty mob");
+
+    let result = handle.retire(AgentIdentity::from("missing-retire")).await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Completed,
+                to: MobState::Running,
+            })
+        ),
+        "unknown retire must not bypass MobMachine terminal-phase admission: {result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_stopped_empty_task_create_is_rejected_by_machine_admission() {
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    handle.stop().await.expect("stop");
+
+    let result = handle
+        .task_create(
+            "   ".to_string(),
+            "empty subject must not shadow stopped admission".to_string(),
+            vec![],
+        )
+        .await;
+
+    assert!(
+        matches!(
+            result,
+            Err(MobError::InvalidTransition {
+                from: MobState::Stopped,
+                to: MobState::Running,
+            })
+        ),
+        "empty task subject must not shadow MobMachine stopped-phase admission: {result:?}"
+    );
 }
 
 #[tokio::test]
@@ -9461,10 +9519,15 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
     for command in [
         "Spawn",
         "Respawn",
+        "Retire",
+        "RetireAll",
         "RunFlow",
         "CancelFlow",
         "SubmitWork",
         "CancelAllWork",
+        "TaskCreate",
+        "TaskUpdate",
+        "ForceCancel",
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [
@@ -9479,6 +9542,12 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
             );
         }
     }
+
+    let spawn_arm = mob_command_arm_source(source, "Spawn");
+    assert!(
+        !spawn_arm.contains("placeholder_bridge_session_id"),
+        "MobCommand::Spawn admission must reserve the bridge session used for the actual spawn, not preview with a throwaway placeholder"
+    );
 }
 
 #[tokio::test]

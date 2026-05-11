@@ -2371,6 +2371,26 @@ describe("Mob decoder strictness", () => {
     );
   });
 
+  it("rejects missing mob snapshot status instead of fabricating unknown", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ mob_id: "mob-1", members: [] });
+
+    await assert.rejects(
+      () => client.mobSnapshot("mob-1"),
+      /missing status/,
+    );
+  });
+
+  it("rejects missing member status instead of fabricating unknown", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ tokens_used: 0, is_final: false });
+
+    await assert.rejects(
+      () => client.mobMemberStatus("mob-1", "lead"),
+      /missing status/,
+    );
+  });
+
   it("rejects malformed wait member snapshots instead of fabricating booleans", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({
@@ -2386,6 +2406,23 @@ describe("Mob decoder strictness", () => {
     await assert.rejects(
       () => client.waitMobReady("mob-1"),
       /is_final must be boolean/,
+    );
+  });
+});
+
+describe("Session fork decoder strictness", () => {
+  it("rejects missing fork handles instead of fabricating empty strings", () => {
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ session_id: "fork", message_count: 1 }),
+      /missing source_session_id/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ source_session_id: "source", message_count: 1 }),
+      /missing session_id/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ source_session_id: "source", session_id: "fork" }),
+      /message_count must be number/,
     );
   });
 });

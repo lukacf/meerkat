@@ -1409,7 +1409,11 @@ export class MeerkatClient {
         ? (result.peer_connectivity as Record<string, unknown>)
         : undefined;
     return {
-      status: String(result.status ?? "unknown"),
+      status: MeerkatClient.requireStringField(
+        result,
+        "status",
+        "Invalid mob/member_status response",
+      ),
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
@@ -1452,7 +1456,11 @@ export class MeerkatClient {
     const result = await this.request("mob/snapshot", { mob_id: mobId });
     return {
       mobId: String(result.mob_id ?? mobId),
-      status: String(result.status ?? "unknown"),
+      status: MeerkatClient.requireStringField(
+        result,
+        "status",
+        "Invalid mob/snapshot response",
+      ),
       members: Array.isArray(result.members) ? result.members : [],
     };
   }
@@ -3200,10 +3208,22 @@ export class MeerkatClient {
 
   static parseSessionForkResult(data: Record<string, unknown>): SessionForkResult {
     return {
-      sourceSessionId: String(data.source_session_id ?? ""),
-      sessionId: String(data.session_id ?? ""),
+      sourceSessionId: MeerkatClient.requireStringField(
+        data,
+        "source_session_id",
+        "Invalid session fork response",
+      ),
+      sessionId: MeerkatClient.requireStringField(
+        data,
+        "session_id",
+        "Invalid session fork response",
+      ),
       sessionRef: data.session_ref != null ? String(data.session_ref) : undefined,
-      messageCount: Number(data.message_count ?? 0),
+      messageCount: MeerkatClient.requireNumberField(
+        data,
+        "message_count",
+        "Invalid session fork response",
+      ),
     };
   }
 

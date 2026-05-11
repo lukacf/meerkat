@@ -219,9 +219,10 @@ pub struct MobMcpState {
     realm_profile_store: Option<Arc<dyn meerkat_mob::RealmProfileStore>>,
     /// Whether the current realm profile store was explicitly supplied by the caller.
     ///
-    /// Default constructor wiring installs an in-memory store so profile CRUD is
-    /// available on ephemeral surfaces. Persistent roots may upgrade that
-    /// default to SQLite, but must not override an explicit caller-owned store.
+    /// Default constructor wiring leaves the store absent so ephemeral surfaces
+    /// cannot present in-memory names or revisions as realm authority.
+    /// Persistent roots may install SQLite, but must not override an explicit
+    /// caller-owned store.
     realm_profile_store_explicit: bool,
 }
 
@@ -245,7 +246,7 @@ impl MobMcpState {
             mobs: RwLock::new(BTreeMap::new()),
             implicit_mob_locks: Mutex::new(HashMap::new()),
             restore_lock: Mutex::new(false),
-            realm_profile_store: Some(Arc::new(meerkat_mob::InMemoryRealmProfileStore::new())),
+            realm_profile_store: None,
             realm_profile_store_explicit: false,
         }
     }
@@ -1660,7 +1661,10 @@ impl MobMcpState {
         let state = Self::new_with_runtime_adapter(
             Arc::new(LocalSessionService::new()),
             Some(Arc::new(meerkat_runtime::MeerkatMachine::ephemeral())),
-        );
+        )
+        .with_realm_profile_store(Some(Arc::new(
+            meerkat_mob::InMemoryRealmProfileStore::new(),
+        )));
         Arc::new(state)
     }
 }
@@ -5678,22 +5682,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_constructor_exposes_realm_profile_crud_with_in_memory_store() {
+    async fn test_default_constructor_rejects_realm_profile_crud_without_store() {
         let svc = Arc::new(MockSessionSvc::new());
         let state = Arc::new(MobMcpState::new(svc));
 
-        let created = state
+        assert!(state.realm_profile_store().is_none());
+
+        let err = state
             .realm_profile_create("worker", &sample_realm_profile("claude-sonnet-4-6"))
             .await
-            .expect("default constructor should provide realm profile store");
-        assert_eq!(created.name, "worker");
-
-        let fetched = state
-            .realm_profile_get("worker")
-            .await
-            .expect("get realm profile")
-            .expect("stored profile");
-        assert_eq!(fetched.profile.model, "claude-sonnet-4-6");
+            .expect_err("default constructor must not expose in-memory realm profile authority");
+        assert!(
+            err.to_string()
+                .contains("realm profile store not configured"),
+            "{err}"
+        );
     }
 
     #[tokio::test]

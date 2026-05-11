@@ -52,16 +52,24 @@ const minimalConfig: RuntimeConfig = {
 };
 
 const fullConfig: RuntimeConfig = {
-  apiKey: 'sk-fallback',
   anthropicApiKey: 'sk-ant',
   openaiApiKey: 'sk-oai',
   geminiApiKey: 'sk-gem',
   model: 'claude-sonnet-4-5',
   maxSessions: 16,
-  baseUrl: 'https://proxy.example.com',
   anthropicBaseUrl: 'https://proxy.example.com/anthropic',
   openaiBaseUrl: 'https://proxy.example.com/openai',
   geminiBaseUrl: 'https://proxy.example.com/gemini',
+};
+
+const legacyApiKeyConfig: RuntimeConfig = {
+  // @ts-expect-error RuntimeConfig no longer advertises ignored legacy carriers.
+  apiKey: 'sk-fallback',
+};
+
+const legacyBaseUrlConfig: RuntimeConfig = {
+  // @ts-expect-error RuntimeConfig no longer advertises ignored legacy carriers.
+  baseUrl: 'https://proxy.example.com',
 };
 
 // ─── SessionConfig ──────────────────────────────────────────────
@@ -326,6 +334,10 @@ function handleEvent(event: AgentEvent): string {
       return event.delta;
     case 'text_complete':
       return event.content;
+    case 'server_tool_content':
+      return `${event.name}:${event.id ?? ''}`;
+    case 'assistant_image_appended':
+      return event.image.image_id;
     case 'tool_call_requested':
       return `${event.name}:${event.id}`;
     case 'tool_result_received':
@@ -336,6 +348,10 @@ function handleEvent(event: AgentEvent): string {
       return `${event.stop_reason} ${event.usage.input_tokens}+${event.usage.output_tokens}`;
     case 'run_completed':
       return event.result;
+    case 'extraction_succeeded':
+      return `${event.session_id}:${event.schema_warnings?.length ?? 0}`;
+    case 'extraction_failed':
+      return `${event.session_id}:${event.attempts}:${event.reason}`;
     case 'run_failed':
       return event.error;
     case 'tool_execution_started':

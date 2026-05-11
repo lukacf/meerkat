@@ -690,17 +690,17 @@ pub fn resolve_configured_provider_binding_for_provider(
     preferred_realm: Option<&RealmId>,
     selection: ProviderBindingSelection<'_>,
 ) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
-    let mut realm_ids: Vec<&str> = Vec::new();
+    let mut candidates: Vec<&str> = Vec::new();
     if let Some(realm) = preferred_realm {
-        realm_ids.push(realm.as_str());
+        candidates.push(realm.as_str());
     }
-    if !realm_ids.contains(&"default") {
-        realm_ids.push("default");
+    if !candidates.contains(&"default") {
+        candidates.push("default");
     }
 
     let criteria = selection.criteria_label();
     let mut missing_provider: Option<String> = None;
-    for realm_id in realm_ids {
+    for realm_id in candidates {
         let Some(section) = config.realm.get(realm_id) else {
             continue;
         };

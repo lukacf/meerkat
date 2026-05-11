@@ -16,7 +16,8 @@ use meerkat_core::handles::{
 };
 use meerkat_core::{
     AuthBindingRef, AuthConstraints, AuthProfileConfig, BackendProfileConfig, BindingId,
-    CredentialSourceSpec, ProviderBindingConfig, RealmConfigSection, RealmConnectionSet, RealmId,
+    CredentialSourceSpec, ExternalAuthResolverId, ProviderBindingConfig, RealmConfigSection,
+    RealmConnectionSet, RealmId,
 };
 use meerkat_gemini::runtime::oauth;
 use meerkat_llm_core::provider_runtime::{ProviderRuntimeRegistry, ResolverEnvironment};
@@ -519,7 +520,7 @@ async fn google_oauth_rejects_wrong_source_even_with_matching_mode() {
     let err = registry
         .resolve(
             &code_assist_realm_with_source(CredentialSourceSpec::ExternalResolver {
-                handle: "external-google".into(),
+                handle: ExternalAuthResolverId::parse("external-google").unwrap(),
             }),
             &default_auth_binding(),
             &env,

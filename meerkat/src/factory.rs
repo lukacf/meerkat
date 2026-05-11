@@ -312,6 +312,9 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_shell`.
     /// `Inherit` defers to the factory default.
     pub override_shell: ToolCategoryOverride,
+    /// Per-build override for factory-level comms tool visibility.
+    /// `Inherit` preserves the legacy runtime/request-driven behavior.
+    pub override_comms: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_memory`.
     /// `Inherit` defers to the factory default.
     pub override_memory: ToolCategoryOverride,
@@ -484,6 +487,7 @@ impl std::fmt::Debug for AgentBuildConfig {
             )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
@@ -556,6 +560,7 @@ impl AgentBuildConfig {
             web_search_executor_override: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -666,6 +671,7 @@ impl AgentBuildConfig {
         self.agent_llm_client_decorator = build.agent_llm_client_decorator.clone();
         self.override_builtins = build.override_builtins;
         self.override_shell = build.override_shell;
+        self.override_comms = build.override_comms;
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
         self.override_workgraph = build.override_workgraph;
@@ -721,6 +727,7 @@ impl AgentBuildConfig {
             agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
             override_builtins: self.override_builtins,
             override_shell: self.override_shell,
+            override_comms: self.override_comms,
             override_memory: self.override_memory,
             override_schedule: self.override_schedule,
             override_workgraph: self.override_workgraph,
@@ -2137,10 +2144,16 @@ impl AgentFactory {
             let build_requests_comms =
                 build_config.is_some_and(|build| build.comms_name.is_some() || build.keep_alive);
             let has_comms_runtime = self.comms_runtime.is_some();
+            let comms_enabled = build_config
+                .map(|build| build.override_comms.resolve(self.enable_comms))
+                .unwrap_or(self.enable_comms);
+            let comms_explicitly_disabled = build_config
+                .is_some_and(|build| matches!(build.override_comms, ToolCategoryOverride::Disable));
             set_tool_capability(
                 &mut capabilities,
                 meerkat_capabilities::CapabilityId::Comms,
-                self.enable_comms || build_requests_comms || has_comms_runtime,
+                !comms_explicitly_disabled
+                    && (comms_enabled || build_requests_comms || has_comms_runtime),
             );
         }
 
@@ -2296,6 +2309,9 @@ impl AgentFactory {
         }
         if !mask.override_shell {
             build_config.override_shell = metadata.tooling.shell;
+        }
+        if !mask.override_comms {
+            build_config.override_comms = metadata.tooling.comms;
         }
         if !mask.override_memory {
             build_config.override_memory = metadata.tooling.memory;
@@ -3112,6 +3128,8 @@ impl AgentFactory {
         );
         build_config.resume_override_mask.override_shell |=
             !matches!(build_config.override_shell, ToolCategoryOverride::Inherit);
+        build_config.resume_override_mask.override_comms |=
+            !matches!(build_config.override_comms, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_memory |=
             !matches!(build_config.override_memory, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_workgraph |= !matches!(
@@ -3655,6 +3673,17 @@ impl AgentFactory {
         let effective_builtins = build_config.override_builtins.resolve(self.enable_builtins);
         #[allow(unused_variables)] // only consumed by non-wasm32 tool dispatcher
         let effective_shell = build_config.override_shell.resolve(self.enable_shell);
+        #[cfg(feature = "comms")]
+        let effective_comms = match build_config.override_comms {
+            ToolCategoryOverride::Inherit => {
+                self.enable_comms
+                    || build_config.keep_alive
+                    || build_config.comms_name.is_some()
+                    || self.comms_runtime.is_some()
+            }
+            ToolCategoryOverride::Enable => true,
+            ToolCategoryOverride::Disable => false,
+        };
         let mut session = build_config.resume_session.clone().unwrap_or_default();
         let initial_tool_filter = match build_config
             .initial_metadata_entries
@@ -3992,7 +4021,7 @@ impl AgentFactory {
 
         // 9a. Compose tools with comms gateway.
         #[cfg(feature = "comms")]
-        if let Some(ref runtime) = comms_runtime {
+        if effective_comms && let Some(ref runtime) = comms_runtime {
             let composed =
                 compose_tools_with_comms(tools, tool_usage_instructions, runtime.tool_material())
                     .map_err(|e| {
@@ -4477,9 +4506,7 @@ impl AgentFactory {
             metadata.provider_params = build_config.provider_params.clone();
             metadata.tooling.builtins = build_config.override_builtins;
             metadata.tooling.shell = build_config.override_shell;
-            // No override_comms field in AgentBuildConfig — preserve the existing
-            // metadata value so explicit Enable/Disable survives across resumes.
-            // (metadata.tooling.comms is left unchanged)
+            metadata.tooling.comms = build_config.override_comms;
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
             metadata.tooling.workgraph = build_config.override_workgraph;
@@ -4509,7 +4536,7 @@ impl AgentFactory {
                 tooling: SessionTooling {
                     builtins: build_config.override_builtins,
                     shell: build_config.override_shell,
-                    comms: ToolCategoryOverride::Inherit,
+                    comms: build_config.override_comms,
                     mob: build_config.override_mob,
                     memory: build_config.override_memory,
                     workgraph: build_config.override_workgraph,
@@ -7897,6 +7924,38 @@ mod tests {
         assert_eq!(metadata.tooling.active_skills, Some(vec![canonical]));
     }
 
+    #[tokio::test]
+    async fn comms_override_persists_and_recovers_through_build_seam() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut build = AgentBuildConfig::new("claude-sonnet-4-5");
+        build.llm_client_override = Some(Arc::new(meerkat_client::TestClient::default()));
+        build.override_builtins = ToolCategoryOverride::Disable;
+        build.override_comms = ToolCategoryOverride::Disable;
+
+        let agent = AgentFactory::new(temp.path().join("sessions"))
+            .builtins(false)
+            .build_agent(build, &Config::default())
+            .await
+            .unwrap();
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("session metadata should be persisted");
+        assert_eq!(metadata.tooling.comms, ToolCategoryOverride::Disable);
+
+        let mut resumed_build = AgentBuildConfig::new("claude-sonnet-4-5");
+        resumed_build.resume_session = Some(agent.session().clone());
+        AgentFactory::apply_resumed_session_metadata(&mut resumed_build)
+            .expect("resume metadata should apply");
+        assert_eq!(resumed_build.override_comms, ToolCategoryOverride::Disable);
+
+        resumed_build.override_comms = ToolCategoryOverride::Enable;
+        resumed_build.resume_override_mask.override_comms = true;
+        AgentFactory::apply_resumed_session_metadata(&mut resumed_build)
+            .expect("resume metadata should preserve explicit override");
+        assert_eq!(resumed_build.override_comms, ToolCategoryOverride::Enable);
+    }
+
     #[cfg(all(feature = "skills", feature = "comms"))]
     #[test]
     fn per_session_comms_build_keeps_comms_skill_capability() {
@@ -7928,6 +7987,23 @@ mod tests {
         assert!(
             caps.iter().any(|cap| cap.as_str() == "schedule"),
             "per-build schedule enable should expose schedule capability to skills"
+        );
+    }
+
+    #[cfg(all(feature = "skills", feature = "comms"))]
+    #[test]
+    fn per_session_comms_build_respects_explicit_disable() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.comms_name = Some("mob:test/analyst/a-1".to_string());
+        build.override_comms = ToolCategoryOverride::Disable;
+
+        let caps = factory.effective_skill_capabilities(&Config::default(), Some(&build));
+
+        assert!(
+            caps.iter().all(|cap| cap.as_str() != "comms"),
+            "explicit comms disable should hide comms capability from skills"
         );
     }
 

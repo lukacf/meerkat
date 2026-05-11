@@ -14,10 +14,10 @@ Define tools using JSON Schema:
 use meerkat::ToolDef;
 use serde_json::json;
 
-let tool = ToolDef {
-    name: "get_weather".into(),
-    description: "Get current weather for a city".to_string(),
-    input_schema: json!({
+let tool = ToolDef::new(
+    "get_weather",
+    "Get current weather for a city",
+    json!({
         "type": "object",
         "properties": {
             "city": {
@@ -32,7 +32,7 @@ let tool = ToolDef {
         },
         "required": ["city"]
     }),
-};
+);
 ```
 
 ### Implementing AgentToolDispatcher
@@ -53,17 +53,17 @@ struct MyToolDispatcher;
 impl AgentToolDispatcher for MyToolDispatcher {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
         vec![
-            Arc::new(ToolDef {
-                name: "search".into(),
-                description: "Search the web".to_string(),
-                input_schema: json!({
+            Arc::new(ToolDef::new(
+                "search",
+                "Search the web",
+                json!({
                     "type": "object",
                     "properties": {
                         "query": {"type": "string"}
                     },
                     "required": ["query"]
                 }),
-            }),
+            )),
         ].into()
     }
 
@@ -161,9 +161,7 @@ Implement the `SessionStore` trait and pass it to `AgentFactory::session_store()
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{SessionFilter, SessionId, SessionStore, SessionStoreError};
-use meerkat_core::{Session, SessionMeta};
-use meerkat_core::SessionMeta;
+use meerkat::{Session, SessionFilter, SessionId, SessionMeta, SessionStore, SessionStoreError};
 use std::sync::Arc;
 
 struct BigQueryStore { /* your storage backend */ }

@@ -1,5 +1,11 @@
 # Rebuild-Trigger Audit
 
+> **Current status (0.6.5):** Historical audit record. It documents projection
+> and rebuild-trigger risks at the baseline commit named below; current live
+> audio behavior is now owned by the live-adapter MVP (`meerkat-live`,
+> `live/*`, `rkat-rpc --live-ws`) rather than the older realtime WebSocket file
+> names cited in the audit.
+
 Status: Read-only audit seeding ITEM-6 sub-PRs
 Scope: Every cached / projection-shaped field currently reachable on `main`
 Dogma reference: `meerkat-runtime-dogma.md` #13 — *derived projections are rebuildable, never authoritative*

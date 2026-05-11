@@ -65,13 +65,15 @@ The tool accepts one top-level field, `request`. For normal use, pass the simple
 }
 ```
 
+This is the Meerkat `generate_image` tool input, not a raw OpenAI Responses API request. Meerkat lowers universal fields such as `size`, `quality`, and `format` into the selected provider's native request. For OpenAI, `format` becomes the provider-side `output_format` option.
+
 For edits, set `intent` to `edit`, provide an `instruction`, and include at least one `source_images` entry:
 
 ```json
 {
   "request": {
     "intent": "edit",
-    "instruction": "make the background transparent and keep the subject unchanged",
+    "instruction": "replace the background with a plain white studio backdrop and keep the subject unchanged",
     "source_images": [
       {
         "kind": "assistant_image",
@@ -129,10 +131,9 @@ OpenAI default:
     "intent": "generate",
     "prompt": "a clean product render of a matte black desk lamp",
     "provider": "openai",
-    "format": "png",
-    "provider_params": {
-      "background": "transparent"
-    }
+    "size": "1024x1024",
+    "quality": "auto",
+    "format": "webp"
   }
 }
 ```
@@ -160,18 +161,24 @@ Gemini default:
 
 `provider: "openai"` uses the OpenAI image default, currently `gpt-image-2`.
 
-OpenAI `provider_params`:
+Meerkat fields and OpenAI lowering:
 
 | Field | Values | Notes |
 |-------|--------|-------|
-| `background` | `auto`, `transparent`, `opaque` | `transparent` is model-dependent. |
-| `output_compression` | `0` to `100` | Applies where the selected OpenAI backend supports it. |
-| `moderation` | `auto`, `low` | OpenAI moderation mode. |
-| `action` | `auto`, `generate`, `edit` | Applies only to the hosted Responses image tool. Images API requests reject `action`. |
+| `size` | `auto`, `1024x1024`, `1024x1536`, `1536x1024`, `WIDTHxHEIGHT` | Universal Meerkat field. Lowered to OpenAI `size`. |
+| `quality` | `auto`, `low`, `medium`, `high` | Universal Meerkat field. Lowered to OpenAI `quality`. |
+| `format` | `auto`, `png`, `jpeg`, `jpg`, `webp` | Universal Meerkat field. Lowered to OpenAI `output_format`; `jpg` normalizes to `jpeg`. |
+| `provider_params.background` | `auto`, `opaque` | Advanced OpenAI override. `gpt-image-2` does not support transparent backgrounds. Use an opaque background and post-process if you need transparency. |
+| `provider_params.output_compression` | `0` to `100` | Advanced OpenAI override. Applies only when the universal `format` is `jpeg` or `webp`. |
+| `provider_params.moderation` | `auto`, `low` | Advanced OpenAI override for GPT Image moderation strictness. |
+| `provider_params.action` | `auto`, `generate`, `edit` | Advanced hosted Responses image-tool override. Normal Meerkat calls should use top-level `intent` and omit `action`; Images API routes reject it. |
 
 Model behavior:
 
-- `gpt-image-2` uses the hosted Responses image tool.
+- `gpt-image-2` uses the hosted Responses image tool internally, but callers still pass Meerkat's `generate_image` request shape.
+- `gpt-image-2` accepts flexible `WIDTHxHEIGHT` sizes when they satisfy OpenAI's constraints: both edges are multiples of 16 px, max edge is 3840 px, aspect ratio is at most 3:1, and total pixels are between 655,360 and 8,294,400. Common values include `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `2048x1152`, `3840x2160`, and `2160x3840`.
+- Do not copy raw Responses API JSON into `provider_params`. Use Meerkat's universal `size`, `quality`, `format`, and `intent` fields, and reserve `provider_params` for the advanced OpenAI overrides above.
+- Do not pass `background: "transparent"` for `gpt-image-2`; OpenAI rejects it. Do not pass `input_fidelity`; `gpt-image-2` treats image inputs as high fidelity by default and Meerkat's 0.6.5 OpenAI adapter rejects unknown provider params.
 - Other OpenAI-owned `gpt-image*` or `dall-e*` models use the Images API path.
 - The Images API path currently rejects edit requests, reference images, and `action`.
 
@@ -218,7 +225,7 @@ Gemini image generation runs through a scoped image-model turn internally. The u
   "revised_prompt": { "disposition": "not_requested" },
   "native_metadata": {
     "provider": "open_ai",
-    "target_model": "gpt-5.4",
+    "target_model": "gpt-5.5",
     "response_id": "resp_..."
   },
   "warnings": []

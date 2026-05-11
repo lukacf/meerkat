@@ -6,7 +6,7 @@ icon: "python"
 
 The Python SDK (`meerkat-sdk`) is a runtime-backed client over `rkat-rpc`.
 
-- **Contract version:** `0.6.2`
+- **Contract version:** `0.6.5`
 - **Python:** `>=3.10`
 - **Runtime dependencies:** `websockets>=12,<16`
 
@@ -96,6 +96,42 @@ All config APIs return a **config envelope** (`config`, `generation`, realm meta
 - `await client.list_schedule_occurrences(...)`
 - `await client.list_schedule_tools()`
 - `await client.call_schedule_tool(...)`
+
+### Live channel APIs
+
+The old `RealtimeChannel` helper has been removed. Use `LiveChannel.session(...)`
+for a session-bound wrapper, or call the direct `live/*` RPC helpers on
+`MeerkatClient`.
+
+```python
+from meerkat import LiveChannel, MeerkatClient
+
+client = MeerkatClient()
+await client.connect(live_ws=True)
+try:
+    session = await client.create_session("Open a live channel")
+    channel = LiveChannel.session(client, session.id, turning_mode="explicit_commit")
+
+    opened = await channel.open()
+    # Connect to opened["transport"]["url"] externally.
+    await channel.send_input_text("hello")
+    await channel.commit_input(response_modality="text")
+    await channel.close()
+finally:
+    await client.close()
+```
+
+- `await client.live_open(session_id, turning_mode=None)`
+- `await client.live_status(channel_id)`
+- `await client.live_close(channel_id)`
+- `await client.live_send_input_text(channel_id, text)`
+- `await client.live_send_input_audio(channel_id, data_base64, sample_rate_hz, channels)`
+- `await client.live_send_input_image(channel_id, mime, data_base64)`
+- `await client.live_send_input_video_frame(channel_id, codec, data_base64, timestamp_ms)`
+- `await client.live_commit_input(channel_id, response_modality=None)`
+- `await client.live_interrupt(channel_id)`
+- `await client.live_truncate(channel_id, item_id, content_index, audio_played_ms)`
+- `await client.live_refresh(channel_id)`
 
 ### Mob APIs
 

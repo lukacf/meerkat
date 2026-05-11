@@ -4,16 +4,21 @@ description: "Build profiles, feature gates, error codes, and capability behavio
 icon: "table-cells"
 ---
 
-Meerkat is modular. Every feature is opt-in. This matrix shows what works in each build profile.
+Meerkat is modular. The `meerkat` facade defaults to the three provider
+features (`anthropic`, `openai`, `gemini`); storage, comms, MCP, skills,
+schedule, memory, and live-channel orchestration are opt-in. This matrix shows
+what works in common build profiles.
 
 ## Build profiles
 
 | Profile | Cargo Features | Use Case |
 |---------|---------------|----------|
 | **Minimal** | `--no-default-features` | Ephemeral agent, no persistence, no compaction |
+| **Provider default** | default features | Anthropic + OpenAI + Gemini providers, no persistence or optional subsystems |
 | **Persistent** | `session-store` | Sessions survive restart with the realm-pinned backend (`sqlite` by default when compiled) |
 | **Compacting** | `session-compaction` | Auto-compact long conversations |
 | **Full** | `session-store,session-compaction` | Persistent + compacting |
+| **Live-capable** | `openai-realtime,live` | Caller-initiated `live/*` channels for realtime-capable sessions |
 
 ## Capability behavior
 
@@ -22,7 +27,7 @@ Meerkat is modular. Every feature is opt-in. This matrix shows what works in eac
 | `create_session` | Works | Works | Works | Works |
 | `start_turn` | Works | Works + snapshot saved | Works | Works + snapshot saved |
 | `interrupt` | Works | Works | Works | Works |
-| `read` (live session) | Works | Works | Works | Works |
+| `read` (running session) | Works | Works | Works | Works |
 | `read` (archived) | `SESSION_NOT_FOUND` | Falls back to store | `SESSION_NOT_FOUND` | Falls back to store |
 | `list` | Live sessions only | Live + stored sessions | Live sessions only | Live + stored sessions |
 | `archive` | Removes from memory | Removes from memory, snapshot kept | Removes from memory | Removes + snapshot kept |
@@ -60,19 +65,22 @@ The table below is the current **session transport** mapping:
 ```toml
 # Minimal: just the agent loop
 [dependencies]
-meerkat = { version = "0.6.2", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.5", default-features = false, features = ["anthropic"] }
 
 # Add persistence
-meerkat = { version = "0.6.2", default-features = false, features = ["anthropic", "session-store"] }
+meerkat = { version = "0.6.5", default-features = false, features = ["anthropic", "session-store"] }
 
 # Add compaction
-meerkat = { version = "0.6.2", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
+meerkat = { version = "0.6.5", default-features = false, features = ["anthropic", "session-store", "session-compaction"] }
 
 # Add scheduling
-meerkat = { version = "0.6.2", default-features = false, features = ["anthropic", "session-store", "schedule"] }
+meerkat = { version = "0.6.5", default-features = false, features = ["anthropic", "session-store", "schedule"] }
 
 # Kitchen sink
-meerkat = { version = "0.6.2", features = ["all-providers", "session-store", "session-compaction", "comms", "mcp", "schedule"] }
+meerkat = { version = "0.6.5", features = [
+  "all-providers", "openai-realtime", "session-store", "session-compaction",
+  "memory-store-session", "comms", "mcp", "skills", "schedule", "live"
+] }
 ```
 
 ## Model capabilities
@@ -83,9 +91,11 @@ meerkat = { version = "0.6.2", features = ["all-providers", "session-store", "se
 |------------|-------------|-----------|--------|--------|
 | `vision` | Model can process image content in user messages | Yes | Yes | Yes |
 | `image_tool_results` | Model can process image content in tool results | Yes | No | Yes |
-| `supports_web_search` | Model supports provider-native web search tools | Yes | Yes | Yes |
+| `inline_video` | Model can process inline video content in user messages | No | No | Yes |
+| `realtime` | Model can back a caller-initiated live channel | No | `gpt-realtime-2` only | No current catalog row |
+| `supports_web_search` | Model supports provider-native web search tools | Yes | Yes for chat catalog rows; not `gpt-realtime-2` / Codex | Yes |
 
-These fields are set in the model catalog (`meerkat-models`) and exposed via `ModelProfile`. They control:
+These fields are set in `meerkat-core/src/model_profile/**` (`meerkat-models` is a compatibility shim) and exposed via `ModelProfile`. They control:
 
 - **`view_image` tool visibility** -- currently hidden via `ToolScope` when `image_tool_results` is `false`.
 - **`ContentBlock::Image` in tool results** -- providers that do not support `image_tool_results` will receive image content blocks converted to text descriptions.

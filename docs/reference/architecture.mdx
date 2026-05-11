@@ -4,7 +4,7 @@ description: "Current Meerkat architecture: execution path, canonical machines, 
 icon: "layer-group"
 ---
 
-Meerkat is a library-first agent runtime. The same execution substrate powers the CLI, REST, JSON-RPC, MCP, Rust embedding, Python/TypeScript SDKs layered on top of `rkat-rpc`, and the browser/WASM runtime. Reduced CLI/RPC profiles remain available as source builds for custom distributions.
+Meerkat is a library-first agent runtime. The same execution substrate powers the CLI, REST, JSON-RPC, MCP, Rust embedding, Python/TypeScript SDKs layered on top of `rkat-rpc`, and the browser/WASM runtime. There are no separate `rkat-mini` or `rkat-rpc-mini` binaries in 0.6.5; reduced distributions are source builds of the same crates with narrower Cargo feature sets.
 
 <Note>
 The architecture working dump under `docs/architecture/two-kernel-research/` was retired during the April 2026 docs cleanup. The canonical sources of truth are the machine catalog, generated specs, and the doctrine/ADR documents linked from this page.
@@ -106,7 +106,7 @@ The current catalog exposes **five** canonical machines from
 `flow_frame`, `flow_run`, and `loop_iteration` are non-canonical Mob-owned
 reducer/projection support modules, not generated runtime authorities.
 `meerkat_mob::run::flow_projection_kernel_audit()` pins that classification in
-code and records that live reducer transitions are gated behind
+code and records that flow reducer transitions are gated behind
 MobMachine-owned command wrappers and tied to the owning `MobMachine` inputs.
 
 ## Canonical compositions
@@ -133,9 +133,10 @@ Generated specs for the machine and composition surfaces live under
 | `meerkat-runtime` | `MeerkatMachine`, runtime control plane, session binding/recovery |
 | `meerkat-session` | Persistent and ephemeral `SessionService` implementations |
 | `meerkat-store` | Session and realm persistence backends (`sqlite`, `jsonl`, schedule store helpers) |
-| `meerkat-tools` | Builtin tools, tool scoping, MCP live-surface integration points |
+| `meerkat-tools` | Builtin tools, tool scoping, shell, session-scoped task store |
 | `meerkat-mcp` | MCP client/router used to consume external tool servers |
 | `meerkat-mcp-server` | Meerkat-as-MCP host surface |
+| `meerkat-live` | Live channel host, projection sink, and WebSocket transport |
 | `meerkat-mob` | Mob runtime, storage, flow engine, member lifecycle |
 | `meerkat-mob-pack` | Mobpack archive/signing/trust primitives |
 | `meerkat-mob-mcp` | Public mob control-plane tools plus agent-side mob tool surfaces |

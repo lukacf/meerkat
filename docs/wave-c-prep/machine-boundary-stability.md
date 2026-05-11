@@ -1,5 +1,10 @@
 # Machine Boundary Stability — Wave (c) Prep
 
+> **Current status (0.6.5):** Historical wave-c boundary analysis. It predates
+> the live-adapter MVP and SessionRuntime split, so realtime attachment language
+> is retained only as audit context. Current public docs should describe live
+> channels and `live/*` RPC methods.
+
 Status: Analysis input for wave (c) coupling decisions. READ-ONLY survey.
 Scope: The 5 canonical machines in the 0.6 catalog as of `meerkat-machine-schema/src/catalog/dsl/`.
 

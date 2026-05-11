@@ -30,7 +30,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
   <Step title="Add the dependency">
     ```toml
     [dependencies]
-    meerkat = "0.6.2"
+    meerkat = "0.6.5"
     tokio = { version = "1", features = ["full"] }
     ```
   </Step>
@@ -39,25 +39,25 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
     <CodeGroup>
     ```toml Default (all providers, no storage)
     [dependencies]
-    meerkat = "0.6.2"
+    meerkat = "0.6.5"
     ```
 
     ```toml Add persistence
     [dependencies]
-    meerkat = { version = "0.6.2", features = ["sqlite-store", "session-store"] }
+    meerkat = { version = "0.6.5", features = ["sqlite-store", "session-store"] }
     ```
 
     ```toml Full harness
     [dependencies]
-    meerkat = { version = "0.6.2", features = [
+    meerkat = { version = "0.6.5", features = [
         "sqlite-store", "session-store", "session-compaction",
-        "memory-store-session", "comms", "mcp", "skills"
+        "memory-store-session", "comms", "mcp", "skills", "live"
     ] }
     ```
 
     ```toml Minimal (single provider)
     [dependencies]
-    meerkat = { version = "0.6.2", default-features = false, features = ["anthropic"] }
+    meerkat = { version = "0.6.5", default-features = false, features = ["anthropic"] }
     ```
     </CodeGroup>
   </Step>
@@ -78,6 +78,7 @@ The Rust SDK is the primary interface. The Python/TypeScript SDKs and all API se
 | `memory-store-session` | Semantic memory indexing | No |
 | `comms` | Ed25519 inter-agent messaging | No |
 | `mcp` | MCP protocol client and tool routing | No |
+| `live` | Live-channel orchestration and realtime adapter helpers | No |
 | `skills` | Composable knowledge packs | No |
 </Accordion>
 
@@ -93,6 +94,7 @@ For the main production embedding path, use the runtime-backed persistent flow:
 use meerkat::{
     AgentFactory, Config, CreateSessionRequest, SessionService,
     build_persistent_service, open_realm_persistence_in,
+    DeferredPromptPolicy,
 };
 use meerkat_core::service::InitialTurnPolicy;
 use meerkat_store::RealmBackend;
@@ -119,6 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx: None,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }).await?;
@@ -140,8 +143,11 @@ For **testing or embedded use** where runtime semantics are intentionally not ne
 ### Multi-turn conversations
 
 ```rust
-use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{InitialTurnPolicy, HandlingMode};
+use meerkat::{
+    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    StartTurnRequest, StartTurnRuntimeSemantics,
+};
+use meerkat_core::service::InitialTurnPolicy;
 
 // Turn 1: create session
 let result = service.create_session(CreateSessionRequest {
@@ -153,6 +159,7 @@ let result = service.create_session(CreateSessionRequest {
     event_tx: None,
     skill_references: None,
     initial_turn: InitialTurnPolicy::RunImmediately,
+    deferred_prompt_policy: DeferredPromptPolicy::Discard,
     build: None,
     labels: None,
 }).await?;
@@ -178,8 +185,11 @@ service.archive(&session_id).await?;
 ### Deferred first-turn system prompt override
 
 ```rust
-use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
-use meerkat_core::service::{HandlingMode, InitialTurnPolicy};
+use meerkat::{
+    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    StartTurnRequest, StartTurnRuntimeSemantics,
+};
+use meerkat_core::service::InitialTurnPolicy;
 
 let created = service.create_session(CreateSessionRequest {
     model: "claude-sonnet-4-6".into(),
@@ -190,6 +200,7 @@ let created = service.create_session(CreateSessionRequest {
     event_tx: None,
     skill_references: None,
     initial_turn: InitialTurnPolicy::Defer,
+    deferred_prompt_policy: DeferredPromptPolicy::Stage,
     build: None,
     labels: None,
 }).await?;
@@ -409,8 +420,8 @@ let tool_call = ToolCall {
     args: json!({"city": "Tokyo"}),
 };
 
-let result = ToolResult::success("tc_123", "Sunny, 25C");
-let error = ToolResult::error("tc_123", "City not found");
+let result = ToolResult::new("tc_123".to_string(), "Sunny, 25C".to_string(), false);
+let error = ToolResult::new("tc_123".to_string(), "City not found".to_string(), true);
 ```
 
 ### RunResult

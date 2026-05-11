@@ -1,5 +1,10 @@
 # Wave (b) — Correct Foundations — Implementation Plan
 
+> **Current status (0.6.5):** Historical implementation plan. The typed
+> foundations described here landed through later wave work; individual stale
+> route names, line numbers, and realtime attachment references below are kept
+> as audit context, not as current surface documentation.
+
 **Branch of record:** `dogma/wave-a-demolition` @ `7f88cb477`. Tree is broken post-wave-a. Foundations below are verified at HEAD.
 
 ---

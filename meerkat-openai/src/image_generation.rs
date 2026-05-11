@@ -225,9 +225,10 @@ impl ImageGenerationProviderProfile for OpenAiImageGenerationProfile {
         Some(
             r#"OpenAI:
 - Models: provider:"openai" uses the catalog OpenAI image default; supported image targets and their hosted-tool vs Images API routes are owned by the shared model catalog.
-- provider_params: {"background":"auto"|"transparent"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
-- action applies only to the hosted Responses image tool. Images API requests reject action.
-- background:"transparent" is model-dependent; unsupported model/background combinations are rejected by OpenAI."#,
+- Use Meerkat's universal size, quality, format, count, and intent fields for normal requests; the adapter lowers format to OpenAI output_format.
+- provider_params is only for advanced OpenAI-specific overrides: {"background":"auto"|"transparent"|"opaque","output_compression":0..100,"moderation":"auto"|"low","action":"auto"|"generate"|"edit"}.
+- action applies only to the hosted Responses image tool and is usually omitted in favor of the top-level Meerkat intent. Images API requests reject action.
+- background:"transparent" is model-dependent; gpt-image-2 rejects it."#,
         )
     }
 

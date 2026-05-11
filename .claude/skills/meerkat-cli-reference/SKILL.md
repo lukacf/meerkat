@@ -13,6 +13,7 @@ spelling, singular/plural forms, flags, and enum values matter.
 - There is no `rkat sessions`; use singular `rkat session`.
 - There is no `rkat resume`; use `rkat run --resume ...`.
 - There is no `rkat rpc`; use the `rkat-rpc` binary for JSON-RPC.
+- There is no `rkat live`; use JSON-RPC `live/*` with `rkat-rpc --live-ws`.
 - There is no `rkat image` command.
 - There is no `rkat mcp reload` CLI command.
 - There is no `--tools all`; valid values are `safe`, `workspace`, `full`, `none`.
@@ -46,7 +47,6 @@ rkat init
 rkat run <PROMPT> [OPTIONS]
 rkat help <QUESTION> [OPTIONS]
 rkat session list|show|delete|interrupt ...
-rkat live open|status|close ...
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|remove|list|get ...
@@ -185,15 +185,10 @@ rkat realm prune [--isolated-only] [--older-than-hours N] [--force]
 
 ## Live channels
 
-```bash
-rkat live open session <SESSION-ID>
-rkat live status session <SESSION-ID>
-rkat live close session <SESSION-ID>
-```
-
-`live open` opens a live audio/text channel on a session with a realtime-capable model.
-`live status` reads the live channel status.
-`live close` closes the channel.
+There is no `rkat live` CLI group. Live channels are controlled through JSON-RPC
+`live/open`, `live/status`, `live/close`, `live/send_input`,
+`live/commit_input`, `live/interrupt`, `live/truncate`, and `live/refresh`.
+Start `rkat-rpc` with `--live-ws <ADDR>` for the WebSocket transport.
 
 ## Mob
 

@@ -23,7 +23,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 17. **Persist intent, not resolved defaults** — use `ToolCategoryOverride` / `from_override()` when storing tooling policy.
 18. **One canonical step path** — `execute_step_with_all_guards()` is shared by flat and frame execution; parallel executors are a regression factory.
 19. **Operator authority is injected, not ambient** — mob support being enabled must not surface operator tools without runtime context.
-20. **Runtime owns detached wake** — background-op completion wakeups flow through `DetachedWakeState` + `ContinuationInput`, not surface code.
+20. **Runtime owns detached wake** — background-op completion wakeups flow through `RuntimeCompletionFeed` / `EpochCursorState` + `ContinuationInput`, not surface code.
 21. **No production-only machine semantics** — new state fields, transitions, effects, helpers, and invariants land in catalog DSL first. Production bridge code may convert/realize, not decide.
 22. **Typed command parity only** — command classification uses typed manifests. String exception tables, wildcard "allowed" branches, and command-name folklore are dogma violations.
 23. **Mob flow helper reducers are not machines** — `flow_run`, `flow_frame`, and `loop_iteration` are MobMachine-owned fail-closed projection reducers. They must not become independent semantic owners.
@@ -41,7 +41,7 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - **Prefabs are gone.** `MobDefinition` is the only creation input.
 - **"Delegate" / "sub-agent" UX is mob-backed and session-owned.** Use canonical `owner_bridge_session_id`, `is_implicit`, and `destroy_session_mobs()` seams.
 - **Persist `ToolCategoryOverride` intent**; never flatten `Inherit` into a resolved bool on save/resume paths.
-- **Background-op wake is runtime-owned** via `DetachedWakeState` + `ContinuationInput`; surfaces must not spawn bespoke waker loops.
+- **Background-op wake is runtime-owned** via `RuntimeCompletionFeed` / `EpochCursorState` + `ContinuationInput`; surfaces must not spawn bespoke waker loops.
 - **Only actionable peer inputs may carry `handling_mode`**; response progress/terminal traffic must fall back to kind-based policy.
 - **`FlowEngine::execute_step_with_all_guards()` is the only canonical step path**; frame-step outcomes route back through MobMachine DSL.
 - **Mob persistence is SQLite/WAL-backed.** Avoid lock-holding backends or split store state.

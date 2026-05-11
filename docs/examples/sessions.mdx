@@ -493,7 +493,7 @@ Cancel an in-flight turn. No-op if the session is idle.
 <Tabs>
   <Tab title="CLI">
     ```bash
-    rkat run --model gpt-5.2 --provider openai "Hello"
+    rkat run --model gpt-5.5 --provider openai "Hello"
     rkat run --model gemini-3-flash-preview --provider gemini "Hello"
     rkat run --model claude-opus-4-6 "Hello"
     ```
@@ -505,7 +505,7 @@ Cancel an in-flight turn. No-op if the session is idle.
       "method": "session/create",
       "params": {
         "prompt": "Hello",
-        "model": "gpt-5.2",
+        "model": "gpt-5.5",
         "provider": "openai",
         "provider_params": { "reasoning_effort": "high" }
       }
@@ -516,14 +516,14 @@ Cancel an in-flight turn. No-op if the session is idle.
     ```bash
     curl -X POST http://localhost:8080/sessions \
       -H "Content-Type: application/json" \
-      -d '{"prompt":"Explain monads","model":"gpt-5.2","provider":"openai","provider_params":{"temperature":0.7}}'
+      -d '{"prompt":"Explain monads","model":"gpt-5.5","provider":"openai","provider_params":{"reasoning_effort":"high"}}'
     ```
   </Tab>
   <Tab title="MCP">
     ```json
     {
       "prompt": "Hello",
-      "model": "gpt-5.2",
+      "model": "gpt-5.5",
       "provider": "openai"
     }
     ```
@@ -533,7 +533,7 @@ Cancel an in-flight turn. No-op if the session is idle.
     ```python
     session = await client.create_session(
         "Hello",
-        model="gpt-5.2",
+        model="gpt-5.5",
         provider="openai",
         provider_params={"reasoning_effort": "high"},
     )
@@ -542,7 +542,7 @@ Cancel an in-flight turn. No-op if the session is idle.
   <Tab title="TypeScript">
     ```typescript
     const session = await client.createSession("Hello", {
-      model: "gpt-5.2",
+      model: "gpt-5.5",
       provider: "openai",
       providerParams: { reasoning_effort: "high" },
     });
@@ -551,7 +551,7 @@ Cancel an in-flight turn. No-op if the session is idle.
   <Tab title="Rust">
     ```rust
     let result = service.create_session(CreateSessionRequest {
-        model: "gpt-5.2".into(),
+        model: "gpt-5.5".into(),
         prompt: "Explain monads".into(),
         system_prompt: None,
         max_tokens: None,
@@ -559,8 +559,8 @@ Cancel an in-flight turn. No-op if the session is idle.
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
         build: Some(SessionBuildOptions {
-            provider: Some(Provider::OpenAi),
-            provider_params: Some(json!({"temperature": 0.7})),
+            provider: Some(Provider::OpenAI),
+            provider_params: Some(json!({"reasoning_effort": "high"})),
             ..Default::default()
         }),
         labels: None,
@@ -579,7 +579,7 @@ Cancel an in-flight turn. No-op if the session is idle.
     rkat config get --format json --with-generation
 
     # Replace config
-    rkat config set --json '{"agent": {"model": "gpt-5.2"}}'
+    rkat config set --json '{"agent": {"model": "gpt-5.5"}}'
 
     # Merge-patch with optimistic concurrency
     rkat config patch --json '{"budget": {"max_tokens": 50000}}' --expected-generation 3
@@ -595,7 +595,7 @@ Cancel an in-flight turn. No-op if the session is idle.
       "jsonrpc": "2.0", "id": 9,
       "method": "config/set",
       "params": {
-        "config": {"agent": {"model": "gpt-5.2"}},
+        "config": {"agent": {"model": "gpt-5.5"}},
         "expected_generation": 3
       }
     }
@@ -620,7 +620,7 @@ Cancel an in-flight turn. No-op if the session is idle.
     # Replace
     curl -X PUT http://localhost:8080/config \
       -H "Content-Type: application/json" \
-      -d '{"config": {"agent": {"model": "gpt-5.2"}}, "expected_generation": 3}'
+      -d '{"config": {"agent": {"model": "gpt-5.5"}}, "expected_generation": 3}'
 
     # Merge-patch
     curl -X PATCH http://localhost:8080/config \
@@ -643,14 +643,14 @@ Cancel an in-flight turn. No-op if the session is idle.
   <Tab title="Python">
     ```python
     config = await client.get_config()
-    await client.set_config({"agent": {"model": "gpt-5.2"}}, expected_generation=3)
+    await client.set_config({"agent": {"model": "gpt-5.5"}}, expected_generation=3)
     await client.patch_config({"agent": {"max_tokens_per_turn": 8192}}, expected_generation=4)
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
     const config = await client.getConfig();
-    await client.setConfig({ agent: { model: "gpt-5.2" } }, { expectedGeneration: 3 });
+    await client.setConfig({ agent: { model: "gpt-5.5" } }, { expectedGeneration: 3 });
     await client.patchConfig({ agent: { maxTokensPerTurn: 8192 } }, { expectedGeneration: 4 });
     ```
   </Tab>

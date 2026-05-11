@@ -1,5 +1,10 @@
 # Wave-d plan — "Fully 100% functional system"
 
+> **Current status (0.6.5):** This is a historical pre-release execution plan.
+> Wave-d completed the path to the 0.6 line; current product docs should use the
+> generated contracts, `CHANGELOG.md`, and the public guides/reference pages
+> rather than treating this plan as current release instructions.
+
 ## Scope
 
 Wave-d closes the gap between "wave-c spine landed" and **a fully functional Meerkat 0.6.0: all tests green including e2e-smoke, CI green, SDK types synced, `make ci` zero locally + GitHub gate green on main**. After wave-d the only remaining work is updating docs and releasing it. **There is no wave-e** — every architectural or compile debt either closes in wave-d or is explicitly filed as a GitHub issue for a future release (0.7.x / 1.0.0), never as "defer to wave-e".

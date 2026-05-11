@@ -112,26 +112,26 @@ Notes:
 
 - CLI `run`/`run --resume` compose `mob_*` tools through `meerkat-mob-mcp` dispatcher integration when mob tools are enabled, for example with `--tools full` or config `tools.mob_enabled=true`.
 - CLI `mob ...` is the explicit lifecycle surface for persisted mob registry operations.
-- RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability via the same dispatcher composition model (`SessionBuildOptions.external_tools`) in host integrations.
+- RPC/REST/MCP server/Python SDK/TypeScript SDK expose mob capability through typed `mob/*` / `meerkat_mob_*` host control planes. Agent-internal `mob_*` tools are late-bound through `SessionBuildOptions.mob_tools` (`MobToolsFactory`); `external_tools` remains for callback/MCP-backed tools.
 - Member runtime default is `autonomous_host` when `runtime_mode` is omitted; `turn_driven` is explicit opt-in for controlled dispatch paths.
 - Spawned mob members use deferred initial turn semantics; mob actor lifecycle starts autonomous loops explicitly after spawn registration.
 - Mob persistence is SQLite/WAL-backed (`MobStorage::persistent()` opens `SqliteMobStores`). In-memory storage is used for tests and WASM. The previous exclusive-handle mob store has been removed.
 - Prefabs are gone. All mob creation uses `MobDefinition` only (CLI, REST, RPC, MCP, SDKs).
-- Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. These tools let agents spawn and manage mob members through implicit session-owned mobs, and create/remove peer-to-peer comms links between members.
+- Agent-facing delegation tools (`delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`) are provided by `AgentMobToolSurface` in `meerkat-mob-mcp`. When a realm profile store is present, `mob_profile_create`, `mob_profile_get`, `mob_profile_list`, `mob_profile_update`, `mob_profile_delete`, and `mob_profile_list_sources` are also surfaced. These tools let agents spawn and manage mob members through implicit session-owned mobs, create/remove peer-to-peer comms links, and manage reusable realm profiles when authorized.
 - Portable mob artifacts are available through mobpack (`rkat mob pack/deploy/inspect/validate`) and browser deployment (`rkat mob web build`).
 - Live (audio/video) channels are exposed through the live-adapter MVP surface, not the previous attachment-status family. Capability detection still uses `ModelCapabilities.realtime` to decide whether a model can back a live channel; channel lifecycle is caller-initiated through the `live/*` JSON-RPC methods (and SDK equivalents) below. The previous `session/realtime_attachment_status`, `mob/member_status.realtime_attachment_status`, `realtime/open_info`, and `RealtimeAttachmentStatus` enum have been removed.
 ### Live channels (audio/video)
 
-Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (today `gpt-realtime-2`; `gpt-realtime` remains a compatibility alias) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
+Live is the single subsystem for audio and other realtime modalities. Pick a realtime-capable model (today the only catalog realtime row is `gpt-realtime-2`; older realtime catalog rows are retired) and open a channel explicitly. `live/open` returns a typed `LiveOpenResult` with the negotiated transport bootstrap (e.g. WebSocket URL for `rkat-rpc`'s `--live-ws` listener at `/live/ws`) and a `WireLiveChannelCapabilities` advert describing supported input/output modalities, continuity mode, and tool semantics.
 
 | Surface | Open channel | Observe / control |
 |---------|--------------|-------------------|
 | JSON-RPC | `live/open` (returns `LiveOpenResult` with transport bootstrap + capabilities) | `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close` |
 | Python SDK | `client.live_open(session_id)` | `client.live_status / live_refresh / live_send_input_text / live_send_input_audio / live_send_input_image / live_send_input_video_frame / live_commit_input / live_interrupt / live_truncate / live_close` |
 | TypeScript SDK | `client.liveOpen({ sessionId })` | `client.liveStatus / liveRefresh / liveSendInput / liveSendInputImage / liveSendInputVideoFrame / liveCommitInput / liveInterrupt / liveTruncate / liveClose` |
-| Rust | `meerkat_live::LiveHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
+| Rust | `meerkat_live::LiveAdapterHost` + `meerkat_core::live_adapter` adapter trait, exercised through `SessionRuntime` | typed observations and capability reads through the live host |
 
-The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for transports that need WebSocket bootstrap; `live/open` will fail if the listener isn't configured. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
+The `--live-ws` listener (`rkat-rpc --live-ws <addr>`) must be enabled for transports that need WebSocket bootstrap; the `live/*` JSON-RPC methods are not registered when the listener is absent. Each session keeps a single canonical history; audio commits at turn boundaries via `live/commit_input` / `live/interrupt` / `live/truncate`.
 
 Practical caveats:
 
@@ -441,19 +441,20 @@ The `meerkat` facade crate defaults to providers only (Anthropic, OpenAI, Gemini
 
 ```toml
 # Default: three providers, no storage/comms/tools
-meerkat = "0.6.0"
+meerkat = "0.6.5"
 
 # Single provider, minimal
-meerkat = { version = "0.6.0", default-features = false, features = ["anthropic"] }
+meerkat = { version = "0.6.5", default-features = false, features = ["anthropic"] }
 
-# Add persistence + memory + comms
-meerkat = { version = "0.6.0", features = [
+# Add persistence + memory + comms + live channels
+meerkat = { version = "0.6.5", features = [
     "jsonl-store", "session-store", "session-compaction",
-    "memory-store-session", "comms", "mcp", "skills"
+    "memory-store-session", "comms", "mcp", "skills",
+    "openai-realtime", "live"
 ] }
 ```
 
-Available features: `anthropic`, `openai`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`.
+Available facade features: `anthropic`, `openai`, `openai-realtime`, `gemini`, `all-providers`, `jsonl-store`, `memory-store`, `sqlite-store`, `session-store`, `session-compaction`, `memory-store-session`, `comms`, `mcp`, `skills`, `schedule`, `live`.
 
 Prebuilt binaries (`rkat`, `rkat-rpc`, `rkat-rest`, `rkat-mcp`) include the normal shipping surfaces. The default `rkat` feature set does not include `memory-store`; memory capabilities appear only in binaries built with the memory-store feature. Custom binary builds:
 
@@ -481,7 +482,7 @@ The model catalog (canonical: `meerkat_core::model_profile`; `meerkat-models` is
 
 ### Mid-session model hot-swap
 
-Model and provider can be changed on a live session without rebuilding the agent:
+Model and provider can be changed on a running session without rebuilding the agent:
 
 - **RPC**: `turn/start` with `model`, `provider`, `provider_params` fields. Works on both pending (deferred) and materialized sessions.
 - **REST**: `POST /sessions/{id}/messages` with `model`, `provider` fields.
@@ -510,7 +511,7 @@ Prompts and tool results support multimodal content (text, images, and video). T
 
 **view_image builtin tool:** Reads images from disk (PNG/JPEG/GIF/WebP/SVG), returns base64 `ContentBlock::Image`. Path sandboxed to project root. 5 MB limit. Hidden on non-vision-capable models via `ToolScope` based on `ModelProfile.vision` and `ModelProfile.image_tool_results`.
 
-**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. Provider crates own image model profiles, supported parameters, and backend selection. Generated images are stored in the blob store; user-facing surfaces fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
+**generate_image builtin tool:** Session-owned assistant image generation. The model calls one stable tool with universal fields (`prompt`, `provider`, `model`, `size`, `quality`, `format`, `count`, reference/source images) plus provider-owned `provider_params`. These are Meerkat tool fields, not raw provider request JSON; for OpenAI, `format` lowers to provider-side `output_format`. Provider crates own image model profiles, advanced provider parameters, and backend selection. For normal OpenAI generate/edit requests, prefer top-level `intent` and omit hosted-tool-only `provider_params.action`. Generated images are stored in the blob store; user-facing surfaces fetch blob payload/bytes by blob id via `rkat blob get <BLOB-ID>`, JSON-RPC `blob/get`, or SDK `get_blob` / `getBlob`.
 
 **Image generation via CLI:** There is no direct image-generation CLI command and no `rkat rpc` subcommand. Ask the assistant through a session, allow the image tool, and fetch the resulting blob:
 
@@ -542,7 +543,7 @@ Background shell jobs (shell tool with `&` or `background: true`), mob member te
 
 If the runtime is backed by persistent storage, completion state and cursors survive process restarts (bounded-loss; you may see one duplicate notice on the seam). Without persistence, conversation history resumes but pending background work doesn't.
 
-For internal seams (`CompletionFeed`, `OpsLifecycleRegistry`, `DetachedWakeState`, `RuntimeEpochId`) load the architecture skill.
+For internal seams (`CompletionFeed`, `OpsLifecycleRegistry`, `EpochCursorState`, `RuntimeEpochId`, runtime-loop feed wake) load the architecture skill.
 
 ### Skills
 

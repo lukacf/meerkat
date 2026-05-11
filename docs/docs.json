@@ -27,7 +27,7 @@
         "groups": [
           {
             "group": "Getting started",
-            "pages": ["introduction", "quickstart", "examples/gallery", "guides/auth"]
+            "pages": ["introduction", "quickstart", "guides/auth"]
           },
           {
             "group": "Concepts",
@@ -62,7 +62,8 @@
               "guides/memory",
               "guides/hooks",
               "guides/skills",
-              "guides/scheduling"
+              "guides/scheduling",
+              "guides/realtime"
             ]
           },
           {

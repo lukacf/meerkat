@@ -1,15 +1,17 @@
 ---
 title: "Mini surfaces"
-description: "Historical note for the removed reduced Meerkat binary surfaces."
+description: "Historical note for source-build-only reduced Meerkat profiles."
 icon: "boxes-stacked"
 ---
 
-The reduced Meerkat binary surfaces have been retired. The repository no longer
-builds or publishes separate reduced CLI or JSON-RPC binaries.
+The reduced Meerkat binary surfaces are historical/source-build-only. GitHub
+Releases and Homebrew publish only the four public runtime binaries; custom
+minimal profiles remain a source-build path for teams that need a smaller
+embedded distribution.
 
 ## Current surfaces
 
-Use the public runtime surfaces instead:
+Use the public runtime surfaces for product integrations:
 
 | Surface | Purpose |
 |---------|---------|
@@ -21,10 +23,10 @@ Use the public runtime surfaces instead:
 ## Custom distributions
 
 If you need a smaller product surface for embedding or custom packaging, start
-from the shared runtime and surface composition layers rather than reviving the
-old reduced binaries. The current codebase keeps feature-gated capabilities in
-the main surfaces and no longer carries dedicated mini binary targets or a
-separate reduced RPC method catalog.
+from the shared runtime and surface composition layers. The source tree includes
+`profiles/minimal.toml` as a custom profile, but there are no published
+`rkat-mini` or `rkat-rpc-mini` artifacts and no separate reduced RPC method
+catalog. Feature-gated capabilities live in the main surfaces.
 
 ## See also
 

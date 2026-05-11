@@ -654,7 +654,7 @@ Generate or edit an assistant-owned image through the session image-generation s
 
 **Supported universal options:** `size` accepts `auto`, `1024x1024`, `1024x1536`, `1536x1024`, or `WIDTHxHEIGHT`; `quality` accepts `auto`, `low`, `medium`, `high`; `format` accepts `auto`, `png`, `jpeg`, `jpg`, `webp`; `count` is currently limited to `1`.
 
-**Provider params:** OpenAI accepts `background`, `output_compression`, `moderation`, and hosted-tool-only `action`. Gemini accepts `aspect_ratio` and `image_size`.
+**Provider params:** Use top-level `size`, `quality`, `format`, and `intent` for normal requests; these are Meerkat fields, not raw provider params. OpenAI `provider_params` are advanced overrides for `background`, `output_compression`, `moderation`, and hosted-tool-only `action`. With the current `gpt-image-2` default, `background` is `auto` or `opaque` only, `output_compression` applies when `format` is `jpeg`/`webp`, `action` is usually omitted in favor of top-level `intent`, and `input_fidelity` is not accepted. Gemini accepts `aspect_ratio` and `image_size`.
 
 **Returns:** `ImageGenerationToolResult` JSON containing `operation_id`, `terminal`, `images`, `provider_text`, `revised_prompt`, `native_metadata`, and `warnings`. Each generated image includes `blob_ref.blob_id`, which can be saved from inside the session with `blob_save_file` or fetched externally with `rkat blob get <blob_id> --output image.png`.
 

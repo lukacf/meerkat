@@ -1,5 +1,10 @@
 # Dogma Catalog Blind Spots — Wave-C Prep
 
+> **Current status (0.6.5):** Historical wave-c audit input. It names files and
+> realtime WebSocket paths from the pre-live-adapter runtime; current live audio
+> behavior is represented by `meerkat-live`, `meerkat-core/src/live_adapter.rs`,
+> and the `live/*` RPC surface.
+
 **Scope.** The 70-item catalog at `~/.codex/dogma-violations.md` is focused on
 semantic-state-ownership: stringly typing, shadow state, duplicate authority,
 name-keyed routing, surface-level mutation, folklore comments. These don't exhaust

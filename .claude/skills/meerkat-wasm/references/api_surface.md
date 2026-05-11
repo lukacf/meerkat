@@ -1,8 +1,10 @@
 # WASM Runtime API Surface
 
-## wasm_bindgen Exports (current as of 0.6)
+## wasm_bindgen Exports (current as of 0.6.5)
 
-The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across bootstrap, sessions, mobs, comms, auth, and subscriptions. Names listed below are the exact JS-visible identifiers.
+The `meerkat-web-runtime` crate exposes the browser bootstrap, session, mob,
+auth, and subscription functions below via `#[wasm_bindgen]`. Names listed below
+are the exact JS-visible identifiers in the Rust binding.
 
 ### Bootstrap
 
@@ -12,10 +14,11 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 | `init_runtime_from_config` | config JSON | init result JSON | Bare-bones bootstrap |
 | `destroy_runtime` | — | `()` | Tear down all runtime state (sessions, mob state, subscriptions) |
 | `runtime_version` | — | version string | Returns `CARGO_PKG_VERSION` for JS/WASM version validation |
-| `register_tool_callback` | name, description, schema JSON, callback | `()` | Must be called BEFORE init; legacy compat for registered tool callbacks |
-| `register_js_tool` | name, description, schema JSON, callback | `()` | Newer JS tool registration entrypoint with promise-aware handling |
+| `register_tool_callback` | name, description, schema JSON, callback | `()` | Register a promise-returning JS tool callback; requires initialized runtime state |
+| `register_js_tool` | name, description, schema JSON | `()` | Register a fire-and-forget JS tool that returns `"acknowledged"` immediately; requires initialized runtime state |
 | `clear_tool_callbacks` | — | `()` | Clear all registered JS tool callbacks |
-| `register_external_auth_resolver` | callback (or `undefined` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain typed `AuthCredential` for a given `authBinding`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
+| `register_external_auth_resolver` | callback (or `undefined` / `null` to clear) | `()` | Register a JS-side resolver that the agent factory calls to obtain a typed `ExternalAuthLease` for a given `authBinding`. Subsequent calls overwrite. Defined in `meerkat-web-runtime/src/external_auth.rs`. |
+| `has_external_auth_resolver` | — | bool | Check whether a JS-side external auth resolver is registered |
 
 ### Session Lifecycle
 
@@ -29,7 +32,10 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 | `destroy_session` | handle | `()` | Remove session |
 | `poll_events` | handle | AgentEvent[] JSON | Drain buffered direct-session events |
 
-`config` for `create_session_simple` accepts an optional `auth_binding` that scopes credential resolution to a realm/binding through the registered external auth resolver (see auth section).
+`config` for `create_session` / `create_session_simple` accepts an optional
+`auth_binding` that scopes credential resolution to a realm/binding through the
+provider runtime registry. If the selected binding uses the WASM external
+resolver source, the registered resolver is invoked (see auth section).
 
 ### Mob Lifecycle (delegates to MobMcpState)
 
@@ -75,18 +81,34 @@ The `meerkat-web-runtime` crate exposes ~44 `#[wasm_bindgen]` functions across b
 
 ### Comms
 
-| Export | Params | Returns | Notes |
-|--------|--------|---------|-------|
-| `comms_peers` | session_id | JSON | List trusted peers |
-| `comms_send` | session_id, params JSON | JSON | Send comms message |
+There are no current low-level `comms_peers` / `comms_send` wasm-bindgen
+exports in `meerkat-web-runtime/src/lib.rs`. Browser comms flow through
+member-directed work (`mob_member_send`, `Member.send(...)`) and the comms tools
+available to agents during turns.
 
 ## Web SDK auth model
 
 Browser-hosted authentication is done through three concepts:
 
-1. **`authBinding`** (structural): every `runtime.createSession({...})`, `mob.spawn(...)`, etc. accepts an optional `authBinding` (realm + binding identifier). It scopes the agent build to a specific provider auth context, exactly the same way `--auth-binding` works on the CLI.
-2. **`registerExternalAuthResolver`** (TS helper in `sdks/web/src/auth.ts`): wraps the wasm-bundled `register_external_auth_resolver` binding. The host page provides a function that maps a `AuthBindingRef` to a typed `AuthCredential` (bearer token, OAuth lease, etc.). The WASM agent factory calls this resolver instead of reading API keys.
-3. **Per-runtime credentials** (init-only): `init_runtime` / `init_runtime_from_config` accept the legacy `anthropicApiKey` / `openaiApiKey` / `geminiApiKey` plus `*_base_url` overrides for proxy deployments. Per-session `apiKey` fields were removed in 0.6 — use the resolver pattern for anything more sophisticated than a global static key.
+1. **`authBinding`** (structural): `runtime.createSession({...})`,
+   `mob.spawnHelper(...)`, and `mob.forkHelper(...)` accept an optional
+   `authBinding` (realm + binding identifier). It scopes the agent build to a
+   specific provider auth context, exactly the same way `--auth-binding` works
+   on the CLI. Plain `mob.spawn([...])` specs do not currently carry an auth
+   binding in `@rkat/web`.
+2. **`registerExternalAuthResolver`** (TS helper in `sdks/web/src/auth.ts`):
+   wraps the wasm-bundled `register_external_auth_resolver` binding. The host
+   page provides a function that maps an `AuthBindingRef` to a typed
+   `ExternalAuthLease` (`inline_secret`, `static_headers`,
+   `dynamic_authorizer`, or `none`). The WASM agent factory calls this resolver
+   when the selected binding uses the WASM external-resolver credential source.
+3. **Per-runtime credentials** (init-only): `init_runtime` /
+   `init_runtime_from_config` accept provider-specific keys and base URLs
+   (`anthropic_api_key`, `openai_api_key`, `gemini_api_key`,
+   `anthropic_base_url`, `openai_base_url`, `gemini_base_url`). The
+   `@rkat/web` wrapper still exposes `apiKey` / `baseUrl` compatibility fields,
+   but current raw WASM config should use provider-specific fields. Per-session
+   `apiKey` / `baseUrl` fields were removed in 0.6.
 
 ```typescript
 import {
@@ -98,11 +120,16 @@ import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
 registerExternalAuthResolver(wasm, async (authBinding) => {
   const token = await myHostFetchToken(authBinding);
-  return { kind: 'bearer_token', token };
+  return {
+    kind: 'inline_secret',
+    secret: token.accessToken,
+    metadata: { account_id: token.accountId },
+    expires_at: token.expiresAt,
+  };
 });
 
 const runtime = await MeerkatRuntime.init(wasm, {
-  // legacy global keys still accepted, but resolver path is preferred:
+  anthropicApiKey: 'proxy',
   anthropicBaseUrl: 'https://my-proxy.example/anthropic',
 });
 
@@ -117,8 +144,8 @@ const session = runtime.createSession(withAuthBinding(
 Surface notes:
 
 - The resolver is **session-build-time**, not request-time — once a session is built, the resolved lease is pinned for that build.
-- `registerExternalAuthResolver(wasm, undefined)` (or passing `JsValue::NULL` directly to the WASM export) clears the registration.
-- `authBinding` is also accepted on `mob.spawn(...)` member specs so an individual member can be bound to a different binding from its parent mob.
+- `clearExternalAuthResolver(wasm)` clears the registration; the raw WASM export also clears on `undefined` / `null`.
+- Helper spawn paths accept `authBinding`; plain `mob.spawn([...])` does not currently include that field in the `@rkat/web` `SpawnSpec`.
 
 ## Config JSON Formats
 
@@ -126,21 +153,39 @@ Surface notes:
 
 ```json
 {
-  "api_key": "sk-...",
   "anthropic_api_key": "sk-...",
   "openai_api_key": "sk-...",
   "gemini_api_key": "sk-...",
   "model": "claude-sonnet-4-6",
   "max_sessions": 64,
-  "base_url": "https://fallback-proxy.example.com",
   "anthropic_base_url": "https://proxy.example.com/anthropic",
   "openai_base_url": "https://proxy.example.com/openai",
-  "gemini_base_url": "https://proxy.example.com/gemini",
-  "auth_binding": { "realm": "team-alpha", "binding": "claude" }
+  "gemini_base_url": "https://proxy.example.com/gemini"
 }
 ```
 
-Per-provider base URLs take precedence over `base_url`. `auth_binding`, when present, is required to resolve through the registered external auth resolver.
+Raw `init_runtime` / `init_runtime_from_config` require at least one
+provider-specific key. Use a proxy sentinel such as `"proxy"` when the browser
+calls a server-side provider proxy that injects the real credential.
+
+### SessionConfig
+
+```json
+{
+  "model": "claude-sonnet-4-6",
+  "auth_binding": { "realm": "team-alpha", "binding": "claude" },
+  "system_prompt": "You are helpful.",
+  "max_tokens": 4096,
+  "comms_name": "browser-agent",
+  "keep_alive": true,
+  "labels": { "surface": "web" },
+  "additional_instructions": ["Be concise."],
+  "app_context": { "tenant": "team-alpha" }
+}
+```
+
+`SessionConfig` does not accept `api_key` or `base_url`; credentials come from
+bootstrap-populated realm config or from the selected `auth_binding`.
 
 ## State Architecture
 
@@ -155,7 +200,9 @@ thread_local! {
 RuntimeState {
     mob_state: Arc<MobMcpState>,                    // All mob operations
     session_service: Arc<WasmSessionService>,       // Concrete service for subscriptions
-    model: String,                                  // Default model
+    sessions: BTreeMap<u32, RuntimeHandleSession>,  // Browser-local handles to runtime sessions
+    next_handle: u32,
+    js_tools: Vec<JsToolEntry>,                     // wasm32 only
 }
 ```
 
@@ -174,13 +221,15 @@ RuntimeState {
     "initial_message": "optional prompt",
     "additional_instructions": ["Extra context for this member"],
     "labels": { "role": "lead" },
-    "context": { "custom": "data" },
-    "auth_binding": { "realm": "team-alpha", "binding": "claude" }
+    "context": { "custom": "data" }
   }
 ]
 ```
 
 `runtime_mode`: `"turn_driven"` or `"autonomous_host"`.
+
+Helper spawn/fork request JSON (`mob_spawn_helper`, `mob_fork_helper`) may carry
+`auth_binding`; regular batch `mob_spawn` specs do not.
 
 ## MobDefinition JSON Format
 
@@ -229,16 +278,22 @@ import {
 } from '@rkat/web';
 import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
-// Register tools before init
-MeerkatRuntime.registerTool(wasm, 'my_tool', 'desc', schema, callback);
-
 // Optional: register external auth resolver before any session build
-registerExternalAuthResolver(wasm, async (ref) => ({ kind: 'bearer_token', token: '...' }));
+registerExternalAuthResolver(wasm, async (ref) => ({
+  kind: 'inline_secret',
+  secret: await hostAuth.freshAccessToken(ref),
+  metadata: {},
+}));
 
 // Initialize
 const runtime = await MeerkatRuntime.init(wasm, {
+  anthropicApiKey: 'proxy',
   anthropicBaseUrl: 'http://localhost:3100/anthropic',
 });
+
+// Register runtime-scoped tools after init
+runtime.registerTool('my_tool', 'desc', schema, callback);
+runtime.registerFireAndForgetTool('request_human_approval', 'desc', schema);
 
 // Mob lifecycle
 const mob = await runtime.createMob(definition);
@@ -265,8 +320,8 @@ session.destroy();
 - `EventSubscription<T>` is generic — `subscribeMemberEvents()` yields `MemberEventItem`, `subscribeEvents()` yields `AttributedEventItem`
 - `Mob.events()` returns `MobEvent[]` (structural mob events, not agent events)
 - `mob_create` and `mob_run_flow` return plain strings (not JSON-wrapped)
-- `SpawnResult` is identity-native: `agent_identity`, `agent_runtime_id`, `fence_token`, optional `generation`
+- `SpawnResult` is identity-native: `mob_id`, `agent_identity`, `member_ref`
 - `MobMember` is identity-native and no longer exposes legacy bridge/session handle fields
-- `MobStatus` uses `state` field instead of `status` + `member_count`
-- Per-session `apiKey` fields were removed; use `runtime.init({ ... globalKeys })` and/or `registerExternalAuthResolver` plus `authBinding`
+- `MobStatus` uses `status`; `state` is a deprecated compatibility projection in `@rkat/web`
+- Per-session `apiKey` / `baseUrl` fields were removed; use runtime init-time provider keys/proxy URLs and/or `registerExternalAuthResolver` plus `authBinding`
 - `start_turn` now takes only `(handle, prompt)`; the legacy options-JSON third argument was removed

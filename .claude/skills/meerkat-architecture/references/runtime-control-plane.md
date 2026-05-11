@@ -12,7 +12,7 @@ All semantic state mutations route through the DSL authority via `dsl_apply(inpu
 
 Runtime-backed surfaces (CLI, REST, RPC, MCP) obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)` and pass them through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`. Standalone paths (WASM, tests, embedded) use `RuntimeBuildMode::StandaloneEphemeral`.
 
-`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle. As of 0.6 it carries identity plus a full set of DSL handles that share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)` — handle method calls and dispatch-driven transitions land on the same underlying state.
+`SessionRuntimeBindings` (in `meerkat-core/src/runtime_epoch.rs`) is the epoch-local bundle. In 0.6.5 it carries identity, ops/completion state, the machine-owned tool visibility projection, and all session-owned DSL handles that share the session's real `MeerkatMachineAuthority` via `HandleDslAuthority::from_shared(...)` — handle method calls and dispatch-driven transitions land on the same underlying state.
 
 Identity:
 
@@ -43,11 +43,10 @@ Peer comms:
 - `peer_interaction: Arc<dyn PeerInteractionHandle>` — peer-driven interaction transitions
 - `interaction_stream: Arc<dyn InteractionStreamHandle>` — interaction stream lifecycle
 
-Model + auth + realtime:
+Model + auth:
 
-- `model_routing: Arc<dyn ModelRoutingHandle>` — provider/model resolution and live reconfigure
+- `model_routing: Arc<dyn ModelRoutingHandle>` — provider/model baseline resolution
 - `auth_lease: Arc<dyn AuthLeaseHandle>` — published `AuthMachine` lease handle for the session
-- `realtime_product_turn: Arc<dyn RealtimeProductTurnHandle>` — realtime-mode turn boundaries
 
 When you add a new handle field, `prepare_bindings()` and the factory's `SessionOwned` validation must be updated so the surface gets the same authority view as dispatch.
 
@@ -92,9 +91,9 @@ The runtime owns the comms drain lifecycle via MeerkatMachine's `drain_phase` / 
 
 `delegate()` is communication-first. It spawns and auto-wires a helper, delivers the opening prompt via the existing initial-message path, and then parent/helper communicate via ordinary comms. There is no hidden task contract or peer reservation stream. If the helper fails during bootstrap before it can reliably report for itself, the bridge emits a typed lifecycle notice and durable kickoff state records the failure.
 
-## Detached-op wake
+## Completion-feed wake
 
-Idle keep-alive wake from background shell completions is runtime-owned. `DetachedWakeState` (`pending`, `signaled`, `notify`) sits beside the runtime loop; terminal detached ops fire `notify`, and the runtime injects `ContinuationInput::detached_background_op_completed()`. Do not spawn surface-local waker tasks or side channels.
+Idle keep-alive wake from background shell completions is runtime-owned. Terminal `BackgroundToolOp` entries land in `RuntimeCompletionFeed`; the runtime loop tracks `EpochCursorState.runtime_observed_seq` and `runtime_last_injected_seq`, checks `is_quiescent_for_detached_wake()`, and injects `ContinuationInput::detached_background_op_completed()` from `runtime_loop.rs`. Do not spawn surface-local waker tasks or side channels.
 
 ## Respawn semantics
 
@@ -115,7 +114,7 @@ Trait in `meerkat-core/src/ops_lifecycle.rs`. Concrete impl `RuntimeOpsLifecycle
 - `wait_all` + `collect_completed` + `drain_completed` for barrier coordination.
 - Bounded completed-operation retention (FIFO eviction; default 256).
 - Multi-listener completion observation, peer info in snapshots, wall-clock timestamps (`created_at_ms`, `completed_at_ms`, `elapsed_ms` from SystemTime anchor), per-parent concurrency enforcement (`max_concurrent`).
-- Detached-op wake signals for keep-alive runtimes.
+- Completion-feed wake signals for keep-alive runtimes.
 
 Completion feed: the registry owns a `FeedBuffer` that produces `CompletionEntry` events on terminal transitions. `RuntimeCompletionFeed` (read handle) implements `CompletionFeed` (meerkat-core trait). Consumer cursors are epoch-owned via `EpochCursorState` on `SessionRuntimeBindings`.
 
@@ -186,7 +185,8 @@ entrypoints that bypass `scripts/repo-cargo`.
 - `meerkat-runtime/src/driver/ephemeral.rs`, `driver/persistent.rs` — per-session drivers
 - `meerkat-runtime/src/ops_lifecycle.rs` — `RuntimeOpsLifecycleRegistry`
 - `meerkat-runtime/src/policy_table.rs` — `DefaultPolicyTable`
-- `meerkat-runtime/src/detached_wake.rs` — detached-op wake machinery
+- `meerkat-runtime/src/runtime_loop.rs` — completion-feed wake injection and runtime loop
+- `meerkat-core/src/completion_feed.rs` — monotonic completion-feed contract
 - `meerkat-runtime/src/peer_handling_mode.rs` — handling_mode validation
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
 - `meerkat-core/src/ops_lifecycle.rs` — `OpsLifecycleRegistry` trait

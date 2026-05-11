@@ -29,7 +29,7 @@ Meerkat is a **library-first, high-performance, modular agent harness** -- compo
 
 That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, live channels, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
-It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formald state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
+It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formal state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
 
 The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
@@ -42,7 +42,7 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **Providers** | Anthropic, OpenAI, Gemini, and self-hosted OpenAI-compatible models | Usually one provider family |
 | **Auth** | Env API keys, realm bindings, OAuth/device flows, TokenStore, cloud IAM, and per-session/member overrides | Usually provider key per process |
 | **Surfaces** | CLI, REST, JSON-RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
-| **Agent infra** | Hooks, skills, semanitc memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
+| **Agent infra** | Hooks, skills, semantic memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
 | **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
 | **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |

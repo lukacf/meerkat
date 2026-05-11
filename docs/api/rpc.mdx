@@ -256,9 +256,9 @@ Handshake. Returns server capabilities.
   "result": {
     "server_info": {
       "name": "meerkat-rpc",
-      "version": "0.6.2"
+      "version": "0.6.5"
     },
-    "contract_version": "0.6.2",
+    "contract_version": "0.6.5",
     "methods": [
       "initialize", "initialized",
       "session/create", "session/list", "session/read",
@@ -374,11 +374,11 @@ Only `prompt` is required. All other fields are optional and fall back to config
 </ParamField>
 
 <ParamField body="model" type="string | null" default="claude-sonnet-4-6">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.5"`).
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred from model">
-  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+  Provider name: `"anthropic"`, `"openai"`, `"gemini"`, `"self_hosted"`, `"other"`.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -911,6 +911,8 @@ List all skills with provenance information, including active and shadowed entri
 
 Returns error `-32603` if skills are not enabled.
 
+`skills/inspect` is not part of the advertised RPC catalog. Use `skills/list` for provenance, or the CLI/MCP skill inspection surfaces when full skill bodies are needed.
+
 ## Live channel methods
 
 Live channels provide low-latency audio and text streaming on sessions that use a realtime-capable model. Create a session with a model like `gpt-realtime-2`, then call `live/open` to start the channel explicitly. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport. See the [Live Channels guide](/guides/realtime) for the full flow.
@@ -1132,7 +1134,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
   "jsonrpc": "2.0",
   "id": 17,
   "result": {
-    "contract_version": "0.6.2",
+    "contract_version": "0.6.5",
     "providers": [
       {
         "provider": "anthropic",
@@ -1190,7 +1192,7 @@ Return runtime capabilities with status resolved against config. This lists ever
   "jsonrpc": "2.0",
   "id": 8,
   "result": {
-    "contract_version": {"major": 0, "minor": 6, "patch": 0},
+    "contract_version": {"major": 0, "minor": 6, "patch": 5},
     "capabilities": [
       {
         "id": "sessions",
@@ -1296,7 +1298,7 @@ Replace config, optionally using generation CAS.
   "id":10,
   "method":"config/set",
   "params":{
-    "config": {"agent":{"model":"gpt-5.2"}},
+    "config": {"agent":{"model":"gpt-5.5"}},
     "expected_generation": 3
   }
 }
@@ -1307,7 +1309,7 @@ Replace config, optionally using generation CAS.
   "jsonrpc":"2.0",
   "id":10,
   "result": {
-    "config": {"agent":{"model":"gpt-5.2"}},
+    "config": {"agent":{"model":"gpt-5.5"}},
     "generation": 4,
     "realm_id": "team-alpha",
     "instance_id": null,

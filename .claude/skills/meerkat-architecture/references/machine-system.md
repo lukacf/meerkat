@@ -151,7 +151,7 @@ Mapping an old phase-driven authority's input onto a parameterless DSL signal lo
 ## Concrete trace — user sends "Hello"
 
 1. **Surface** (CLI/RPC/REST): `rkat run "Hello"` → `SessionService::create_session()` → `AgentFactory::build_agent()`.
-2. **Runtime-backed surface**: calls `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings` (bundle of handles including DSL handles per F1/F3/F4/F5 cutover).
+2. **Runtime-backed surface**: calls `MeerkatMachine::prepare_bindings(session_id)` to obtain `SessionRuntimeBindings` (the 0.6.5 bundle of epoch-local state plus session-owned DSL handles).
 3. **Accept input**: `MeerkatMachine::accept_input_with_completion(session_id, Input::Prompt { content: "Hello" })` routes through dispatch → driver.
 4. **Driver** generates `input_id`, resolves policy, calls `self.dsl_apply(mm_dsl::MeerkatMachineInput::QueueAccepted { input_id })`.
 5. **`dsl_apply`** locks the per-session `Arc<Mutex<MeerkatMachineAuthority>>`, calls `authority.apply(input)` on the generated kernel.
@@ -171,16 +171,23 @@ Every semantic state change is one `dsl_apply`. Shell code does not decide what 
 
 Pattern: trait in meerkat-core, impl in meerkat-runtime, `Arc<dyn Trait>` on `SessionRuntimeBindings` (also in meerkat-core).
 
-Current handle traits (all in `meerkat-core/src/handles.rs`):
+Current handle traits carried by `SessionRuntimeBindings` (all in `meerkat-core/src/handles.rs`):
 - `TurnStateHandle` — for turn execution transitions
 - `CommsDrainHandle` — for comms drain lifecycle
 - `ExternalToolSurfaceHandle` — for MCP tool surface transitions
 - `PeerCommsHandle` — for peer envelope classification
 - `SessionAdmissionHandle` — for session turn admission
+- `ModelRoutingHandle` — for session model-routing baseline
+- `AuthLeaseHandle` — for published auth lease lifecycle
+- `McpServerLifecycleHandle` — for per-server MCP lifecycle and pending-connect projection
+- `PeerInteractionHandle` — for peer request/response interaction transitions
+- `SessionContextHandle` — for session-context advancement effects
+- `SessionClaimHandle` — for runtime-owned session identity claims
+- `InteractionStreamHandle` — for interaction stream lifecycle
 
 Each trait has methods 1:1 with the DSL's Inputs/Signals for that domain. Each method takes primitive-or-core-type parameters (not domain types from downstream crates, which meerkat-core can't import). Return type is `Result<(), DslTransitionError>` for write methods; read accessors return plain snapshot structs.
 
-Impls in `meerkat-runtime/src/handles/` hold `Arc<HandleDslAuthority>` where `HandleDslAuthority` wraps `Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>` — **the session's real authority**, not a private per-handle copy. `prepare_bindings()` constructs one `HandleDslAuthority` per session pointing at the session's authority, passes Arc clones to all 5 handle impls. All handles for a given session route to the same state.
+Impls in `meerkat-runtime/src/handles/` hold `Arc<HandleDslAuthority>` where `HandleDslAuthority` wraps `Arc<Mutex<mm_dsl::MeerkatMachineAuthority>>` — **the session's real authority**, not a private per-handle copy. `prepare_bindings()` constructs one `HandleDslAuthority` per session pointing at the session's authority, then passes Arc clones to every handle impl. All handles for a given session route to the same state.
 
 MobMachine in-crate access: `MobActor.dsl_authority: MobMachineAuthority` is direct (meerkat-mob depends on meerkat-runtime). No cross-crate trait needed for mob-internal callers.
 
@@ -213,7 +220,7 @@ Per `docs/architecture/meerkat-runtime-dogma.md`:
 - Exactly 5 canonical compositions in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()`.
 - Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds only: per-session `Arc<Mutex<MeerkatMachineAuthority>>` + `Arc<Mutex<MobMachineAuthority>>`, handle trait impls that route through the shared authorities, IO mechanics (channels, handles, wall-clock timestamps), and observability projections (history logs, diagnostic snapshots).
-- Handle traits in `meerkat-core/src/handles.rs` (`TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`) give cross-crate access to MeerkatMachine transitions. Mob-internal callers use `MobActor.dsl_authority` directly.
+- Handle traits in `meerkat-core/src/handles.rs` (`TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle`) give cross-crate access to MeerkatMachine/AuthMachine-owned transitions and projections. Mob-internal callers use `MobActor.dsl_authority` directly.
 - `InputState` and equivalent per-instance shell structs carry only non-DSL data: caller-provided metadata (policy, durability, idempotency keys), wall-clock timestamps, and observability history. Semantic state (phase, terminal outcome, attempt count, run association, boundary sequence) is read from the DSL through handle accessors.
 - `flow_run`, `flow_frame`, and `loop_iteration` are projection/reducer support modules for `MobRun` persistence shape. Their semantic inputs are covered by MobMachine; they must fail closed if used outside a MobMachine-authorized transition path.
 

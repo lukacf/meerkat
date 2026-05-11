@@ -105,15 +105,14 @@ Wire types live in `meerkat-contracts/src/wire/live.rs`. Adapter
 internals live in `meerkat-core::live_adapter` (`LiveAdapterStatus`,
 `LiveChannelCapabilities`, `LiveContinuityMode`,
 `LiveTransportBootstrap`, `LiveAdapterObservation`, etc.). Provider
-implementations sit in `meerkat-openai::live` and adjacent
-provider crates.
+implementations currently sit in `meerkat-openai::live`.
 
 The DSL realtime-binding plane and `reconfigure_live_topology`
-orchestration were deleted, not renamed; there is no separate
-architectural reference for the new live-adapter surface. For a
-deeper internal reference, `meerkat-rpc/src/handlers/live.rs` plus
+orchestration were deleted, not renamed; the live-adapter implementation
+lives in `meerkat-live`. For a deeper internal reference,
+`meerkat-live/src/host.rs`, `meerkat-rpc/src/handlers/live.rs`, and
 `meerkat-contracts/src/wire/live.rs` are the authoritative surface;
-`docs/guides/live.mdx` (when present) is the user-facing companion.
+`docs/guides/realtime.mdx` is the user-facing Live Channels companion.
 
 ## The 5-machine target
 
@@ -150,14 +149,14 @@ Stable per-member identity is separate from per-runtime binding:
 When adding state or effects keyed on member identity, choose
 `AgentIdentity` if the fact survives respawn (wiring preferences,
 durable per-member configuration), `AgentRuntimeId` if it's
-per-binding (ops registry membership, live channel handles).
+per-binding (ops registry membership, adapter ownership for a running channel).
 
 ## Crate Ownership
 
 | Crate | Owns | Key Trait |
 |-------|------|-----------|
 | `meerkat-models` | Compatibility shim that re-exports `meerkat_core::model_profile` | — |
-| `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle` |
+| `meerkat-core` | Agent loop, core types, session-store contract, ALL trait contracts, DSL handle traits | `AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionStore`, `SessionService`, `CommsRuntime`, `HookEngine`, `OpsLifecycleRegistry`, `TurnStateHandle`, `CommsDrainHandle`, `ExternalToolSurfaceHandle`, `PeerCommsHandle`, `SessionAdmissionHandle`, `ModelRoutingHandle`, `AuthLeaseHandle`, `McpServerLifecycleHandle`, `PeerInteractionHandle`, `SessionContextHandle`, `SessionClaimHandle`, `InteractionStreamHandle` |
 | `meerkat-contracts` | Wire types, catalogs, stable error codes, generated surface schemas, **supervisor bridge protocol (`BridgeCommand`, `BridgeReply`, `BridgePeerSpec`, `BridgeSupervisorPayload`)** | — |
 | `meerkat-client` | Compatibility client shim that re-exports provider surfaces | Compatibility exports only |
 | `meerkat-auth-core` | Shared auth primitives, token stores, OAuth helpers, cloud authorizers | — |
@@ -167,7 +166,7 @@ per-binding (ops registry membership, live channel handles).
 | `meerkat-tools` | Tool registry, builtins, shell, session-scoped task store | Implements `AgentToolDispatcher` |
 | `meerkat-mcp` | MCP client, protocol transport, router (routes to `ExternalToolSurfaceHandle`) | — |
 | `meerkat-session` | Session orchestration (Ephemeral, Persistent), turn admission slot (shell) | Implements `SessionService` |
-| `meerkat-runtime` | Runtime control plane, policy engine, detached wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
+| `meerkat-runtime` | Runtime control plane, policy engine, completion-feed wake, DSL handle impls | `RuntimeControlPlane`, `RuntimeDriver`, `MeerkatMachine` |
 | `meerkat-comms` | Inter-agent messaging (inproc, TCP, UDS, Ed25519), peer identity claims, pure peer data types | Implements `CommsRuntime` |
 | `meerkat-hooks` | Hook runtimes (in-process, command, HTTP) | Implements `HookEngine` |
 | `meerkat-skills` | Skill loading (filesystem, git, HTTP, embedded) | Implements `SkillEngine` |
@@ -175,6 +174,7 @@ per-binding (ops registry membership, live channel handles).
 | `meerkat-mob` | Multi-agent orchestration, member provisioning, flow runtime, **identity-first binding model, supervisor bridge** | `MobSessionService`, `MobProvisioner`, `MobMemberRuntimeBridge` |
 | `meerkat-mob-pack` | Mobpack archive format, signing, trust policies, validation | — |
 | `meerkat-mob-mcp` | MCP/operator mob surface plus agent-facing delegation tool surface | `MobMcpState`, `AgentMobToolSurfaceFactory` |
+| `meerkat-live` | Live channel host and WebSocket transport glue for `live/*` methods | `LiveAdapterHost`, `LiveProjectionSink` |
 | `meerkat-schedule` | Scheduler subsystem; `Schedule::apply` / `Occurrence::apply` on domain types | `ScheduleService`, `ScheduleDriver`, `ScheduleStore` |
 | `meerkat-web-runtime` | WASM browser deployment (wasm_bindgen exports) | — |
 | `meerkat-machine-schema` | Rust-native machine/composition catalog DSL — the formal authority | — |
@@ -209,6 +209,8 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-runtime/src/handles/` — runtime impls of DSL handle traits
 - `meerkat-core/src/handles.rs` — DSL handle trait definitions
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings`, `RuntimeBuildMode`
+- `meerkat-live/src/host.rs`, `meerkat-live/src/transport.rs` — live channel host and WebSocket transport
+- `meerkat-rpc/src/handlers/live.rs` — `live/*` JSON-RPC handlers
 - `meerkat-core/src/agent.rs`, `meerkat-core/src/agent/*.rs` — agent loop
 - `meerkat/src/factory.rs` — `AgentFactory::build_agent()` (pipeline)
 - `meerkat-session/src/{ephemeral,persistent}.rs` — session services
@@ -220,6 +222,6 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
 - `docs/architecture/meerkat-runtime-dogma.md` — full dogma
 - `docs/architecture/buildbuddy-bazel-poc.md` — BuildBuddy/Bazel developer and CI backend guide
-- `docs/architecture/identity-first-live-voice-proposal.md` — live adapter + identity-first design notes
+- `docs/architecture/identity-first-live-voice-proposal.md` — historical live adapter + identity-first design notes
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog
 - `scripts/build-backend-env`, `scripts/run-build-backend-lane`, `scripts/buildbuddy-dev` — local build backend switch and BuildBuddy facade

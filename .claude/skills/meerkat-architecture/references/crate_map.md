@@ -12,14 +12,15 @@ meerkat-core              (pure types, traits, agent loop, session-store contrac
   ├── meerkat-contracts       (wire types, capability registry, error codes, schema codegen source)
   ├── meerkat-anthropic       (Anthropic streaming client, implements AgentLlmClient through llm-core)
   ├── meerkat-openai          (OpenAI client, including realtime transport — implements AgentLlmClient)
-  ├── meerkat-gemini          (Gemini client, including inline video and live capability — implements AgentLlmClient)
+  ├── meerkat-gemini          (Gemini client, including inline video — implements AgentLlmClient)
   ├── meerkat-providers       (compatibility shim: ProviderRuntimeRegistry surface + cloud authorizer wiring)
   ├── meerkat-client          (compatibility shim: re-exports provider crates — do NOT add new code here)
   ├── meerkat-store           (session persistence: SQLite, Jsonl, Memory)
   ├── meerkat-tools           (tool registry, builtins, shell, session-scoped task store)
   ├── meerkat-session         (session service: Ephemeral, Persistent)
-  ├── meerkat-runtime         (runtime control plane, policy engine, detached wake, DSL handle impls,
-                                live-topology reconfigure, realtime attachment public methods)
+  ├── meerkat-runtime         (runtime control plane, policy engine, completion-feed wake,
+                                DSL handle impls)
+  ├── meerkat-live            (LiveAdapterHost, live projection sink, WebSocket transport)
   ├── meerkat-comms           (inter-agent: inproc, TCP, UDS, Ed25519)
   ├── meerkat-hooks           (hook engine: in-process, command, HTTP)
   ├── meerkat-skills          (skill loading: filesystem, git, HTTP, embedded)
@@ -49,7 +50,7 @@ Surface binaries:
   └── meerkat-mcp-server    → rkat-mcp                    (MCP server)
 ```
 
-The `*-mini` binaries are intentional reduced-surface builds — same wire protocol as the full binaries but with a smaller command/method set, suitable for embedded hosts and constrained build budgets.
+There are no separate `rkat-mini` or `rkat-rpc-mini` binaries in 0.6.5. Reduced-surface distributions are source builds of the same `rkat` / `rkat-rpc` crates with a narrower Cargo feature set.
 
 ## Key Traits
 
@@ -121,10 +122,9 @@ The `*-mini` binaries are intentional reduced-surface builds — same wire proto
 | Type | Purpose |
 |------|---------|
 | `ToolCategoryOverride` | Tri-state tooling intent across save/resume (`Inherit` / `Enable` / `Disable`) |
-| `DetachedWakeState` | Runtime-owned idle keep-alive wake for detached background ops |
 | `PeerInput.handling_mode` | Typed per-input policy override for actionable peer traffic only |
 | `RuntimeBuildMode` | Explicit runtime ownership mode for builds (`SessionOwned` / `StandaloneEphemeral`) |
-| `SessionRuntimeBindings` | Runtime-backed session bindings carrying `session_id`, `epoch_id`, ops lifecycle, and cursor state |
+| `SessionRuntimeBindings` | Runtime-backed session bindings carrying `session_id`, `epoch_id`, ops lifecycle, cursor state, tool visibility owner, and all session-owned DSL handles |
 | `RuntimeEpochId` / `EpochCursorState` | Epoch-local runtime continuity identity and consumer cursor state |
 | `RuntimeCompletionFeed` | Read handle to the completion feed (implements `CompletionFeed`) — meerkat-runtime |
 | `PersistedOpsSnapshot` | Serializable snapshot for durable epoch recovery — meerkat-runtime |
@@ -160,8 +160,9 @@ archive(id) → remove handle, drop session task
 `keep_alive` is runtime-owned session behavior. Direct substrate usage does not
 own runtime drain semantics; runtime-backed surfaces do.
 
-Detached background ops now wake idle keep_alive sessions through the runtime
-loop via `ContinuationInput`; surface-local waker tasks are a smell.
+Detached background ops now wake idle keep_alive sessions through the
+completion feed and runtime loop via `ContinuationInput`; surface-local waker
+tasks are a smell.
 
 Runtime-backed builds should go through:
 

@@ -16,6 +16,7 @@ Everything public is re-exported from the package root:
 import {
   MeerkatClient,
   Session,
+  LiveChannel,
   Mob,
   EventStream,
   EventSubscription,
@@ -31,6 +32,11 @@ import type {
   Usage,
   SessionInfo,
   SessionOptions,
+  LiveChannelOptions,
+  LiveOpenResult,
+  LiveRefreshResult,
+  LiveStatusResult,
+  LiveInputChunkWire,
   ContentBlock,
   Capability,
   SkillKey,
@@ -65,6 +71,10 @@ The package exports more than the core session lifecycle. The `MeerkatClient` al
 - typed ingress helper: `sendPeerResponseTerminal`
 - MCP live-op helpers: `mcpAdd`, `mcpRemove`, `mcpReload`
 - blob/skill helpers: `getBlob`, `listSkills`
+- live-channel helpers: `liveOpen`, `liveStatus`, `liveClose`, `liveSendInput`,
+  `liveSendInputImage`, `liveSendInputVideoFrame`, `liveCommitInput`,
+  `liveInterrupt`, `liveTruncate`, `liveRefresh`, and
+  `parseLiveObservation`
 
 ---
 
@@ -130,6 +140,29 @@ The `Session` methods are thin conveniences over canonical runtime calls:
 ### DeferredSession
 
 `client.createDeferredSession()` reserves session identity now and runs the first turn later through `await deferred.startTurn(...)`.
+
+### LiveChannel
+
+`LiveChannel` is the session-bound helper for the `live/*` RPC surface.
+`RealtimeChannel` was removed with the live-adapter surface; use
+`LiveChannel.session(client, sessionId, options?)` instead.
+
+```typescript
+const channel = LiveChannel.session(client, session.id, {
+  turningMode: "explicit_commit",
+});
+
+const opened: LiveOpenResult = await channel.open();
+await channel.sendInputText("hello");
+await channel.commitInput("text");
+const status: LiveStatusResult = await channel.status();
+const refresh: LiveRefreshResult = await channel.refresh();
+await channel.close();
+```
+
+The helper stores the `channel_id` returned by `live/open`. It does not own the
+WebSocket transport; connect to `opened.transport.url` with the returned token
+using the transport appropriate for your app.
 
 ### Usage
 
@@ -613,7 +646,7 @@ const result2 = await session.invokeSkill(
 
 ```typescript
 import { CONTRACT_VERSION } from "@rkat/sdk";
-console.log(CONTRACT_VERSION);  // e.g. "0.6.2"
+console.log(CONTRACT_VERSION);  // "0.6.5"
 ```
 
 - While the major version is `0`, minor versions must match exactly between SDK and server.

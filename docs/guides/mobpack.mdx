@@ -112,10 +112,18 @@ The runtime uses `tokio_with_wasm` as a drop-in tokio replacement (backed by the
 
 API:
 
-```js
-const handle = runtime.create_session(mobpackBytes, '{"model":"claude-sonnet-4-6","api_key":"sk-..."}');
-const result = await runtime.start_turn(handle, "Your prompt here", "{}");
-const events = runtime.poll_events(handle);
+```typescript
+import { MeerkatRuntime } from "@rkat/web";
+import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
+
+const runtime = await MeerkatRuntime.initFromMobpack(wasm, mobpackBytes, {
+  anthropicApiKey: "sk-ant-...",
+  model: "claude-sonnet-4-6",
+});
+
+const session = runtime.createSession({ model: "claude-sonnet-4-6" });
+const result = await session.turn("Your prompt here");
+const events = session.pollEvents();
 ```
 
 ### Browser capabilities and limitations

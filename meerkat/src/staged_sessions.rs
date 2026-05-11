@@ -1,9 +1,11 @@
-//! Staged session lifecycle authority.
+//! Staged session lifecycle projection seam.
 //!
 //! Owns the "session ID claimed, build config staged, but not yet materialized
 //! in the session service" state that the RPC/surface layers use for deferred
-//! session creation. The registry is the canonical owner of this state —
-//! surfaces call through it instead of holding local phase discriminants.
+//! session creation. Session existence must already be claimed by
+//! `MeerkatMachine::prepare_bindings`; this registry only holds the pending
+//! build payload and service-facing projection for that machine-owned session.
+//! Surfaces call through it instead of holding local phase discriminants.
 //!
 //! See `docs/wave-d-prep/d-j-staged-session-design.md` for the design
 //! rationale. The facade crate owns this authority because the staged payload
@@ -25,11 +27,11 @@
 //!      (removed)
 //! ```
 
-use meerkat_core::types::{ContentInput, SessionId};
 use meerkat_core::{
     AppendSystemContextRequest, AppendSystemContextStatus, Session, SessionLlmIdentity,
-    SessionSystemContextState,
+    SessionRuntimeBindings, SessionSystemContextState,
 };
+use meerkat_core::{RuntimeBuildMode, RuntimeEpochId, types::ContentInput, types::SessionId};
 use std::collections::{BTreeMap, HashMap};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::sync::RwLock;
@@ -37,6 +39,60 @@ use tokio::sync::RwLock;
 use tokio_with_wasm::alias::sync::RwLock;
 
 use crate::AgentBuildConfig;
+
+/// Witness that a staged slot is backed by a session already claimed by the
+/// runtime machine.
+///
+/// The claim is minted from `SessionRuntimeBindings`, which are prepared by
+/// `MeerkatMachine::prepare_bindings`. The staged registry cannot create
+/// pending-session existence on its own; it can only project a build payload
+/// for the claimed `(session_id, epoch_id)`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StagedSessionMachineClaim {
+    session_id: SessionId,
+    epoch_id: RuntimeEpochId,
+}
+
+impl StagedSessionMachineClaim {
+    pub fn from_runtime_bindings(bindings: &SessionRuntimeBindings) -> Self {
+        Self {
+            session_id: bindings.session_id().clone(),
+            epoch_id: bindings.epoch_id().clone(),
+        }
+    }
+
+    pub fn from_runtime_build_mode(
+        session_id: &SessionId,
+        mode: &RuntimeBuildMode,
+    ) -> Result<Self, StagedLifecycleError> {
+        let RuntimeBuildMode::SessionOwned(bindings) = mode else {
+            return Err(StagedLifecycleError::MissingMachineClaim(
+                session_id.clone(),
+            ));
+        };
+        let claim = Self::from_runtime_bindings(bindings);
+        claim.ensure_matches(session_id)?;
+        Ok(claim)
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn epoch_id(&self) -> &RuntimeEpochId {
+        &self.epoch_id
+    }
+
+    fn ensure_matches(&self, session_id: &SessionId) -> Result<(), StagedLifecycleError> {
+        if &self.session_id == session_id {
+            return Ok(());
+        }
+        Err(StagedLifecycleError::MachineClaimMismatch {
+            staged_session_id: session_id.clone(),
+            claimed_session_id: self.session_id.clone(),
+        })
+    }
+}
 
 /// Phase discriminant for a staged session.
 pub enum StagedPhase {
@@ -57,6 +113,7 @@ pub enum StagedPhase {
 
 /// A staged session slot: build payload + surfaceable metadata.
 pub struct StagedSlot {
+    pub machine_claim: StagedSessionMachineClaim,
     pub phase: StagedPhase,
     pub effective_llm_identity: SessionLlmIdentity,
     pub labels: Option<BTreeMap<String, String>>,
@@ -88,6 +145,7 @@ pub struct StagedSessionInfo {
 /// full build config plus the metadata it needs to either finish the
 /// promotion path or restore the slot via `abandon_promotion`.
 pub struct PromotingSlot {
+    pub machine_claim: StagedSessionMachineClaim,
     pub build_config: Box<AgentBuildConfig>,
     pub effective_llm_identity: SessionLlmIdentity,
     pub labels: Option<BTreeMap<String, String>>,
@@ -112,13 +170,23 @@ pub enum StagedLifecycleError {
     /// A staged keep-alive override requires a comms participant name.
     #[error("keep_alive requires a session created with comms_name")]
     KeepAliveRequiresCommsName,
+    /// A staged slot must carry a runtime-machine claim for the target session.
+    #[error("staged session requires a runtime machine claim: {0}")]
+    MissingMachineClaim(SessionId),
+    /// The supplied machine claim belongs to a different session.
+    #[error("staged machine claim for {claimed_session_id} cannot stage {staged_session_id}")]
+    MachineClaimMismatch {
+        staged_session_id: SessionId,
+        claimed_session_id: SessionId,
+    },
 }
 
-/// Canonical staged-session registry.
+/// Canonical staged-session projection registry.
 ///
 /// Surfaces hold an `Arc<StagedSessionRegistry>` and route every
-/// staged-session concern (existence, phase, metadata, system-context
-/// mutation, promotion, abandonment) through this object.
+/// staged-session projection concern (phase, metadata, system-context
+/// mutation, promotion, abandonment) through this object after the runtime
+/// machine has claimed session existence.
 #[derive(Default)]
 pub struct StagedSessionRegistry {
     slots: RwLock<HashMap<SessionId, StagedSlot>>,
@@ -197,6 +265,7 @@ impl StagedSessionRegistry {
 
     /// Insert a newly-staged slot. Errors if a slot already exists for `id`.
     pub async fn stage(&self, id: SessionId, slot: StagedSlot) -> Result<(), StagedLifecycleError> {
+        slot.machine_claim.ensure_matches(&id)?;
         let mut slots = self.slots.write().await;
         if slots.contains_key(&id) {
             return Err(StagedLifecycleError::AlreadyStaged(id));
@@ -237,6 +306,7 @@ impl StagedSessionRegistry {
             unreachable!("phase was checked before replacement");
         };
         Ok(Some(PromotingSlot {
+            machine_claim: slot.machine_claim.clone(),
             build_config,
             effective_llm_identity: slot.effective_llm_identity.clone(),
             labels: slot.labels.clone(),
@@ -267,6 +337,7 @@ impl StagedSessionRegistry {
                 slots.insert(
                     id.clone(),
                     StagedSlot {
+                        machine_claim: slot.machine_claim,
                         phase: StagedPhase::Staged { build_config },
                         effective_llm_identity: slot.effective_llm_identity,
                         labels: slot.labels,
@@ -282,6 +353,7 @@ impl StagedSessionRegistry {
                 slots.insert(
                     id.clone(),
                     StagedSlot {
+                        machine_claim: slot.machine_claim,
                         phase: StagedPhase::Closing { build_config },
                         effective_llm_identity: slot.effective_llm_identity,
                         labels: slot.labels,
@@ -340,10 +412,12 @@ impl StagedSessionRegistry {
         if !matches!(slot.phase, StagedPhase::Promoting { .. }) {
             return false;
         }
+        let machine_claim = slot.machine_claim.clone();
         let updated_at_secs = updated_at_secs.max(slot.updated_at_secs);
         slots.insert(
             id,
             StagedSlot {
+                machine_claim,
                 phase: StagedPhase::Staged {
                     build_config: Box::new(build_config),
                 },
@@ -469,6 +543,9 @@ impl StagedSessionRegistry {
 
     /// Restore a slot previously removed by `take_staged`.
     pub async fn restore_taken_staged(&self, id: SessionId, slot: StagedSlot) -> bool {
+        if slot.machine_claim.ensure_matches(&id).is_err() {
+            return false;
+        }
         let mut slots = self.slots.write().await;
         if slots.contains_key(&id) {
             return false;
@@ -597,8 +674,12 @@ mod tests {
         }
     }
 
-    fn slot() -> StagedSlot {
+    fn slot(id: &SessionId) -> StagedSlot {
         StagedSlot {
+            machine_claim: StagedSessionMachineClaim {
+                session_id: id.clone(),
+                epoch_id: RuntimeEpochId::new(),
+            },
             phase: StagedPhase::Staged {
                 build_config: Box::new(AgentBuildConfig::new("test-model".to_string())),
             },
@@ -615,7 +696,7 @@ mod tests {
     async fn stage_then_promote_round_trip() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         assert!(reg.contains(&id).await);
         let promoted = reg
             .begin_promotion(&id)
@@ -637,7 +718,7 @@ mod tests {
     async fn stage_then_abandon_without_promote() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         assert!(reg.abandon(&id).await);
         assert!(!reg.contains(&id).await);
     }
@@ -646,7 +727,7 @@ mod tests {
     async fn begin_promotion_twice_rejects_second_caller() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         let first = reg.begin_promotion(&id).await;
         assert!(matches!(first, Ok(Some(_))));
         let second = reg.begin_promotion(&id).await;
@@ -669,7 +750,7 @@ mod tests {
     async fn abandon_promotion_restores_staged() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         let promoted = reg
             .begin_promotion(&id)
             .await
@@ -704,7 +785,7 @@ mod tests {
     async fn abandon_promotion_does_not_resurrect_finished_slot() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         let promoted = reg
             .begin_promotion(&id)
             .await
@@ -732,7 +813,7 @@ mod tests {
     async fn begin_archive_blocks_promotion_until_restored_or_finished() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
 
         assert!(reg.begin_archive(&id).await.unwrap());
         assert!(reg.info(&id).await.unwrap().is_promoting);
@@ -773,8 +854,8 @@ mod tests {
     async fn stage_is_idempotent_guard() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
-        let result = reg.stage(id.clone(), slot()).await;
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
+        let result = reg.stage(id.clone(), slot(&id)).await;
         assert!(matches!(
             result,
             Err(StagedLifecycleError::AlreadyStaged(_))
@@ -782,10 +863,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stage_rejects_mismatched_machine_claim() {
+        let reg = StagedSessionRegistry::new();
+        let id = SessionId::new();
+        let other_id = SessionId::new();
+        let result = reg.stage(id.clone(), slot(&other_id)).await;
+        assert!(matches!(
+            result,
+            Err(StagedLifecycleError::MachineClaimMismatch {
+                staged_session_id,
+                claimed_session_id,
+            }) if staged_session_id == id && claimed_session_id == other_id
+        ));
+        assert!(!reg.contains(&id).await);
+    }
+
+    #[test]
+    fn machine_claim_requires_session_owned_runtime_build_mode() {
+        let id = SessionId::new();
+        let build_config = AgentBuildConfig::new("test-model".to_string());
+        let result = StagedSessionMachineClaim::from_runtime_build_mode(
+            &id,
+            &build_config.runtime_build_mode,
+        );
+        assert!(matches!(
+            result,
+            Err(StagedLifecycleError::MissingMachineClaim(missing)) if missing == id
+        ));
+    }
+
+    #[tokio::test]
     async fn append_system_context_mutates_staged_slot() {
         let reg = StagedSessionRegistry::new();
         let id = SessionId::new();
-        reg.stage(id.clone(), slot()).await.unwrap();
+        reg.stage(id.clone(), slot(&id)).await.unwrap();
         let req = AppendSystemContextRequest {
             text: "hello".to_string(),
             source: Some("test".to_string()),
@@ -804,10 +915,10 @@ mod tests {
         let reg = StagedSessionRegistry::new();
         let id_a = SessionId::new();
         let id_b = SessionId::new();
-        let mut slot_a = slot();
+        let mut slot_a = slot(&id_a);
         slot_a.labels = Some(BTreeMap::from([("env".to_string(), "prod".to_string())]));
         reg.stage(id_a.clone(), slot_a).await.unwrap();
-        let mut slot_b = slot();
+        let mut slot_b = slot(&id_b);
         slot_b.labels = Some(BTreeMap::from([("env".to_string(), "dev".to_string())]));
         reg.stage(id_b.clone(), slot_b).await.unwrap();
         let filter = BTreeMap::from([("env".to_string(), "prod".to_string())]);

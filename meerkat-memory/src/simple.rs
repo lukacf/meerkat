@@ -115,7 +115,7 @@ impl MemoryStore for SimpleMemoryStore {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use meerkat_core::memory::MemoryIndexRequest;
+    use meerkat_core::memory::{MemoryIndexRequest, MemorySourceProvenance};
     use meerkat_core::types::SessionId;
     use std::time::SystemTime;
 
@@ -124,6 +124,7 @@ mod tests {
             session_id: session_id.clone(),
             turn: Some(1),
             indexed_at: SystemTime::now(),
+            source: Some(MemorySourceProvenance::for_message(session_id.clone(), 0)),
         }
     }
 
@@ -226,6 +227,24 @@ mod tests {
             MemoryIndexScope::for_session(session_id),
             "outside scope".to_string(),
             meta(&other_session_id),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, MemoryStoreError::Scope(_)));
+    }
+
+    #[test]
+    fn test_index_request_rejects_missing_source_provenance() {
+        let session_id = SessionId::new();
+        let error = MemoryIndexRequest::new(
+            MemoryIndexScope::for_session(session_id.clone()),
+            "missing source".to_string(),
+            MemoryMetadata {
+                session_id,
+                turn: Some(1),
+                indexed_at: SystemTime::now(),
+                source: None,
+            },
         )
         .unwrap_err();
 

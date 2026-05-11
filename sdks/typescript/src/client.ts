@@ -1467,6 +1467,7 @@ export class MeerkatClient {
     agentIdentity: string,
   ): Promise<{
     status: string;
+    memberRef: MobMemberRef;
     outputPreview?: string;
     error?: string;
     tokensUsed: number;
@@ -1484,12 +1485,23 @@ export class MeerkatClient {
       mob_id: mobId,
       agent_identity: agentIdentity,
     });
+    const memberRef =
+      typeof result.member_ref === "string" && result.member_ref.length > 0
+        ? result.member_ref
+        : undefined;
+    if (!memberRef) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/member_status response: missing member_ref",
+      );
+    }
     const rawConnectivity =
       result.peer_connectivity && typeof result.peer_connectivity === "object"
         ? (result.peer_connectivity as Record<string, unknown>)
         : undefined;
     return {
       status: String(result.status ?? "unknown"),
+      memberRef,
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
       tokensUsed: Number(result.tokens_used ?? 0),
@@ -1782,8 +1794,8 @@ export class MeerkatClient {
   async spawnMobHelper(
     mobId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       roleName?: string;
       profileName?: string;
       runtimeMode?: string;
@@ -1795,19 +1807,19 @@ export class MeerkatClient {
     agentIdentity: string;
     memberRef: MobMemberRef;
   }> {
-    const roleName = options?.roleName ?? options?.profileName;
+    const roleName = options.roleName ?? options.profileName;
     const result = await this.request("mob/spawn_helper", {
       mob_id: mobId,
       prompt,
-      agent_identity: options?.agentIdentity,
+      agent_identity: options.agentIdentity,
       role_name: roleName,
-      runtime_mode: options?.runtimeMode,
-      backend: options?.backend,
+      runtime_mode: options.runtimeMode,
+      backend: options.backend,
     });
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0
         ? result.agent_identity
-        : options?.agentIdentity;
+        : undefined;
     if (!resultIdentity) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
@@ -1836,8 +1848,8 @@ export class MeerkatClient {
     mobId: string,
     sourceMemberId: string,
     prompt: string,
-    options?: {
-      agentIdentity?: string;
+    options: {
+      agentIdentity: string;
       roleName?: string;
       profileName?: string;
       forkContext?: Record<string, unknown>;
@@ -1850,21 +1862,21 @@ export class MeerkatClient {
     agentIdentity: string;
     memberRef: MobMemberRef;
   }> {
-    const roleName = options?.roleName ?? options?.profileName;
+    const roleName = options.roleName ?? options.profileName;
     const result = await this.request("mob/fork_helper", {
       mob_id: mobId,
       source_member_id: sourceMemberId,
       prompt,
-      agent_identity: options?.agentIdentity,
+      agent_identity: options.agentIdentity,
       role_name: roleName,
-      fork_context: options?.forkContext,
-      runtime_mode: options?.runtimeMode,
-      backend: options?.backend,
+      fork_context: options.forkContext,
+      runtime_mode: options.runtimeMode,
+      backend: options.backend,
     });
     const resultIdentity =
       typeof result.agent_identity === "string" && result.agent_identity.length > 0
         ? result.agent_identity
-        : options?.agentIdentity;
+        : undefined;
     if (!resultIdentity) {
       throw new MeerkatError(
         "INVALID_RESPONSE",
@@ -2846,16 +2858,27 @@ export class MeerkatClient {
 
     const quarantined = rawQuarantined
       .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
-      .map((item) => ({
-        sourceUuid: String(item.source_uuid ?? ""),
-        skillId: String(item.skill_id ?? ""),
-        location: String(item.location ?? ""),
-        errorCode: String(item.error_code ?? ""),
-        errorClass: String(item.error_class ?? ""),
-        message: String(item.message ?? ""),
-        firstSeenUnixSecs: Number(item.first_seen_unix_secs ?? 0),
-        lastSeenUnixSecs: Number(item.last_seen_unix_secs ?? 0),
-      }));
+      .map((item) => {
+        const rawKey =
+          item.key && typeof item.key === "object" ? (item.key as Record<string, unknown>) : undefined;
+        const key =
+          typeof rawKey?.source_uuid === "string" && typeof rawKey.skill_name === "string"
+            ? {
+                sourceUuid: rawKey.source_uuid,
+                skillName: rawKey.skill_name,
+              }
+            : undefined;
+        return {
+          key,
+          identityHint: String(item.identity_hint ?? ""),
+          location: String(item.location ?? ""),
+          errorCode: String(item.error_code ?? ""),
+          errorClass: String(item.error_class ?? ""),
+          message: String(item.message ?? ""),
+          firstSeenUnixSecs: Number(item.first_seen_unix_secs ?? 0),
+          lastSeenUnixSecs: Number(item.last_seen_unix_secs ?? 0),
+        };
+      });
 
     return {
       sourceHealth: {

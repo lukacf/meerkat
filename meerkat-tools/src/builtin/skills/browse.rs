@@ -88,8 +88,7 @@ impl BuiltinTool for BrowseSkillsTool {
             .map(|entry| {
                 let s = &entry.descriptor;
                 json!({
-                    "source_uuid": s.key.source_uuid.to_string(),
-                    "skill_name": s.key.skill_name.as_str(),
+                    "skill_key": &s.key,
                     "name": s.name,
                     "description": s.description,
                 })

@@ -283,6 +283,7 @@ where
 pub struct CompactionDiscard {
     pub message: Message,
     pub source_turn: Option<u32>,
+    pub source_message_index: Option<u64>,
 }
 
 fn transcript_source_turns(messages: &[Message]) -> Vec<Option<u32>> {
@@ -315,21 +316,23 @@ fn annotate_compaction_discards(
     discarded
         .into_iter()
         .map(|message| {
-            let source_turn = serde_json::to_vec(&message)
+            let source = serde_json::to_vec(&message)
                 .ok()
                 .and_then(|discard_key| {
                     message_keys.iter().enumerate().find_map(|(index, key)| {
                         (!consumed[index] && key.as_ref() == Some(&discard_key)).then_some(index)
                     })
-                })
+                });
+            let (source_message_index, source_turn) = source
                 .map(|index| {
                     consumed[index] = true;
-                    source_turns[index]
+                    (Some(index as u64), source_turns[index])
                 })
-                .unwrap_or(None);
+                .unwrap_or((None, None));
             CompactionDiscard {
                 message,
                 source_turn,
+                source_message_index,
             }
         })
         .collect()
@@ -402,7 +405,9 @@ mod tests {
         let discarded = annotate_compaction_discards(&transcript, vec![first, second]);
 
         assert_eq!(discarded[0].source_turn, Some(0));
+        assert_eq!(discarded[0].source_message_index, Some(0));
         assert_eq!(discarded[1].source_turn, Some(1));
+        assert_eq!(discarded[1].source_message_index, Some(2));
     }
 
     #[test]

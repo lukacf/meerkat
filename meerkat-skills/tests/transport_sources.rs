@@ -69,7 +69,10 @@ async fn http_source_uses_configured_uuid_and_quarantines_entry_mismatch() {
 
     let quarantined = source.quarantined_diagnostics().await.unwrap();
     assert_eq!(quarantined.len(), 1);
-    assert_eq!(quarantined[0].key, key(source_uuid, "remote-bad"));
+    assert_eq!(
+        quarantined[0].key.as_ref(),
+        Some(&key(source_uuid, "remote-bad"))
+    );
     assert!(quarantined[0].message.contains("source_uuid mismatch"));
 }
 
@@ -184,6 +187,57 @@ async fn git_source_uses_configured_uuid_and_loads_skill_documents() {
     assert_eq!(listed[0].key.source_uuid, source_uuid);
     let loaded = source.load(&key(source_uuid, "git-skill")).await.unwrap();
     assert_eq!(loaded.body.trim(), "git body");
+}
+
+#[tokio::test]
+async fn git_source_keys_nested_skills_by_source_relative_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let remote = tmp.path().join("remote.git");
+    let work = tmp.path().join("work");
+    let top_level = work.join("skills/alpha");
+    let nested = work.join("skills/team-a/shared/alpha");
+    fs::create_dir_all(&top_level).unwrap();
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(
+        top_level.join("SKILL.md"),
+        skill_body("alpha", "top alpha", "top body"),
+    )
+    .unwrap();
+    fs::write(
+        nested.join("SKILL.md"),
+        skill_body("alpha", "nested alpha", "nested body"),
+    )
+    .unwrap();
+    init_test_repo(&remote, &work);
+
+    let source_uuid = source_uuid("a93d587d-8f44-438f-8189-6e8cf549f6e7");
+    let source = GitSkillSource::new(GitSkillConfig {
+        repo_url: remote.to_string_lossy().to_string(),
+        git_ref: GitRef::Branch("main".to_string()),
+        cache_dir: tmp.path().join("cache"),
+        skills_root: Some("skills".to_string()),
+        refresh_interval: Duration::from_secs(300),
+        auth: None,
+        depth: Some(1),
+        source_uuid: source_uuid.clone(),
+        health_thresholds: Default::default(),
+    });
+
+    let listed = source.list(&SkillFilter::default()).await.unwrap();
+    let keys = listed
+        .iter()
+        .map(|descriptor| descriptor.key.skill_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(keys.contains(&"alpha"));
+    assert!(keys.contains(&"team-a/shared/alpha"));
+
+    let nested_doc = source
+        .load(&key(source_uuid.clone(), "team-a/shared/alpha"))
+        .await
+        .unwrap();
+    let top_level_doc = source.load(&key(source_uuid, "alpha")).await.unwrap();
+    assert_eq!(nested_doc.body.trim(), "nested body");
+    assert_eq!(top_level_doc.body.trim(), "top body");
 }
 
 #[test]

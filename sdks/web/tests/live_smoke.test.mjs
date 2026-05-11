@@ -209,7 +209,7 @@ test(
       assert.equal(archived.session_id, state.session_id);
       assert.equal(archived.is_active, false);
       await assert.rejects(
-        () => session.turn("stale browser handle must not control archived session"),
+        () => session.turn("stale browser session must not control archived session"),
         /SESSION_NOT_FOUND|session not found/,
       );
       assert.throws(() => session.isDestroyed, /deprecated/i);

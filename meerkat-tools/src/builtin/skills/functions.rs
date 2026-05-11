@@ -1,7 +1,7 @@
 //! Skill function tool.
 //!
-//! Keyed by typed `SkillKey` (source_uuid + skill_name) — no slash-string
-//! parsing of skill identity on the ingress path.
+//! Keyed by typed `SkillKey` objects — no decomposed sibling fields or
+//! slash-string parsing of skill identity on the ingress path.
 
 use std::sync::Arc;
 
@@ -15,9 +15,14 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct SkillInvokeFunctionArgs {
+struct SkillKeyInput {
     source_uuid: String,
     skill_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SkillInvokeFunctionArgs {
+    skill_key: SkillKeyInput,
     function_name: String,
     #[serde(default)]
     arguments: Value,
@@ -33,11 +38,11 @@ impl SkillInvokeFunctionTool {
     }
 }
 
-fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
-    let source_uuid =
-        SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
-    let skill_name =
-        SkillName::parse(skill_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+fn parse_key(input: &SkillKeyInput) -> Result<SkillKey, BuiltinToolError> {
+    let source_uuid = SourceUuid::parse(&input.source_uuid)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    let skill_name = SkillName::parse(&input.skill_name)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     Ok(SkillKey {
         source_uuid,
         skill_name,
@@ -54,9 +59,8 @@ impl BuiltinTool for SkillInvokeFunctionTool {
     fn def(&self) -> ToolDef {
         ToolDef {
             name: "skill_invoke_function".into(),
-            description:
-                "Invoke a function exposed by a skill identified by (source_uuid, skill_name)."
-                    .into(),
+            description: "Invoke a function exposed by a skill identified by canonical skill_key."
+                .into(),
             input_schema: crate::schema::schema_for::<SkillInvokeFunctionArgs>(),
             provenance: Some(ToolProvenance {
                 kind: ToolSourceKind::Builtin,
@@ -72,7 +76,7 @@ impl BuiltinTool for SkillInvokeFunctionTool {
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let args: SkillInvokeFunctionArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
-        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
+        let raw_key = parse_key(&args.skill_key)?;
         // Apply source-identity lineage remaps before dispatch.
         let key = self
             .engine
@@ -86,8 +90,7 @@ impl BuiltinTool for SkillInvokeFunctionTool {
             .map_err(|e| BuiltinToolError::ExecutionFailed(e.to_string()))?;
 
         Ok(ToolOutput::Json(json!({
-            "source_uuid": key.source_uuid.to_string(),
-            "skill_name": key.skill_name.as_str(),
+            "skill_key": &key,
             "function_name": args.function_name,
             "output": output,
         })))

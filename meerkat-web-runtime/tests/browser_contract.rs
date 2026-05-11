@@ -199,7 +199,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 
     install_tool_use_fetch_stub();
 
-    let handle = create_session_simple(
+    let session_id = create_session_simple(
         &json!({
             "model": "claude-sonnet-4-5",
             "api_key": "sk-test",
@@ -212,7 +212,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 
     let staged = parse_js_result(
         append_system_context(
-            handle,
+            &session_id,
             &json!({
                 "text": "Remember the browser contract.",
                 "source": "browser_contract",
@@ -223,25 +223,25 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
         .await
         .expect("append system context"),
     );
-    assert_eq!(staged["handle"], handle);
+    assert_eq!(staged["session_id"], session_id);
     assert_eq!(staged["status"], "staged");
 
     let before: Value =
-        serde_json::from_str(&get_session_state(handle).expect("session state before turn"))
+        serde_json::from_str(&get_session_state(&session_id).expect("session state before turn"))
             .expect("state json");
-    let session_id = before["session_id"]
+    let canonical_session_id = before["session_id"]
         .as_str()
         .expect("runtime-backed session id")
         .to_string();
-    assert_eq!(before["handle"], handle);
-    assert_ne!(session_id, handle.to_string());
+    assert_eq!(canonical_session_id, session_id);
+    assert!(before.get("handle").is_none());
     assert!(
         before.get("run_counter").is_none(),
         "browser-local run_counter must not be present before turns"
     );
 
     let turn = parse_js_result(
-        start_turn(handle, "Use the echo_browser tool, then answer.")
+        start_turn(&session_id, "Use the echo_browser tool, then answer.")
             .await
             .expect("start turn"),
     );
@@ -251,7 +251,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     assert_eq!(turn["text"], "browser tool contract ok");
 
     let events: Value =
-        serde_json::from_str(&poll_events(handle).expect("poll events")).expect("events json");
+        serde_json::from_str(&poll_events(&session_id).expect("poll events")).expect("events json");
     let items = events.as_array().expect("event array");
     assert!(
         items
@@ -266,7 +266,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     assert!(items.iter().any(|item| item["type"] == "text_complete"));
 
     let after: Value =
-        serde_json::from_str(&get_session_state(handle).expect("session state after turn"))
+        serde_json::from_str(&get_session_state(&session_id).expect("session state after turn"))
             .expect("state json");
     assert_eq!(after["session_id"], session_id);
     assert!(
@@ -275,38 +275,41 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     );
     assert!(
         after.get("run_counter").is_none(),
-        "browser-local run_counter must not be fabricated by the wasm handle map"
+        "browser-local run_counter must not be fabricated by the wasm session projection"
     );
 
     clear_tool_callbacks();
-    destroy_session(handle).expect("destroy session");
+    destroy_session(&session_id).expect("destroy session");
     let archived: Value =
-        serde_json::from_str(&get_session_state(handle).expect("canonical archived state"))
+        serde_json::from_str(&get_session_state(&session_id).expect("canonical archived state"))
             .expect("archived state json");
     assert_eq!(archived["session_id"], session_id);
     assert_eq!(archived["is_active"], false);
 
-    let stale_control = start_turn(handle, "stale handles must not restart archived sessions")
-        .await
-        .expect_err("stale handle control must fail through canonical session authority");
+    let stale_control = start_turn(
+        &session_id,
+        "stale sessions must not restart archived sessions",
+    )
+    .await
+    .expect_err("stale session control must fail through canonical session authority");
     assert_eq!(parse_js_error(stale_control)["code"], "SESSION_NOT_FOUND");
 
     let stale_append = append_system_context(
-        handle,
+        &session_id,
         &json!({
-            "text": "stale direct handle must not stage context",
+            "text": "stale direct session must not stage context",
             "source": "browser_contract",
-            "idempotency_key": "stale-direct-handle"
+            "idempotency_key": "stale-direct-session"
         })
         .to_string(),
     )
     .await
-    .expect_err("stale handle mutation must fail through canonical session authority");
+    .expect_err("stale session mutation must fail through canonical session authority");
     assert_eq!(parse_js_error(stale_append)["code"], "SESSION_NOT_FOUND");
 }
 
 #[wasm_bindgen_test]
-fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references() {
+fn browser_contract_rejects_unknown_direct_session_ids_as_invalid_references() {
     let init = parse_js_result(
         init_runtime_from_config(
             &json!({
@@ -319,14 +322,14 @@ fn browser_contract_rejects_unknown_direct_session_handles_as_invalid_references
     );
     assert_eq!(init["status"], "initialized");
 
-    let bogus_handle = u32::MAX - 7;
+    let bogus_session_id = "00000000-0000-4000-8000-00000000feed";
 
     for error in [
-        get_session_state(bogus_handle).expect_err("state must reject an unknown local handle"),
-        poll_events(bogus_handle).expect_err("poll must reject an unknown local handle"),
-        destroy_session(bogus_handle).expect_err("destroy must reject an unknown local handle"),
+        get_session_state(bogus_session_id).expect_err("state must reject an unknown session_id"),
+        poll_events(bogus_session_id).expect_err("poll must reject an unknown session_id"),
+        destroy_session(bogus_session_id).expect_err("destroy must reject an unknown session_id"),
     ] {
-        assert_eq!(parse_js_error(error)["code"], "invalid_session_handle");
+        assert_eq!(parse_js_error(error)["code"], "invalid_session_id");
     }
 }
 

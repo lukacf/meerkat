@@ -16,8 +16,6 @@ use std::sync::Arc;
 use meerkat_client::{FactoryError, LlmClient, LlmClientAdapter};
 #[cfg(feature = "openai")]
 use meerkat_client::{OpenAiCompatibleClient, OpenAiCompatibleMode};
-#[cfg(feature = "openai")]
-use meerkat_core::CredentialSourceSpec;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 use meerkat_core::service::{CreateSessionRequest, SessionBuildOptions};
 
@@ -50,8 +48,8 @@ use meerkat_core::SessionId;
 use meerkat_core::SessionMeta;
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
-    AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
-    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
+    AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, ExternalAuthResolverId,
+    HookRunOverrides, ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
     SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
     ToolCategoryOverride,
 };
@@ -885,8 +883,6 @@ impl meerkat_llm_core::ImageGenerationExecutor for UnavailableImageGenerationExe
 }
 
 #[cfg(feature = "openai")]
-const SELF_HOSTED_LEGACY_REALM_ID: &str = "self_hosted_legacy";
-
 #[cfg(feature = "openai")]
 struct SelfHostedClientSpec {
     server_id: String,
@@ -1320,14 +1316,14 @@ pub struct AgentFactory {
     /// a `FileLockCoordinator` here.
     #[cfg(not(target_arch = "wasm32"))]
     pub refresh_coord: Option<Arc<dyn meerkat_providers::auth_store::RefreshCoordinator>>,
-    /// External auth resolvers keyed by handle. Merged into
+    /// External auth resolvers keyed by canonical resolver id. Merged into
     /// `ResolverEnvironment.external_resolvers` during `build_agent`.
     /// The WASM runtime registers a `WasmExternalAuthResolver` under
     /// `"wasm_host"` so realm bindings configured with
     /// `CredentialSourceSpec::ExternalResolver { handle: "wasm_host" }`
     /// delegate credential resolution to the JS host's OAuth flow.
     pub external_auth_resolvers:
-        BTreeMap<String, Arc<dyn meerkat_providers::ExternalAuthResolverHandle>>,
+        BTreeMap<ExternalAuthResolverId, Arc<dyn meerkat_providers::ExternalAuthResolverHandle>>,
     /// Provider runtime registry, owned by the factory. Populated with
     /// the feature-gated per-provider runtimes
     /// (`AnthropicProviderRuntime`, `OpenAiProviderRuntime`,
@@ -1881,10 +1877,10 @@ impl AgentFactory {
     /// existing auth story.
     pub fn with_external_auth_resolver(
         mut self,
-        handle: impl Into<String>,
+        handle: ExternalAuthResolverId,
         resolver: Arc<dyn meerkat_providers::ExternalAuthResolverHandle>,
     ) -> Self {
-        self.external_auth_resolvers.insert(handle.into(), resolver);
+        self.external_auth_resolvers.insert(handle, resolver);
         self
     }
 
@@ -2751,12 +2747,10 @@ impl AgentFactory {
             )));
         }
 
-        Self::legacy_self_hosted_connection(spec).map(|(realm, auth_binding)| {
-            // Legacy `[self_hosted]` compatibility is a transient migration
-            // binding. Do not persist it as `SessionMetadata.auth_binding`;
-            // future resumes rebuild it from the model registry server id.
-            (realm, auth_binding, None)
-        })
+        Err(FactoryError::ClientCreationFailed(format!(
+            "self-hosted server '{}' has no configured auth binding; define a realm self_hosted backend/auth/binding and select it with auth_binding or a realm default binding",
+            spec.server_id
+        )))
     }
 
     #[cfg(feature = "openai")]
@@ -2801,7 +2795,7 @@ impl AgentFactory {
             Err(err) => {
                 tracing::debug!(
                     error = %err,
-                    "self-hosted connection seam lookup did not find a configured binding; falling back to legacy self_hosted config"
+                    "self-hosted connection seam lookup did not find a configured binding"
                 );
                 Ok(None)
             }
@@ -2817,91 +2811,6 @@ impl AgentFactory {
             .is_some_and(|server| {
                 server.bearer_token.is_some() || server.bearer_token_env.is_some()
             })
-    }
-
-    #[cfg(feature = "openai")]
-    fn legacy_self_hosted_connection(
-        spec: &SelfHostedClientSpec,
-    ) -> Result<(RealmConnectionSet, AuthBindingRef), FactoryError> {
-        let realm_id = RealmId::parse(SELF_HOSTED_LEGACY_REALM_ID).map_err(|err| {
-            FactoryError::ClientCreationFailed(format!(
-                "invalid self-hosted legacy realm id '{SELF_HOSTED_LEGACY_REALM_ID}': {err}"
-            ))
-        })?;
-        let binding_id = Self::legacy_self_hosted_binding_id(&spec.server_id)?;
-        let binding_key = binding_id.as_str().to_string();
-
-        let backend = meerkat_core::BackendProfile {
-            id: spec.server_id.clone(),
-            provider: Provider::SelfHosted,
-            backend_kind: "self_hosted".to_string(),
-            base_url: Some(spec.base_url.clone()),
-            options: serde_json::json!({
-                "remote_model": spec.remote_model,
-                "api_style": match spec.mode {
-                    OpenAiCompatibleMode::Responses => "responses",
-                    OpenAiCompatibleMode::ChatCompletions => "chat_completions",
-                },
-            }),
-        };
-        let auth = meerkat_core::AuthProfile {
-            id: format!("{}_auth", spec.server_id),
-            provider: Provider::SelfHosted,
-            auth_method: "none".to_string(),
-            source: CredentialSourceSpec::PlatformDefault,
-            constraints: Default::default(),
-            metadata_defaults: Default::default(),
-        };
-        let binding = meerkat_core::ProviderBinding {
-            id: binding_key.clone(),
-            backend_profile: backend.id.clone(),
-            auth_profile: auth.id.clone(),
-            default_model: Some(spec.remote_model.clone()),
-            policy: Default::default(),
-        };
-
-        let mut backends = BTreeMap::new();
-        backends.insert(backend.id.clone(), backend);
-        let mut auth_profiles = BTreeMap::new();
-        auth_profiles.insert(auth.id.clone(), auth);
-        let mut bindings = BTreeMap::new();
-        bindings.insert(binding.id.clone(), binding);
-
-        Ok((
-            RealmConnectionSet {
-                realm_id: SELF_HOSTED_LEGACY_REALM_ID.to_string(),
-                backends,
-                auth_profiles,
-                bindings,
-                default_binding: Some(binding_key),
-            },
-            AuthBindingRef {
-                realm: realm_id,
-                binding: binding_id,
-                profile: None,
-            },
-        ))
-    }
-
-    #[cfg(feature = "openai")]
-    fn legacy_self_hosted_binding_id(
-        server_id: &str,
-    ) -> Result<meerkat_core::BindingId, FactoryError> {
-        if let Ok(binding_id) = meerkat_core::BindingId::parse(server_id.to_string()) {
-            return Ok(binding_id);
-        }
-
-        let mut hash = 0xcbf29ce484222325_u64;
-        for byte in server_id.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        let generated = format!("legacy-{hash:016x}");
-        meerkat_core::BindingId::parse(generated).map_err(|err| {
-            FactoryError::ClientCreationFailed(format!(
-                "failed to derive transient legacy binding id for self-hosted server '{server_id}': {err}"
-            ))
-        })
     }
 
     fn publish_auth_lease(
@@ -6406,7 +6315,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_non_slug_server_id_uses_safe_transient_binding() {
+    async fn self_hosted_non_slug_server_id_without_realm_binding_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
@@ -6425,48 +6334,45 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        let agent = factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("self-hosted without configured realm binding must fail closed"),
+            Err(err) => err,
+        };
 
-        let calls = calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].auth_binding.realm.as_str(), "self_hosted_legacy");
-        assert_ne!(calls[0].auth_binding.binding.as_str(), "localhost:11434");
         assert!(
-            matches!(calls[0].auth_source, CredentialSourceSpec::PlatformDefault),
-            "authless legacy compatibility must not synthesize bearer auth"
+            calls.lock().unwrap().is_empty(),
+            "missing auth_binding/binding must not synthesize transient realm authority"
         );
         assert!(
-            calls[0]
-                .auth_binding
-                .binding
-                .as_str()
-                .starts_with("legacy-"),
-            "non-slug legacy server IDs should map to a generated transient binding ID"
-        );
-        assert!(
-            agent
-                .session()
-                .session_metadata()
-                .unwrap()
-                .auth_binding
-                .is_none(),
-            "generated legacy compatibility binding must remain transient"
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("auth binding")
+                && err.to_string().contains("localhost:11434"),
+            "unexpected error: {err}"
         );
     }
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_runtime_resolution_publishes_auth_lease_visibility() {
+    async fn self_hosted_realm_resolution_publishes_auth_lease_visibility() {
         let temp = tempfile::tempdir().unwrap();
         let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let calls = install_recording_self_hosted_runtime(&mut factory);
-        let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
+        let mut config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
             transport: SelfHostedTransport::OpenAiCompatible,
-            base_url: "http://127.0.0.1:11434".to_string(),
+            base_url: "http://legacy.example/v1".to_string(),
             api_style: SelfHostedApiStyle::ChatCompletions,
             bearer_token: None,
             bearer_token_env: None,
         });
+        insert_self_hosted_realm_binding(
+            &mut config,
+            "dev",
+            "dev_local",
+            "http://realm.example/v1",
+            CredentialSourceSpec::InlineSecret {
+                secret: "realm-token".to_string(),
+            },
+        );
 
         let session = Session::new();
         let runtime = meerkat_runtime::MeerkatMachine::ephemeral();
@@ -6476,6 +6382,7 @@ mod tests {
             .unwrap();
         let mut build = AgentBuildConfig::new("gemma-4-e2b");
         build.provider = Some(Provider::SelfHosted);
+        build.realm_id = Some("dev".to_string());
         build.resume_session = Some(session);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(bindings.clone());
         build.override_builtins = ToolCategoryOverride::Disable;
@@ -7038,7 +6945,7 @@ mod tests {
 
     #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
     #[tokio::test]
-    async fn self_hosted_legacy_without_credentials_remains_authless_compatible() {
+    async fn self_hosted_without_credentials_and_without_realm_binding_fails_closed() {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
         let config = config_with_self_hosted_legacy_server(SelfHostedServerConfig {
@@ -7052,16 +6959,16 @@ mod tests {
         build.provider = Some(Provider::SelfHosted);
         build.override_builtins = ToolCategoryOverride::Disable;
 
-        let agent = factory.build_agent(build, &config).await.unwrap();
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => panic!("self-hosted without configured realm binding must fail closed"),
+            Err(err) => err,
+        };
 
         assert!(
-            agent
-                .session()
-                .session_metadata()
-                .unwrap()
-                .auth_binding
-                .is_none(),
-            "authless legacy compatibility must remain transient"
+            err.to_string().contains("self-hosted")
+                && err.to_string().contains("auth binding")
+                && err.to_string().contains("local"),
+            "unexpected error: {err}"
         );
     }
 

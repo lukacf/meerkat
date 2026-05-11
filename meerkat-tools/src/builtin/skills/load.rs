@@ -1,8 +1,7 @@
 //! Load skill tool — activates a skill mid-turn.
 //!
-//! The tool accepts a typed `SkillKey` on the wire (`source_uuid` +
-//! `skill_name` JSON fields), not a slash-delimited path. The ingress
-//! parser validates both halves before dispatching to the runtime.
+//! The tool accepts a typed `SkillKey` object on the wire, not decomposed
+//! sibling fields or a slash-delimited path.
 
 use std::sync::Arc;
 
@@ -16,9 +15,14 @@ use serde_json::{Value, json};
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-struct LoadSkillArgs {
+struct SkillKeyInput {
     source_uuid: String,
     skill_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct LoadSkillArgs {
+    skill_key: SkillKeyInput,
 }
 
 /// Tool for loading a skill's full instructions into the conversation.
@@ -32,11 +36,11 @@ impl LoadSkillTool {
     }
 }
 
-fn parse_key(source_raw: &str, skill_raw: &str) -> Result<SkillKey, BuiltinToolError> {
-    let source_uuid =
-        SourceUuid::parse(source_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
-    let skill_name =
-        SkillName::parse(skill_raw).map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+fn parse_key(input: &SkillKeyInput) -> Result<SkillKey, BuiltinToolError> {
+    let source_uuid = SourceUuid::parse(&input.source_uuid)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
+    let skill_name = SkillName::parse(&input.skill_name)
+        .map_err(|e| BuiltinToolError::InvalidArgs(e.to_string()))?;
     Ok(SkillKey {
         source_uuid,
         skill_name,
@@ -54,7 +58,7 @@ impl BuiltinTool for LoadSkillTool {
         ToolDef {
             name: "load_skill".into(),
             description:
-                "Load a skill's full instructions by (source_uuid, skill_name) into the conversation."
+                "Load a skill's full instructions by canonical skill_key into the conversation."
                     .into(),
             input_schema: crate::schema::schema_for::<LoadSkillArgs>(),
             provenance: Some(ToolProvenance {
@@ -71,7 +75,7 @@ impl BuiltinTool for LoadSkillTool {
     async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
         let args: LoadSkillArgs = serde_json::from_value(args)
             .map_err(|err| BuiltinToolError::InvalidArgs(err.to_string()))?;
-        let raw_key = parse_key(&args.source_uuid, &args.skill_name)?;
+        let raw_key = parse_key(&args.skill_key)?;
         // Apply the source-identity lineage remap chain before dispatch
         // so legacy source_uuids that have since been rotated/merged
         // still resolve to the canonical backing skill.
@@ -88,8 +92,7 @@ impl BuiltinTool for LoadSkillTool {
 
         match results.into_iter().next() {
             Some(resolved) => Ok(ToolOutput::Json(json!({
-                "source_uuid": resolved.key.source_uuid.to_string(),
-                "skill_name": resolved.key.skill_name.as_str(),
+                "skill_key": &resolved.key,
                 "name": resolved.name,
                 "body": resolved.rendered_body,
                 "byte_size": resolved.byte_size,

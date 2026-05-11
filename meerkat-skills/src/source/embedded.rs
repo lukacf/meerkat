@@ -10,13 +10,13 @@ use crate::registration::{SkillRegistration, collect_registered_skills};
 
 /// Convert a static `SkillRegistration` to a `SkillDescriptor`.
 ///
-/// Embedded skills are all rooted at `SourceUuid::builtin()`. The legacy
-/// slash-delimited registration id is interpreted as "`skill_name`" (the
-/// final path segment) — any prefix was purely a display convention and is
-/// preserved via `metadata["display_id"]`.
+/// Embedded skills are all rooted at `SourceUuid::builtin()`. The full static
+/// registration id is part of the canonical identity so two component crates
+/// cannot collapse to the same builtin `SkillKey` by sharing a final path
+/// segment.
 fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor, SkillError> {
-    let final_segment = reg.id.rsplit('/').next().unwrap_or(reg.id);
-    let skill_name = SkillName::parse(final_segment)?;
+    let skill_name = SkillName::parse(reg.id)?;
+    let display_name = skill_name.leaf_slug().to_string();
     let key = SkillKey {
         source_uuid: SourceUuid::builtin(),
         skill_name,
@@ -24,8 +24,8 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor
 
     let mut metadata: IndexMap<String, String> = IndexMap::new();
     metadata.insert("display_name".to_string(), reg.name.to_string());
-    if reg.id != final_segment {
-        metadata.insert("display_id".to_string(), reg.id.to_string());
+    if reg.id != display_name {
+        metadata.insert("display_slug".to_string(), display_name.clone());
     }
 
     let mut capability_requirements = Vec::new();
@@ -36,7 +36,7 @@ fn registration_to_descriptor(reg: &SkillRegistration) -> Result<SkillDescriptor
 
     Ok(SkillDescriptor {
         key,
-        name: final_segment.to_string(),
+        name: display_name,
         description: reg.description.to_string(),
         scope: reg.scope,
         metadata,
@@ -97,10 +97,7 @@ impl SkillSource for EmbeddedSkillSource {
         let slug = key.skill_name.as_str();
         collect_registered_skills()
             .into_iter()
-            .find(|r| {
-                let final_segment = r.id.rsplit('/').next().unwrap_or(r.id);
-                final_segment == slug
-            })
+            .find(|r| r.id == slug)
             .map(registration_to_document)
             .transpose()?
             .ok_or_else(|| SkillError::NotFound { key: key.clone() })
@@ -114,7 +111,7 @@ mod tests {
     use meerkat_core::skills::SkillScope;
 
     #[test]
-    fn registration_descriptor_uses_builtin_source_uuid_and_slug() {
+    fn registration_descriptor_uses_builtin_source_uuid_and_registration_path() {
         let reg = SkillRegistration {
             id: "collection/email-extractor",
             name: "Email Extractor",
@@ -127,14 +124,18 @@ mod tests {
 
         let descriptor = registration_to_descriptor(&reg).unwrap();
         assert_eq!(descriptor.key.source_uuid, SourceUuid::builtin());
-        assert_eq!(descriptor.key.skill_name.as_str(), "email-extractor");
+        assert_eq!(
+            descriptor.key.skill_name.as_str(),
+            "collection/email-extractor"
+        );
+        assert_eq!(descriptor.name, "email-extractor");
         assert_eq!(
             descriptor.metadata.get("display_name"),
             Some(&"Email Extractor".to_string())
         );
         assert_eq!(
-            descriptor.metadata.get("display_id"),
-            Some(&"collection/email-extractor".to_string())
+            descriptor.metadata.get("display_slug"),
+            Some(&"email-extractor".to_string())
         );
     }
 

@@ -269,8 +269,8 @@ class SourceHealthSnapshot:
 class SkillQuarantineDiagnostic:
     """Diagnostic details for a single quarantined skill entry."""
 
-    source_uuid: str = ""
-    skill_id: str = ""
+    key: SkillKey | None = None
+    identity_hint: str = ""
     location: str = ""
     error_code: str = ""
     error_class: str = ""

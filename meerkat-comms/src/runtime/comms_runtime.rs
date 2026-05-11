@@ -1112,51 +1112,27 @@ impl CoreCommsRuntime for CommsRuntime {
                 )
             })?
         };
-        let mut trusted_peers: Vec<TrustedPeerDescriptor> = self
-            .trusted_peers
-            .read()
-            .peers
-            .iter()
-            .filter_map(|peer| {
-                if peer.pubkey.is_zero() {
+        let mut trusted_peers: Vec<TrustedPeerDescriptor> = {
+            let trusted = self.trusted_peers.read();
+            match trusted.canonical_entries() {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|entry| TrustedPeerDescriptor {
+                        peer_id: entry.peer_id,
+                        name: entry.name,
+                        address: entry.address,
+                        pubkey: *entry.pubkey.as_bytes(),
+                    })
+                    .collect(),
+                Err(error) => {
                     tracing::warn!(
-                        peer_name = %peer.name,
-                        "skipping zero-pubkey trusted peer in ingress runtime snapshot"
+                        error = %error,
+                        "skipping non-canonical trusted peers in ingress runtime snapshot"
                     );
-                    return None;
+                    Vec::new()
                 }
-                let name = match PeerName::new(peer.name.clone()) {
-                    Ok(name) => name,
-                    Err(err) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            error = %err,
-                            "skipping trusted peer with invalid name in snapshot"
-                        );
-                        return None;
-                    }
-                };
-                let address = match parse_peer_address(&peer.addr) {
-                    Ok(address) => address,
-                    Err(err) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            peer_id = %peer.pubkey.to_peer_id(),
-                            address = %peer.addr,
-                            error = %err,
-                            "skipping trusted peer with invalid address in snapshot"
-                        );
-                        return None;
-                    }
-                };
-                Some(TrustedPeerDescriptor {
-                    peer_id: self.router.peer_id_for_pubkey(&peer.pubkey),
-                    name,
-                    address,
-                    pubkey: *peer.pubkey.as_bytes(),
-                })
-            })
-            .collect();
+            }
+        };
         trusted_peers.sort_by(|left, right| {
             left.name
                 .as_str()
@@ -2219,79 +2195,47 @@ impl CommsRuntime {
 
         {
             let trusted = self.trusted_peers.read();
-            let trusted_peer_id_counts: HashMap<PeerId, usize> = trusted
-                .peers
-                .iter()
-                .filter(|peer| peer.has_raw_sendable_identity())
-                .fold(HashMap::new(), |mut counts, peer| {
-                    *counts
-                        .entry(self.router.peer_id_for_pubkey(&peer.pubkey))
-                        .or_default() += 1;
-                    counts
-                });
-            for peer in &trusted.peers {
-                if !peer.has_raw_sendable_identity() {
+            let entries = match trusted.canonical_entries() {
+                Ok(entries) => entries,
+                Err(error) => {
                     tracing::warn!(
-                        peer_name = %peer.name,
-                        "skipping zero-pubkey trusted peer in peer directory"
+                        error = %error,
+                        "skipping non-canonical trusted peers in peer directory"
                     );
+                    for peer in trusted
+                        .peers
+                        .iter()
+                        .filter(|peer| peer.has_raw_sendable_identity())
+                    {
+                        trusted_names.insert(peer.name.clone());
+                        trusted_pubkeys.insert(peer.pubkey);
+                    }
+                    Vec::new()
+                }
+            };
+            for entry in entries {
+                if entry.name.as_str() == participant_name || entry.pubkey == self.public_key {
                     continue;
                 }
-                if peer.name == participant_name || peer.pubkey == self.public_key {
-                    continue;
-                }
-                let peer_id = self.router.peer_id_for_pubkey(&peer.pubkey);
-                trusted_names.insert(peer.name.clone());
-                trusted_pubkeys.insert(peer.pubkey);
-                if trusted_peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
-                    tracing::warn!(
-                        peer_name = %peer.name,
-                        peer_id = %peer_id,
-                        "skipping duplicate trusted peer id in peer directory"
-                    );
-                    continue;
-                }
-                if private_peer_ids.contains(&peer_id) {
+                trusted_names.insert(entry.name.as_string());
+                trusted_pubkeys.insert(entry.pubkey);
+                if private_peer_ids.contains(&entry.peer_id) {
                     continue;
                 }
                 let source = if inproc_by_name
-                    .get(&peer.name)
-                    .is_some_and(|key| *key == peer.pubkey)
+                    .get(entry.name.as_str())
+                    .is_some_and(|key| *key == entry.pubkey)
                 {
                     PeerDirectorySource::TrustedAndInproc
                 } else {
                     PeerDirectorySource::Trusted
                 };
-                let name = match PeerName::new(peer.name.clone()) {
-                    Ok(name) => name,
-                    Err(_) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            peer_id = %peer.pubkey.to_peer_id(),
-                            "skipping invalid peer name in trusted peers"
-                        );
-                        continue;
-                    }
-                };
-                let address = match parse_peer_address(&peer.addr) {
-                    Ok(address) => address,
-                    Err(err) => {
-                        tracing::warn!(
-                            peer_name = %peer.name,
-                            peer_id = %peer_id,
-                            address = %peer.addr,
-                            error = %err,
-                            "skipping trusted peer with invalid address in peer directory"
-                        );
-                        continue;
-                    }
-                };
                 on_peer(ResolvedPeer {
-                    name,
-                    peer_id,
-                    address,
+                    name: entry.name,
+                    peer_id: entry.peer_id,
+                    address: entry.address,
                     source,
-                    meta: peer.meta.clone(),
+                    meta: entry.meta,
                 });
                 emitted += 1;
             }
@@ -5961,22 +5905,24 @@ mod tests {
 
         {
             let mut trusted = runtime.trusted_peers.write();
-            trusted
-                .upsert(crate::TrustedPeer {
+            assert!(matches!(
+                trusted.upsert(crate::TrustedPeer {
                     name: unknown_name.clone(),
                     pubkey: unknown_pubkey,
                     addr: "http://127.0.0.1:4200".to_string(),
                     meta: crate::PeerMeta::default(),
-                })
-                .expect("valid test peer should upsert");
-            trusted
-                .upsert(crate::TrustedPeer {
+                }),
+                Err(crate::TrustError::InvalidPeerAddress { .. })
+            ));
+            assert!(matches!(
+                trusted.upsert(crate::TrustedPeer {
                     name: schemeless_name.clone(),
                     pubkey: schemeless_pubkey,
                     addr: "127.0.0.1:4201".to_string(),
                     meta: crate::PeerMeta::default(),
-                })
-                .expect("valid test peer should upsert");
+                }),
+                Err(crate::TrustError::InvalidPeerAddress { .. })
+            ));
         }
 
         let peers = CoreCommsRuntime::peers(&runtime).await;

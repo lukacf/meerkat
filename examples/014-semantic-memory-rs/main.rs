@@ -99,6 +99,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             session_id: memory_session_id.clone(),
             turn: Some(i as u32 + 1),
             indexed_at: now,
+            source: Some(meerkat_core::memory::MemorySourceProvenance::for_message(
+                memory_session_id.clone(),
+                i as u64,
+            )),
         };
         let request = MemoryIndexRequest::new(
             MemoryIndexScope::for_session(memory_session_id.clone()),

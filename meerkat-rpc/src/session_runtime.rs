@@ -14061,7 +14061,9 @@ mod tests {
                 provider_params: None,
             }),
         );
-        definition.mark_owner_bridge_session_indexed(owner_session_id);
+        definition.mark_owner_bridge_session_indexed(
+            SessionId::parse(owner_session_id).expect("valid owner session id"),
+        );
         let events = Arc::new(DirectArchiveFailClearEventStore::new());
         let storage = meerkat_mob::MobStorage::with_events(events.clone());
         let handle = meerkat_mob::MobBuilder::new(definition, storage)

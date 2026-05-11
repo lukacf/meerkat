@@ -669,6 +669,7 @@ class MobTurnStartParams:
 class MobMemberStatusResult:
     """Response payload for `mob/member_status`."""
     is_final: bool
+    member_ref: WireMemberRef
     status: WireMobMemberStatus
     tokens_used: int
     current_session_id: Optional[str] = None

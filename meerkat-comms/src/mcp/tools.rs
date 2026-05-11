@@ -35,7 +35,7 @@ use meerkat_core::types::{ContentBlock, HandlingMode, ImageData};
 
 const RUNTIME_COMMAND_AUTHORITY_UNAVAILABLE_CODE: &str = "runtime_command_authority_unavailable";
 
-const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"current_turn\",\"index\":0} refers only to an image attached to the current admitted user input turn.\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- Do not use source=current_turn for generated images; generated images must be sent with source=blob, blob_id, and media_type.";
+const COMMS_BLOCKS_DESCRIPTION: &str = "\n\nMultimodal blocks:\n- Use blocks to send text and images alongside the body/request/response.\n- {\"type\":\"image_ref\",\"source\":\"blob\",\"blob_id\":\"sha256:...\",\"media_type\":\"image/png\"} refers to a generated or otherwise blob-backed image, such as an image returned by generate_image earlier in this assistant turn or a previous turn.\n- source=current_turn is rejected because current-turn image indexes are dispatch-local projections rather than canonical image handles.";
 
 const SEND_REQUEST_CONTRACTS_DESCRIPTION: &str = "\n\nSupported request contracts:\n- checksum_token: Use for a simple correlated check/ack/review. params must be {\"subject\":\"<subject>\"}. The responder should send_response with status completed and result {\"request_intent\":\"checksum_token\",\"request_subject\":\"<same subject>\",\"token\":\"<token or checksum>\"}.\n- supervisor.bridge: Use for supervisor bridge control. params include the bridge command payload, for example command observe_member with supervisor, epoch, and protocol_version fields.";
 
@@ -73,11 +73,9 @@ pub struct SendMessageInput {
     pub display_name: Option<String>,
     /// Message body
     pub body: String,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
+    /// Optional multimodal blocks. Use blob-backed image_ref entries such as
     /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// to forward images without inlining bytes in the tool call.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// "steer" for immediate processing (normal), "queue" for next turn boundary
@@ -100,11 +98,9 @@ pub struct SendRequestInput {
     pub handling_mode: HandlingMode,
     /// Request parameters
     pub params: CommsPeerRequestParams,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
+    /// Optional multimodal blocks. Use blob-backed image_ref entries such as
     /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// to forward images without inlining bytes in the tool call.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
 }
@@ -120,7 +116,7 @@ pub enum CommsToolContentBlock {
         /// Source collection for the image reference.
         source: CommsToolImageReferenceSource,
         /// Zero-based image index within the current admitted turn. Required for
-        /// source=current_turn; forbidden for source=blob.
+        /// Rejected for source=current_turn; forbidden for source=blob.
         #[serde(default)]
         index: Option<usize>,
         /// Blob ID for a generated or otherwise blob-backed image. Required for
@@ -158,11 +154,9 @@ pub struct SendResponseInput {
     /// Response result data (optional)
     #[serde(default)]
     pub result: Option<CommsPeerResponseResult>,
-    /// Optional multimodal blocks. Use image_ref entries such as
-    /// {"type":"image_ref","source":"current_turn","index":0} to forward
-    /// images from the current admitted user turn, or
+    /// Optional multimodal blocks. Use blob-backed image_ref entries such as
     /// {"type":"image_ref","source":"blob","blob_id":"sha256:...","media_type":"image/png"}
-    /// to forward a generated/blob-backed image without inlining bytes in the tool call.
+    /// to forward images without inlining bytes in the tool call.
     #[serde(default)]
     pub blocks: Option<Vec<CommsToolContentBlock>>,
     /// Handling mode override for terminal responses: "steer" or "queue" (optional)
@@ -400,20 +394,11 @@ fn resolve_image_ref(
 ) -> Result<ContentBlock, String> {
     match source {
         CommsToolImageReferenceSource::CurrentTurn => {
-            if blob_id.is_some() || media_type.is_some() {
-                return Err("invalid image_ref: source current_turn only accepts index".to_string());
-            }
-            let index = index.ok_or_else(|| {
-                "invalid image_ref: source current_turn requires index".to_string()
-            })?;
-            dispatch_context
-                .current_turn_image(index)
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "image_ref_unavailable: current_turn image {index} did not resolve to a current-turn image"
-                    )
-                })
+            let _ = (index, blob_id, media_type, dispatch_context);
+            Err(
+                "image_ref_unavailable: source current_turn is not a canonical image handle; use source blob with blob_id and media_type"
+                    .to_string(),
+            )
         }
         CommsToolImageReferenceSource::Blob => {
             if index.is_some() {
@@ -990,12 +975,12 @@ mod tests {
                 "{name} should document blob-backed generated image refs"
             );
             assert!(
-                text.contains("\"source\":\"current_turn\""),
-                "{name} should document current-turn user image refs"
+                text.contains("source=current_turn is rejected"),
+                "{name} should document that current-turn image refs are rejected"
             );
             assert!(
-                text.contains("generated images must be sent with source=blob"),
-                "{name} should distinguish generated images from current-turn input"
+                text.contains("dispatch-local projections"),
+                "{name} should explain why current-turn image refs are not canonical"
             );
         }
 
@@ -1052,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_resolves_current_turn_image_ref_to_peer_message_blocks() {
+    async fn send_message_rejects_current_turn_image_ref() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
         let runtime = Arc::new(RecordingRuntime::new());
@@ -1069,7 +1054,7 @@ mod tests {
             ]),
         );
 
-        handle_tools_call_with_context(
+        let err = handle_tools_call_with_context(
             &ctx,
             "send_message",
             &json!({
@@ -1084,36 +1069,14 @@ mod tests {
             &dispatch_context,
         )
         .await
-        .expect("send_message should resolve current-turn image refs");
+        .expect_err("current-turn image refs must fail closed");
 
-        let sent = runtime.sent.lock();
-        let [
-            CommsCommand::PeerMessage {
-                body,
-                blocks: Some(blocks),
-                ..
-            },
-        ] = sent.as_slice()
-        else {
-            panic!("expected one peer message with blocks, got {sent:?}");
-        };
-        assert_eq!(body, "Please describe the attached image.");
-        assert!(matches!(
-            &blocks[0],
-            meerkat_core::ContentBlock::Text { text }
-                if text == "Please describe the attached image."
-        ));
-        assert!(matches!(
-            &blocks[1],
-            meerkat_core::ContentBlock::Image {
-                media_type,
-                data: meerkat_core::ImageData::Inline { data }
-            } if media_type == "image/png" && data == "iVBORw0KGgo="
-        ));
+        assert!(err.contains("source current_turn is not a canonical image handle"));
+        assert!(runtime.sent.lock().is_empty());
     }
 
     #[tokio::test]
-    async fn send_request_resolves_current_turn_image_ref_to_peer_request_blocks() {
+    async fn send_request_rejects_current_turn_image_ref() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
         let runtime = Arc::new(RecordingRuntime::new());
@@ -1125,7 +1088,7 @@ mod tests {
             }]),
         );
 
-        handle_tools_call_with_context(
+        let err = handle_tools_call_with_context(
             &ctx,
             "send_request",
             &json!({
@@ -1141,30 +1104,10 @@ mod tests {
             &dispatch_context,
         )
         .await
-        .expect("send_request should resolve current-turn image refs");
+        .expect_err("current-turn image refs must fail closed");
 
-        let sent = runtime.sent.lock();
-        let [
-            CommsCommand::PeerRequest {
-                blocks: Some(blocks),
-                ..
-            },
-        ] = sent.as_slice()
-        else {
-            panic!("expected one peer request with blocks, got {sent:?}");
-        };
-        assert!(matches!(
-            &blocks[0],
-            meerkat_core::ContentBlock::Text { text }
-                if text == "Please describe the attached image."
-        ));
-        assert!(matches!(
-            &blocks[1],
-            meerkat_core::ContentBlock::Image {
-                media_type,
-                data: meerkat_core::ImageData::Inline { data }
-            } if media_type == "image/png" && data == "iVBORw0KGgo="
-        ));
+        assert!(err.contains("source current_turn is not a canonical image handle"));
+        assert!(runtime.sent.lock().is_empty());
     }
 
     #[tokio::test]
@@ -1293,7 +1236,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn send_message_synthesizes_body_text_when_blocks_only_reference_image() {
+    async fn send_message_rejects_image_only_current_turn_reference() {
         let peer_keypair = Keypair::generate();
         let (mut ctx, peer_id) = make_trusted_runtime_less_context(&peer_keypair);
         let runtime = Arc::new(RecordingRuntime::new());
@@ -1305,7 +1248,7 @@ mod tests {
             }]),
         );
 
-        handle_tools_call_with_context(
+        let err = handle_tools_call_with_context(
             &ctx,
             "send_message",
             &json!({
@@ -1319,31 +1262,10 @@ mod tests {
             &dispatch_context,
         )
         .await
-        .expect("send_message should resolve image-only blocks");
+        .expect_err("current-turn image refs must fail closed");
 
-        let sent = runtime.sent.lock();
-        let [
-            CommsCommand::PeerMessage {
-                blocks: Some(blocks),
-                ..
-            },
-        ] = sent.as_slice()
-        else {
-            panic!("expected one peer message with blocks, got {sent:?}");
-        };
-        assert_eq!(
-            blocks.first(),
-            Some(&meerkat_core::ContentBlock::Text {
-                text: "Please describe the attached image.".into()
-            })
-        );
-        assert!(matches!(
-            &blocks[1],
-            meerkat_core::ContentBlock::Image {
-                media_type,
-                data: meerkat_core::ImageData::Inline { data }
-            } if media_type == "image/png" && data == "iVBORw0KGgo="
-        ));
+        assert!(err.contains("source current_turn is not a canonical image handle"));
+        assert!(runtime.sent.lock().is_empty());
     }
 
     #[tokio::test]

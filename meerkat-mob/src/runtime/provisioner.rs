@@ -2035,7 +2035,7 @@ impl MultiBackendProvisioner {
 
     async fn external_member_ref(
         &self,
-        _create_session: CreateSessionRequest,
+        create_session: CreateSessionRequest,
         owner_bridge_session_id: Option<SessionId>,
         ops_registry: Option<Arc<dyn OpsLifecycleRegistry>>,
         target: ExternalBindingTarget,
@@ -2096,15 +2096,28 @@ impl MultiBackendProvisioner {
             bootstrap_token: Some(effective_bootstrap_token),
             session_id: None,
         };
-        if let (Some(owner_bridge_session_id), Some(registry)) =
-            (owner_bridge_session_id, ops_registry)
+        let admitted_owner_bridge_session_id = create_session
+            .build
+            .as_ref()
+            .and_then(|build| build.resume_session.as_ref())
+            .map(|session| session.id().clone());
+        if let Some(owner_bridge_session_id) =
+            owner_bridge_session_id.or(admitted_owner_bridge_session_id)
         {
-            self.session.ops_adapter.bind_member_registry(
-                &member_ref,
-                owner_bridge_session_id,
-                registry,
-                peer_name.clone(),
-            )?;
+            if let Some(registry) = ops_registry {
+                self.session.ops_adapter.bind_member_registry(
+                    &member_ref,
+                    owner_bridge_session_id,
+                    registry,
+                    peer_name.clone(),
+                )?;
+            } else {
+                self.session.ops_adapter.bind_member_fallback_registry(
+                    &member_ref,
+                    owner_bridge_session_id,
+                    peer_name.clone(),
+                )?;
+            }
         }
         let operation_id = self
             .session
@@ -2334,10 +2347,18 @@ impl MobProvisioner for MultiBackendProvisioner {
                         return Err(MobError::BridgeDeliveryRejected { cause, reason });
                     }
                 }
-                self.session
+                let progress_recorded = self
+                    .session
                     .ops_adapter
-                    .report_member_progress(member_ref, "turn dispatched")
+                    .report_member_progress_if_bound(member_ref, "turn dispatched")
                     .await?;
+                if !progress_recorded {
+                    tracing::debug!(
+                        peer_id = %peer_id,
+                        address = %address,
+                        "skipping peer-only lifecycle progress without canonical owner binding"
+                    );
+                }
                 Ok(())
             }
             _ => self.session.start_turn(member_ref, req).await,

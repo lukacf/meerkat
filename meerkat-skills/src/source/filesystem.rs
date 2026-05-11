@@ -71,8 +71,13 @@ impl FilesystemSkillSource {
     }
 
     fn skill_key_for_dir(&self, skill_dir: &Path) -> Option<SkillKey> {
-        let file_name = skill_dir.file_name()?.to_str()?;
-        let skill_name = SkillName::parse(file_name).ok()?;
+        let relative = skill_dir.strip_prefix(&self.root).ok()?;
+        let mut segments = Vec::new();
+        for segment in relative.components() {
+            let segment = segment.as_os_str().to_str()?;
+            segments.push(segment);
+        }
+        let skill_name = SkillName::parse(&segments.join("/")).ok()?;
         Some(SkillKey {
             source_uuid: self.source_uuid.clone(),
             skill_name,
@@ -91,7 +96,7 @@ impl SkillSource for FilesystemSkillSource {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            let expected = key.skill_name.as_str().to_string();
+            let expected = key.skill_name.leaf_slug().to_string();
             match parse_skill_md(key.clone(), self.scope, &content, Some(&expected)) {
                 Ok(doc) => all.push(doc.descriptor),
                 Err(err) => {
@@ -106,7 +111,7 @@ impl SkillSource for FilesystemSkillSource {
         if key.source_uuid != self.source_uuid {
             return Err(SkillError::NotFound { key: key.clone() });
         }
-        let dir = self.root.join(key.skill_name.as_str());
+        let dir = self.root.join(Path::new(key.skill_name.as_str()));
         if !dir.join("SKILL.md").is_file() {
             return Err(SkillError::NotFound { key: key.clone() });
         }
@@ -116,7 +121,7 @@ impl SkillSource for FilesystemSkillSource {
             key.clone(),
             self.scope,
             &content,
-            Some(key.skill_name.as_str()),
+            Some(key.skill_name.leaf_slug()),
         )
     }
 

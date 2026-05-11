@@ -15,7 +15,8 @@ use meerkat_contracts::{
 use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
-    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, MediaType,
+    BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, LlmRetryEvent,
+    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, MediaType,
     ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
     SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
     ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
@@ -23,6 +24,29 @@ use meerkat_core::{
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
     ToolCallArguments::from_value(value).expect("test tool args must be an object")
+}
+
+fn retry_event(message: &str, attempt: u32, max_retries: u32, delay_ms: u64) -> AgentEvent {
+    AgentEvent::Retrying {
+        retry: LlmRetryEvent::from_schedule(LlmRetrySchedule {
+            failure: LlmRetryFailure {
+                provider: "test".to_string(),
+                kind: LlmRetryFailureKind::RetryableProviderError,
+                retry_after_ms: None,
+                duration_ms: None,
+                message: message.to_string(),
+            },
+            plan: LlmRetryPlan {
+                attempt,
+                max_retries,
+                computed_delay_ms: delay_ms,
+                selected_delay_ms: delay_ms,
+                retry_after_hint_ms: None,
+                rate_limit_floor_applied: false,
+                budget_capped: false,
+            },
+        }),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,13 +489,7 @@ fn agent_event_all_variants_roundtrip() {
             limit: 10000,
             percent: 0.8,
         },
-        AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 3,
-            error: "rate limited".to_string(),
-            delay_ms: 1000,
-            retry: None,
-        },
+        retry_event("rate limited", 1, 3, 1000),
         AgentEvent::SkillsResolved {
             skills: vec![meerkat_core::skills::SkillKey::builtin(
                 meerkat_core::skills::SkillName::parse("test-skill").expect("valid name"),
@@ -689,13 +707,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             limit: 2,
             percent: 50.0,
         },
-        AgentEvent::Retrying {
-            attempt: 1,
-            max_attempts: 2,
-            error: "retry".to_string(),
-            delay_ms: 100,
-            retry: None,
-        },
+        retry_event("retry", 1, 2, 100),
         AgentEvent::SkillsResolved {
             skills: vec![],
             injection_bytes: 0,

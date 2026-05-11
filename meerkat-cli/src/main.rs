@@ -7062,6 +7062,9 @@ async fn run_agent(
             agent_llm_client_decorator: None,
             override_builtins: meerkat_core::ToolCategoryOverride::from_effective(enable_builtins),
             override_shell: meerkat_core::ToolCategoryOverride::from_effective(enable_shell),
+            override_comms: meerkat_core::ToolCategoryOverride::from_effective(
+                !comms_overrides.disabled,
+            ),
             override_memory: meerkat_core::ToolCategoryOverride::from_effective(enable_memory),
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
             override_workgraph: meerkat_core::ToolCategoryOverride::from_effective(

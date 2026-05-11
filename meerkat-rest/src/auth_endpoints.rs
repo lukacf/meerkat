@@ -18,10 +18,10 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 
 use meerkat_contracts::{
-    WireAuthProfile, WireAuthProfileCleared, WireAuthProfileCreated, WireAuthProfileDetail,
-    WireAuthProfilesList, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
-    WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding, WireRealmConnectionSet,
-    WireRealmList, WireRealmSummary,
+    CreateProfileParams, LoginStartParams, WireAuthProfile, WireAuthProfileCleared,
+    WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatusDetail,
+    WireBackendProfile, WireBindingIdentity, WireDeviceStart, WireLoginReady, WireLoginStart,
+    WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
 use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
 use meerkat_core::handles::LeaseKey;
@@ -186,6 +186,33 @@ fn oauth_terminal_device_consume_error(err: OAuthFlowError) -> (StatusCode, Stri
         ),
         other => oauth_device_state_error(other),
     }
+}
+
+fn parse_rest_realm_id(raw: &str) -> Result<RealmId, (StatusCode, String)> {
+    RealmId::parse(raw).map_err(|source| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid realm_id `{raw}`: {source}"),
+        )
+    })
+}
+
+fn parse_rest_binding_id(raw: &str) -> Result<BindingId, (StatusCode, String)> {
+    BindingId::parse(raw).map_err(|source| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid binding_id `{raw}`: {source}"),
+        )
+    })
+}
+
+fn parse_rest_profile_id(raw: Option<&str>) -> Result<Option<ProfileId>, (StatusCode, String)> {
+    raw.map(ProfileId::parse).transpose().map_err(|source| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid profile_id: {source}"),
+        )
+    })
 }
 
 fn release_uncredentialed_terminal_oauth_lifecycle(
@@ -662,59 +689,46 @@ pub async fn list_auth_profiles(
     }
 }
 
-#[derive(serde::Deserialize)]
-pub struct CreateAuthProfileBody {
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-    pub provider: String,
-    pub auth_method: String,
-    pub secret: String,
-}
-
 /// Create an auth credential entry by writing the secret into the
 /// TokenStore under the binding-scoped `AuthBindingRef`. The resolved
 /// auth profile must declare `source.kind = "managed_store"`; otherwise
 /// the provider runtime would read a different credential source.
 pub async fn create_auth_profile(
     State(state): State<AppState>,
-    Json(body): Json<CreateAuthProfileBody>,
+    Json(body): Json<CreateProfileParams>,
 ) -> impl IntoResponse {
-    let (auth_binding, _binding, auth_profile) = match resolve_binding_identity(
-        &state,
-        &body.realm_id,
-        &body.binding_id,
-        body.profile_id.as_ref(),
-    )
-    .await
-    {
-        Ok(v) => v,
+    let realm_id = match parse_rest_realm_id(&body.realm_id) {
+        Ok(value) => value,
         Err((status, msg)) => {
             return (status, Json(serde_json::json!({ "error": msg }))).into_response();
         }
     };
-    if body.provider != auth_profile.provider.as_str() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": format!(
-                    "binding {} resolves provider '{}' not '{}'",
-                    body.binding_id,
-                    auth_profile.provider.as_str(),
-                    body.provider,
-                ),
-            })),
-        )
-            .into_response();
-    }
+    let binding_id = match parse_rest_binding_id(&body.binding_id) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let profile_id = match parse_rest_profile_id(body.profile_id.as_deref()) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let (auth_binding, _binding, auth_profile) =
+        match resolve_binding_identity(&state, &realm_id, &binding_id, profile_id.as_ref()).await {
+            Ok(v) => v,
+            Err((status, msg)) => {
+                return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+            }
+        };
     if body.auth_method != auth_profile.auth_method {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
                 "error": format!(
                     "binding {} resolves auth_method '{}' not '{}'",
-                    body.binding_id,
+                    binding_id,
                     auth_profile.auth_method,
                     body.auth_method,
                 ),
@@ -722,7 +736,7 @@ pub async fn create_auth_profile(
         )
             .into_response();
     }
-    if let Err((status, msg)) = require_managed_store_source(&body.binding_id, &auth_profile) {
+    if let Err((status, msg)) = require_managed_store_source(&binding_id, &auth_profile) {
         return (status, Json(serde_json::json!({ "error": msg }))).into_response();
     }
     let auth_mode = match body.auth_method.as_str() {
@@ -943,21 +957,9 @@ pub async fn test_auth_binding(
 // The server owns the state -> PKCE verifier correlation. The client receives
 // only the authorize URL and state, then posts the provider code with that state.
 
-#[derive(Debug, serde::Deserialize)]
-pub struct LoginStartBody {
-    pub provider: String,
-    /// Client-provided redirect URI (typically a loopback binding that
-    /// the caller has already bound). The authorize URL will embed this.
-    pub redirect_uri: String,
-    pub realm_id: RealmId,
-    pub binding_id: BindingId,
-    #[serde(default)]
-    pub profile_id: Option<ProfileId>,
-}
-
 pub async fn start_login(
     State(state): State<AppState>,
-    Json(body): Json<LoginStartBody>,
+    Json(body): Json<LoginStartParams>,
 ) -> impl IntoResponse {
     let resolved = match resolve_oauth_provider(&body.provider, &body.redirect_uri) {
         Ok(v) => v,
@@ -969,12 +971,30 @@ pub async fn start_login(
                 .into_response();
         }
     };
+    let realm_id = match parse_rest_realm_id(&body.realm_id) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let binding_id = match parse_rest_binding_id(&body.binding_id) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
+    let profile_id = match parse_rest_profile_id(body.profile_id.as_deref()) {
+        Ok(value) => value,
+        Err((status, msg)) => {
+            return (status, Json(serde_json::json!({ "error": msg }))).into_response();
+        }
+    };
     let target = match resolve_oauth_target(
         &state,
         resolved.provider,
-        Some(&body.realm_id),
-        Some(&body.binding_id),
-        body.profile_id.as_ref(),
+        Some(&realm_id),
+        Some(&binding_id),
+        profile_id.as_ref(),
     )
     .await
     {
@@ -2452,11 +2472,11 @@ mod tests {
 
         let response = start_login(
             State(state.clone()),
-            Json(LoginStartBody {
+            Json(LoginStartParams {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2509,11 +2529,11 @@ mod tests {
 
         let response = start_login(
             State(state.clone()),
-            Json(LoginStartBody {
+            Json(LoginStartParams {
                 provider: "openai".to_string(),
                 redirect_uri: redirect_uri.to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2551,11 +2571,11 @@ mod tests {
 
         let response = start_login(
             State(state.clone()),
-            Json(LoginStartBody {
+            Json(LoginStartParams {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2597,11 +2617,11 @@ mod tests {
 
         let response = start_login(
             State(state.clone()),
-            Json(LoginStartBody {
+            Json(LoginStartParams {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )
@@ -2637,11 +2657,11 @@ mod tests {
 
         let response = start_login(
             State(state.clone()),
-            Json(LoginStartBody {
+            Json(LoginStartParams {
                 provider: "openai".to_string(),
                 redirect_uri: "http://127.0.0.1:0/callback".to_string(),
-                realm_id: RealmId::parse("dev").unwrap(),
-                binding_id: BindingId::parse("default_openai").unwrap(),
+                realm_id: "dev".to_string(),
+                binding_id: "default_openai".to_string(),
                 profile_id: None,
             }),
         )

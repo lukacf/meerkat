@@ -69,7 +69,7 @@ pub mod external_auth;
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -716,10 +716,8 @@ struct ParsedMobpack {
 }
 
 fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
-    let files = meerkat_mob_pack::targz::extract_targz_safe(bytes)
+    let archive = meerkat_mob_pack::archive::MobpackArchive::from_archive_bytes(bytes)
         .map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
-    let archive = meerkat_mob_pack::archive::MobpackArchive::from_extracted_files(&files)
-        .map_err(|e| format!("invalid mobpack: {e}"))?;
 
     if let Some(requires) = &archive.manifest.requires {
         for capability in requires.typed_capabilities() {
@@ -734,18 +732,9 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
         }
     }
 
-    let mut skills = BTreeMap::new();
-    for (path, content) in &archive.skills {
-        if let Some(name) = path.strip_prefix("skills/") {
-            let text = std::str::from_utf8(content)
-                .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
-            let key = name
-                .strip_suffix(".md")
-                .or_else(|| name.strip_suffix(".txt"))
-                .unwrap_or(name);
-            skills.insert(key.to_string(), text.to_string());
-        }
-    }
+    let skills = archive
+        .manifest_profile_skill_texts()
+        .map_err(|e| format!("invalid mobpack profile skill binding: {e}"))?;
 
     Ok(ParsedMobpack {
         manifest: archive.manifest,
@@ -1323,14 +1312,17 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<String,
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
-    let mob_id = parsed.definition.id.to_string();
     let system_prompt = compile_system_prompt(
-        &mob_id,
+        parsed.definition.id.as_str(),
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-    create_runtime_backed_session(config, Some(system_prompt), mob_id)
+    create_runtime_backed_session(
+        config,
+        Some(system_prompt),
+        parsed.definition.id.as_str().to_string(),
+    )
 }
 
 /// Create a standalone session through initialized runtime state.
@@ -1507,7 +1499,7 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
             "version": parsed.manifest.mobpack.version,
             "description": parsed.manifest.mobpack.description,
         },
-        "definition": { "id": parsed.definition.id.to_string() },
+        "definition": { "id": parsed.definition.id.as_str() },
         "skills": skills,
         "capabilities": parsed.manifest.requires.as_ref().map(|r| &r.capabilities),
     });
@@ -1598,10 +1590,12 @@ pub fn poll_events(session_id: &str) -> Result<String, JsValue> {
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                    events.push(serde_json::json!({
-                        "type": "lagged",
-                        "skipped": skipped,
-                    }));
+                    events.push(
+                        serde_json::to_value(meerkat_contracts::StreamLaggedEvent::Lagged {
+                            skipped,
+                        })
+                        .map_err(|err| err_str("serialize_error", err))?,
+                    );
                 }
             }
         }
@@ -1706,7 +1700,7 @@ fn parse_mob_lifecycle_action_arg(
 
 /// Fetch mob events.
 ///
-/// Returns JSON array of mob events.
+/// Returns a generated `MobEventsResult` JSON envelope.
 ///
 /// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
 /// internally widened to u64. Cursors beyond 4B are not supported via this export.
@@ -1718,7 +1712,13 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
         .mob_events(&id, after_cursor as u64, limit as usize)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;
+    let events = events
+        .iter()
+        .map(meerkat_contracts::WireMobEvent::from_serializable)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| err_str("contract_projection_error", e))?;
+    let json = serde_json::to_string(&meerkat_contracts::MobEventsResult { events })
+        .map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
 
@@ -2353,7 +2353,12 @@ pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsVa
         .parse()
         .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
     let status = mob_state.mob_flow_status(&id, rid).await.map_err(err_mob)?;
-    let json = serde_json::to_string(&serde_json::json!({ "run": status }))
+    let run = status
+        .as_ref()
+        .map(meerkat_contracts::WireMobRun::from_serializable)
+        .transpose()
+        .map_err(|e| err_str("contract_projection_error", e))?;
+    let json = serde_json::to_string(&meerkat_contracts::MobFlowStatusResult { run })
         .map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2527,10 +2532,12 @@ pub fn poll_subscription(subscription_ref: &str) -> Result<String, JsValue> {
                         ),
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
-                            events.push(serde_json::json!({
-                                "type": "lagged",
-                                "skipped": n,
-                            }));
+                            events.push(
+                                serde_json::to_value(
+                                    meerkat_contracts::StreamLaggedEvent::Lagged { skipped: n },
+                                )
+                                .map_err(|err| err_js("serialize_error", &err.to_string()))?,
+                            );
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2622,6 +2629,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_mob::{MobId, SpawnMemberSpec};
     use serde_json::json;
+    use std::collections::BTreeMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::BTreeMap;
     #[cfg(not(target_arch = "wasm32"))]
@@ -3063,6 +3071,34 @@ model = "planner"
                 "unexpected error for {capability}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn parse_mobpack_binds_only_manifest_profile_skills() {
+        let manifest = br#"
+[mobpack]
+name = "browser-test"
+version = "1.0.0"
+
+[profiles.worker]
+skills = ["skills/review.md"]
+"#;
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_test_mobpack_file(&mut builder, "manifest.toml", manifest);
+        append_test_mobpack_file(&mut builder, "definition.json", br#"{"id":"browser-test"}"#);
+        append_test_mobpack_file(&mut builder, "skills/review.md", b"selected");
+        append_test_mobpack_file(&mut builder, "skills/unreferenced.md", b"not selected");
+        builder.finish().expect("finish tar archive");
+        let encoder = builder.into_inner().expect("take gzip encoder");
+        let bytes = encoder.finish().expect("finish gzip archive");
+
+        let parsed = parse_mobpack(&bytes).expect("manifest-selected skills parse");
+
+        assert_eq!(
+            parsed.skills,
+            BTreeMap::from([("skills/review.md".to_string(), "selected".to_string())])
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

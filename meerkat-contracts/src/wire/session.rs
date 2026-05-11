@@ -85,10 +85,38 @@ pub struct ForkSessionAtParams {
 pub struct ForkSessionReplaceParams {
     pub session_id: String,
     pub message_index: usize,
-    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+    #[cfg_attr(feature = "schema", schemars(with = "WireTranscriptReplacement"))]
     pub replacement: TranscriptReplacement,
     #[serde(default)]
     pub running_behavior: TranscriptEditRunningBehavior,
+}
+
+/// Public schema mirror for `TranscriptReplacement`.
+///
+/// The runtime owns the core `TranscriptReplacement` enum. This mirror keeps the
+/// generated RPC/SDK contract tied to the same message and block wire contracts
+/// used by transcript history instead of exposing `replacement` as arbitrary
+/// JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireTranscriptReplacement {
+    Message {
+        message: WireSessionMessage,
+    },
+    UserContentBlock {
+        block_index: usize,
+        block: WireContentBlock,
+    },
+    AssistantBlock {
+        block_index: usize,
+        block: WireAssistantBlock,
+    },
+    ToolResultContentBlock {
+        result_index: usize,
+        block_index: usize,
+        block: WireContentBlock,
+    },
 }
 
 /// Canonical session info for wire protocol.
@@ -1002,6 +1030,22 @@ mod tests {
         let json = serde_json::to_value(&fork_replace).unwrap();
         assert_eq!(json["replacement"]["type"], "message");
         assert_eq!(json["running_behavior"], "reject");
+    }
+
+    #[cfg(feature = "schema")]
+    #[test]
+    fn fork_session_replace_schema_uses_generated_replacement_contract() {
+        let schema = schemars::schema_for!(ForkSessionReplaceParams);
+        let value = serde_json::to_value(schema).unwrap();
+        assert_ne!(
+            value.pointer("/properties/replacement"),
+            Some(&serde_json::json!(true)),
+            "session/fork_replace must not expose replacement as arbitrary JSON"
+        );
+        assert!(
+            value.pointer("/$defs/WireTranscriptReplacement").is_some(),
+            "session/fork_replace schema must own a typed replacement definition"
+        );
     }
 
     #[test]

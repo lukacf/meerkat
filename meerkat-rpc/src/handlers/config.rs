@@ -23,25 +23,6 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum ConfigSetRequest {
-    Wrapped {
-        config: Config,
-        #[serde(default)]
-        expected_generation: Option<u64>,
-    },
-    Direct(Config),
-}
-
-#[derive(serde::Deserialize)]
-struct ConfigPatchPayload {
-    #[serde(default)]
-    patch: Option<Value>,
-    #[serde(default)]
-    expected_generation: Option<u64>,
-}
-
 fn config_response_body(snapshot: ConfigSnapshot) -> Value {
     serde_json::to_value(ConfigEnvelope::from_snapshot(
         snapshot,
@@ -180,25 +161,11 @@ pub async fn handle_set(
     config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
-    let value: Value = match parse_params(params) {
+    let request: meerkat_contracts::ConfigSetParams = match parse_params(params) {
         Ok(v) => v,
         Err(resp) => return resp.with_id(id),
     };
-
-    let (config, expected_generation) = match serde_json::from_value::<ConfigSetRequest>(value) {
-        Ok(ConfigSetRequest::Wrapped {
-            config,
-            expected_generation,
-        }) => (config, expected_generation),
-        Ok(ConfigSetRequest::Direct(config)) => (config, None),
-        Err(e) => {
-            return RpcResponse::error(
-                id,
-                error::INVALID_PARAMS,
-                format!("Failed to parse config payload: {e}"),
-            );
-        }
-    };
+    let (config, expected_generation) = request.into_parts();
 
     if let Err(response) = validate_config_for_runtime(id.clone(), &config, runtime) {
         return response;
@@ -296,19 +263,11 @@ pub async fn handle_patch(
     config_store: &Arc<dyn ConfigStore>,
     config_runtime: Option<Arc<ConfigRuntime>>,
 ) -> RpcResponse {
-    let value: Value = match parse_params(params) {
+    let request: meerkat_contracts::ConfigPatchParams = match parse_params(params) {
         Ok(v) => v,
         Err(resp) => return resp.with_id(id),
     };
-    let (patch, expected_generation) =
-        if let Ok(payload) = serde_json::from_value::<ConfigPatchPayload>(value.clone()) {
-            match payload.patch {
-                Some(patch) => (patch, payload.expected_generation),
-                None => (value, None),
-            }
-        } else {
-            (value, None)
-        };
+    let (patch, expected_generation) = request.into_parts();
 
     if let Some(config_runtime) = config_runtime {
         let current = match config_runtime.get().await {

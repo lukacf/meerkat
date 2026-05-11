@@ -143,11 +143,10 @@ A signed pack includes a `signature.toml` at the archive root (excluded from
 digest computation):
 
 ```toml
-[signature]
 signer_id = "team@example.com"
-public_key = "ed25519:<base64>"
-digest = "sha256:<hex>"                   # canonical mobpack_digest that was signed
-signature = "<base64 over digest bytes>"  # Ed25519 signature
+public_key = "<64 hex chars>"             # Ed25519 verifying key bytes
+digest = "<64 hex chars>"                 # canonical mobpack_digest that was signed
+signature = "<128 hex chars>"             # Ed25519 signature bytes
 timestamp = "2026-02-24T12:00:00Z"
 ```
 
@@ -171,13 +170,13 @@ for itself. Trust is anchored externally:
 
 ```toml
 # ~/.rkat/trusted-signers.toml
-[[signers]]
-id = "team@example.com"
-public_key = "ed25519:<base64>"
+[signers]
+"team@example.com" = "<64 hex chars>"
 ```
 
 Verification: extract `signer_id` from `signature.toml`, look up expected
-`public_key` in trust store, verify Ed25519 signature over `mobpack_digest`.
+hex `public_key` in the trust store, compare it with the embedded hex
+`public_key`, then verify the hex Ed25519 signature over `mobpack_digest`.
 If `signer_id` is not in the trust store, strict mode rejects; permissive mode
 warns.
 

@@ -42,6 +42,203 @@ impl RestPathDescriptor {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct RestOperationContract {
+    pub request_schema: Option<&'static str>,
+    pub request_required: bool,
+    pub response_schema: &'static str,
+    pub response_content_type: &'static str,
+}
+
+impl RestOperationContract {
+    const fn json(response_schema: &'static str) -> Self {
+        Self {
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "application/json",
+        }
+    }
+
+    const fn with_json_request(
+        request_schema: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            request_schema: Some(request_schema),
+            request_required: true,
+            response_schema,
+            response_content_type: "application/json",
+        }
+    }
+
+    const fn with_optional_json_request(
+        request_schema: &'static str,
+        response_schema: &'static str,
+    ) -> Self {
+        Self {
+            request_schema: Some(request_schema),
+            request_required: false,
+            response_schema,
+            response_content_type: "application/json",
+        }
+    }
+
+    const fn text(response_schema: &'static str) -> Self {
+        Self {
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "text/plain",
+        }
+    }
+
+    const fn event_stream(response_schema: &'static str) -> Self {
+        Self {
+            request_schema: None,
+            request_required: false,
+            response_schema,
+            response_content_type: "text/event-stream",
+        }
+    }
+}
+
+pub fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
+    if let Some(response_schema) =
+        meerkat_workgraph::workgraph_rest_response_schema(path, method)
+    {
+        return RestOperationContract::json(response_schema);
+    }
+
+    match (path, method) {
+        ("/help", "post") => {
+            RestOperationContract::with_json_request("HelpRequest", "HelpResponse")
+        }
+        ("/sessions", "get") => RestOperationContract::json("ListSessionsResponse"),
+        ("/sessions", "post") => {
+            RestOperationContract::with_json_request("RestCreateSessionRequest", "WireRunResult")
+        }
+        ("/sessions/{id}", "get") => RestOperationContract::json("SessionDetailsResponse"),
+        ("/sessions/{id}", "delete") => RestOperationContract::json("StatusResponse"),
+        ("/sessions/{id}/history", "get") => RestOperationContract::json("WireSessionHistory"),
+        ("/sessions/{id}/interrupt", "post") => RestOperationContract::json("StatusResponse"),
+        ("/sessions/{id}/system_context", "post") => RestOperationContract::with_json_request(
+            "RestAppendSystemContextRequest",
+            "StatusResponse",
+        ),
+        ("/sessions/{id}/messages", "post") => {
+            RestOperationContract::with_json_request("RestContinueSessionRequest", "WireRunResult")
+        }
+        ("/sessions/{id}/external-events", "post") => RestOperationContract::with_json_request(
+            "RestSessionExternalEventEnvelope",
+            "StatusResponse",
+        ),
+        ("/sessions/{id}/peer-response-terminal", "post") => {
+            RestOperationContract::with_json_request(
+                "RestPeerResponseTerminalRequest",
+                "StatusResponse",
+            )
+        }
+        ("/sessions/{id}/mcp/add", "post") => {
+            RestOperationContract::with_json_request("McpAddParams", "McpLiveOpResponse")
+        }
+        ("/sessions/{id}/mcp/remove", "post") => {
+            RestOperationContract::with_json_request("McpRemoveParams", "McpLiveOpResponse")
+        }
+        ("/sessions/{id}/mcp/reload", "post") => {
+            RestOperationContract::with_json_request("McpReloadParams", "McpLiveOpResponse")
+        }
+        ("/sessions/{id}/events" | "/mob/{id}/events", "get") => {
+            RestOperationContract::event_stream("SseEventStream")
+        }
+        ("/sessions/{id}/status", "get") => RestOperationContract::json("RuntimeStateResult"),
+        ("/schedule/tools", "get") => RestOperationContract::json("ScheduleToolsResult"),
+        ("/schedule/call", "post") => RestOperationContract::with_json_request(
+            "ScheduleToolCallParams",
+            "ScheduleToolCallResult",
+        ),
+        ("/schedules", "get") => RestOperationContract::json("ScheduleListResult"),
+        ("/schedules", "post") => {
+            RestOperationContract::with_json_request("CreateScheduleRequest", "Schedule")
+        }
+        ("/schedules/{id}", "get" | "delete")
+        | ("/schedules/{id}/pause" | "/schedules/{id}/resume", "post") => {
+            RestOperationContract::json("Schedule")
+        }
+        ("/schedules/{id}", "patch") => {
+            RestOperationContract::with_json_request("ScheduleUpdateRequest", "Schedule")
+        }
+        ("/schedules/{id}/occurrences", "get") => {
+            RestOperationContract::json("ScheduleOccurrencesResult")
+        }
+        ("/comms/send", "post") => {
+            RestOperationContract::with_json_request("CommsSendParams", "CommsSendResult")
+        }
+        ("/comms/peers", "get") => RestOperationContract::json("CommsPeersResult"),
+        ("/config", "get") => RestOperationContract::json("ConfigEnvelope"),
+        ("/config", "put") => {
+            RestOperationContract::with_json_request("ConfigSetParams", "ConfigEnvelope")
+        }
+        ("/config", "patch") => {
+            RestOperationContract::with_json_request("ConfigPatchParams", "ConfigEnvelope")
+        }
+        ("/skills", "get") => RestOperationContract::json("SkillListResponse"),
+        ("/capabilities", "get") => RestOperationContract::json("CapabilitiesResponse"),
+        ("/runtime/host_info", "get") => RestOperationContract::json("RuntimeHostInfo"),
+        ("/runtime/capabilities", "get") => RestOperationContract::json("RuntimeHostCapabilities"),
+        ("/runtime/health", "get") => RestOperationContract::json("RuntimeHostHealth"),
+        ("/models/catalog", "get") => RestOperationContract::json("ModelsCatalogResponse"),
+        ("/mob/{id}/spawn-helper", "post") => {
+            RestOperationContract::with_json_request("RestMobHelperRequest", "JsonValue")
+        }
+        ("/mob/{id}/fork-helper", "post") => {
+            RestOperationContract::with_json_request("RestMobForkHelperRequest", "JsonValue")
+        }
+        ("/mob/{id}/wait-kickoff", "post") => {
+            RestOperationContract::with_optional_json_request("RestMobWaitRequest", "JsonValue")
+        }
+        ("/mob/{id}/members/{agent_identity}/status", "get")
+        | (
+            "/mob/{id}/members/{agent_identity}/cancel"
+            | "/mob/{id}/members/{agent_identity}/respawn",
+            "post",
+        ) => RestOperationContract::json("JsonValue"),
+        ("/health", "get") => RestOperationContract::text("PlainTextResponse"),
+        ("/auth/profiles", "get") => RestOperationContract::json("WireAuthProfilesList"),
+        ("/auth/profiles", "post") => RestOperationContract::with_json_request(
+            "CreateProfileParams",
+            "WireAuthProfileCreated",
+        ),
+        ("/auth/bindings/{binding_id}", "get") => {
+            RestOperationContract::json("WireAuthProfileDetail")
+        }
+        ("/auth/bindings/{binding_id}", "delete")
+        | ("/auth/bindings/{binding_id}/logout", "post") => {
+            RestOperationContract::json("WireAuthProfileCleared")
+        }
+        ("/auth/bindings/{binding_id}/test", "post")
+        | ("/auth/bindings/{binding_id}/status", "get") => {
+            RestOperationContract::json("WireAuthStatusDetail")
+        }
+        ("/auth/login/start", "post") => {
+            RestOperationContract::with_json_request("LoginStartParams", "WireLoginStart")
+        }
+        ("/auth/login/complete", "post") => {
+            RestOperationContract::with_json_request("LoginCompleteParams", "WireLoginReady")
+        }
+        ("/auth/login/device/start", "post") => {
+            RestOperationContract::with_json_request("DeviceStartParams", "WireDeviceStart")
+        }
+        ("/auth/login/device/complete", "post") => RestOperationContract::with_json_request(
+            "DeviceCompleteParams",
+            "WireDeviceCompleteResult",
+        ),
+        ("/realms", "get") => RestOperationContract::json("WireRealmList"),
+        ("/realms/{id}", "get") => RestOperationContract::json("WireRealmConnectionSet"),
+        _ => RestOperationContract::json("JsonValue"),
+    }
+}
+
 pub fn rest_path_catalog() -> Vec<RestPathDescriptor> {
     let mut paths = vec![
         RestPathDescriptor::new(

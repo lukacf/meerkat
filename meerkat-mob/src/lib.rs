@@ -57,6 +57,7 @@ pub mod launch;
 pub mod machines;
 mod mob_machine;
 pub mod profile;
+pub mod public_definition;
 mod roster;
 pub mod run;
 pub mod runtime;
@@ -104,6 +105,7 @@ pub mod machine_schema_exports {
 }
 
 pub use profile::{Profile, ProfileBinding, ProfileSource, SpawnTooling, ToolConfig};
+pub use public_definition::{PublicMobDefinitionDecodeError, decode_public_mob_definition};
 pub use roster::{MemberState, MobMemberKickoffPhase, MobMemberKickoffSnapshot};
 pub use run::{
     FailureLedgerEntry, FlowContext, FlowRunConfig, FrameSnapshot, LoopContextHistory,

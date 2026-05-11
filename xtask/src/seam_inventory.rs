@@ -2,7 +2,8 @@ use std::fmt;
 
 use clap::Args;
 use meerkat_machine_schema::{
-    CompositionSchema, EffectDisposition, MachineSchema, Route, canonical_composition_schemas,
+    ClosurePolicy, CompositionInvariantKind, CompositionSchema, EffectDisposition,
+    EffectDispositionRule, MachineSchema, Route, canonical_composition_schemas,
     canonical_machine_schemas, compat_composition_schemas,
 };
 
@@ -80,6 +81,22 @@ pub struct RoutedRealization {
     pub composition: String,
     pub resolved_consumers: Vec<(String, String, String)>,
     pub missing_consumers: Vec<String>,
+}
+
+/// Typed coverage row for an [`EffectHandoffProtocol`]. These rows replace
+/// route/effect-name folklore in the seam report: if a destroy path needs an
+/// ingress-detach acknowledgement, that fact must be expressed as a protocol
+/// plus a `HandoffProtocolCovered` invariant in the composition schema.
+#[derive(Debug)]
+pub struct HandoffObligationCoverage {
+    pub protocol: String,
+    pub composition: String,
+    pub producer_instance: String,
+    pub effect_variant: String,
+    pub realizing_actor: String,
+    pub closure_policy: String,
+    pub feedback_inputs: Vec<String>,
+    pub invariant_covered: bool,
 }
 
 /// Known effect classifications for canonical machines.
@@ -775,20 +792,30 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
 /// purely for reporting — classification debt is still the failure signal.
 fn classify_effect(
     machine: &str,
-    effect: &str,
-    disposition: &EffectDisposition,
+    rule: &EffectDispositionRule,
     known: &[(&str, &str, SeamClassification, &str)],
 ) -> (SeamClassification, String, bool) {
+    if let Some(protocol) = &rule.handoff_protocol {
+        return (
+            SeamClassification::OwnerRealizationPlusFeedback,
+            format!(
+                "Machine DSL handoff_protocol `{}` requires owner realization with formal protocol closure",
+                protocol.as_str()
+            ),
+            true,
+        );
+    }
+
     // Check known classifications first.
     for (m, e, class, notes) in known {
-        if *m == machine && *e == effect {
+        if *m == machine && *e == rule.effect_variant.as_str() {
             return (*class, notes.to_string(), true);
         }
     }
 
     // Heuristic fallback — only ever reported. Under `--strict` the caller
     // turns the resulting `was_explicit == false` into a hard error.
-    match disposition {
+    match &rule.disposition {
         EffectDisposition::Local => (
             SeamClassification::NoOwnerRealization,
             "Default: Local effect with no known owner feedback requirement".into(),
@@ -844,6 +871,11 @@ fn known_public_surface_contracts() -> Vec<SurfaceContractEntry> {
 pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     let machines = canonical_machine_schemas();
     let compositions = canonical_composition_schemas();
+    let compat_compositions = compat_composition_schemas();
+    let all_compositions: Vec<&CompositionSchema> = compositions
+        .iter()
+        .chain(compat_compositions.iter())
+        .collect();
     let known = known_classifications();
     let mut entries: Vec<SeamEntry> = Vec::new();
     let public_surface_contracts = known_public_surface_contracts();
@@ -856,8 +888,9 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     // `EffectDisposition::Routed` arm. Each routed effect must resolve to
     // a typed consumer input via the composition schema's `routed_inputs`.
     let routed_realizations = collect_routed_realizations(&machines, &compositions);
+    let handoff_obligation_coverages = collect_handoff_obligation_coverages(&all_compositions);
 
-    let protocol_index = compositions
+    let protocol_index = all_compositions
         .iter()
         .flat_map(|composition| {
             composition.handoff_protocols.iter().filter_map(|protocol| {
@@ -903,6 +936,10 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         .iter()
         .filter(|rr| !rr.missing_consumers.is_empty())
         .collect::<Vec<_>>();
+    let unresolved_handoff_obligation_debt = handoff_obligation_coverages
+        .iter()
+        .filter(|coverage| !coverage.invariant_covered)
+        .collect::<Vec<_>>();
 
     // Print the report
     print_report(&entries);
@@ -917,7 +954,8 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
         &unresolved_public_surface_alignment_debt,
         &routed_realizations,
         &unresolved_routed_debt,
-        &compositions,
+        &handoff_obligation_coverages,
+        &unresolved_handoff_obligation_debt,
     );
 
     let strict = args.strict;
@@ -925,15 +963,21 @@ pub fn run_seam_inventory(args: SeamInventoryArgs) -> anyhow::Result<()> {
     let protocol_debt = unresolved_protocol_debt.len();
     let public_surface_debt = unresolved_public_surface_alignment_debt.len();
     let routed_debt = unresolved_routed_debt.len();
+    let handoff_obligation_debt = unresolved_handoff_obligation_debt.len();
 
     if strict && classification_debt > 0 {
         anyhow::bail!(
             "seam-inventory --strict: {classification_debt} effect(s) lack explicit classification; add entries to known_classifications() for every Local/External effect",
         );
     }
-    if classification_debt > 0 || protocol_debt > 0 || public_surface_debt > 0 || routed_debt > 0 {
+    if classification_debt > 0
+        || protocol_debt > 0
+        || public_surface_debt > 0
+        || routed_debt > 0
+        || handoff_obligation_debt > 0
+    {
         anyhow::bail!(
-            "seam inventory has unresolved debt: classification={classification_debt}, protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}",
+            "seam inventory has unresolved debt: classification={classification_debt}, protocol={protocol_debt}, public_surface={public_surface_debt}, routed={routed_debt}, handoff_obligation={handoff_obligation_debt}",
         );
     }
 
@@ -954,12 +998,8 @@ fn collect_machine_seams(
                     EffectDisposition::Routed { .. } => unreachable!(),
                 };
 
-                let (classification, notes, explicitly_classified) = classify_effect(
-                    machine.machine.as_str(),
-                    rule.effect_variant.as_str(),
-                    &rule.disposition,
-                    known,
-                );
+                let (classification, notes, explicitly_classified) =
+                    classify_effect(machine.machine.as_str(), rule, known);
 
                 entries.push(SeamEntry {
                     machine: machine.machine.as_str().to_string(),
@@ -976,6 +1016,72 @@ fn collect_machine_seams(
                 // not by the disposition-based classification table.
             }
         }
+    }
+}
+
+fn collect_handoff_obligation_coverages(
+    compositions: &[&CompositionSchema],
+) -> Vec<HandoffObligationCoverage> {
+    let mut rows = Vec::new();
+    for composition in compositions {
+        for protocol in &composition.handoff_protocols {
+            let feedback_inputs = protocol
+                .allowed_feedback_inputs
+                .iter()
+                .map(|fb| {
+                    format!(
+                        "{}::{}",
+                        fb.machine_instance.as_str(),
+                        fb.input_variant.as_str()
+                    )
+                })
+                .collect();
+            let invariant_covered = composition.invariants.iter().any(|invariant| {
+                matches!(
+                    &invariant.kind,
+                    CompositionInvariantKind::HandoffProtocolCovered {
+                        producer_instance,
+                        effect_variant,
+                        protocol_name,
+                    } if *producer_instance == protocol.producer_instance
+                        && *effect_variant == protocol.effect_variant
+                        && *protocol_name == protocol.name
+                )
+            });
+            rows.push(HandoffObligationCoverage {
+                protocol: protocol.name.as_str().to_string(),
+                composition: composition.name.as_str().to_string(),
+                producer_instance: protocol.producer_instance.as_str().to_string(),
+                effect_variant: protocol.effect_variant.as_str().to_string(),
+                realizing_actor: protocol.realizing_actor.as_str().to_string(),
+                closure_policy: closure_policy_label(&protocol.closure_policy).to_string(),
+                feedback_inputs,
+                invariant_covered,
+            });
+        }
+    }
+    rows.sort_by(|left, right| {
+        (
+            &left.protocol,
+            &left.composition,
+            &left.producer_instance,
+            &left.effect_variant,
+        )
+            .cmp(&(
+                &right.protocol,
+                &right.composition,
+                &right.producer_instance,
+                &right.effect_variant,
+            ))
+    });
+    rows
+}
+
+fn closure_policy_label(policy: &ClosurePolicy) -> &'static str {
+    match policy {
+        ClosurePolicy::AckRequired => "AckRequired",
+        ClosurePolicy::AckOrAbort => "AckOrAbort",
+        ClosurePolicy::TerminalClosure => "TerminalClosure",
     }
 }
 
@@ -1143,7 +1249,8 @@ fn print_summary(
     unresolved_public_surface_alignment_debt: &[&SurfaceContractEntry],
     routed_realizations: &[RoutedRealization],
     unresolved_routed_debt: &[&RoutedRealization],
-    compositions: &[CompositionSchema],
+    handoff_obligation_coverages: &[HandoffObligationCoverage],
+    unresolved_handoff_obligation_debt: &[&HandoffObligationCoverage],
 ) {
     let total = entries.len();
     let no_owner = entries
@@ -1174,6 +1281,10 @@ fn print_summary(
         "  routed-effect realizations:             {}",
         routed_realizations.len()
     );
+    println!(
+        "  declared handoff obligations:           {}",
+        handoff_obligation_coverages.len()
+    );
     println!();
     println!("## Seams Requiring Formal Handoff Protocols");
     for entry in entries {
@@ -1182,149 +1293,42 @@ fn print_summary(
         }
     }
     println!();
-    // Generated handoff obligation pairs declared in canonical + perimeter
-    // compositions. Each protocol is an obligation pair: producer effect
-    // → realising actor → typed feedback input(s) that close the
-    // step-lock (ack / failure). Producers now host the annotation on
-    // their canonical effect rather than through bridge-only schemas.
-    let compat = compat_composition_schemas();
-    let mut protocol_rows: Vec<(String, String, String, String, String, String)> = Vec::new();
-    let all_compositions: Vec<&CompositionSchema> =
-        compositions.iter().chain(compat.iter()).collect();
-    for composition in &all_compositions {
-        for protocol in &composition.handoff_protocols {
-            let feedback_variants: Vec<String> = protocol
-                .allowed_feedback_inputs
-                .iter()
-                .map(|fb| {
-                    format!(
-                        "{}::{}",
-                        fb.machine_instance.as_str(),
-                        fb.input_variant.as_str(),
-                    )
-                })
-                .collect();
-            protocol_rows.push((
-                protocol.name.as_str().to_string(),
-                composition.name.as_str().to_string(),
-                protocol.producer_instance.as_str().to_string(),
-                protocol.effect_variant.as_str().to_string(),
-                protocol.realizing_actor.as_str().to_string(),
-                feedback_variants.join(", "),
-            ));
-        }
-    }
-    protocol_rows.sort();
-    println!("## Declared Handoff Obligation Pairs (canonical + compat)");
+    println!("## Handoff Obligation Coverage (canonical + compat)");
     println!(
-        "  {:40} {:28} {:30} {:32} {:32} feedback_inputs",
-        "protocol", "composition", "producer_instance", "effect", "realizing_actor"
+        "  {:40} {:28} {:30} {:32} {:32} {:16} {:8} feedback_inputs",
+        "protocol",
+        "composition",
+        "producer_instance",
+        "effect",
+        "realizing_actor",
+        "closure_policy",
+        "covered"
     );
-    for (protocol, composition, producer, effect, actor, feedback) in &protocol_rows {
+    for coverage in handoff_obligation_coverages {
+        let feedback = coverage.feedback_inputs.join(", ");
         println!(
-            "  {protocol:40} {composition:28} {producer:30} {effect:32} {actor:32} {feedback}"
+            "  {:40} {:28} {:30} {:32} {:32} {:16} {:8} {}",
+            coverage.protocol,
+            coverage.composition,
+            coverage.producer_instance,
+            coverage.effect_variant,
+            coverage.realizing_actor,
+            coverage.closure_policy,
+            if coverage.invariant_covered {
+                "yes"
+            } else {
+                "NO"
+            },
+            feedback
         );
     }
     println!(
         "  total handoff obligation pairs:            {}",
-        protocol_rows.len()
+        handoff_obligation_coverages.len()
     );
-    println!();
-    // C-F3 — destroy-obligation pairing audit. State-scope audit row
-    // F3 flagged that `MeerkatMachine` carries a
-    // `peer_ingress_mob_id: Option<MobId>` whose "mob-exists"
-    // invariant is convention-driven: when a mob destroys its
-    // runtime, every session whose peer-ingress ownership was
-    // `MobOwned` by that mob must receive `DetachIngress` first,
-    // otherwise the `peer_ingress_mob_id` on that session dangles.
-    //
-    // This section walks every canonical routed effect whose variant
-    // name contains the substring "Destroy" and asserts a paired
-    // handoff obligation exists whose feedback inputs include at
-    // least one variant that mentions "IngressDetached" or "Detach".
-    // Unpaired destroy routes are emitted as debt so the
-    // `mob-destroy → session-detach` ordering cannot regress
-    // silently.
-    let mut destroy_routes: Vec<(String, String, String, String, bool)> = Vec::new();
-    for composition in &all_compositions {
-        for route in &composition.routes {
-            // Filter to destroy *requests* that flow from a producer to a
-            // consumer that will be torn down. Reply signals like
-            // `RuntimeDestroyed` (consumer → producer, "destroy observed")
-            // are not request-side effects and do not need a paired
-            // detach obligation: the destroy is already done by the time
-            // they fire.
-            let variant = route.effect_variant.as_str();
-            if !(variant.contains("Destroy") && variant.starts_with("Request")) {
-                continue;
-            }
-            let producer_instance = route.from_machine.as_str().to_string();
-            let producer_machine = composition
-                .machines
-                .iter()
-                .find(|m| m.instance_id == route.from_machine)
-                .map(|m| m.machine_name.as_str().to_string())
-                .unwrap_or_default();
-            let effect = route.effect_variant.as_str().to_string();
-            let composition_name = composition.name.as_str().to_string();
-            // Paired iff some protocol (across all compositions) has a
-            // feedback input whose variant name is "*IngressDetach*"
-            // or "*Detach*" AND the protocol's allowed feedback inputs
-            // route into the same consumer as this destroy route.
-            let consumer_instance = &route.to.machine;
-            let paired = all_compositions.iter().any(|other| {
-                other.handoff_protocols.iter().any(|protocol| {
-                    protocol.allowed_feedback_inputs.iter().any(|fb| {
-                        let variant = fb.input_variant.as_str();
-                        (variant.contains("IngressDetached") || variant.contains("Detach"))
-                            && (fb.machine_instance == *consumer_instance
-                                || other.machines.iter().any(|m| {
-                                    m.instance_id == fb.machine_instance
-                                        && other
-                                            .machines
-                                            .iter()
-                                            .any(|cm| cm.machine_name.as_str() == producer_machine)
-                                })
-                                || protocol.name.as_str().contains("session_ingress"))
-                    })
-                })
-            });
-            destroy_routes.push((
-                producer_machine.clone(),
-                effect,
-                composition_name,
-                producer_instance,
-                paired,
-            ));
-        }
-    }
-    destroy_routes.sort();
-    println!("## Destroy-obligation Pairing (C-F3)");
-    if destroy_routes.is_empty() {
-        println!("  (no canonical routed *Destroy* effects declared)");
-    } else {
-        println!(
-            "  {:24} {:32} {:32} {:32} paired",
-            "producer_machine", "effect_variant", "composition", "producer_instance"
-        );
-        for (producer, effect, composition_name, instance, paired) in &destroy_routes {
-            println!(
-                "  {:24} {:32} {:32} {:32} {}",
-                producer,
-                effect,
-                composition_name,
-                instance,
-                if *paired { "yes" } else { "NO" }
-            );
-        }
-    }
-    let unpaired_destroy_debt: Vec<&(String, String, String, String, bool)> = destroy_routes
-        .iter()
-        .filter(|(_, _, _, _, paired)| !paired)
-        .collect();
     println!(
-        "  unpaired destroy routes (debt):            {}",
-        unpaired_destroy_debt.len()
+        "  uncovered handoff obligation debt:        {}",
+        unresolved_handoff_obligation_debt.len()
     );
     println!();
     println!("## Public Surface Contracts");
@@ -1358,7 +1362,59 @@ fn print_summary(
         unresolved_routed_debt.len()
     );
     println!(
-        "  unpaired destroy-obligation debt (C-F3):   {}",
-        unpaired_destroy_debt.len()
+        "  uncovered handoff obligation debt:        {}",
+        unresolved_handoff_obligation_debt.len()
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handoff_protocol_metadata_classifies_feedback_seams() {
+        let known = known_classifications();
+        let mob = canonical_machine_schemas()
+            .into_iter()
+            .find(|machine| machine.machine.as_str() == "MobMachine")
+            .expect("MobMachine schema");
+        let rule = mob
+            .effect_dispositions
+            .iter()
+            .find(|rule| rule.effect_variant.as_str() == "RequestSessionIngressDetachForMobDestroy")
+            .expect("destroy ingress handoff disposition");
+
+        let (classification, notes, explicitly_classified) =
+            classify_effect(mob.machine.as_str(), rule, &known);
+
+        assert_eq!(
+            classification,
+            SeamClassification::OwnerRealizationPlusFeedback
+        );
+        assert!(explicitly_classified);
+        assert!(notes.contains("mob_destroying_session_ingress"));
+    }
+
+    #[test]
+    fn handoff_obligation_coverage_comes_from_protocol_invariants() {
+        let canonical = canonical_composition_schemas();
+        let compat = compat_composition_schemas();
+        let all_compositions: Vec<&CompositionSchema> =
+            canonical.iter().chain(compat.iter()).collect();
+        let rows = collect_handoff_obligation_coverages(&all_compositions);
+        let destroy_row = rows
+            .iter()
+            .find(|row| row.protocol == "mob_destroying_session_ingress")
+            .expect("destroy ingress handoff coverage row");
+
+        assert!(destroy_row.invariant_covered);
+        assert_eq!(destroy_row.closure_policy, "AckRequired");
+        assert_eq!(
+            destroy_row.feedback_inputs,
+            vec![
+                "mob::SessionIngressDetachedForMobDestroy".to_string(),
+                "mob::SessionIngressDetachFailedForMobDestroy".to_string(),
+            ]
+        );
+    }
 }

@@ -16,6 +16,7 @@ mod mob;
 mod models;
 mod params;
 mod realtime;
+mod rest;
 mod result;
 pub mod runtime;
 mod schedule;
@@ -64,7 +65,7 @@ pub use event::{
     EventReplayCursor, EventReplayCursorError, EventReplayEnvelope, EventReplayEventId,
     EventReplayScope, EventsLatestCursorParams, EventsLatestCursorResult, EventsListSinceParams,
     EventsListSinceResult, EventsSnapshotBody, EventsSnapshotParams, EventsSnapshotResult,
-    WireEvent,
+    StreamLaggedEvent, WireEvent,
 };
 pub use help::{HelpExecutionMode, HelpRequest, HelpResponse};
 pub use host::{
@@ -121,8 +122,11 @@ pub use mob::{
     MobUnwireParams, MobUnwireResult, MobWaitMembersResult, MobWaitParams, MobWireParams,
     MobWireResult, MobWiringRulesInput, SupervisorRotationReportWire, WireAgentRuntimeId,
     WireBudgetSplitPolicy, WireForkContext, WireHandlingMode, WireMemberLaunchMode, WireMemberRef,
-    WireMemberRefError, WireMemberState, WireMobBackendKind, WireMobLifecycleAction,
-    WireMobMemberStatus, WireMobProfile, WireMobReconcileStage, WireMobRuntimeMode,
+    WireMemberRefError, WireMemberState, WireMobAgentRuntimeId, WireMobBackendKind, WireMobEvent,
+    WireMobEventKind, WireMobFailureLedgerEntry, WireMobLifecycleAction,
+    WireMobLoopIterationLedgerEntry, WireMobMemberSpawnedEvent, WireMobMemberStatus,
+    WireMobProfile, WireMobProjectionError, WireMobReconcileStage, WireMobRun, WireMobRunStatus,
+    WireMobRuntimeMode, WireMobStepLedgerEntry, WireMobStepRunStatus, WireMobTaskStatus,
     WireMobToolConfig, WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
     WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
     WireWorkOrigin,
@@ -131,11 +135,19 @@ pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,
     WireModelProfile, WireModelTier, WireResolvedModelCapabilities,
 };
-pub use params::{CommsParams, CoreCreateParams, HookParams, SkillsParams, StructuredOutputParams};
+pub use params::{
+    CommsParams, ConfigPatchParams, ConfigSetParams, CoreCreateParams, HookParams, SkillsParams,
+    StructuredOutputParams,
+};
 pub use realtime::{
     RealtimeAudioChunk, RealtimeAudioFormat, RealtimeCapabilities, RealtimeInputChunk,
     RealtimeInputKind, RealtimeOutputKind, RealtimeTextChunk, RealtimeTurningMode,
     RealtimeVideoChunk,
+};
+pub use rest::{
+    RestAppendSystemContextRequest, RestContinueSessionRequest, RestCreateSessionRequest,
+    RestMobForkHelperRequest, RestMobHelperRequest, RestMobWaitRequest,
+    RestPeerResponseTerminalRequest, RestSessionExternalEventEnvelope,
 };
 pub use result::WireRunResult;
 pub use runtime::{
@@ -154,15 +166,17 @@ pub use runtime::{
     WireRuntimeState,
 };
 pub use schedule::{
-    ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
-    ScheduleOccurrencesResult, UpdateScheduleParams,
+    EmptyScheduleToolArguments, ListSchedulesParams, ScheduleIdParams, ScheduleListResult,
+    ScheduleOccurrencesParams, ScheduleOccurrencesResult, ScheduleToolCallParams,
+    ScheduleToolCallResult, ScheduleToolDescriptor, ScheduleToolIdArguments, ScheduleToolName,
+    ScheduleToolUpdateArguments, ScheduleToolsResult, UpdateScheduleParams,
 };
 pub use session::{
     ForkSessionAtParams, ForkSessionReplaceParams, SessionStreamCloseParams,
     SessionStreamCloseResult, SessionStreamOpenParams, SessionStreamOpenResult, WireAssistantBlock,
     WireContentBlock, WireContentInput, WireProviderMeta, WireSessionHistory, WireSessionInfo,
     WireSessionMessage, WireSessionSummary, WireStopReason, WireToolCall, WireToolResult,
-    WireToolResultContent, WireToolResultError, WireTranscriptSource,
+    WireToolResultContent, WireToolResultError, WireTranscriptReplacement, WireTranscriptSource,
 };
 pub use skills::{SkillEntry, SkillInspectResponse, SkillListResponse, SkillSourceProvenance};
 pub use supervisor_bridge::{

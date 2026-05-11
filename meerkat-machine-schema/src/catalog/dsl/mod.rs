@@ -482,14 +482,26 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),
             NamedTypeBinding::string("SessionId"),
-            NamedTypeBinding::string("SessionLlmCapabilitySurface"),
+            NamedTypeBinding::type_path(
+                "SessionLlmCapabilitySurface",
+                "crate::catalog::dsl::meerkat_machine::SessionLlmCapabilitySurface",
+            ),
             NamedTypeBinding::string_enum(
                 "SessionLlmCapabilitySurfaceStatus",
                 &["Unresolved", "Resolved"],
             ),
-            NamedTypeBinding::string("SessionLlmIdentity"),
-            NamedTypeBinding::string("SessionToolVisibilityDelta"),
-            NamedTypeBinding::string("SessionToolVisibilityState"),
+            NamedTypeBinding::type_path(
+                "SessionLlmIdentity",
+                "crate::catalog::dsl::meerkat_machine::SessionLlmIdentity",
+            ),
+            NamedTypeBinding::type_path(
+                "SessionToolVisibilityDelta",
+                "crate::catalog::dsl::meerkat_machine::SessionToolVisibilityDelta",
+            ),
+            NamedTypeBinding::type_path(
+                "SessionToolVisibilityState",
+                "crate::catalog::dsl::meerkat_machine::SessionToolVisibilityState",
+            ),
             NamedTypeBinding::string_enum("SupervisorBindingKind", &["Unbound", "Bound"]),
             NamedTypeBinding::string("SurfaceDeltaOperation"),
             NamedTypeBinding::string("SurfaceDeltaPhase"),

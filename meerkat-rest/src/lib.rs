@@ -56,8 +56,17 @@ use meerkat::{
     open_realm_persistence_in, schedule_tools_list,
 };
 use meerkat_contracts::{
-    CommsSendParams, CommsSendResult, ErrorCode, RuntimeStateResult, SessionLocator, SkillsParams,
-    WireError, format_session_ref,
+    CommsSendParams, CommsSendResult, ErrorCode,
+    RestAppendSystemContextRequest as AppendSystemContextRequest,
+    RestContinueSessionRequest as ContinueSessionRequest,
+    RestCreateSessionRequest as CreateSessionRequest,
+    RestMobForkHelperRequest as ForkHelperRequest, RestMobHelperRequest as SpawnHelperRequest,
+    RestMobWaitRequest as WaitKickoffRequest,
+    RestPeerResponseTerminalRequest as RestPeerResponseTerminalBody,
+    RestSessionExternalEventEnvelope, RuntimeStateResult, ScheduleListResult,
+    ScheduleOccurrencesResult, ScheduleToolCallParams, ScheduleToolCallResult,
+    ScheduleToolDescriptor, ScheduleToolsResult, SessionLocator, SkillsParams, WireError,
+    WireForkContext, WireMobBackendKind, WireMobRuntimeMode, format_session_ref,
 };
 use meerkat_core::EventEnvelope;
 use meerkat_core::lifecycle::core_executor::{
@@ -484,7 +493,7 @@ impl AppState {
             .builtins(enable_builtins)
             .shell(enable_shell)
             .workgraph(config.tools.workgraph_enabled)
-            .schedule(config.tools.schedule_enabled);
+            .schedule(true);
         let conventions_context_root = bootstrap.context.context_root.clone();
         let conventions_user_root = bootstrap.context.user_config_root.clone();
         let task_project_root = conventions_context_root
@@ -1730,89 +1739,6 @@ fn validate_public_surface_metadata(
         .map_err(ApiError::BadRequest)
 }
 
-/// Create session request
-#[derive(Debug, Deserialize)]
-pub struct CreateSessionRequest {
-    pub prompt: ContentInput,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    #[serde(default)]
-    pub model: Option<Cow<'static, str>>,
-    #[serde(default)]
-    pub provider: Option<Provider>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    /// JSON schema for structured output extraction (wrapper or raw schema).
-    #[serde(default)]
-    pub output_schema: Option<OutputSchema>,
-    /// Max retries for structured output validation.
-    /// Omit to use the product default.
-    #[serde(default)]
-    pub structured_output_retries: Option<u32>,
-    /// Enable verbose event logging (server-side).
-    #[serde(default)]
-    pub verbose: bool,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    /// Requires comms_name when enabled.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
-    /// Agent name for inter-agent communication. Required for keep_alive.
-    #[serde(default)]
-    pub comms_name: Option<String>,
-    /// Friendly metadata for peer discovery.
-    #[serde(default)]
-    pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Optional run-scoped hook overrides.
-    #[serde(default)]
-    pub hooks_override: Option<HookRunOverrides>,
-    /// Enable built-in tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_builtins: Option<bool>,
-    /// Enable shell tool. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_shell: Option<bool>,
-    /// Enable semantic memory. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_memory: Option<bool>,
-    /// Enable mob tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_mob: Option<bool>,
-    /// Enable schedule tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_schedule: Option<bool>,
-    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
-    #[serde(default)]
-    pub enable_web_search: Option<bool>,
-    /// Enable WorkGraph tools. Omit to use factory defaults.
-    #[serde(default)]
-    pub enable_workgraph: Option<bool>,
-    /// Explicit budget limits for this run.
-    #[serde(default)]
-    pub budget_limits: Option<meerkat_core::BudgetLimits>,
-    /// Provider-specific parameters (for example reasoning config).
-    #[serde(default)]
-    pub provider_params: Option<Value>,
-    /// Skills to preload into the system prompt.
-    #[serde(default)]
-    pub preload_skills: Option<Vec<meerkat_core::skills::SkillKey>>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Optional key-value labels attached at session creation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub labels: Option<BTreeMap<String, String>>,
-    /// Additional instruction sections appended to the system prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-    /// Opaque application context passed through to custom builders.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub app_context: Option<Value>,
-    /// Per-agent environment variables injected into shell tool subprocesses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub shell_env: Option<std::collections::HashMap<String, String>>,
-}
-
 fn default_structured_output_retries() -> u32 {
     2
 }
@@ -1857,66 +1783,6 @@ async fn canonical_skill_keys_for_state(
     Ok(params.canonical_skill_keys())
 }
 
-/// Continue session request
-#[derive(Debug, Deserialize, Clone)]
-pub struct ContinueSessionRequest {
-    pub session_id: String,
-    pub prompt: ContentInput,
-    #[serde(default)]
-    pub system_prompt: Option<String>,
-    /// JSON schema for structured output extraction (wrapper or raw schema).
-    #[serde(default)]
-    pub output_schema: Option<OutputSchema>,
-    /// Max retries for structured output validation.
-    /// Omit to inherit the current/persisted session value.
-    #[serde(default)]
-    pub structured_output_retries: Option<u32>,
-    /// Keep session alive after turn completes, listening for comms messages.
-    /// None = inherit persisted session intent, Some(true) = enable, Some(false) = disable.
-    #[serde(default)]
-    pub keep_alive: Option<bool>,
-    /// Agent name for inter-agent communication. Required for keep_alive.
-    #[serde(default)]
-    pub comms_name: Option<String>,
-    /// Friendly metadata for peer discovery.
-    #[serde(default)]
-    pub peer_meta: Option<meerkat_core::PeerMeta>,
-    /// Enable verbose event logging (server-side).
-    #[serde(default)]
-    pub verbose: bool,
-    #[serde(default)]
-    pub model: Option<Cow<'static, str>>,
-    #[serde(default)]
-    pub provider: Option<Provider>,
-    #[serde(default)]
-    pub max_tokens: Option<u32>,
-    /// Optional run-scoped hook overrides.
-    #[serde(default)]
-    pub hooks_override: Option<HookRunOverrides>,
-    /// Enable Meerkat-owned fallback web search. Omit to inherit.
-    #[serde(default)]
-    pub enable_web_search: Option<bool>,
-    /// Structured refs for per-turn skill injection.
-    #[serde(default)]
-    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
-    /// Optional per-turn flow tool overlay.
-    #[serde(default)]
-    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
-    /// Additional instruction sections prepended as system notices to the prompt.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub additional_instructions: Option<Vec<String>>,
-}
-
-/// Append runtime system context to a session.
-#[derive(Debug, Deserialize)]
-pub struct AppendSystemContextRequest {
-    pub text: String,
-    #[serde(default)]
-    pub source: Option<String>,
-    #[serde(default)]
-    pub idempotency_key: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct ListSessionsQuery {
     #[serde(default)]
@@ -1956,16 +1822,6 @@ pub struct SessionDetailsResponse {
     pub labels: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ScheduleListResponse {
-    pub schedules: Vec<meerkat::Schedule>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ScheduleOccurrencesResponse {
-    pub occurrences: Vec<meerkat::Occurrence>,
-}
-
 /// API error response
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
@@ -1973,28 +1829,6 @@ pub struct ErrorResponse {
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<Value>,
-}
-
-fn workgraph_observability_router() -> Router<AppState> {
-    meerkat::workgraph_rest_path_catalog()
-        .iter()
-        .fold(Router::new(), |router, descriptor| match descriptor.route {
-            meerkat::WorkGraphRestRoute::Items => {
-                router.route(descriptor.path, get(workgraph_list_items))
-            }
-            meerkat::WorkGraphRestRoute::Item => {
-                router.route(descriptor.path, get(workgraph_get_item))
-            }
-            meerkat::WorkGraphRestRoute::Ready => {
-                router.route(descriptor.path, get(workgraph_ready))
-            }
-            meerkat::WorkGraphRestRoute::Snapshot => {
-                router.route(descriptor.path, get(workgraph_snapshot))
-            }
-            meerkat::WorkGraphRestRoute::Events => {
-                router.route(descriptor.path, get(workgraph_events))
-            }
-        })
 }
 
 /// Build the REST API router
@@ -2023,7 +1857,11 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/events", get(session_events))
         .route("/schedule/tools", get(schedule_tools))
         .route("/schedule/call", post(schedule_call))
-        .merge(workgraph_observability_router())
+        .route("/workgraph/items", get(workgraph_list_items))
+        .route("/workgraph/items/{id}", get(workgraph_get_item))
+        .route("/workgraph/ready", get(workgraph_ready))
+        .route("/workgraph/snapshot", get(workgraph_snapshot))
+        .route("/workgraph/events", get(workgraph_events))
         .route("/schedules", get(list_schedules).post(create_schedule))
         .route(
             "/schedules/{id}",
@@ -2359,18 +2197,28 @@ async fn mob_event_stream(
 // Mob parity endpoints
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
 #[cfg(feature = "mob")]
-struct SpawnHelperRequest {
-    prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
-    #[serde(default)]
-    role_name: Option<String>,
-    #[serde(default)]
-    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    #[serde(default)]
-    backend: Option<meerkat_mob::MobBackendKind>,
+fn mob_runtime_mode_from_wire(mode: WireMobRuntimeMode) -> meerkat_mob::MobRuntimeMode {
+    match mode {
+        WireMobRuntimeMode::AutonomousHost => meerkat_mob::MobRuntimeMode::AutonomousHost,
+        WireMobRuntimeMode::TurnDriven => meerkat_mob::MobRuntimeMode::TurnDriven,
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mob_backend_kind_from_wire(kind: WireMobBackendKind) -> meerkat_mob::MobBackendKind {
+    match kind {
+        WireMobBackendKind::Session => meerkat_mob::MobBackendKind::Session,
+        WireMobBackendKind::External => meerkat_mob::MobBackendKind::External,
+    }
+}
+
+#[cfg(feature = "mob")]
+fn mob_fork_context_from_wire(context: WireForkContext) -> meerkat_mob::ForkContext {
+    match context {
+        WireForkContext::FullHistory => meerkat_mob::ForkContext::FullHistory,
+        WireForkContext::LastMessages { count } => meerkat_mob::ForkContext::LastMessages { count },
+    }
 }
 
 /// POST /mob/{id}/spawn-helper — spawn a short-lived helper, wait, return result.
@@ -2389,8 +2237,8 @@ async fn mob_spawn_helper(
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.runtime_mode = req.runtime_mode;
-    options.backend = req.backend;
+    options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
+    options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state
         .mob_state
         .mob_spawn_helper(&mob_id, identity, req.prompt, options)
@@ -2400,32 +2248,6 @@ async fn mob_spawn_helper(
     let payload = serde_json::to_value(result)
         .map_err(|e| ApiError::Internal(format!("serialize helper result: {e}")))?;
     Ok(Json(payload))
-}
-
-#[derive(Debug, Deserialize)]
-#[cfg(feature = "mob")]
-struct ForkHelperRequest {
-    source_member_id: String,
-    prompt: String,
-    #[serde(default)]
-    agent_identity: Option<String>,
-    #[serde(default)]
-    role_name: Option<String>,
-    #[serde(default)]
-    fork_context: Option<meerkat_mob::ForkContext>,
-    #[serde(default)]
-    runtime_mode: Option<meerkat_mob::MobRuntimeMode>,
-    #[serde(default)]
-    backend: Option<meerkat_mob::MobBackendKind>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-#[cfg(feature = "mob")]
-struct WaitKickoffRequest {
-    #[serde(default)]
-    member_ids: Option<Vec<String>>,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
 }
 
 /// POST /mob/{id}/wait-kickoff — wait for autonomous kickoff completion barrier.
@@ -2467,13 +2289,14 @@ async fn mob_fork_helper(
     );
     let fork_context = req
         .fork_context
+        .map(mob_fork_context_from_wire)
         .unwrap_or(meerkat_mob::ForkContext::FullHistory);
     let mut options = meerkat_mob::HelperOptions::default();
     if let Some(role) = req.role_name {
         options.role_name = Some(meerkat_mob::ProfileName::from(role));
     }
-    options.runtime_mode = req.runtime_mode;
-    options.backend = req.backend;
+    options.runtime_mode = req.runtime_mode.map(mob_runtime_mode_from_wire);
+    options.backend = req.backend.map(mob_backend_kind_from_wire);
     let result = state
         .mob_state
         .mob_fork_helper(
@@ -2736,29 +2559,6 @@ fn make_runtime_external_event_input(
             blocks,
         },
     ))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum RestSessionExternalEventEnvelope {
-    GenericJson {
-        event_type: String,
-        payload: Value,
-        #[serde(default)]
-        blocks: Option<Vec<meerkat_contracts::WireContentBlock>>,
-    },
-    PeerResponseTerminal {},
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RestPeerResponseTerminalBody {
-    peer_id: meerkat_core::comms::PeerId,
-    #[serde(default)]
-    display_name: Option<meerkat_core::comms::PeerName>,
-    request_id: meerkat_core::PeerCorrelationId,
-    status: meerkat_contracts::PeerResponseTerminalStatusWire,
-    result: Value,
 }
 
 /// Queue an external event into the runtime without waking an idle session.
@@ -3789,6 +3589,16 @@ struct WorkGraphEventsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize)]
+struct WorkGraphItemsResponse {
+    items: Vec<meerkat::WorkItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkGraphEventsResponse {
+    events: Vec<meerkat::WorkGraphEvent>,
+}
+
 impl From<WorkGraphItemsQuery> for meerkat::WorkItemFilter {
     fn from(value: WorkGraphItemsQuery) -> Self {
         Self {
@@ -3951,7 +3761,6 @@ fn help_request_to_create_session(
         enable_shell: Some(false),
         enable_memory: Some(false),
         enable_mob: Some(false),
-        enable_schedule: Some(false),
         enable_web_search: Some(false),
         enable_workgraph: Some(false),
         budget_limits: None,
@@ -4199,7 +4008,7 @@ async fn create_session_inner(
         override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(req.enable_shell),
         override_comms: ToolCategoryOverride::Inherit,
-        override_schedule: ToolCategoryOverride::from_override(req.enable_schedule),
+        override_schedule: ToolCategoryOverride::Inherit,
         override_workgraph: ToolCategoryOverride::from_override(req.enable_workgraph),
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
         override_mob: ToolCategoryOverride::Inherit,
@@ -4459,40 +4268,58 @@ async fn create_schedule(
         .map_err(schedule_error_to_api)
 }
 
-async fn schedule_tools() -> Json<Value> {
-    Json(json!({ "tools": schedule_tools_list() }))
+fn typed_schedule_tools() -> Result<Vec<ScheduleToolDescriptor>, ApiError> {
+    schedule_tools_list()
+        .into_iter()
+        .map(serde_json::from_value::<ScheduleToolDescriptor>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "schedule tool descriptor drifted from contract: {error}"
+            ))
+        })
 }
 
-#[derive(Debug, Deserialize)]
-struct ScheduleToolCallRequest {
-    name: String,
-    #[serde(default)]
-    arguments: Value,
+async fn schedule_tools() -> Result<Json<ScheduleToolsResult>, ApiError> {
+    Ok(Json(ScheduleToolsResult {
+        tools: typed_schedule_tools()?,
+    }))
 }
 
 async fn schedule_call(
     State(state): State<AppState>,
-    Json(req): Json<ScheduleToolCallRequest>,
-) -> Result<Json<Value>, ApiError> {
+    Json(req): Json<ScheduleToolCallParams>,
+) -> Result<Json<ScheduleToolCallResult>, ApiError> {
     state
         .ensure_schedule_host_started()
         .await
         .map_err(schedule_error_to_api)?;
-    handle_schedule_tools_call(&state.schedule_service, &req.name, &req.arguments)
-        .await
+    let tool_name = req.name();
+    let arguments = req.arguments_json().map_err(|error| {
+        ApiError::BadRequest(format!("invalid schedule tool arguments: {error}"))
+    })?;
+    let result =
+        handle_schedule_tools_call(&state.schedule_service, tool_name.as_str(), &arguments)
+            .await
+            .map_err(schedule_tool_error_to_api)?;
+    ScheduleToolCallResult::from_tool_value(tool_name, result)
         .map(Json)
-        .map_err(schedule_tool_error_to_api)
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "schedule tool result drifted from contract: {error}"
+            ))
+        })
 }
 
 async fn workgraph_list_items(
     State(state): State<AppState>,
     Query(query): Query<WorkGraphItemsQuery>,
-) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
+) -> Result<Json<WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
         .list(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(|items| Json(WorkGraphItemsResponse { items }))
         .map_err(workgraph_error_to_api)
 }
 
@@ -4513,12 +4340,12 @@ async fn workgraph_get_item(
 async fn workgraph_ready(
     State(state): State<AppState>,
     Query(query): Query<WorkGraphReadyQuery>,
-) -> Result<Json<meerkat::WorkGraphItemsResponse>, ApiError> {
+) -> Result<Json<WorkGraphItemsResponse>, ApiError> {
     state
         .workgraph_service
         .ready(query.into())
         .await
-        .map(|items| Json(meerkat::WorkGraphItemsResponse { items }))
+        .map(|items| Json(WorkGraphItemsResponse { items }))
         .map_err(workgraph_error_to_api)
 }
 
@@ -4537,23 +4364,23 @@ async fn workgraph_snapshot(
 async fn workgraph_events(
     State(state): State<AppState>,
     Query(query): Query<WorkGraphEventsQuery>,
-) -> Result<Json<meerkat::WorkGraphEventsResponse>, ApiError> {
+) -> Result<Json<WorkGraphEventsResponse>, ApiError> {
     state
         .workgraph_service
         .events(query.into())
         .await
-        .map(|events| Json(meerkat::WorkGraphEventsResponse { events }))
+        .map(|events| Json(WorkGraphEventsResponse { events }))
         .map_err(workgraph_error_to_api)
 }
 
 async fn list_schedules(
     State(state): State<AppState>,
-) -> Result<Json<ScheduleListResponse>, ApiError> {
+) -> Result<Json<ScheduleListResult>, ApiError> {
     state
         .schedule_service
         .list()
         .await
-        .map(|schedules| Json(ScheduleListResponse { schedules }))
+        .map(|schedules| Json(ScheduleListResult { schedules }))
         .map_err(schedule_error_to_api)
 }
 
@@ -4638,13 +4465,13 @@ async fn delete_schedule(
 async fn list_schedule_occurrences(
     State(state): State<AppState>,
     Path(id): Path<String>,
-) -> Result<Json<ScheduleOccurrencesResponse>, ApiError> {
+) -> Result<Json<ScheduleOccurrencesResult>, ApiError> {
     let schedule_id = resolve_schedule_id(&id)?;
     state
         .schedule_service
         .list_occurrences(&schedule_id)
         .await
-        .map(|occurrences| Json(ScheduleOccurrencesResponse { occurrences }))
+        .map(|occurrences| Json(ScheduleOccurrencesResult { occurrences }))
         .map_err(schedule_error_to_api)
 }
 
@@ -8964,8 +8791,8 @@ mod tests {
         assert!(!state.enable_shell);
     }
 
-    fn missing_target_schedule_tool_args() -> Value {
-        json!({
+    fn missing_target_schedule_tool_args() -> meerkat::CreateScheduleRequest {
+        serde_json::from_value(json!({
             "name": "missing-target",
             "description": "create a due schedule through the tool surface",
             "trigger": {
@@ -8984,7 +8811,8 @@ mod tests {
             "missing_target_policy": "mark_misfired",
             "planning_horizon_days": 1,
             "planning_horizon_occurrences": 1
-        })
+        }))
+        .expect("valid schedule request")
     }
 
     async fn wait_for_missing_target_misfire(
@@ -9016,20 +8844,17 @@ mod tests {
 
         let Json(created) = schedule_call(
             State(state.clone()),
-            Json(ScheduleToolCallRequest {
-                name: "meerkat_schedule_create".into(),
+            Json(ScheduleToolCallParams::Create {
                 arguments: missing_target_schedule_tool_args(),
             }),
         )
         .await
         .expect("schedule tool create should succeed");
 
-        let schedule_id = ScheduleId::parse(
-            created["schedule_id"]
-                .as_str()
-                .expect("schedule_id should be returned"),
-        )
-        .expect("valid schedule id");
+        let schedule_id = match created {
+            ScheduleToolCallResult::Schedule(schedule) => schedule.schedule_id,
+            _ => panic!("schedule create should return a schedule"),
+        };
 
         let occurrence = wait_for_missing_target_misfire(&state.schedule_service, &schedule_id)
             .await
@@ -9291,19 +9116,19 @@ mod tests {
             .expect("seed other WorkGraph item");
         let app = router(state);
 
-        for descriptor in meerkat::workgraph_rest_path_catalog() {
-            let uri = match descriptor.route {
-                meerkat::WorkGraphRestRoute::Item => {
-                    descriptor.path.replace("{id}", item.id.as_str())
-                }
-                _ => descriptor.path.to_string(),
-            };
+        for uri in [
+            "/workgraph/items",
+            &format!("/workgraph/items/{}", item.id),
+            "/workgraph/ready",
+            "/workgraph/snapshot",
+            "/workgraph/events",
+        ] {
             let response = app
                 .clone()
                 .oneshot(
                     axum::http::Request::builder()
                         .method("GET")
-                        .uri(uri.as_str())
+                        .uri(uri)
                         .body(Body::empty())
                         .unwrap(),
                 )
@@ -9312,17 +9137,12 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
         }
 
-        let events_path = meerkat::workgraph_rest_path_catalog()
-            .iter()
-            .find(|descriptor| descriptor.route == meerkat::WorkGraphRestRoute::Events)
-            .expect("WorkGraph events route")
-            .path;
         let response = app
             .clone()
             .oneshot(
                 axum::http::Request::builder()
                     .method("GET")
-                    .uri(format!("{events_path}?all_namespaces=true"))
+                    .uri("/workgraph/events?all_namespaces=true")
                     .body(Body::empty())
                     .unwrap(),
             )

@@ -22,6 +22,7 @@
 import type {
   AgentEventEnvelope,
   CommsCommand,
+  CommsPeersResult,
   CommsSendReceipt,
   ContentBlock,
   PeerCorrelationId,
@@ -186,9 +187,9 @@ export class Session {
     return this._client._send(this._id, command);
   }
 
-  async peers(): Promise<Array<Record<string, unknown>>> {
+  async peers(): Promise<CommsPeersResult["peers"]> {
     const result = await this._client._peers(this._id);
-    return (result.peers ?? []) as Array<Record<string, unknown>>;
+    return result.peers;
   }
 
   toString(): string {

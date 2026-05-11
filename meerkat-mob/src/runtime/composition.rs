@@ -42,6 +42,9 @@ use meerkat_runtime::composition::{
     RouteTable, SignalConsumerRefusal, SignalConsumerSurface,
 };
 use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
+use meerkat_runtime::generated::meerkat_mob_seam::adapters::{
+    Field as SeamField, Signal as SeamSignal, mob::Effect as MobSeamEffectAdapter,
+};
 use meerkat_runtime::meerkat_machine::dsl as meerkat_dsl;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -103,32 +106,37 @@ pub enum MobSeamEffect {
 }
 
 impl MobSeamEffect {
-    /// Typed [`EffectVariantId`] for this producer body. Matches the
-    /// effect-variant slugs declared on `MobMachine`'s schema and the
-    /// `meerkat_mob_seam` route declarations.
-    pub fn variant_id(&self) -> EffectVariantId {
+    fn generated_adapter(&self) -> MobSeamEffectAdapter {
         match self {
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding { .. }) => {
-                seam_facts::effects::mob::request_runtime_binding()
+                MobSeamEffectAdapter::RequestRuntimeBinding
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }) => {
-                seam_facts::effects::mob::request_runtime_ingress()
+                MobSeamEffectAdapter::RequestRuntimeIngress
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { .. }) => {
-                seam_facts::effects::mob::request_runtime_retire()
+                MobSeamEffectAdapter::RequestRuntimeRetire
             }
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { .. }) => {
-                seam_facts::effects::mob::request_runtime_destroy()
+                MobSeamEffectAdapter::RequestRuntimeDestroy
             }
             Self::Mob(other) => unreachable!("non-routed mob effect reached seam: {other:?}"),
         }
     }
 
+    /// Typed [`EffectVariantId`] for this producer body. Matches the
+    /// effect-variant slugs declared on `MobMachine`'s schema and the
+    /// `meerkat_mob_seam` route declarations.
+    pub fn variant_id(&self) -> EffectVariantId {
+        self.generated_adapter().variant_id()
+    }
+
     pub fn generated_input_route(&self) -> Option<seam_facts::TypedRoutedInput> {
-        seam_facts::route_to_input(&mob_producer_instance_id(), &self.variant_id())
+        self.generated_adapter().input_route()
     }
 
     fn field(&self, id: &FieldId) -> Option<FieldValue<'_>> {
+        let field = self.generated_adapter().field(id)?;
         match self {
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeBinding {
                 agent_identity: _,
@@ -136,51 +144,33 @@ impl MobSeamEffect {
                 fence_token,
                 generation,
                 session_id,
-            }) => {
-                if id == &seam_facts::fields::agent_runtime_id() {
-                    Some(FieldValue::Str(agent_runtime_id.as_str()))
-                } else if id == &seam_facts::fields::fence_token() {
-                    Some(FieldValue::U64(fence_token.0))
-                } else if id == &seam_facts::fields::generation() {
-                    Some(FieldValue::U64(generation.0))
-                } else if id == &seam_facts::fields::session_id() {
-                    Some(FieldValue::Str(session_id.0.as_str()))
-                } else {
-                    None
-                }
-            }
+            }) => match field {
+                SeamField::AgentRuntimeId => Some(FieldValue::Str(agent_runtime_id.as_str())),
+                SeamField::FenceToken => Some(FieldValue::U64(fence_token.0)),
+                SeamField::Generation => Some(FieldValue::U64(generation.0)),
+                SeamField::SessionId => Some(FieldValue::Str(session_id.0.as_str())),
+                _ => None,
+            },
             Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeIngress {
                 agent_runtime_id,
-                fence_token,
                 work_id,
                 origin,
-            }) => {
-                if id == &seam_facts::fields::agent_runtime_id() {
-                    Some(FieldValue::Str(agent_runtime_id.as_str()))
-                } else if id == &seam_facts::fields::fence_token() {
-                    Some(FieldValue::U64(fence_token.0))
-                } else if id == &seam_facts::fields::work_id() {
-                    Some(FieldValue::Str(work_id.0.as_str()))
-                } else if id == &seam_facts::fields::origin() {
+                ..
+            }) => match field {
+                SeamField::AgentRuntimeId => Some(FieldValue::Str(agent_runtime_id.as_str())),
+                SeamField::WorkId => Some(FieldValue::Str(work_id.0.as_str())),
+                SeamField::Origin => {
                     Some(FieldValue::Opaque(Arc::new(meerkat_work_origin(origin))))
-                } else {
-                    None
                 }
-            }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }) => {
-                if id == &seam_facts::fields::session_id() {
-                    Some(FieldValue::Str(session_id.0.as_str()))
-                } else {
-                    None
-                }
-            }
-            Self::Mob(mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id }) => {
-                if id == &seam_facts::fields::session_id() {
-                    Some(FieldValue::Str(session_id.0.as_str()))
-                } else {
-                    None
-                }
-            }
+                _ => None,
+            },
+            Self::Mob(
+                mob_dsl::MobMachineEffect::RequestRuntimeRetire { session_id }
+                | mob_dsl::MobMachineEffect::RequestRuntimeDestroy { session_id },
+            ) => match field {
+                SeamField::SessionId => Some(FieldValue::Str(session_id.0.as_str())),
+                _ => None,
+            },
             Self::Mob(_) => None,
         }
     }
@@ -335,33 +325,34 @@ fn build_mob_signal(
     projected: &[(FieldId, OwnedFieldValue)],
 ) -> Result<mob_dsl::MobMachineSignal, String> {
     let runtime_id = mob_dsl::AgentRuntimeId::from(
-        signal_project_str(projected, &seam_facts::fields::agent_runtime_id())?.to_string(),
+        signal_project_str(projected, &SeamField::AgentRuntimeId.id())?.to_string(),
     );
-    let fence_token = mob_dsl::FenceToken(signal_project_u64(
-        projected,
-        &seam_facts::fields::fence_token(),
-    )?);
-    if variant == &seam_facts::signals::observe_runtime_ready() {
-        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
-            agent_runtime_id: runtime_id,
-            fence_token,
-        })
-    } else if variant == &seam_facts::signals::observe_runtime_retired() {
-        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
-            agent_runtime_id: runtime_id,
-            fence_token,
-        })
-    } else if variant == &seam_facts::signals::observe_runtime_destroyed() {
-        Ok(mob_dsl::MobMachineSignal::ObserveRuntimeDestroyed {
-            agent_runtime_id: runtime_id,
-            fence_token,
-        })
-    } else {
-        Err(format!(
+    let fence_token =
+        mob_dsl::FenceToken(signal_project_u64(projected, &SeamField::FenceToken.id())?);
+    match SeamSignal::from_variant(variant) {
+        Some(SeamSignal::ObserveRuntimeReady) => {
+            Ok(mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                agent_runtime_id: runtime_id,
+                fence_token,
+            })
+        }
+        Some(SeamSignal::ObserveRuntimeRetired) => {
+            Ok(mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
+                agent_runtime_id: runtime_id,
+                fence_token,
+            })
+        }
+        Some(SeamSignal::ObserveRuntimeDestroyed) => {
+            Ok(mob_dsl::MobMachineSignal::ObserveRuntimeDestroyed {
+                agent_runtime_id: runtime_id,
+                fence_token,
+            })
+        }
+        None => Err(format!(
             "mob signal consumer surface does not accept routed signal `{other}`; \
              only ObserveRuntimeReady/ObserveRuntimeRetired/ObserveRuntimeDestroyed are declared",
             other = variant.as_str()
-        ))
+        )),
     }
 }
 

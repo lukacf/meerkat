@@ -8,27 +8,15 @@ use meerkat::{
 };
 use meerkat_contracts::{
     ListSchedulesParams, ScheduleIdParams, ScheduleListResult, ScheduleOccurrencesParams,
-    ScheduleOccurrencesResult, UpdateScheduleParams,
+    ScheduleOccurrencesResult, ScheduleToolCallParams, ScheduleToolCallResult,
+    ScheduleToolDescriptor, ScheduleToolsResult, UpdateScheduleParams,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, value::RawValue};
+use serde_json::value::RawValue;
 
 use super::{RpcResponseExt, parse_params};
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
-
-#[derive(Debug, Serialize)]
-pub struct ScheduleToolsResult {
-    pub tools: Vec<Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ScheduleToolCallParams {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: Value,
-}
 
 fn parse_schedule_id(id: Option<RpcId>, raw: &str) -> Result<ScheduleId, Box<RpcResponse>> {
     ScheduleId::parse(raw).map_err(|error| {
@@ -267,12 +255,21 @@ pub async fn handle_occurrences(
 }
 
 pub async fn handle_tools(id: Option<RpcId>) -> RpcResponse {
-    RpcResponse::success(
-        id,
-        ScheduleToolsResult {
-            tools: schedule_tools_list(),
-        },
-    )
+    let tools = match schedule_tools_list()
+        .into_iter()
+        .map(serde_json::from_value::<ScheduleToolDescriptor>)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(tools) => tools,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("schedule tool descriptor drifted from contract: {error}"),
+            );
+        }
+    };
+    RpcResponse::success(id, ScheduleToolsResult { tools })
 }
 
 pub async fn handle_call(
@@ -289,10 +286,29 @@ pub async fn handle_call(
         return map_schedule_error(id, error);
     }
 
-    match handle_schedule_tools_call(&schedule_service(&runtime), &params.name, &params.arguments)
+    let tool_name = params.name();
+    let arguments = match params.arguments_json() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("invalid schedule tool arguments: {error}"),
+            );
+        }
+    };
+
+    match handle_schedule_tools_call(&schedule_service(&runtime), tool_name.as_str(), &arguments)
         .await
     {
-        Ok(value) => RpcResponse::success(id, value),
+        Ok(value) => match ScheduleToolCallResult::from_tool_value(tool_name, value) {
+            Ok(result) => RpcResponse::success(id, result),
+            Err(error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("schedule tool result drifted from contract: {error}"),
+            ),
+        },
         Err(error) => RpcResponse::error(id, error.code, error.message),
     }
 }
@@ -308,15 +324,15 @@ mod tests {
         PersistenceBundle, SessionStore,
     };
     use meerkat_core::{Config, SessionId};
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     fn memory_blob_store() -> Arc<dyn meerkat_core::BlobStore> {
         Arc::new(meerkat_store::MemoryBlobStore::new())
     }
 
-    fn missing_target_schedule_tool_args() -> Value {
-        json!({
+    fn missing_target_schedule_tool_args() -> CreateScheduleRequest {
+        serde_json::from_value(json!({
             "name": "missing-target",
             "description": "create a due schedule through the tool surface",
             "trigger": {
@@ -335,11 +351,12 @@ mod tests {
             "missing_target_policy": "mark_misfired",
             "planning_horizon_days": 1,
             "planning_horizon_occurrences": 1
-        })
+        }))
+        .expect("valid schedule request")
     }
 
     fn missing_target_schedule_request() -> Result<CreateScheduleRequest, serde_json::Error> {
-        serde_json::from_value(missing_target_schedule_tool_args())
+        Ok(missing_target_schedule_tool_args())
     }
 
     fn test_runtime(temp: &TempDir) -> Arc<SessionRuntime> {
@@ -421,10 +438,9 @@ mod tests {
             return;
         };
         let runtime = test_runtime(&temp);
-        let serialized_result = serde_json::to_string(&json!({
-            "name": "meerkat_schedule_create",
-            "arguments": missing_target_schedule_tool_args(),
-        }));
+        let serialized_result = serde_json::to_string(&ScheduleToolCallParams::Create {
+            arguments: missing_target_schedule_tool_args(),
+        });
         assert!(
             serialized_result.is_ok(),
             "serialize params: {serialized_result:?}"
@@ -453,7 +469,7 @@ mod tests {
         let Some(result) = response.result.as_ref() else {
             return;
         };
-        let created_result: Result<Value, _> = serde_json::from_str(result.get());
+        let created_result: Result<meerkat::Schedule, _> = serde_json::from_str(result.get());
         assert!(
             created_result.is_ok(),
             "valid JSON result: {created_result:?}"
@@ -461,22 +477,7 @@ mod tests {
         let Ok(created) = created_result else {
             return;
         };
-        let schedule_id_str = created["schedule_id"].as_str();
-        assert!(
-            schedule_id_str.is_some(),
-            "schedule_id should be returned: {created:?}"
-        );
-        let Some(schedule_id_str) = schedule_id_str else {
-            return;
-        };
-        let schedule_id_result = ScheduleId::parse(schedule_id_str);
-        assert!(
-            schedule_id_result.is_ok(),
-            "valid schedule id: {schedule_id_result:?}"
-        );
-        let Ok(schedule_id) = schedule_id_result else {
-            return;
-        };
+        let schedule_id = created.schedule_id;
 
         let occurrence = wait_for_missing_target_misfire(&runtime, &schedule_id).await;
         assert!(

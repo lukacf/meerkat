@@ -20,7 +20,7 @@ if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY environment variable required")
 
 BASE_URL = "https://api.openai.com/v1"
-MODEL = "gpt-5.2"
+MODEL = "gpt-5.5"
 
 headers = {
     "Authorization": f"Bearer {OPENAI_API_KEY}",

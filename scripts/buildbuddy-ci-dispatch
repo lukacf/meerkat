@@ -158,7 +158,10 @@ case "${mode}" in
       echo "error: changed-paths mode requires --paths or MEERKAT_BUILDBUDDY_CHANGED_PATHS" >&2
       exit 2
     fi
-    mapfile -t paths < <(printf '%s\n' "${paths_text}" | tr '[:space:]' '\n' | awk 'NF' | sort -u)
+    paths=()
+    while IFS= read -r path; do
+      paths+=("${path}")
+    done < <(printf '%s\n' "${paths_text}" | tr '[:space:]' '\n' | awk 'NF' | sort -u)
     exec ./scripts/buildbuddy-agent-gate "${mode_args[@]}" --base "${base_ref}" "${paths[@]}"
     ;;
   *)

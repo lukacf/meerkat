@@ -58,6 +58,7 @@ This overview follows the generated OpenAPI artifact at
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `POST` | `/help` | Ask Meerkat usage help with the embedded platform skill |
 | `POST` | `/sessions` | Create and run a new session |
 | `GET` | `/sessions` | List sessions |
 | `GET` | `/sessions/{id}` | Fetch session metadata and usage |
@@ -180,6 +181,18 @@ Cancellation only affects uncommitted work:
 
 ## Endpoints
 
+### POST /help
+
+Ask Meerkat usage help with the embedded platform skill.
+
+```json Request
+{
+  "question": "How do I add an MCP server?"
+}
+```
+
+Returns a `HelpResponse` with the answer text and any plan metadata requested by the input.
+
 ### POST /sessions
 
 Create and run a new session.
@@ -245,11 +258,11 @@ Create and run a new session.
 </ParamField>
 
 <ParamField body="model" type="string | null" default="config default">
-  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.2"`).
+  Model name (e.g. `"claude-opus-4-6"`, `"gpt-5.5"`).
 </ParamField>
 
 <ParamField body="provider" type="string | null" default="inferred from model">
-  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"other"`.
+  Provider: `"anthropic"`, `"openai"`, `"gemini"`, `"self_hosted"`, `"other"`.
 </ParamField>
 
 <ParamField body="max_tokens" type="u32 | null" default="config default">
@@ -744,7 +757,7 @@ Return the curated model catalog with provider profiles, capability metadata, an
 
 ```json Response (abbreviated)
 {
-  "contract_version": "0.6.2",
+  "contract_version": "0.6.5",
   "providers": [
     {
       "provider": "anthropic",
@@ -778,7 +791,7 @@ Returns runtime capabilities with status resolved against config.
 
 ```json Response (abbreviated)
 {
-  "contract_version": {"major": 0, "minor": 6, "patch": 0},
+  "contract_version": {"major": 0, "minor": 6, "patch": 5},
   "capabilities": [
     {
       "id": "sessions",

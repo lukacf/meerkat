@@ -29,7 +29,7 @@ Meerkat is a **library-first, high-performance, modular agent harness** -- compo
 
 That harness is backed by a shared runtime. The same sessions, tools, credentials, schedules, live channels, blobs, and mob members work across the CLI, services, SDKs, and browser/WASM delivery instead of each surface reimplementing agent behavior.
 
-It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formald state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
+It is designed to be **stable** (typed session events, explicit terminal results, resumable persistence, scoped credentials) and **fast** (<10ms cold start, ~20MB memory, small standalone binaries for the common surfaces). Meerkat lifecycle flows are specified as typed formal state machines and mathematically proven with TLA+ where it matters, which means the system avoids getting stuck in invalid or unknown states.
 
 The library still comes first; surfaces come second. Pick the entry point that fits your architecture: embed the crates directly, run a CLI task, host REST or JSON-RPC, expose MCP tools, script from Python or TypeScript, or ship a browser-delivered agent with `@rkat/web`.
 
@@ -42,7 +42,7 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **Providers** | Anthropic, OpenAI, Gemini, and self-hosted OpenAI-compatible models | Usually one provider family |
 | **Auth** | Env API keys, realm bindings, OAuth/device flows, TokenStore, cloud IAM, and per-session/member overrides | Usually provider key per process |
 | **Surfaces** | CLI, REST, JSON-RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
-| **Agent infra** | Hooks, skills, semanitc memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
+| **Agent infra** | Hooks, skills, semantic memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
 | **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
 | **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |
@@ -116,8 +116,8 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 **Generate images** from a runtime-backed session:
 
 ```bash
-rkat run --allow-tool generate_image \
-  "Use generate_image to create a square PNG icon for a release dashboard. Return the blob id."
+rkat run --model gpt-5.5 --allow-tool generate_image \
+  "Use generate_image with provider \"openai\" to create a square PNG icon for a release dashboard. Return the blob id."
 rkat blob get <blob_id> --output release-dashboard.png
 ```
 
@@ -224,7 +224,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the live-adapter MVP surface (`live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close`) on JSON-RPC and the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
+**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the `live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, and `live/close` JSON-RPC methods, or the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 

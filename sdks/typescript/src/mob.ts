@@ -64,6 +64,7 @@ export interface MobMemberSnapshot {
   error?: string;
   tokensUsed: number;
   isFinal: boolean;
+  currentSessionId?: string;
   liveAttachmentStatus?: "unattached" | "intent_present_unbound" | "binding_not_ready" | "binding_ready" | "replacement_pending" | "reattach_required";
   resolvedCapabilities?: ResolvedModelCapabilities;
   peerConnectivity?: {

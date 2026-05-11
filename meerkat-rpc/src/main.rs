@@ -56,6 +56,22 @@ struct Cli {
     /// Example: --live-ws 127.0.0.1:4900
     #[arg(long)]
     live_ws: Option<String>,
+    /// Enable live WebRTC signaling over JSON-RPC.
+    ///
+    /// Requires the `live-webrtc` Cargo feature. The browser/client still
+    /// calls `live/open` followed by `live/webrtc/answer`; no separate media
+    /// dependency is pulled into the RPC crate.
+    #[cfg(feature = "live-webrtc")]
+    #[arg(long)]
+    live_webrtc: bool,
+    /// Per-tool-call timeout for live provider tool calls, in milliseconds.
+    ///
+    /// Defaults to `meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT`. Longer values
+    /// are useful for manual smoke tests of slow tools such as image
+    /// generation; stuck tools still terminalize through the typed live timeout
+    /// path instead of holding the provider turn indefinitely.
+    #[arg(long)]
+    live_tool_timeout_ms: Option<u64>,
     /// Scheme advertised in the `live/open` bootstrap URL: `ws` or `wss`.
     ///
     /// Defaults to `ws`. Use `wss` when the live listener is fronted by a
@@ -276,18 +292,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     let skill_runtime = factory.build_skill_runtime(&config).await?;
 
-    // N74: only build the OpenAI realtime factory when --live-ws is configured;
-    // otherwise live/* is not exposed at all and the factory work is wasted.
-    // B15: when --live-ws IS set, factory build failure must fail at startup
-    // rather than leaving live/open exposed with no provider wired.
+    #[cfg(feature = "live-webrtc")]
+    let live_webrtc_enabled = cli.live_webrtc;
+    #[cfg(not(feature = "live-webrtc"))]
+    let live_webrtc_enabled = false;
+    let live_transport_enabled = cli.live_ws.is_some() || live_webrtc_enabled;
+
+    // N74 updated: only build the OpenAI realtime factory when a live
+    // transport is configured; otherwise live/* is not exposed and the
+    // factory work is wasted. B15: when live is configured, factory build
+    // failure must fail at startup rather than leaving live/open exposed
+    // with no provider wired.
     let live_session_factory: Option<
         Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>,
-    > = if cli.live_ws.is_some() {
+    > = if live_transport_enabled {
         match factory.build_openai_realtime_session_factory(&config).await {
             Ok(f) => Some(f),
             Err(err) => {
                 return Err(format!(
-                    "--live-ws is configured but the OpenAI realtime session factory \
+                    "a live transport is configured but the OpenAI realtime session factory \
                      could not be built: {err}"
                 )
                 .into());
@@ -338,6 +361,46 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "rkat-rpc",
     )
     .await?;
+    let live_host = if live_transport_enabled {
+        // Wave-3: install the surface projection sink so adapter observations
+        // become canonical Meerkat semantic facts (A1-A6, A14). The host is
+        // shared by every enabled transport; surfaces stay thin skins.
+        let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
+            std::sync::Arc::new(
+                meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
+                    &runtime,
+                )),
+            );
+        // G6 (P2): every production live channel runs with the canonical
+        // per-tool-call dispatch deadline.
+        let live_tool_timeout = cli
+            .live_tool_timeout_ms
+            .map(std::time::Duration::from_millis)
+            .unwrap_or(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT);
+        Some(std::sync::Arc::new(
+            meerkat_live::LiveAdapterHost::new(projection_sink)
+                .with_tool_timeout(live_tool_timeout),
+        ))
+    } else {
+        None
+    };
+
+    #[cfg(feature = "live-webrtc")]
+    let live_webrtc_state = if cli.live_webrtc {
+        let Some(host) = live_host.as_ref() else {
+            return Err("internal error: live host missing for --live-webrtc".into());
+        };
+        eprintln!(
+            "rkat-rpc live-webrtc signaling enabled over JSON-RPC method {}",
+            meerkat_live::LIVE_WEBRTC_ANSWER_METHOD
+        );
+        Some(std::sync::Arc::new(meerkat_live::LiveWebrtcState::new(
+            std::sync::Arc::clone(host),
+        )))
+    } else {
+        None
+    };
+
     let live_ws = if let Some(ref live_ws_addr) = cli.live_ws {
         let listener = tokio::net::TcpListener::bind(live_ws_addr).await?;
         let actual_addr = listener.local_addr()?;
@@ -346,27 +409,24 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             path = meerkat_live::LIVE_WS_PATH,
             scheme = cli.live_ws_scheme.as_str(),
         );
-        // Wave-3: install the surface projection sink so adapter observations
-        // become canonical Meerkat semantic facts (A1-A6, A14). Without the
-        // sink, `apply_observation` only updates host status and projection
-        // becomes a silent no-op.
-        let projection_sink: std::sync::Arc<dyn meerkat_live::LiveProjectionSink> =
-            std::sync::Arc::new(
-                meerkat_rpc::live_projection_sink::SessionServiceProjectionSink::new(Arc::clone(
-                    &runtime,
-                )),
-            );
-        // G6 (P2): every production live channel runs with the canonical
-        // per-tool-call dispatch deadline. Without this, a stuck tool can
-        // hold a live provider's turn indefinitely (dogma: the adapter
-        // cannot stall canonical session lifecycle).
-        let host = std::sync::Arc::new(
-            meerkat_live::LiveAdapterHost::new(projection_sink)
-                .with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT),
-        );
-        let ws_state = std::sync::Arc::new(meerkat_live::LiveWsState::new(host));
+        let Some(host) = live_host.as_ref() else {
+            return Err("internal error: live host missing for --live-ws".into());
+        };
+        let ws_state =
+            std::sync::Arc::new(meerkat_live::LiveWsState::new(std::sync::Arc::clone(host)));
         let ws_state_clone = std::sync::Arc::clone(&ws_state);
+        #[cfg(feature = "live-webrtc")]
+        let webrtc_state_for_http = live_webrtc_state.clone();
         let handle = tokio::spawn(async move {
+            #[cfg(feature = "live-webrtc")]
+            if let Some(webrtc_state) = webrtc_state_for_http {
+                return meerkat_live::serve_live_ws_and_webrtc_listener(
+                    listener,
+                    ws_state_clone,
+                    webrtc_state,
+                )
+                .await;
+            }
             meerkat_live::serve_live_ws_listener(listener, ws_state_clone).await
         });
         Some((ws_state, actual_addr, handle))
@@ -378,13 +438,21 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     // The actual listener is plaintext WebSocket; `wss` is for advertisement
     // when a TLS-terminating proxy fronts the live listener.
     let live_ws_scheme = cli.live_ws_scheme.as_str();
-    let live_ws_config = live_ws
-        .as_ref()
-        .map(|(state, addr, _)| meerkat_rpc::LiveWsConfig {
-            state: std::sync::Arc::clone(state),
-            base_url: format!("{live_ws_scheme}://{addr}"),
+    let live_config = if live_transport_enabled {
+        Some(meerkat_rpc::LiveConfig {
+            ws: live_ws
+                .as_ref()
+                .map(|(state, addr, _)| meerkat_rpc::LiveWsConfig {
+                    state: std::sync::Arc::clone(state),
+                    base_url: format!("{live_ws_scheme}://{addr}"),
+                }),
+            #[cfg(feature = "live-webrtc")]
+            webrtc_state: live_webrtc_state.clone(),
             session_factory: live_session_factory.clone(),
-        });
+        })
+    } else {
+        None
+    };
 
     let serve_result = if let Some(ref tcp_addr) = cli.tcp {
         eprintln!("rkat-rpc listening on tcp://{tcp_addr}");
@@ -393,11 +461,11 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
             runtime,
             config_store,
             skill_runtime,
-            live_ws_config,
+            live_config,
         )
         .await
     } else {
-        meerkat_rpc::serve_stdio_with_options(runtime, config_store, skill_runtime, live_ws_config)
+        meerkat_rpc::serve_stdio_with_options(runtime, config_store, skill_runtime, live_config)
             .await
     };
 

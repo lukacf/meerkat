@@ -1,5 +1,11 @@
 # LUC-339 Review Readiness Packet
 
+> **Current status (0.6.5):** Historical review packet for a specific Web SDK
+> PR head. The generated mob envelope and fail-closed decoder principles remain
+> relevant, but fields such as `realtime_attachment_status` below are preserved
+> as review-context vocabulary from that PR, not as current public live-channel
+> API guidance.
+
 Issue: `LUC-339` fail closed Web SDK mob decoder defaults.
 
 This packet applies to the PR head that contains this file. If the PR head

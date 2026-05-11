@@ -202,28 +202,35 @@ comms = true
 
 ## Shared integration model (`meerkat-mob-mcp`)
 
-Outside direct `meerkat_mob` usage, mob capability is provided by composing
-`meerkat_mob_mcp::MobMcpDispatcher` into `SessionBuildOptions.external_tools`.
+Outside direct `meerkat_mob` usage, agent-facing mob capability is provided by
+late-binding `meerkat_mob_mcp::AgentMobToolSurfaceFactory` into
+`SessionBuildOptions.mob_tools`. The factory receives the owning session ID,
+runtime-injected `MobToolAuthorityContext`, effective authority handle, and
+optional comms runtime during `AgentFactory::build_agent()`, then returns the
+session-scoped `AgentMobToolSurface` dispatcher.
 
 ```rust
 use std::sync::Arc;
-use meerkat_core::service::SessionBuildOptions;
-use meerkat_core::AgentToolDispatcher;
+use meerkat_core::service::{MobToolsFactory, SessionBuildOptions};
 use meerkat_mob::MobSessionService;
-use meerkat_mob_mcp::{MobMcpDispatcher, MobMcpState};
+use meerkat_mob_mcp::{AgentMobToolSurfaceFactory, MobMcpState};
 
-fn mob_external_tools(
+fn with_mob_tools(
     session_service: Arc<dyn MobSessionService>,
-) -> Arc<dyn AgentToolDispatcher> {
+) -> SessionBuildOptions {
     let state = Arc::new(MobMcpState::new(session_service));
-    Arc::new(MobMcpDispatcher::new(state))
+    let factory: Arc<dyn MobToolsFactory> =
+        Arc::new(AgentMobToolSurfaceFactory::new(state));
+    SessionBuildOptions {
+        mob_tools: Some(factory),
+        ..Default::default()
+    }
 }
-
-let build = SessionBuildOptions {
-    external_tools: Some(mob_external_tools(session_service)),
-    ..Default::default()
-};
 ```
+
+`external_tools` is still the right slot for callback tools and MCP-backed
+dispatchers. Mob orchestration uses the separate `mob_tools` slot so operator
+authority and session-scoped wiring are injected at build time.
 
 ## Surface matrix
 
@@ -232,9 +239,9 @@ let build = SessionBuildOptions {
 | CLI `run` / `run --resume` | `mob_*` tools in prompt-driven runs when mob tools are enabled | Primary CLI mob UX |
 | CLI `rkat mob ...` | helper/artifact commands | Secondary operational surface |
 | CLI `rkat mob pack/deploy/web build` | artifact and browser distribution | Portable deploy + web target |
-| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; `mob/tools` / `mob/call` are escape hatches |
-| REST | session HTTP endpoints | compact mob lifecycle via `/mob/tools` + `/mob/call` plus SSE observe |
-| MCP | `meerkat_*` session tools | tool-oriented mob access for LLM ergonomics |
+| RPC | explicit `mob/*` methods | canonical typed substrate for SDKs; generic `mob/tools` / `mob/call` escape hatches are absent in 0.6.5 |
+| REST | session HTTP endpoints plus mob helpers | `/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff |
+| MCP | `meerkat_*` session tools plus `meerkat_mob_*` public tools, including `meerkat_mob_wait_ready` and profile CRUD | typed public mob control plane for host access |
 | Python SDK | `Mob` class via `create_mob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
 | TypeScript SDK | `Mob` class via `createMob()` | first-class mob lifecycle, member mgmt, flow control, event subscriptions |
 | Web SDK | `Mob` class via `createMob()` | same WASM-backed mob lifecycle with typed `EventSubscription<T>` |
@@ -449,7 +456,7 @@ When a realm profile store is configured, six additional profile-management tool
 | `mob_profile_delete` | Delete a profile with `expected_revision` for CAS |
 | `mob_profile_list_sources` | List the provenance sources contributing profiles |
 
-These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime; ambient mob enablement alone does not surface operator tools on resume.
+These tools are composed into the agent's tool dispatcher via `MobToolsFactory` late-binding. Operator authority is injected at runtime through `MobToolAuthorityContext`; ambient mob enablement alone does not surface operator tools on resume.
 
 ## Practical guidance
 

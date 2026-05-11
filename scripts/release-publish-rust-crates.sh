@@ -53,18 +53,35 @@ publish_one() {
       echo "  ${crate}: upload mode skips cargo's duplicate verifier; release validation already packaged and linked these crates"
     fi
 
-    set +e
-    if command -v timeout >/dev/null 2>&1; then
-      CARGO_TARGET_DIR="$target_dir" \
-        timeout "$PUBLISH_TIMEOUT" "${cmd[@]}" \
-        > >(tee "$output_file") 2> >(tee -a "$output_file" >&2)
-      rc=$?
-    else
-      CARGO_TARGET_DIR="$target_dir" \
-        "${cmd[@]}" \
-        > >(tee "$output_file") 2> >(tee -a "$output_file" >&2)
-      rc=$?
+    local attempt=1
+    local max_attempts="${MEERKAT_CRATE_PUBLISH_ATTEMPTS:-5}"
+    if ! [[ "$max_attempts" =~ ^[0-9]+$ ]] || ((max_attempts < 1)); then
+      max_attempts=5
     fi
+
+    set +e
+    while true; do
+      : > "$output_file"
+      if command -v timeout >/dev/null 2>&1; then
+        CARGO_TARGET_DIR="$target_dir" \
+          timeout "$PUBLISH_TIMEOUT" "${cmd[@]}" \
+          > >(tee "$output_file") 2> >(tee -a "$output_file" >&2)
+        rc=$?
+      else
+        CARGO_TARGET_DIR="$target_dir" \
+          "${cmd[@]}" \
+          > >(tee "$output_file") 2> >(tee -a "$output_file" >&2)
+        rc=$?
+      fi
+
+      if [[ $rc -eq 0 ]] || ! grep -q "Too Many Requests" "$output_file" || ((attempt >= max_attempts)); then
+        break
+      fi
+
+      echo "  ${crate}: crates.io rate limited publish attempt ${attempt}/${max_attempts}; retrying in 15s" >&2
+      sleep 15
+      attempt=$((attempt + 1))
+    done
     set -e
   fi
 

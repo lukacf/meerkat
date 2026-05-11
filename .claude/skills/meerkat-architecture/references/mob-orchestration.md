@@ -47,7 +47,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 ## Agent-Facing Delegation Tools
 
-`AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`.
+`AgentMobToolSurface` (`meerkat-mob-mcp/src/agent_tools.rs`) provides `delegate`, `mob_create`, `mob_destroy`, `mob_spawn_member`, `mob_retire_member`, `mob_check_member`, `mob_list_members`, `mob_list`, `mob_wire`, `mob_unwire`. When a realm profile store is present it also exposes `mob_profile_create`, `mob_profile_get`, `mob_profile_list`, `mob_profile_update`, `mob_profile_delete`, and `mob_profile_list_sources`.
 
 `mob_wire` / `mob_unwire` create and remove comms trust relationships between mob members (local or external peers). Reuses `MobMcpState::mob_wire()` / `mob_unwire()` state API.
 
@@ -55,7 +55,7 @@ Profile source rule: agent-internal surfaces inherit from caller config. Non-age
 
 `destroy_session_mobs()` is the canonical archive cleanup seam. Tool building and cleanup must share the same hydrated `MobMcpState`; parallel shadow registries are a bug.
 
-Operator capabilities are runtime-injected. `MobToolAccessContext::OperatorCapabilitiesPresent` / `override_mob == Some(true)` is the authoritative signal; ambient mob enablement alone must not resurrect operator tools on resume.
+Operator capabilities are runtime-injected through `MobToolAuthorityContext`. `can_create_mobs`, `can_mutate_profiles`, and `managed_mob_scope` are the authoritative checks; ambient mob enablement alone must not resurrect operator tools on resume.
 
 ## Lifecycle Control
 

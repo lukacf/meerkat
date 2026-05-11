@@ -139,7 +139,7 @@ describe("MeerkatClient binary resolution", () => {
     }
   });
 
-  it("does not enable live websocket transport by default", () => {
+  it("does not enable live transports by default", () => {
     assert.deepEqual(MeerkatClient.buildArgs(false), []);
   });
 
@@ -147,6 +147,20 @@ describe("MeerkatClient binary resolution", () => {
     assert.deepEqual(
       MeerkatClient.buildArgs(false, { liveWs: true }),
       ["--live-ws", "127.0.0.1:0"],
+    );
+  });
+
+  it("enables live WebRTC transport only when requested", () => {
+    assert.deepEqual(
+      MeerkatClient.buildArgs(false, { liveWebrtc: true }),
+      ["--live-webrtc"],
+    );
+  });
+
+  it("passes live tool timeout when requested", () => {
+    assert.deepEqual(
+      MeerkatClient.buildArgs(false, { liveWebrtc: true, liveToolTimeoutMs: 180000 }),
+      ["--live-webrtc", "--live-tool-timeout-ms", "180000"],
     );
   });
 });

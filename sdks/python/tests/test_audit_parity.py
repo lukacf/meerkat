@@ -248,6 +248,7 @@ async def test_create_session_with_extended_create_fields():
         additional_instructions=["You are concise."],
         app_context={"app": "sdk"},
         shell_env={"FOO": "BAR"},
+        enable_web_search=True,
         external_tools=[{"name": "tool_a", "description": "Tool A", "input_schema": {"type": "object"}}],
     )
 
@@ -257,6 +258,7 @@ async def test_create_session_with_extended_create_fields():
     assert args[1]["additional_instructions"] == ["You are concise."]
     assert args[1]["app_context"] == {"app": "sdk"}
     assert args[1]["shell_env"] == {"FOO": "BAR"}
+    assert args[1]["enable_web_search"] is True
     assert args[1]["external_tools"][0]["name"] == "tool_a"
 
 

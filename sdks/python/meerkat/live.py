@@ -51,10 +51,12 @@ class LiveChannel:
         session_id: str,
         *,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        transport: Literal["websocket", "webrtc"] | None = None,
     ) -> None:
         self._client = client
         self._session_id = session_id
         self._turning_mode = turning_mode
+        self._transport = transport
         self._channel_id: str | None = None
 
     @classmethod
@@ -64,9 +66,15 @@ class LiveChannel:
         session_id: str,
         *,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        transport: Literal["websocket", "webrtc"] | None = None,
     ) -> LiveChannel:
         """Create a ``LiveChannel`` bound to a standalone session."""
-        return cls(client, session_id, turning_mode=turning_mode)
+        return cls(
+            client,
+            session_id,
+            turning_mode=turning_mode,
+            transport=transport,
+        )
 
     @property
     def client(self) -> MeerkatClient:
@@ -93,7 +101,9 @@ class LiveChannel:
         ``transport``, ``capabilities``, ``continuity``).
         """
         result = await self._client.live_open(
-            self._session_id, turning_mode=self._turning_mode
+            self._session_id,
+            turning_mode=self._turning_mode,
+            transport=self._transport,
         )
         self._channel_id = result.get("channel_id") or result.get("channelId")
         return result

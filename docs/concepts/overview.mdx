@@ -70,21 +70,19 @@ Then branch into the systems you need:
 | `Scheduling` | How does durable automation fire over time? |
 | `Live Channels` | How does low-latency interactive transport fit into the session model? |
 
-## How the docs are organized
+## Where To Go Next
 
-Meerkat’s docs are intentionally split by **reader need**, not by “beginner vs advanced developer”:
+After the core concepts, choose the path that matches the system you are
+building:
 
-| Section | What it should do |
-|---------|-------------------|
-| `Getting started` | Get the reader to a first successful run and into the examples hub |
-| `Concepts` | Explain shared mental models first |
-| `Guides` | Help the reader accomplish a task or configure a system |
-| `Examples` | Show runnable patterns and learning progression across surfaces |
-| `Reference` | Provide exact contracts, inventories, and lookup material |
-| `Architecture` | Explain ownership, rationale, and deeper internal structure |
-| `Operations` | Cover release/distribution/operational workflows that are still part of real Meerkat usage |
-
-This matters because Meerkat is both a composable library and a practical product layer. In many cases the builder/operator boundary is intentionally small.
+| Path | Start with |
+|------|------------|
+| Embedding Meerkat in Rust | [Rust SDK overview](/rust/overview) |
+| Driving Meerkat from an app | [Python SDK](/sdks/python/overview) or [TypeScript SDK](/sdks/typescript/overview) |
+| Running Meerkat as a service | [JSON-RPC](/api/rpc) or [REST](/api/rest) |
+| Building multi-agent systems | [Mobs](/guides/mobs) |
+| Running private models | [Self-hosting models](/guides/self-hosting-models) |
+| Understanding ownership | [Architecture](/reference/architecture) |
 
 ## See also
 

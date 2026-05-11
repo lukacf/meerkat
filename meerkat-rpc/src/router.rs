@@ -34,6 +34,29 @@ use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
+struct RuntimeLiveToolDispatcher {
+    runtime: Arc<SessionRuntime>,
+}
+
+#[async_trait::async_trait]
+impl meerkat_live::LiveToolDispatcher for RuntimeLiveToolDispatcher {
+    async fn dispatch_live_tool_call(
+        &self,
+        session_id: &SessionId,
+        call: meerkat_core::ToolCall,
+    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_live::LiveToolDispatchError> {
+        self.runtime
+            .dispatch_external_tool_call(session_id, call)
+            .await
+            .map_err(|err| match err {
+                SessionError::NotFound { id } => meerkat_live::LiveToolDispatchError::Rejected(
+                    format!("session {id} not found for live tool dispatch"),
+                ),
+                other => meerkat_live::LiveToolDispatchError::Internal(other.to_string()),
+            })
+    }
+}
+
 fn is_transport_internal(message: &str) -> bool {
     message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
@@ -585,6 +608,8 @@ pub struct MethodRouter {
     live_adapter_host: Arc<meerkat_live::LiveAdapterHost>,
     live_ws_state: Option<Arc<meerkat_live::LiveWsState>>,
     live_ws_base_url: Option<String>,
+    #[cfg(feature = "live-webrtc")]
+    live_webrtc_state: Option<Arc<meerkat_live::LiveWebrtcState>>,
     live_session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
@@ -666,6 +691,10 @@ impl MethodRouter {
             runtime.set_mob_state(mob_state.clone());
             mob_state
         };
+        #[cfg(feature = "mob")]
+        runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+            mob_state.clone(),
+        )));
         let schedule_runtime = runtime.clone();
         tokio::spawn(async move {
             if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
@@ -702,30 +731,58 @@ impl MethodRouter {
             ))),
             live_ws_state: None,
             live_ws_base_url: None,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_state: None,
             live_session_factory: None,
         }
     }
 
-    /// Attach a live WebSocket transport state for `live/open` token minting.
-    ///
-    /// Also closes A4/A5: the runtime's callback-backed tool dispatcher is
-    /// built and installed on the live host via `set_tool_dispatcher`. By the
-    /// time this runs (after `RpcServer::new_*` has called
-    /// `runtime.set_callback_channel`), the dispatcher is ready; if it isn't,
-    /// the host stays at `ToolCallSkipped { NoDispatcher }` (audited skip).
-    pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
-        self.live_adapter_host = Arc::clone(state.host());
-        if let Some(dispatcher) = self.runtime.live_tool_dispatcher() {
-            self.live_adapter_host.set_tool_dispatcher(dispatcher);
-        }
-        // P1#5: hand the host to the runtime so `propagate_config_to_live_channels`
-        // can fan out `Refresh`/`Close` commands when an upstream config patch
-        // changes a session's resolved model/provider.
+    fn attach_live_host(&mut self, host: Arc<meerkat_live::LiveAdapterHost>) {
+        self.live_adapter_host = host;
+        self.live_adapter_host
+            .set_live_tool_dispatcher(Arc::new(RuntimeLiveToolDispatcher {
+                runtime: Arc::clone(&self.runtime),
+            }));
+        // P1#5: hand the host to the runtime so config propagation fans out
+        // through the shared live runtime, independent of the transport skin.
         self.runtime
             .set_live_adapter_host(Arc::clone(&self.live_adapter_host));
+    }
+
+    /// Attach a live WebSocket transport state for `live/open` token minting.
+    ///
+    /// Also closes A4/A5: the live host gets a session-scoped tool dispatcher
+    /// that calls `SessionRuntime::dispatch_external_tool_call`, so provider
+    /// tool requests use the same composed dispatcher as ordinary Meerkat
+    /// turns. SDK callback tools remain one possible external tool source
+    /// inside that composed dispatcher.
+    pub fn with_live_ws(mut self, state: Arc<meerkat_live::LiveWsState>, base_url: String) -> Self {
+        self.attach_live_host(Arc::clone(state.host()));
         self.live_ws_state = Some(state);
         self.live_ws_base_url = Some(base_url);
         self
+    }
+
+    /// Attach live WebRTC signaling state for `live/open` token minting and
+    /// `live/webrtc/answer` SDP answers.
+    #[cfg(feature = "live-webrtc")]
+    pub fn with_live_webrtc(mut self, state: Arc<meerkat_live::LiveWebrtcState>) -> Self {
+        self.attach_live_host(Arc::clone(state.host()));
+        self.live_webrtc_state = Some(state);
+        self
+    }
+
+    fn live_enabled(&self) -> bool {
+        self.live_ws_state.is_some() || {
+            #[cfg(feature = "live-webrtc")]
+            {
+                self.live_webrtc_state.is_some()
+            }
+            #[cfg(not(feature = "live-webrtc"))]
+            {
+                false
+            }
+        }
     }
 
     /// Attach a live session factory for creating provider adapters on `live/open`.
@@ -988,6 +1045,9 @@ impl MethodRouter {
     ) -> Self {
         let runtime_adapter = runtime.runtime_adapter();
         runtime.set_mob_state(mob_state.clone());
+        runtime.set_mob_tools(Arc::new(meerkat_mob_mcp::AgentMobToolSurfaceFactory::new(
+            mob_state.clone(),
+        )));
         let schedule_runtime = runtime.clone();
         tokio::spawn(async move {
             if let Err(error) = schedule_runtime.ensure_schedule_host_started().await {
@@ -1021,6 +1081,8 @@ impl MethodRouter {
             ))),
             live_ws_state: None,
             live_ws_base_url: None,
+            #[cfg(feature = "live-webrtc")]
+            live_webrtc_state: None,
             live_session_factory: None,
         }
     }
@@ -1490,33 +1552,48 @@ impl MethodRouter {
                 )
                 .await
             }
-            // B16: live/* is only registered when `with_live_ws` was called.
-            // Without --live-ws, the router has no transport state and would
-            // hand out empty WS URLs/tokens — refuse the method instead of
-            // silently routing it through a broken handler.
-            "live/open" if self.live_ws_state.is_some() => {
+            // live/* is registered when at least one live transport is
+            // configured. The handler owns transport selection; provider
+            // setup remains shared.
+            "live/open" if self.live_enabled() => {
                 handlers::live::handle_live_open(
                     id,
                     params,
-                    &self.live_adapter_host,
-                    self.live_ws_state.as_deref(),
-                    self.live_ws_base_url.as_deref(),
-                    &self.runtime,
-                    self.live_session_factory.as_ref().map(Arc::as_ref),
+                    handlers::live::LiveOpenHandlerContext {
+                        host: &self.live_adapter_host,
+                        live_ws: self.live_ws_state.as_deref(),
+                        live_ws_base_url: self.live_ws_base_url.as_deref(),
+                        #[cfg(feature = "live-webrtc")]
+                        live_webrtc: self.live_webrtc_state.as_deref(),
+                        runtime: &self.runtime,
+                        session_factory: self.live_session_factory.as_ref().map(Arc::as_ref),
+                    },
                 )
                 .await
             }
-            "live/status" if self.live_ws_state.is_some() => {
+            #[cfg(feature = "live-webrtc")]
+            "live/webrtc/answer" if self.live_webrtc_state.is_some() => {
+                if let Some(state) = self.live_webrtc_state.as_deref() {
+                    handlers::live::handle_live_webrtc_answer(id, params, state).await
+                } else {
+                    RpcResponse::error(
+                        id,
+                        error::INTERNAL_ERROR,
+                        "live/webrtc/answer reached handler without WebRTC state".to_string(),
+                    )
+                }
+            }
+            "live/status" if self.live_enabled() => {
                 handlers::live::handle_live_status(id, params, &self.live_adapter_host).await
             }
-            "live/close" if self.live_ws_state.is_some() => {
+            "live/close" if self.live_enabled() => {
                 handlers::live::handle_live_close(id, params, &self.live_adapter_host).await
             }
             // P1#5: push a fresh projection snapshot into an already-open
             // live adapter (model switch via `config/patch`, snapshot drift
             // after a session edit, etc.). Same gating as the other live/*
-            // arms — without `--live-ws` the router has no transport state.
-            "live/refresh" if self.live_ws_state.is_some() => {
+            // arms — without a live transport the router has no live state.
+            "live/refresh" if self.live_enabled() => {
                 handlers::live::handle_live_refresh(
                     id,
                     params,
@@ -1525,24 +1602,50 @@ impl MethodRouter {
                 )
                 .await
             }
-            "live/send_input" if self.live_ws_state.is_some() => {
+            "live/send_input" if self.live_enabled() => {
                 handlers::live::handle_live_send_input(id, params, &self.live_adapter_host).await
             }
             // I50: surface the buffered-input commit verb. Same gating as the
             // other live/* arms — without --live-ws the router has no
             // transport state and the method falls through to METHOD_NOT_FOUND.
-            "live/commit_input" if self.live_ws_state.is_some() => {
+            "live/commit_input" if self.live_enabled() => {
                 handlers::live::handle_live_commit_input(id, params, &self.live_adapter_host).await
             }
             // A7: explicit barge-in surface. Without these arms callers can
             // only rely on provider-native VAD; with them, a client can
             // signal interrupt directly and truncate an assistant item at a
             // specific playback cursor.
-            "live/interrupt" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_interrupt(id, params, &self.live_adapter_host).await
+            "live/interrupt" if self.live_enabled() => {
+                #[cfg(feature = "live-webrtc")]
+                {
+                    handlers::live::handle_live_interrupt(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        self.live_webrtc_state.as_deref(),
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "live-webrtc"))]
+                {
+                    handlers::live::handle_live_interrupt(id, params, &self.live_adapter_host).await
+                }
             }
-            "live/truncate" if self.live_ws_state.is_some() => {
-                handlers::live::handle_live_truncate(id, params, &self.live_adapter_host).await
+            "live/truncate" if self.live_enabled() => {
+                #[cfg(feature = "live-webrtc")]
+                {
+                    handlers::live::handle_live_truncate(
+                        id,
+                        params,
+                        &self.live_adapter_host,
+                        self.live_webrtc_state.as_deref(),
+                    )
+                    .await
+                }
+                #[cfg(not(feature = "live-webrtc"))]
+                {
+                    handlers::live::handle_live_truncate(id, params, &self.live_adapter_host).await
+                }
             }
             // A7: no `live/playback_cursor` arm — playback is a client-side
             // fact (jitter buffers, end-of-stream silence trim). Clients
@@ -4489,6 +4592,526 @@ args = [{}]
         assert_eq!(
             notification.params["session_id"].as_str(),
             Some(session_id.as_str())
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn router_created_deferred_sessions_project_mob_tools_to_live_open_config() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred live mob tool fixture",
+                    "initial_turn": "deferred",
+                    "enable_mob": true
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(
+            create_resp.error.is_none(),
+            "session/create should succeed: {create_resp:?}"
+        );
+        let create_result = result_value(&create_resp);
+        let session_id = create_result["session_id"].as_str().expect("session_id");
+        let session_id = SessionId::parse(session_id).expect("created session id should parse");
+
+        let open_config = router
+            .runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live open config");
+        let tool_names: std::collections::BTreeSet<&str> = open_config
+            .visible_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+
+        for expected in ["delegate", "mob_create", "mob_spawn_member", "mob_list"] {
+            assert!(
+                tool_names.contains(expected),
+                "live/open config must expose agent-facing mob tool `{expected}`; got {tool_names:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn router_created_deferred_live_session_exposes_comms_tools_before_peers_exist() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred live comms tool fixture",
+                    "initial_turn": "deferred",
+                    "keep_alive": true,
+                    "comms_name": "live-smoke-controller-test"
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(
+            create_resp.error.is_none(),
+            "session/create should succeed: {create_resp:?}"
+        );
+        let create_result = result_value(&create_resp);
+        let session_id = create_result["session_id"].as_str().expect("session_id");
+        let session_id = SessionId::parse(session_id).expect("created session id should parse");
+
+        let open_config = router
+            .runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live open config");
+        let tool_names: std::collections::BTreeSet<&str> = open_config
+            .visible_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+
+        for expected in ["peers", "send_message"] {
+            assert!(
+                tool_names.contains(expected),
+                "live/open config must advertise comms tool `{expected}` before delegate wiring so the hosted realtime provider can call it later; got {tool_names:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    struct RecordingLiveAdapter {
+        log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>>,
+    }
+
+    #[cfg(feature = "comms")]
+    #[async_trait::async_trait]
+    impl meerkat_core::live_adapter::LiveAdapter for RecordingLiveAdapter {
+        async fn send_command(
+            &self,
+            command: meerkat_core::live_adapter::LiveAdapterCommand,
+        ) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            self.log.lock().await.push(command);
+            Ok(())
+        }
+
+        async fn next_observation(
+            &self,
+        ) -> Result<
+            Option<meerkat_core::live_adapter::LiveAdapterObservation>,
+            meerkat_core::live_adapter::LiveAdapterError,
+        > {
+            Ok(None)
+        }
+
+        fn status(&self) -> meerkat_core::live_adapter::LiveAdapterStatus {
+            meerkat_core::live_adapter::LiveAdapterStatus::Ready
+        }
+
+        async fn close(&self) -> Result<(), meerkat_core::live_adapter::LiveAdapterError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    struct RecordingLiveFactory {
+        log: Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>>,
+    }
+
+    #[cfg(feature = "comms")]
+    #[async_trait::async_trait]
+    impl meerkat_client::realtime_session::RealtimeSessionFactory for RecordingLiveFactory {
+        fn capabilities(&self) -> meerkat_contracts::RealtimeCapabilities {
+            meerkat_contracts::RealtimeCapabilities::default()
+        }
+
+        async fn open_session(
+            &self,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "test factory only supports direct live adapters".to_string(),
+            })
+        }
+
+        async fn attach_external_session(
+            &self,
+            _target: &meerkat_client::realtime_session::RealtimeExternalSessionTarget,
+            _turning_mode: meerkat_contracts::RealtimeTurningMode,
+        ) -> Result<
+            Box<dyn meerkat_client::realtime_session::RealtimeSession>,
+            meerkat_client::LlmError,
+        > {
+            Err(meerkat_client::LlmError::InvalidRequest {
+                message: "test factory only supports direct live adapters".to_string(),
+            })
+        }
+
+        async fn open_live_adapter(
+            &self,
+            _open_config: &meerkat_client::realtime_session::RealtimeSessionOpenConfig,
+        ) -> Result<Arc<dyn meerkat_core::live_adapter::LiveAdapter>, meerkat_client::LlmError>
+        {
+            Ok(Arc::new(RecordingLiveAdapter {
+                log: Arc::clone(&self.log),
+            }))
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    async fn open_deferred_keep_alive_live_controller(
+        comms_name: &str,
+    ) -> (
+        MethodRouter,
+        SessionId,
+        Arc<tokio::sync::Mutex<Vec<meerkat_core::live_adapter::LiveAdapterCommand>>>,
+    ) {
+        let (router, _notif_rx) = test_router().await;
+        let host = Arc::new(meerkat_live::LiveAdapterHost::new(Arc::new(
+            meerkat_live::NoOpProjectionSink,
+        )));
+        let live_ws = Arc::new(meerkat_live::LiveWsState::new(host));
+        let command_log = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let router = router
+            .with_live_ws(live_ws, "ws://127.0.0.1:0".to_string())
+            .with_live_session_factory(Arc::new(RecordingLiveFactory {
+                log: Arc::clone(&command_log),
+            }));
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred live comms drain fixture",
+                    "initial_turn": "deferred",
+                    "model": "gpt-realtime-2",
+                    "provider": "openai",
+                    "keep_alive": true,
+                    "comms_name": comms_name
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(
+            create_resp.error.is_none(),
+            "session/create should succeed: {create_resp:?}"
+        );
+        let create_result = result_value(&create_resp);
+        let session_id = create_result["session_id"].as_str().expect("session_id");
+        let session_id = SessionId::parse(session_id).expect("created session id should parse");
+
+        let open_resp = router
+            .dispatch(make_request(
+                "live/open",
+                serde_json::json!({
+                    "session_id": session_id.to_string(),
+                    "transport": "websocket"
+                }),
+            ))
+            .await
+            .expect("live/open response");
+        assert!(
+            open_resp.error.is_none(),
+            "live/open should succeed: {open_resp:?}"
+        );
+
+        (router, session_id, command_log)
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_open_starts_peer_ingress_for_deferred_keep_alive_controller() {
+        let (router, session_id, _command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-drain-test").await;
+
+        let snapshot = router
+            .runtime_adapter()
+            .meerkat_machine_spine_snapshot(&session_id)
+            .await
+            .expect("runtime spine snapshot");
+        assert_eq!(
+            snapshot.drain.phase,
+            Some(meerkat_runtime::CommsDrainPhase::Running),
+            "live/open must start the session-owned comms drain so wired delegate helpers can report back to the live controller; got {:?}",
+            snapshot.drain
+        );
+        assert!(
+            snapshot.drain.handle_present,
+            "running live peer ingress must have a drain task handle: {:?}",
+            snapshot.drain
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_peer_ingress_forwards_peer_message_to_active_live_adapter() {
+        let (router, session_id, command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-forward-test").await;
+
+        let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::Peer {
+                    peer_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                    display_identity: Some("helper-forward-test".to_string()),
+                    runtime_id: None,
+                },
+                durability: meerkat_runtime::InputDurability::Durable,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(meerkat_runtime::PeerConvention::Message),
+            body: "helper finished via comms".to_string(),
+            payload: None,
+            blocks: None,
+            handling_mode: None,
+        });
+
+        let (_outcome, handle) = router
+            .runtime_adapter()
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("accept peer input");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
+
+        let recorded = command_log.lock().await;
+        assert!(
+            recorded.iter().any(|command| matches!(
+                command,
+                meerkat_core::live_adapter::LiveAdapterCommand::SendInput {
+                    chunk: meerkat_core::live_adapter::LiveInputChunk::Text { text }
+                } if text.contains("helper finished via comms")
+            )),
+            "live peer ingress must project the peer message to the active live adapter; got {recorded:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_peer_ingress_steer_interrupts_before_forwarding_to_active_live_adapter() {
+        let (router, session_id, command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
+
+        let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::Peer {
+                    peer_id: "550e8400-e29b-41d4-a716-446655440001".to_string(),
+                    display_identity: Some("helper-steer-test".to_string()),
+                    runtime_id: None,
+                },
+                durability: meerkat_runtime::InputDurability::Durable,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(meerkat_runtime::PeerConvention::Message),
+            body: "urgent helper update via comms".to_string(),
+            payload: None,
+            blocks: None,
+            handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+        });
+
+        let (_outcome, handle) = router
+            .runtime_adapter()
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("accept steered peer input");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
+
+        let recorded = command_log.lock().await;
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [
+                    meerkat_core::live_adapter::LiveAdapterCommand::Interrupt,
+                    meerkat_core::live_adapter::LiveAdapterCommand::SendInput {
+                        chunk: meerkat_core::live_adapter::LiveInputChunk::Text { text }
+                    },
+                    ..
+                ] if text.contains("urgent helper update via comms")
+            ),
+            "steered live peer ingress must interrupt provider output before sending the new text input; got {recorded:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_peer_ingress_does_not_forward_context_only_primitives_to_live_adapter() {
+        let (router, session_id, command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-context-test").await;
+
+        let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
+            meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "peer_response_progress:helper".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                            text: "helper is still working".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        );
+        assert!(
+            primitive.is_context_only_apply_without_turn(),
+            "fixture must exercise the context-only executor path"
+        );
+
+        let forwarded = router
+            .runtime
+            .try_forward_runtime_primitive_to_live_adapter(
+                &session_id,
+                meerkat_core::lifecycle::RunId::new(),
+                &primitive,
+            )
+            .await
+            .expect("live forward check should not fail");
+
+        assert!(
+            forwarded.is_none(),
+            "context-only runtime facts must stay in Meerkat context instead of becoming hosted live user text"
+        );
+        assert!(
+            command_log.lock().await.is_empty(),
+            "context-only primitive must not send commands to the live adapter"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn router_created_deferred_sessions_apply_tool_filter_to_live_open_config() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred live filtered mob tool fixture",
+                    "initial_turn": "deferred",
+                    "enable_mob": true,
+                    "tool_filter": { "Deny": ["mob_check_member"] }
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(
+            create_resp.error.is_none(),
+            "session/create should succeed: {create_resp:?}"
+        );
+        let create_result = result_value(&create_resp);
+        let session_id = create_result["session_id"].as_str().expect("session_id");
+        let session_id = SessionId::parse(session_id).expect("created session id should parse");
+
+        let open_config = router
+            .runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("live open config");
+        let tool_names: std::collections::BTreeSet<&str> = open_config
+            .visible_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+
+        assert!(
+            !tool_names.contains("mob_check_member"),
+            "session-local tool filter must hide status side-channel from live/open config; got {tool_names:?}"
+        );
+        assert!(
+            tool_names.contains("delegate"),
+            "session-local deny filter must keep ordinary mob tools visible; got {tool_names:?}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[tokio::test]
+    async fn live_tool_dispatcher_routes_through_session_composed_tools() {
+        let (router, _notif_rx) = test_router().await;
+
+        let create_resp = router
+            .dispatch(make_request(
+                "session/create",
+                serde_json::json!({
+                    "prompt": "deferred live mob dispatch fixture",
+                    "initial_turn": "deferred",
+                    "enable_mob": true
+                }),
+            ))
+            .await
+            .expect("session/create response");
+        assert!(
+            create_resp.error.is_none(),
+            "session/create should succeed: {create_resp:?}"
+        );
+        let create_result = result_value(&create_resp);
+        let session_id = create_result["session_id"].as_str().expect("session_id");
+        let session_id = SessionId::parse(session_id).expect("created session id should parse");
+
+        router
+            .runtime
+            .live_open_config_for_session(
+                &session_id,
+                meerkat_contracts::RealtimeTurningMode::ProviderManaged,
+            )
+            .await
+            .expect("materialize deferred session for live");
+
+        let dispatcher = RuntimeLiveToolDispatcher {
+            runtime: Arc::clone(&router.runtime),
+        };
+        let outcome = meerkat_live::LiveToolDispatcher::dispatch_live_tool_call(
+            &dispatcher,
+            &session_id,
+            meerkat_core::ToolCall::new(
+                "live-call-1".to_string(),
+                "mob_list".to_string(),
+                serde_json::json!({}),
+            ),
+        )
+        .await
+        .expect("live tool dispatch");
+
+        assert_eq!(outcome.result.tool_use_id, "live-call-1");
+        assert!(
+            !outcome.result.is_error,
+            "mob_list must execute through the session-composed dispatcher, not the callback-only path: {:?}",
+            outcome.result
         );
     }
 

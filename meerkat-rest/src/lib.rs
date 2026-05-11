@@ -1750,6 +1750,9 @@ pub struct CreateSessionRequest {
     /// Enable mob tools. Omit to use factory defaults.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
@@ -1788,6 +1791,7 @@ fn rest_continue_requires_rebuild(req: &ContinueSessionRequest) -> bool {
         || req.output_schema.is_some()
         || req.structured_output_retries.is_some()
         || req.hooks_override.is_some()
+        || req.enable_web_search.is_some()
         || req.comms_name.is_some()
         || req.peer_meta.is_some()
 }
@@ -1855,6 +1859,9 @@ pub struct ContinueSessionRequest {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
+    /// Enable Meerkat-owned fallback web search. Omit to inherit.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -3714,6 +3721,7 @@ fn help_request_to_create_session(
         enable_shell: Some(false),
         enable_memory: Some(false),
         enable_mob: Some(false),
+        enable_web_search: Some(false),
         budget_limits: None,
         provider_params: None,
         preload_skills: Some(meerkat::help::platform_preload_skills()),
@@ -3760,6 +3768,8 @@ async fn create_session_inner(
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
+    let model_was_explicit = req.model.is_some();
+    let provider_was_explicit = req.provider.is_some();
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
@@ -3916,7 +3926,8 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
-        provider: req.provider,
+        provider: (provider_was_explicit || model_was_explicit)
+            .then_some(initial_identity.provider),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -3941,6 +3952,7 @@ async fn create_session_inner(
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
         override_mob: ToolCategoryOverride::Inherit,
         override_image_generation: ToolCategoryOverride::Inherit,
+        override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
         schedule_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
@@ -3955,8 +3967,10 @@ async fn create_session_inner(
         max_inline_peer_notifications: None,
         app_context: req.app_context,
         additional_instructions: req.additional_instructions,
+        initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
+            model: model_was_explicit,
             provider: req.provider.is_some(),
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),
@@ -3965,6 +3979,7 @@ async fn create_session_inner(
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
             peer_meta: req.peer_meta.is_some(),
+            override_web_search: req.enable_web_search.is_some(),
             ..Default::default()
         },
         call_timeout_override: Default::default(),
@@ -4771,6 +4786,7 @@ async fn continue_session_inner(
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
+            override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
@@ -4785,6 +4801,7 @@ async fn continue_session_inner(
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
+            initial_metadata_entries: std::collections::BTreeMap::new(),
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: req.model.is_some(),
@@ -4794,6 +4811,7 @@ async fn continue_session_inner(
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: req.comms_name.is_some(),
                 peer_meta: req.peer_meta.is_some(),
+                override_web_search: req.enable_web_search.is_some(),
                 ..Default::default()
             },
             call_timeout_override: Default::default(),
@@ -7229,6 +7247,7 @@ mod tests {
                     provider: None,
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7426,6 +7445,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7487,6 +7507,7 @@ mod tests {
                     provider: None,
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7618,6 +7639,7 @@ mod tests {
                 provider: None,
                 max_tokens: Some(state.max_tokens.saturating_add(1)),
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7716,6 +7738,7 @@ mod tests {
                     provider: None,
                     max_tokens: Some(512),
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,
@@ -7843,6 +7866,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -7913,6 +7937,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -9699,6 +9724,7 @@ mod tests {
             provider: None,
             max_tokens: None,
             hooks_override: None,
+            enable_web_search: None,
             skill_refs: None,
             flow_tool_overlay: None,
             additional_instructions: None,
@@ -9722,6 +9748,10 @@ mod tests {
             "additional instructions stay on the live path"
         );
         req.additional_instructions = None;
+
+        req.enable_web_search = Some(true);
+        assert!(rest_continue_requires_rebuild(&req));
+        req.enable_web_search = None;
 
         req.comms_name = Some("agent-a".to_string());
         assert!(rest_continue_requires_rebuild(&req));
@@ -9862,6 +9892,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -9939,6 +9970,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10025,6 +10057,7 @@ mod tests {
                 provider: None,
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10111,6 +10144,7 @@ mod tests {
                 provider: Some(Provider::Anthropic),
                 max_tokens: None,
                 hooks_override: None,
+                enable_web_search: None,
                 skill_refs: None,
                 flow_tool_overlay: None,
                 additional_instructions: None,
@@ -10189,6 +10223,7 @@ mod tests {
                     provider: Some(Provider::Anthropic),
                     max_tokens: None,
                     hooks_override: None,
+                    enable_web_search: None,
                     skill_refs: None,
                     flow_tool_overlay: None,
                     additional_instructions: None,

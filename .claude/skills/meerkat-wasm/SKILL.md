@@ -70,7 +70,7 @@ binding.
 
 The `sdks/web/` directory contains `@rkat/web` — a TypeScript wrapper around the wasm_bindgen exports with an idiomatic camelCase API. Ships with the pre-built WASM binary and a Node.js provider proxy.
 
-**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `withAuthBinding`, `Auth` types).
+**Key classes:** `MeerkatRuntime`, `Mob`, `Session`, `EventSubscription`. Auth helpers live in `sdks/web/src/auth.ts` (`registerExternalAuthResolver`, `clearExternalAuthResolver`, `withAuthBinding`, `Auth` types).
 
 **Provider proxy** (`sdks/web/proxy/`): Node.js auth-injecting reverse proxy. Sits between browser WASM and LLM providers so API keys stay server-side. Strips `Origin`/`Referer`/`Accept-Encoding` headers from forwarded requests.
 
@@ -93,7 +93,7 @@ const runtime = await MeerkatRuntime.init(wasm, {
 
 ### Browser auth model (0.6)
 
-For OAuth, cloud IAM, or any flow more dynamic than a static global key, use the external auth resolver path. The agent factory inside the WASM bundle calls back into the host page via `register_external_auth_resolver` to obtain a typed `AuthCredential` for a given `authBinding`:
+For OAuth, cloud IAM, or any flow more dynamic than a static global key, use the external auth resolver path. The selected realm binding must use the WASM external-resolver credential source; the agent factory inside the WASM bundle then calls back into the host page via `register_external_auth_resolver` to obtain a typed `ExternalAuthLease` for a given `authBinding`:
 
 ```typescript
 import {
@@ -105,10 +105,18 @@ import * as wasm from '@rkat/web/wasm/meerkat_web_runtime.js';
 
 registerExternalAuthResolver(wasm, async (authBinding) => {
   const token = await myHostFetchToken(authBinding);
-  return { kind: 'bearer_token', token };
+  return {
+    kind: 'inline_secret',
+    secret: token.accessToken,
+    metadata: { account_id: token.accountId },
+    expires_at: token.expiresAt,
+  };
 });
 
-const runtime = await MeerkatRuntime.init(wasm, { anthropicBaseUrl: '/proxy/anthropic' });
+const runtime = await MeerkatRuntime.init(wasm, {
+  anthropicApiKey: 'proxy',
+  anthropicBaseUrl: '/proxy/anthropic',
+});
 // withAuthBinding takes (authBinding, config) and returns config with `authBinding` set;
 // you can also set `authBinding` directly on the config object.
 const session = runtime.createSession(withAuthBinding(
@@ -119,10 +127,10 @@ const session = runtime.createSession(withAuthBinding(
 
 Notes:
 
-- `authBinding` is structural and supported on `runtime.createSession({...})`, `mob.spawn({...})`, etc.
-- Per-session `apiKey` fields were removed in 0.6. Use init-time global keys, the proxy, or the resolver.
-- Pass `JsValue::NULL` / `undefined` to the resolver helper to clear the registration.
-- The `register_js_tool` export is the modern JS tool registration entrypoint; `register_tool_callback` remains for legacy callers.
+- `authBinding` is structural and supported on `runtime.createSession({...})`, `mob.spawnHelper(...)`, and `mob.forkHelper(...)`. Plain `mob.spawn([...])` specs do not currently carry an auth binding.
+- `RuntimeConfig` in `@rkat/web` still exposes `apiKey` / `baseUrl` compatibility fields, but the current raw WASM config contract is provider-specific snake_case (`anthropic_api_key` / `openai_api_key` / `gemini_api_key` and matching base URLs). Do not add `apiKey` / `baseUrl` to `SessionConfig`; per-session credentials were removed in 0.6.
+- Use `clearExternalAuthResolver(wasm)` from `@rkat/web`, or pass `JsValue::NULL` / `undefined` to the raw WASM export, to clear the registration.
+- `register_tool_callback` registers promise-returning JS callbacks, while `register_js_tool` registers fire-and-forget tools that immediately return `"acknowledged"`. Both require initialized runtime state; prefer the instance methods after `MeerkatRuntime.init(...)`.
 - `destroy_runtime` zeroes runtime state, sessions, subscriptions, and the resolver — call it on host teardown.
 
 For repository smoke coverage, browser/WASM scenarios are owned by the Rust lane

@@ -450,9 +450,9 @@ impl MobDefinition {
     /// Create a minimal implicit delegation mob indexed to the given bridge session.
     ///
     /// The mob is tagged with `owner_bridge_session_id` for
-    /// bridge-session-indexed lookup and marked session-scoped for cleanup. It
-    /// also has `auto_wire_orchestrator = true` so spawned members are
-    /// automatically wired to the lead agent.
+    /// bridge-session-indexed lookup and marked session-scoped for cleanup.
+    /// The owning session is wired as an external peer by the delegate tool;
+    /// implicit mobs do not create a local orchestrator member.
     #[doc(hidden)]
     pub fn implicit(bridge_session_id: &str, model: &str) -> Self {
         let mob_id = MobId::from(format!("implicit-{bridge_session_id}"));
@@ -480,7 +480,7 @@ impl MobDefinition {
             orchestrator: None,
             profiles,
             wiring: WiringRules {
-                auto_wire_orchestrator: true,
+                auto_wire_orchestrator: false,
                 role_wiring: Vec::new(),
             },
             skills: BTreeMap::new(),
@@ -811,6 +811,11 @@ id = "minimal"
             def.owner_bridge_session_id.as_deref(),
             Some("bridge-session"),
             "owner bridge session id should be populated"
+        );
+        assert!(def.orchestrator.is_none());
+        assert!(
+            !def.wiring.auto_wire_orchestrator,
+            "implicit delegate mobs rely on external owner wiring"
         );
         assert!(def.has_owner_bridge_session_index("bridge-session"));
         assert!(def.is_indexed_to_owner_bridge_session("bridge-session"));

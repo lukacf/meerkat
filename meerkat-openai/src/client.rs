@@ -27,7 +27,7 @@ use meerkat_llm_core::{http, streaming};
 use serde::Deserialize;
 use serde_json::Value;
 use serde_json::value::RawValue;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::image_generation::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
@@ -1271,6 +1271,8 @@ impl LlmClient for OpenAiClient {
             let mut usage = Usage::default();
             let mut saw_stream_text_delta = false;
             let mut streamed_tool_ids: HashSet<String> = HashSet::with_capacity(4);
+            let mut response_item_tool_calls: HashMap<String, (String, String)> =
+                HashMap::with_capacity(4);
             let mut streamed_reasoning_ids: HashSet<String> = HashSet::with_capacity(2);
             let mut done_emitted = false;
 
@@ -1494,6 +1496,21 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         // Handle streaming delta events
+                        else if event.event_type == "response.output_item.added" {
+                            if let Some(item) = &event.item
+                                && item.get("type").and_then(Value::as_str) == Some("function_call")
+                                && let (Some(item_id), Some(call_id), Some(name)) = (
+                                    item.get("id").and_then(Value::as_str),
+                                    item.get("call_id").and_then(Value::as_str),
+                                    item.get("name").and_then(Value::as_str),
+                                )
+                            {
+                                response_item_tool_calls.insert(
+                                    item_id.to_string(),
+                                    (call_id.to_string(), name.to_string()),
+                                );
+                            }
+                        }
                         else if event.event_type == "response.output_text.delta" {
                             if let Some(delta) = &event.delta {
                                 saw_stream_text_delta = true;
@@ -1507,8 +1524,22 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         else if event.event_type == "response.function_call_arguments.delta" {
-                            if let (Some(call_id), Some(delta)) = (&event.call_id, &event.delta) {
-                                let name = event.name.clone();
+                            if let Some(delta) = &event.delta {
+                                let item_lookup = event
+                                    .item_id
+                                    .as_ref()
+                                    .and_then(|item_id| response_item_tool_calls.get(item_id));
+                                let call_id = event
+                                    .call_id
+                                    .as_ref()
+                                    .or_else(|| item_lookup.map(|(call_id, _)| call_id));
+                                let Some(call_id) = call_id else {
+                                    continue;
+                                };
+                                let name = event
+                                    .name
+                                    .clone()
+                                    .or_else(|| item_lookup.map(|(_, name)| name.clone()));
                                 yield LlmEvent::ToolCallDelta {
                                     id: call_id.clone(),
                                     name,
@@ -1517,8 +1548,23 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         else if event.event_type == "response.function_call_arguments.done" {
-                            if let (Some(call_id), Some(arguments)) = (&event.call_id, &event.arguments) {
-                                let name = event.name.clone().unwrap_or_default();
+                            if let Some(arguments) = &event.arguments {
+                                let item_lookup = event
+                                    .item_id
+                                    .as_ref()
+                                    .and_then(|item_id| response_item_tool_calls.get(item_id));
+                                let call_id = event
+                                    .call_id
+                                    .as_ref()
+                                    .or_else(|| item_lookup.map(|(call_id, _)| call_id));
+                                let Some(call_id) = call_id else {
+                                    continue;
+                                };
+                                let name = event
+                                    .name
+                                    .clone()
+                                    .or_else(|| item_lookup.map(|(_, name)| name.clone()))
+                                    .unwrap_or_default();
                                 let (args, args_value) =
                                     parse_tool_call_arguments(arguments, call_id)?;
 
@@ -1534,6 +1580,49 @@ impl LlmClient for OpenAiClient {
                                 yield LlmEvent::ToolCallComplete {
                                     id: call_id.clone(),
                                     name,
+                                    args: args_value,
+                                    meta: None,
+                                };
+                            }
+                        }
+                        else if event.event_type == "response.output_item.done" {
+                            if let Some(item) = &event.item
+                                && item.get("type").and_then(Value::as_str) == Some("function_call")
+                            {
+                                let Some(call_id) = item.get("call_id").and_then(Value::as_str)
+                                else {
+                                    tracing::warn!("function_call output item missing call_id");
+                                    continue;
+                                };
+                                if streamed_tool_ids.contains(call_id) {
+                                    continue;
+                                }
+                                let Some(name) = item.get("name").and_then(Value::as_str) else {
+                                    tracing::warn!(call_id, "function_call output item missing name");
+                                    continue;
+                                };
+                                let (args, args_value) = match item
+                                    .get("arguments")
+                                    .and_then(Value::as_str)
+                                {
+                                    Some(arguments) => {
+                                        parse_tool_call_arguments(arguments, call_id)?
+                                    }
+                                    None => (empty_tool_args_raw_value(), serde_json::json!({})),
+                                };
+
+                                let _ = assembler.on_tool_call_start(call_id.to_string());
+                                let _ = assembler.on_tool_call_complete(
+                                    call_id.to_string(),
+                                    name.to_string(),
+                                    args,
+                                    None,
+                                );
+
+                                streamed_tool_ids.insert(call_id.to_string());
+                                yield LlmEvent::ToolCallComplete {
+                                    id: call_id.to_string(),
+                                    name: name.to_string(),
                                     args: args_value,
                                     meta: None,
                                 };
@@ -4065,6 +4154,44 @@ mod tests {
         // Should only get one ToolCallComplete, not duplicated from response.completed
         assert_eq!(tool_completes.len(), 1);
         assert_eq!(tool_completes[0], "call_1");
+    }
+
+    #[tokio::test]
+    async fn test_stream_function_call_arguments_can_reference_output_item_id() {
+        let payload = [
+            r#"data: {"type":"response.output_item.added","item":{"id":"fc_1","type":"function_call","status":"in_progress","arguments":"","call_id":"call_1","name":"datetime"},"output_index":0,"sequence_number":1}"#,
+            r#"data: {"type":"response.function_call_arguments.delta","delta":"{}","item_id":"fc_1","output_index":0,"sequence_number":2}"#,
+            r#"data: {"type":"response.function_call_arguments.done","arguments":"{}","item_id":"fc_1","output_index":0,"sequence_number":3}"#,
+            r#"data: {"type":"response.output_item.done","item":{"id":"fc_1","type":"function_call","status":"completed","arguments":"{}","call_id":"call_1","name":"datetime"},"output_index":0,"sequence_number":4}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":5}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("date".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut tool_completes = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ToolCallComplete { id, name, args, .. } => {
+                    tool_completes.push((id, name, args));
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(tool_completes.len(), 1);
+        assert_eq!(tool_completes[0].0, "call_1");
+        assert_eq!(tool_completes[0].1, "datetime");
+        assert_eq!(tool_completes[0].2, serde_json::json!({}));
     }
 
     #[tokio::test]

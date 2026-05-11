@@ -707,7 +707,7 @@ impl AgentMobToolSurface {
         if first_delegate {
             let notice = if wired {
                 "Implicit delegation mob created. Helpers are wired to you via comms. \
-                 Use `send` to communicate. The mob persists across turns."
+                 Use `send_message` to communicate. The mob persists across turns."
             } else {
                 "Implicit delegation mob created. The mob persists across turns. \
                  Use `mob_check_member` to poll helper status."
@@ -1215,6 +1215,154 @@ fn tool_def(name: &str, description: &str, input_schema: serde_json::Value) -> A
     })
 }
 
+fn tool_config_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Tool category switches for a spawned member/profile.",
+        "properties": {
+            "builtins": {"type": "boolean", "description": "Enable built-in task/file/utility tools."},
+            "shell": {"type": "boolean", "description": "Enable shell/background job tools."},
+            "comms": {"type": "boolean", "description": "Enable peer messaging tools."},
+            "memory": {"type": "boolean", "description": "Enable semantic memory tools."},
+            "mob": {"type": "boolean", "description": "Enable mob/delegation tools."},
+            "mob_tasks": {"type": "boolean", "description": "Enable shared task-list tools."},
+            "schedule": {"type": "boolean", "description": "Enable schedule tools."},
+            "image_generation": {"type": "boolean", "description": "Enable image generation tools."},
+            "mcp": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Configured MCP server names to connect."
+            }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn inline_profile_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Inline member profile. Required field: model.",
+        "properties": {
+            "model": {"type": "string", "description": "Model for this helper/member."},
+            "skills": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Skill references to preload."
+            },
+            "tools": tool_config_schema(),
+            "peer_description": {"type": "string", "description": "Human-readable role shown to peers."},
+            "external_addressable": {"type": "boolean", "description": "Whether external callers can address this member."},
+            "backend": {"type": "string", "enum": ["session", "external"], "description": "Optional backend override."},
+            "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"], "description": "Member runtime mode."},
+            "provider_params": {"type": "object", "description": "Provider-specific model parameters."}
+        },
+        "required": ["model"],
+        "additionalProperties": true
+    })
+}
+
+fn spawn_tooling_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Controls the helper/member tool surface. Use {\"mode\":\"inherit_parent\"} to inherit current tools, optionally with allow_overlay/deny_overlay. Use profile+inline to request explicit model/tools such as shell.",
+        "properties": {
+            "mode": {
+                "type": "string",
+                "enum": ["inherit_parent", "minimal", "profile"],
+                "description": "inherit_parent = current visible tools; minimal = comms only; profile = realm or inline profile."
+            },
+            "allow_overlay": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional allow-list of tool names/categories to keep."
+            },
+            "deny_overlay": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Optional deny-list of tool names/categories to remove."
+            },
+            "source": {
+                "type": "object",
+                "description": "Only for mode=profile. Examples: {\"type\":\"realm_profile\",\"name\":\"writer\"} or {\"type\":\"inline\",\"model\":\"gpt-5.5\",\"tools\":{\"builtins\":true,\"shell\":true,\"comms\":true}}.",
+                "properties": {
+                    "type": {"type": "string", "enum": ["realm_profile", "inline"]},
+                    "name": {"type": "string", "description": "Realm profile name when type=realm_profile."},
+                    "model": {"type": "string", "description": "Inline profile model when type=inline."},
+                    "tools": tool_config_schema(),
+                    "skills": {"type": "array", "items": {"type": "string"}},
+                    "peer_description": {"type": "string"},
+                    "external_addressable": {"type": "boolean"},
+                    "backend": {"type": "string", "enum": ["session", "external"]},
+                    "runtime_mode": {"type": "string", "enum": ["autonomous_host", "turn_driven"]},
+                    "provider_params": {"type": "object"}
+                },
+                "required": ["type"],
+                "additionalProperties": true
+            }
+        },
+        "required": ["mode"],
+        "additionalProperties": false
+    })
+}
+
+fn mob_definition_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Explicit mob definition. Minimal useful shape: {\"id\":\"mob-id\",\"profiles\":{\"role\":{\"model\":\"gpt-5.5\",\"tools\":{\"builtins\":true,\"shell\":true,\"comms\":true}}}}.",
+        "properties": {
+            "id": {"type": "string", "description": "Unique mob id."},
+            "profiles": {
+                "type": "object",
+                "description": "Map from role/profile name to inline profile or {\"realm_profile\":\"name\"}.",
+                "additionalProperties": {
+                    "oneOf": [
+                        inline_profile_schema(),
+                        {
+                            "type": "object",
+                            "properties": {
+                                "realm_profile": {"type": "string"}
+                            },
+                            "required": ["realm_profile"],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            },
+            "wiring": {
+                "type": "object",
+                "description": "Optional automatic peer wiring.",
+                "properties": {
+                    "auto_wire_orchestrator": {"type": "boolean"},
+                    "role_wiring": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "a": {"type": "string"},
+                                "b": {"type": "string"}
+                            },
+                            "required": ["a", "b"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "additionalProperties": false
+            },
+            "backend": {
+                "type": "object",
+                "properties": {
+                    "default": {"type": "string", "enum": ["session", "external"]}
+                },
+                "additionalProperties": true
+            },
+            "flows": {"type": "object", "description": "Optional named flow definitions."},
+            "topology": {"type": "object", "description": "Optional role dispatch topology."}
+        },
+        "required": ["id"],
+        "additionalProperties": true
+    })
+}
+
 #[cfg(test)]
 fn build_tool_defs() -> Arc<[Arc<ToolDef>]> {
     build_tool_defs_with_profile_support(false, false)
@@ -1231,8 +1379,10 @@ fn build_tool_defs_with_profile_support(
              WHAT IT DOES:\n\
              Creates a disposable helper agent that runs your task autonomously. On first call, \
              an implicit mob is created behind the scenes to manage helpers. Each subsequent call \
-             spawns a new helper into that same mob. Helpers are auto-wired to you for comms \
-             (messaging) but run independently -- they do not share your session or memory.\n\n\
+             spawns a new helper into that same mob. Helpers are wired back to you for comms \
+             (messaging) when your session has a comms identity; the response's wired field \
+             tells you whether that wiring succeeded. Helpers run independently -- they do not \
+             share your session or memory.\n\n\
              HELPERS ARE DISPOSABLE:\n\
              Each helper gets its own session that exists only for the delegated task. Helpers \
              do not persist between your turns. Once a helper completes or is retired, its session \
@@ -1260,7 +1410,7 @@ fn build_tool_defs_with_profile_support(
              1. Call mob_check_member with the mob_id (returned in the delegate response) and \
                 the member_id you provided (or the auto-generated one from the response).\n\
              2. Status will be 'running', 'completed', or 'failed'.\n\
-             3. The helper may also send you a message via comms when done.\n\
+             3. If wired=true, the helper may also send you a message via comms when done.\n\
              Avoid tight polling loops -- check after meaningful intervals or wait for a comms \
              message.\n\n\
              EXAMPLES:\n\
@@ -1284,10 +1434,7 @@ fn build_tool_defs_with_profile_support(
                         "type": "string",
                         "description": "Extra instructions appended to the helper's system prompt"
                     },
-                    "tooling": {
-                        "type": "object",
-                        "description": "Spawn tooling mode. Controls the helper's model and tool surface. Options: {\"mode\":\"inherit_parent\"} (default, inherits your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Overlays: allow_overlay/deny_overlay arrays narrow the tool set."
-                    }
+                    "tooling": spawn_tooling_schema()
                 },
                 "required": ["task"]
             }),
@@ -1324,10 +1471,7 @@ fn build_tool_defs_with_profile_support(
             json!({
                 "type": "object",
                 "properties": {
-                    "definition": {
-                        "type": "object",
-                        "description": "Full mob definition (id, profiles, wiring, flows, etc.)"
-                    }
+                    "definition": mob_definition_schema()
                 },
                 "required": ["definition"]
             }),
@@ -1400,10 +1544,7 @@ fn build_tool_defs_with_profile_support(
                         "type": "boolean",
                         "description": "If true, auto-wire bidirectional comms with the orchestrator after spawn."
                     },
-                    "tooling": {
-                        "type": "object",
-                        "description": "Override the profile's model/tool config. Options: {\"mode\":\"inherit_parent\"} (your tools), {\"mode\":\"minimal\"} (comms only), or {\"mode\":\"profile\",\"source\":{\"type\":\"realm_profile\",\"name\":\"...\"}} / {\"mode\":\"profile\",\"source\":{\"type\":\"inline\",\"model\":\"...\",\"tools\":{...}}}. Add allow_overlay/deny_overlay arrays to narrow the tool set."
-                    }
+                    "tooling": spawn_tooling_schema()
                 },
                 "required": ["mob_id", "profile", "member_id"]
             }),
@@ -2802,6 +2943,45 @@ mod tests {
         let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
         let required = delegate.input_schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("task")));
+    }
+
+    #[test]
+    fn delegate_schema_exposes_spawn_tooling_controls() {
+        let defs = build_tool_defs();
+        let delegate = defs.iter().find(|d| d.name == "delegate").unwrap();
+        let tooling = &delegate.input_schema["properties"]["tooling"];
+        assert_eq!(tooling["properties"]["mode"]["enum"][0], "inherit_parent");
+        assert_eq!(tooling["properties"]["mode"]["enum"][2], "profile");
+        assert!(
+            tooling["properties"]["source"]["properties"]["tools"]["properties"]
+                .get("shell")
+                .is_some(),
+            "delegate tooling schema must expose inline profile shell access"
+        );
+        assert!(
+            tooling["properties"].get("allow_overlay").is_some()
+                && tooling["properties"].get("deny_overlay").is_some(),
+            "delegate tooling schema must expose access overlays"
+        );
+    }
+
+    #[test]
+    fn mob_create_schema_exposes_definition_profile_shape() {
+        let defs = build_tool_defs();
+        let mob_create = defs.iter().find(|d| d.name == "mob_create").unwrap();
+        let definition = &mob_create.input_schema["properties"]["definition"];
+        assert_eq!(definition["required"][0], "id");
+        assert!(
+            definition["properties"]["profiles"]["additionalProperties"]["oneOf"][0]["properties"]
+                ["tools"]["properties"]
+                .get("shell")
+                .is_some(),
+            "mob_create definition schema must expose profile tool category switches"
+        );
+        assert!(
+            definition["properties"].get("wiring").is_some(),
+            "mob_create definition schema must expose wiring"
+        );
     }
 
     #[tokio::test]

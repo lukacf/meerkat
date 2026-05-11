@@ -862,7 +862,10 @@ export interface SessionOptions {
   enableBuiltins?: boolean;
   enableShell?: boolean;
   enableMemory?: boolean;
+  enableSchedule?: boolean;
   enableMob?: boolean;
+  enableWebSearch?: boolean;
+  toolFilter?: WireToolFilter;
   keepAlive?: boolean;
   commsName?: string;
   peerMeta?: Record<string, unknown>;

@@ -206,6 +206,9 @@ pub struct MeerkatRunInput {
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
@@ -269,6 +272,7 @@ fn mcp_resume_requires_rebuild(input: &MeerkatResumeInput) -> bool {
             .is_some_and(|cfg| cfg.enable_shell.is_some())
         || input.enable_memory.is_some()
         || input.enable_mob.is_some()
+        || input.enable_web_search.is_some()
         || input.budget_limits.is_some()
         || input.preload_skills.is_some()
         || input.comms_name.is_some()
@@ -991,6 +995,9 @@ pub struct MeerkatResumeInput {
     /// Enable mob tools.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Provider-specific parameters (e.g., thinking config).
     #[serde(default)]
     pub provider_params: Option<serde_json::Value>,
@@ -2875,6 +2882,7 @@ async fn handle_meerkat_help(
         hooks_override: None,
         enable_memory: Some(false),
         enable_mob: Some(false),
+        enable_web_search: Some(false),
         provider_params: None,
         budget_limits: None,
         preload_skills: Some(meerkat::help::platform_preload_skills()),
@@ -3089,6 +3097,7 @@ async fn handle_meerkat_run(
         override_schedule: ToolCategoryOverride::Inherit,
         override_mob: ToolCategoryOverride::Inherit,
         override_image_generation: ToolCategoryOverride::Inherit,
+        override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
         schedule_tools: None,
         mob_tool_authority_context: None,
         preload_skills,
@@ -3106,6 +3115,7 @@ async fn handle_meerkat_run(
         max_inline_peer_notifications: None,
         app_context: input.app_context.clone(),
         additional_instructions: input.additional_instructions.clone(),
+        initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: input.shell_env.clone(),
         resume_override_mask: ResumeOverrideMask {
             provider: llm_binding.provider_overridden,
@@ -3116,6 +3126,7 @@ async fn handle_meerkat_run(
             keep_alive: keep_alive_override.is_some(),
             comms_name: input.comms_name.is_some(),
             peer_meta: input.peer_meta.is_some(),
+            override_web_search: input.enable_web_search.is_some(),
             ..Default::default()
         },
         blob_store_override: None,
@@ -3456,6 +3467,7 @@ async fn handle_meerkat_resume(
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
+            override_web_search: ToolCategoryOverride::from_override(input.enable_web_search),
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills: preload_skills.clone(),
@@ -3480,6 +3492,7 @@ async fn handle_meerkat_resume(
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: input.additional_instructions.clone(),
+            initial_metadata_entries: std::collections::BTreeMap::new(),
             shell_env: None,
             resume_override_mask: ResumeOverrideMask {
                 model: input.model.is_some(),
@@ -3491,6 +3504,7 @@ async fn handle_meerkat_resume(
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: input.comms_name.is_some(),
                 peer_meta: input.peer_meta.is_some(),
+                override_web_search: input.enable_web_search.is_some(),
                 ..Default::default()
             },
             blob_store_override: None,
@@ -5075,6 +5089,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5124,6 +5139,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5227,6 +5243,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5308,6 +5325,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5369,6 +5387,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5501,6 +5520,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5619,6 +5639,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5735,6 +5756,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5830,6 +5852,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,
@@ -5922,6 +5945,7 @@ mod tests {
                 hooks_override: None,
                 enable_memory: None,
                 enable_mob: None,
+                enable_web_search: None,
                 provider_params: None,
                 budget_limits: None,
                 preload_skills: None,

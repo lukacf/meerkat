@@ -75,7 +75,7 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
         combined_findings.push(Finding {
             key: FindingKey {
                 rule: "OwnershipLedgerDocDrift".into(),
-                path: "docs/architecture/finite-ownership-ledger.md".into(),
+                path: ownership_ledger::DOC_PATH.into(),
                 symbol: "finite-ownership-ledger".into(),
             },
             severity: "error".into(),
@@ -96,7 +96,8 @@ pub fn rmat_audit(args: RmatAuditArgs) -> Result<()> {
 
     if !ownership_doc_in_sync {
         bail!(
-            "ownership ledger doc drift:\n- docs/architecture/finite-ownership-ledger.md is stale relative to typed ownership registry"
+            "ownership ledger doc drift:\n- {} is stale relative to typed ownership registry",
+            ownership_ledger::DOC_PATH
         );
     }
 

@@ -1,5 +1,10 @@
 # MeerkatMachine State Scope + Session Identity Audit
 
+> **Current status (0.6.5):** Historical wave-c audit input. The state-scope
+> classifications remain useful background, but the pre-0.6.5 realtime
+> attachment fields described here were superseded at the public boundary by the
+> live-adapter MVP and caller-initiated `live/*` channels.
+
 Wave-C preparation. This audit enumerates every field in the MeerkatMachine
 DSL state schema, classifies each by actual lifetime scope, and then
 formalizes the session identity contract that MeerkatMachine presupposes.

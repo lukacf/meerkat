@@ -23,8 +23,11 @@ Mob contract notes:
 
 - CLI `run`/`run --resume` include `mob_*` tools via `meerkat-mob-mcp` dispatcher composition when mob tools are enabled (`--tools full` or config `tools.mob_enabled=true`).
 - CLI `mob ...` commands provide helper/artifact operational verbs. Mob lifecycle creation/wiring/member management is through agent `mob_*` tools or RPC `mob/*`.
-- RPC/REST/MCP/SDK surfaces gain mob capability by composing `meerkat-mob-mcp`
-  (`MobMcpState` + `MobMcpDispatcher`) into `SessionBuildOptions.external_tools`.
+- RPC/REST/MCP/SDK host integrations use the typed `mob/*` or `meerkat_mob_*`
+  control planes. Agent-facing `mob_*` tools are composed through
+  `SessionBuildOptions.mob_tools` with `MobMcpState` +
+  `AgentMobToolSurfaceFactory`; `external_tools` remains for callback and
+  MCP-backed dispatchers.
 
 For full mob behavior details (runtime model, flows, and surface matrix), also load:
 `references/mobs.md`
@@ -57,7 +60,6 @@ rkat session list [--limit N] [--offset N] [--label KEY=VALUE]
 rkat session show <ID>
 rkat session delete <ID>
 rkat session interrupt <ID>
-rkat live open|status|close session <SESSION-ID>
 rkat blob get <BLOB-ID> [--output <FILE>] [--json]
 rkat realm current|list|show|create|delete|prune ...
 rkat mcp add|remove|list|get ...
@@ -77,6 +79,7 @@ rkat capabilities
 rkat doctor
 rkat-rpc                                # JSON-RPC stdio
 rkat-rpc --tcp 127.0.0.1:9000           # JSON-RPC over TCP (stdio is default)
+rkat-rpc --tcp 127.0.0.1:9000 --live-ws 127.0.0.1:9001
 ```
 
 CLI keep-alive terminology:
@@ -104,7 +107,7 @@ Important `rkat run` options:
 ```
 
 Hard CLI negatives: no `rkat sessions`, no `rkat resume`, no `rkat rpc`, no
-`rkat image`, no `--tools all`, no `rkat blob get -o`, no
+`rkat live`, no `rkat image`, no `--tools all`, no `rkat blob get -o`, no
 `rkat session show --json`, no `rkat models --json`, no
 `rkat capabilities --json`.
 
@@ -161,29 +164,50 @@ rkat-rest --realm team-alpha --instance rest-1 --realm-backend sqlite
 
 Core endpoints:
 
+- `POST /help` — ask Meerkat usage help with the embedded platform skill
 - `GET /sessions` — list sessions
 - `POST /sessions` — create and run a new session
 - `GET /sessions/{id}` — get session details
+- `GET /sessions/{id}/status` — get a session's current runtime state
 - `GET /sessions/{id}/history` — get committed transcript history
 - `DELETE /sessions/{id}` — archive (remove) a session
 - `POST /sessions/{id}/interrupt` — interrupt an in-flight turn
+- `POST /sessions/{id}/system_context` — append staged runtime system context
 - `POST /sessions/{id}/messages` — continue an existing session
+- `POST /sessions/{id}/external-events` — queue a runtime-backed external event
+- `POST /sessions/{id}/peer-response-terminal` — admit a correlated terminal peer response
 - `GET /sessions/{id}/events` — SSE stream for agent events
-- `POST /sessions/{id}/event` — (legacy) push external event
 - `POST /requests/{request_id}/cancel` — cancel uncommitted in-flight work when `X-Meerkat-Request-Id` is supplied
+- `GET /schedule/tools`, `POST /schedule/call`
+- `GET|POST /schedules`
+- `GET|PATCH|DELETE /schedules/{id}`
+- `POST /schedules/{id}/pause`, `POST /schedules/{id}/resume`
+- `GET /schedules/{id}/occurrences`
 - `GET /skills` — list skills with provenance
 - `GET /health`
 - `GET /models/catalog` — curated model catalog with provider profiles
 - `GET /capabilities`
+- `GET /runtime/host_info`, `GET /runtime/capabilities`, `GET /runtime/health`
 - `GET|PUT|PATCH /config`
 - `POST /sessions/{id}/mcp/add` — stage live MCP server add (feature-gated)
 - `POST /sessions/{id}/mcp/remove` — stage live MCP server remove (feature-gated)
 - `POST /sessions/{id}/mcp/reload` — stage live MCP server reload (feature-gated)
 - `POST /comms/send` (feature-gated)
 - `GET /comms/peers` (feature-gated)
-- `GET /mob/tools` — list mob tools (feature-gated)
-- `POST /mob/call` — invoke a mob tool (feature-gated)
 - `GET /mob/{id}/events` — SSE stream for mob events (feature-gated)
+- `POST /mob/{id}/spawn-helper`, `POST /mob/{id}/fork-helper`
+- `POST /mob/{id}/wait-kickoff`
+- `GET /mob/{id}/members/{agent_identity}/status`
+- `POST /mob/{id}/members/{agent_identity}/cancel`
+- `POST /mob/{id}/members/{agent_identity}/respawn`
+- `GET|POST /auth/profiles`
+- `GET|DELETE /auth/bindings/{binding_id}`
+- `POST /auth/bindings/{binding_id}/test`
+- `POST /auth/login/start`, `POST /auth/login/complete`
+- `POST /auth/login/device/start`, `POST /auth/login/device/complete`
+- `GET /auth/bindings/{binding_id}/status`
+- `POST /auth/bindings/{binding_id}/logout`
+- `GET /realms`, `GET /realms/{id}`
 
 Config envelope shape (`GET/PUT/PATCH /config`):
 
@@ -220,12 +244,14 @@ Start the server (stdio is default; `--tcp <addr>` exposes the same protocol ove
 ```bash
 rkat-rpc --realm team-alpha
 rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000
+rkat-rpc --realm team-alpha --tcp 127.0.0.1:9000 --live-ws 127.0.0.1:9001
 ```
 
 ### Sessions, turns, history
 
 - `initialize`
 - `session/create`, `session/list`, `session/read`, `session/history`, `session/archive`
+- `session/fork_at`, `session/fork_replace`
 - `session/external_event`, `session/peer_response_terminal`, `session/inject_context`
 - `session/stream_open` / `session/stream_close` — event streaming
 - `events/latest_cursor`, `events/list_since`, `events/snapshot` — cursor-based event reads
@@ -255,6 +281,7 @@ rkat blob get <BLOB-ID> --output meerkat.png
 - `live/refresh` — apply mutable session config (instructions/tools/audio) to an open live channel
 
 Set `model: "gpt-realtime-2"` on `session/create` and call `live/open` to open a live channel; capability is gated on `ModelCapabilities.realtime`.
+The `live/*` methods require `rkat-rpc --live-ws <addr>` so the server can return a WebSocket transport bootstrap.
 
 ### Auth (realm/binding model)
 
@@ -293,7 +320,8 @@ non-interactive api-key login writes `dev:default_<provider>`.
 
 ### Skills, models, capabilities, runtime, approvals
 
-- `skills/list`, `skills/inspect`
+- `help/ask`
+- `skills/list` (no advertised `skills/inspect`; that method returns method-not-found)
 - `models/catalog`
 - `capabilities/get`
 - `runtime/host_info`, `runtime/capabilities`, `runtime/health`
@@ -371,9 +399,11 @@ Core tools:
 
 - `meerkat_run` — create and run a new session
 - `meerkat_resume` — continue an existing session
+- `meerkat_help` — ask Meerkat usage help with the embedded platform skill
 - `meerkat_read` — get session details
 - `meerkat_history` — get committed transcript history
 - `meerkat_sessions` — list sessions
+- `meerkat_blob_get` — fetch raw blob bytes and metadata by blob id
 - `meerkat_interrupt` — cancel in-flight turn
 - `meerkat_archive` — archive (remove) a session
 - `meerkat_config` — get/set/patch config
@@ -388,7 +418,7 @@ Core tools:
 Mob tools (feature-gated, public MCP names — distinct from the agent-internal `mob_*` tool surface):
 
 - Lifecycle: `meerkat_mob_create`, `meerkat_mob_list`, `meerkat_mob_status`, `meerkat_mob_lifecycle`
-- Membership: `meerkat_mob_spawn`, `meerkat_mob_spawn_many`, `meerkat_mob_retire`, `meerkat_mob_respawn`, `meerkat_mob_force_cancel`, `meerkat_mob_wait_kickoff`
+- Membership: `meerkat_mob_spawn`, `meerkat_mob_spawn_many`, `meerkat_mob_retire`, `meerkat_mob_respawn`, `meerkat_mob_force_cancel`, `meerkat_mob_wait_kickoff`, `meerkat_mob_wait_ready`
 - Wiring: `meerkat_mob_wire`, `meerkat_mob_unwire`
 - Member interaction: `meerkat_mob_member_send`, `meerkat_mob_append_system_context`
 - Flows: `meerkat_mob_events`, `meerkat_mob_flows`, `meerkat_mob_flow_run`, `meerkat_mob_flow_status`, `meerkat_mob_flow_cancel`
@@ -716,7 +746,7 @@ v2 flows still support flat `steps` for backward compatibility; when `root` is p
 
 ### Agent-facing delegation tools
 
-`AgentMobToolSurface` provides 8 agent-internal mob tools:
+`AgentMobToolSurface` provides 10 agent-internal mob tools:
 
 | Tool | Purpose |
 |------|---------|
@@ -728,5 +758,7 @@ v2 flows still support flat `steps` for backward compatibility; when `root` is p
 | `mob_check_member` | Check a member's execution status and output |
 | `mob_list_members` | List members of a mob |
 | `mob_list` | List all mobs |
+| `mob_wire` | Wire a local mob member to a local or typed external peer |
+| `mob_unwire` | Remove a mob wiring relationship |
 
 These tools are composed via `MobToolsFactory` late-binding. Operator capabilities are runtime-injected.

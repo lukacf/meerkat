@@ -1,5 +1,11 @@
 # Wave (c) — Shell-Code Rebuild Plan
 
+> **Current status (0.6.5):** This is a historical implementation plan for the
+> wave-c rebuild, not a current API or architecture reference. Several realtime
+> and runtime file names below were valid planning targets during the wave but
+> have since been superseded by the live-adapter MVP (`meerkat-live`, `live/*`
+> RPC methods, and `rkat-rpc --live-ws`) and the SessionRuntime split.
+
 **Branch:** `dogma/wave-a-demolition`. Wave-c opens on the foundation crates (`meerkat-machine-schema`, `meerkat-machine-kernels`, `meerkat-machine-codegen`, `meerkat-core`, `meerkat-contracts`) green. As of this revision, wave-b is landed through B-10 (commits `d3a4b3df8`, `691e9d682`, `d5cccf6bc`, `0e66b2346`, `77554ed80`, `99e155992`); downstream crates are broken.
 
 Wave-c is a retyping pass on consumer code plus a short list of design decisions where the typed foundation collapsed a formerly-implicit seam. No shadow state is reintroduced. Callers that became obsolete because wave-a deleted their semantic owner are *deleted*, not retyped. Six late findings (roster/peer separation, DSL peer retype, composition-dispatcher producer+consumer wiring, OwnerProvided binding extension, SessionStore append-only hardening, persistence v0→v1 migration) fold into the task list rather than living as follow-ups.

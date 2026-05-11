@@ -8965,6 +8965,14 @@
   },
   "LiveOpenParams": {
     "$defs": {
+      "LiveOpenTransport": {
+        "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
+        "enum": [
+          "websocket",
+          "webrtc"
+        ],
+        "type": "string"
+      },
       "RealtimeTurningMode": {
         "description": "Turning mode for a provider realtime session.",
         "enum": [
@@ -8979,6 +8987,16 @@
     "properties": {
       "session_id": {
         "type": "string"
+      },
+      "transport": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/LiveOpenTransport"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "turning_mode": {
         "anyOf": [
@@ -9155,6 +9173,33 @@
             "type": "object"
           },
           {
+            "description": "WebRTC bootstrap: client calls `answer_method` with\n[`LiveWebrtcAnswerParams`] using this single-use token. `http_url`\nis optional convenience signaling; JSON-RPC is canonical.",
+            "properties": {
+              "answer_method": {
+                "type": "string"
+              },
+              "http_url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "token": {
+                "type": "string"
+              },
+              "transport": {
+                "const": "webrtc",
+                "type": "string"
+              }
+            },
+            "required": [
+              "transport",
+              "token",
+              "answer_method"
+            ],
+            "type": "object"
+          },
+          {
             "description": "R3-6 (P2): explicit fail-loud variant for unknown core variants.\n\nThe core [`LiveTransportBootstrap`] enum is `#[non_exhaustive]`. When\na future variant (e.g. WebRTC reintroduction per Round-4 T4) lands\nwithout an explicit arm in the wire `From` impl, the conversion\nsurfaces as `Unknown { debug }` rather than silently coercing into\n`Websocket { url: \"\", token: \"\" }`. SDK consumers route on the\n`transport: \"unknown\"` discriminator and treat it as an unsupported\ntransport — never as a usable websocket. The `debug` payload carries\nthe `{:?}` projection of the source variant so server logs name the\nreal shape that needs to be promoted.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor, not\nthe destination.**",
             "properties": {
               "debug": {
@@ -9198,6 +9243,16 @@
     ],
     "title": "LiveOpenResult",
     "type": "object"
+  },
+  "LiveOpenTransport": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Transport requested by `live/open`.\n\nMissing means \"server default\": prefer WebSocket when configured, otherwise\nWebRTC when that is the only configured live transport. This preserves the\npre-WebRTC `live/open` shape while keeping the new branch typed.",
+    "enum": [
+      "websocket",
+      "webrtc"
+    ],
+    "title": "LiveOpenTransport",
+    "type": "string"
   },
   "LiveRefreshResult": {
     "$defs": {
@@ -9578,6 +9633,42 @@
       "audio_played_ms"
     ],
     "title": "LiveTruncateParams",
+    "type": "object"
+  },
+  "LiveWebrtcAnswerParams": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Request payload for `live/webrtc/answer`.",
+    "properties": {
+      "channel_id": {
+        "type": "string"
+      },
+      "offer_sdp": {
+        "type": "string"
+      },
+      "token": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "channel_id",
+      "token",
+      "offer_sdp"
+    ],
+    "title": "LiveWebrtcAnswerParams",
+    "type": "object"
+  },
+  "LiveWebrtcAnswerResult": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "description": "Response payload for `live/webrtc/answer`.",
+    "properties": {
+      "answer_sdp": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "answer_sdp"
+    ],
+    "title": "LiveWebrtcAnswerResult",
     "type": "object"
   },
   "McpLiveOpResponse": {
@@ -25257,6 +25348,33 @@
           "transport",
           "url",
           "token"
+        ],
+        "type": "object"
+      },
+      {
+        "description": "WebRTC bootstrap: client calls `answer_method` with\n[`LiveWebrtcAnswerParams`] using this single-use token. `http_url`\nis optional convenience signaling; JSON-RPC is canonical.",
+        "properties": {
+          "answer_method": {
+            "type": "string"
+          },
+          "http_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "type": "string"
+          },
+          "transport": {
+            "const": "webrtc",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transport",
+          "token",
+          "answer_method"
         ],
         "type": "object"
       },

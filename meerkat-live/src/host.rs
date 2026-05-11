@@ -20,7 +20,7 @@
 //! - `AppendTranscript`  → writes to the injected [`LiveProjectionSink`]
 //!   (user transcripts, assistant deltas/finals, turn-completed projection).
 //! - `DispatchToolCall`  → routes through the injected
-//!   [`meerkat_core::AgentToolDispatcher`] and submits the result back via
+//!   [`LiveToolDispatcher`] and submits the result back via
 //!   [`LiveAdapterCommand::SubmitToolResult`] / `SubmitToolError`.
 //! - `SignalInterrupt`   → calls the sink's `signal_turn_interrupt` (the same
 //!   path the user-facing interrupt RPC uses).
@@ -42,11 +42,13 @@ use indexmap::IndexMap;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::RealtimeTranscriptEvent;
 use meerkat_core::SessionLlmIdentity;
+use meerkat_core::ToolDispatchOutcome;
+use meerkat_core::ToolError;
 use meerkat_core::live_adapter::{
     LiveAdapter, LiveAdapterCommand, LiveAdapterError, LiveAdapterErrorCode,
     LiveAdapterObservation, LiveAdapterStatus, LiveInputChunk, LiveToolResult,
 };
-use meerkat_core::types::{SessionId, StopReason, ToolResult, Usage};
+use meerkat_core::types::{SessionId, StopReason, ToolCall, ToolResult, Usage};
 use serde_json::value::RawValue;
 use tokio::sync::Mutex;
 
@@ -638,6 +640,70 @@ pub enum ObservationRouting {
     Noop,
 }
 
+/// Session-scoped tool executor used by [`LiveAdapterHost`].
+///
+/// The provider only reports a tool call and a live channel id. The host
+/// resolves that channel back to the owning [`SessionId`] and hands the call to
+/// this trait. Production surfaces should implement it by delegating to the
+/// canonical session service / runtime tool dispatcher; tests and compatibility
+/// adapters may wrap a plain [`AgentToolDispatcher`].
+#[async_trait::async_trait]
+pub trait LiveToolDispatcher: Send + Sync {
+    async fn dispatch_live_tool_call(
+        &self,
+        session_id: &SessionId,
+        call: ToolCall,
+    ) -> Result<ToolDispatchOutcome, LiveToolDispatchError>;
+}
+
+/// Error returned by a [`LiveToolDispatcher`].
+#[derive(Debug, Clone, thiserror::Error)]
+#[non_exhaustive]
+pub enum LiveToolDispatchError {
+    #[error(transparent)]
+    Tool(#[from] ToolError),
+    #[error("live tool dispatch rejected: {0}")]
+    Rejected(String),
+    #[error("live tool dispatch internal error: {0}")]
+    Internal(String),
+}
+
+struct AgentLiveToolDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+}
+
+impl AgentLiveToolDispatcher {
+    fn new(inner: Arc<dyn AgentToolDispatcher>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait::async_trait]
+impl LiveToolDispatcher for AgentLiveToolDispatcher {
+    async fn dispatch_live_tool_call(
+        &self,
+        _session_id: &SessionId,
+        call: ToolCall,
+    ) -> Result<ToolDispatchOutcome, LiveToolDispatchError> {
+        let args_string = serde_json::to_string(&call.args).map_err(|err| {
+            LiveToolDispatchError::Internal(format!(
+                "failed to serialize live tool-call arguments: {err}"
+            ))
+        })?;
+        let raw = RawValue::from_string(args_string).map_err(|err| {
+            LiveToolDispatchError::Internal(format!(
+                "failed to create live tool-call argument payload: {err}"
+            ))
+        })?;
+        let view = meerkat_core::types::ToolCallView {
+            id: &call.id,
+            name: &call.name,
+            args: raw.as_ref(),
+        };
+        self.inner.dispatch(view).await.map_err(Into::into)
+    }
+}
+
 /// Runtime-owned host for live provider adapter sessions.
 ///
 /// This is NOT MeerkatMachine state (dogma: adapter must not become a
@@ -663,17 +729,14 @@ pub struct LiveAdapterHost {
     /// lack of a sink is no longer a silent fail-open hidden in an
     /// `Option`.
     projection_sink: Arc<dyn LiveProjectionSink>,
-    /// Late-bindable tool dispatcher.
+    /// Late-bindable session-scoped live tool dispatcher.
     ///
     /// `Mutex<Option<...>>` rather than the prior plain `Option<...>` because
-    /// the dispatcher is constructed *after* the host (the rkat-rpc callback
-    /// channel that backs the dispatcher is initialized by
-    /// `RpcServer::new_with_skill_runtime`, which runs only once the host is
-    /// already wrapped inside `LiveWsState`). A builder-only `with_*` API
-    /// can't reach that point, so we expose [`set_tool_dispatcher`] as a
-    /// late setter. Reads are short and fully sync — never held across an
-    /// `.await`.
-    tool_dispatcher: std::sync::Mutex<Option<Arc<dyn AgentToolDispatcher>>>,
+    /// the dispatcher may be constructed after the host has already been
+    /// wrapped by a transport state. A builder-only `with_*` API can't reach
+    /// that point, so we expose [`set_live_tool_dispatcher`] as a late setter.
+    /// Reads are short and fully sync — never held across an `.await`.
+    tool_dispatcher: std::sync::Mutex<Option<Arc<dyn LiveToolDispatcher>>>,
     /// Optional per-tool-call dispatch timeout. When set, `dispatch_tool_call`
     /// races the dispatcher future against
     /// [`tokio::time::timeout`](tokio::time::timeout); on elapse, the host
@@ -755,28 +818,45 @@ impl LiveAdapterHost {
         self.tool_timeout
     }
 
-    /// Builder: install the agent tool dispatcher.
+    /// Builder: install a legacy agent tool dispatcher.
     ///
     /// Without a dispatcher, observed tool calls return
     /// `ObservationOutcome::ToolCallSkipped { reason: NoDispatcher, .. }`.
-    /// Internally delegates to [`set_tool_dispatcher`] so builder-time and
-    /// post-construction wiring share one code path.
+    /// This compatibility helper wraps the dispatcher in a
+    /// [`LiveToolDispatcher`] that ignores the session id. Production surfaces
+    /// should prefer [`Self::with_live_tool_dispatcher`] so tool execution can
+    /// flow through the session-owned dispatcher.
     #[must_use]
     pub fn with_tool_dispatcher(self, dispatcher: Arc<dyn AgentToolDispatcher>) -> Self {
         self.set_tool_dispatcher(dispatcher);
         self
     }
 
-    /// Late setter for the agent tool dispatcher.
+    /// Builder: install the session-scoped live tool dispatcher.
+    #[must_use]
+    pub fn with_live_tool_dispatcher(self, dispatcher: Arc<dyn LiveToolDispatcher>) -> Self {
+        self.set_live_tool_dispatcher(dispatcher);
+        self
+    }
+
+    /// Late setter for a legacy agent tool dispatcher.
+    ///
+    /// Kept for tests and compatibility. Runtime surfaces should install a
+    /// session-scoped dispatcher with [`Self::set_live_tool_dispatcher`].
+    pub fn set_tool_dispatcher(&self, dispatcher: Arc<dyn AgentToolDispatcher>) {
+        self.set_live_tool_dispatcher(Arc::new(AgentLiveToolDispatcher::new(dispatcher)));
+    }
+
+    /// Late setter for the session-scoped live tool dispatcher.
     ///
     /// Surfaces (rkat-rpc) cannot construct the dispatcher until after the
     /// host has been wrapped inside `LiveWsState`, so a builder-only
-    /// `with_tool_dispatcher` is unreachable for them. This setter accepts
-    /// `&self` (no `mut`) and replaces whatever was previously installed.
+    /// `with_live_tool_dispatcher` is unreachable for them. This setter
+    /// accepts `&self` (no `mut`) and replaces whatever was previously installed.
     /// Subsequent `ToolCallRequested` observations dispatch through the
     /// new value; in-flight dispatches that already cloned an `Arc` to the
     /// previous dispatcher continue running with that one.
-    pub fn set_tool_dispatcher(&self, dispatcher: Arc<dyn AgentToolDispatcher>) {
+    pub fn set_live_tool_dispatcher(&self, dispatcher: Arc<dyn LiveToolDispatcher>) {
         // Lock is brief and never held across an .await — tool dispatch reads
         // load_dispatcher() which clones the Arc and drops the guard before
         // calling dispatch().
@@ -795,7 +875,7 @@ impl LiveAdapterHost {
     /// Returns `None` if no dispatcher has been installed yet, in which case
     /// `dispatch_tool_call` projects `ObservationOutcome::ToolCallSkipped {
     /// reason: NoDispatcher }`.
-    fn load_dispatcher(&self) -> Option<Arc<dyn AgentToolDispatcher>> {
+    fn load_dispatcher(&self) -> Option<Arc<dyn LiveToolDispatcher>> {
         self.tool_dispatcher
             .lock()
             .ok()
@@ -1373,40 +1453,18 @@ impl LiveAdapterHost {
             }
         };
 
-        // Serialize args once so we can hand the dispatcher a `RawValue`
-        // (zero-copy from the dispatcher's perspective; see types.rs:608).
-        let args_string = match serde_json::to_string(&arguments) {
-            Ok(s) => s,
-            Err(_) => {
-                return Ok(ObservationOutcome::ToolCallSkipped {
-                    provider_call_id: provider_call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    reason: ToolDispatchSkipReason::InvalidArguments,
-                });
-            }
-        };
-        let raw: Box<RawValue> = match RawValue::from_string(args_string) {
-            Ok(r) => r,
-            Err(_) => {
-                return Ok(ObservationOutcome::ToolCallSkipped {
-                    provider_call_id: provider_call_id.to_string(),
-                    tool_name: tool_name.to_string(),
-                    reason: ToolDispatchSkipReason::InvalidArguments,
-                });
-            }
-        };
-
-        let view = meerkat_core::types::ToolCallView {
-            id: provider_call_id,
-            name: tool_name,
-            args: &raw,
-        };
+        let session_id = self.channel_session(channel_id).await?;
+        let call = ToolCall::new(
+            provider_call_id.to_string(),
+            tool_name.to_string(),
+            arguments,
+        );
 
         // Race the dispatcher future against the configured timeout (if any).
         // Without a timeout, fall through to the legacy unbounded await so
         // existing surfaces (and tests that don't pause the clock) keep their
         // behavior.
-        let dispatch_call = dispatcher.dispatch(view);
+        let dispatch_call = dispatcher.dispatch_live_tool_call(&session_id, call);
         let dispatch_result = match self.tool_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, dispatch_call).await {
                 Ok(result) => result,

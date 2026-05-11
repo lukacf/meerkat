@@ -43,6 +43,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub override_memory: Option<bool>,
     pub override_mob: Option<bool>,
     pub override_image_generation: Option<bool>,
+    pub override_web_search: Option<bool>,
     pub preload_skills: Option<Vec<SkillKey>>,
     pub app_context: Option<serde_json::Value>,
     pub shell_env: Option<HashMap<String, String>>,
@@ -215,6 +216,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
         || overrides.override_memory.is_some()
         || overrides.override_mob.is_some()
         || overrides.override_image_generation.is_some()
+        || overrides.override_web_search.is_some()
         || overrides.preload_skills.is_some()
         || overrides.app_context.is_some()
         || overrides.shell_env.is_some()
@@ -319,6 +321,7 @@ pub fn resolve_effective_turn_config(
         override_memory: overrides.override_memory.is_some(),
         override_mob: overrides.override_mob.is_some(),
         override_image_generation: overrides.override_image_generation.is_some(),
+        override_web_search: overrides.override_web_search.is_some(),
         preload_skills: overrides.preload_skills.is_some(),
         keep_alive: overrides.keep_alive.is_some(),
         comms_name: overrides.comms_name.is_some(),
@@ -405,6 +408,10 @@ pub fn resolve_effective_turn_config(
             .override_image_generation
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.image_generation),
+        override_web_search: overrides
+            .override_web_search
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.web_search),
         schedule_tools: None,
         preload_skills: overrides
             .preload_skills
@@ -436,6 +443,7 @@ pub fn resolve_effective_turn_config(
             .clone()
             .or_else(|| build_state.app_context.clone()),
         additional_instructions: build_state.additional_instructions.clone(),
+        initial_metadata_entries: std::collections::BTreeMap::new(),
         shell_env: overrides
             .shell_env
             .clone()
@@ -514,6 +522,7 @@ mod tests {
                     mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
                     image_generation: ToolCategoryOverride::Inherit,
+                    web_search: ToolCategoryOverride::Inherit,
                     active_skills: Some(vec![skill_key("persisted-skill")]),
                 },
                 keep_alive: false,

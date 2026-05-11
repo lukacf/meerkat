@@ -21,7 +21,7 @@ committed with the repository:
 
 `rkat-rpc initialize` returns the compiled feature subset at runtime. The
 catalog above is the full documented surface with blob, sessions, events,
-streams, schedule, skills, runtime, realtime, mob, MCP, comms, auth, realm, and
+streams, schedule, skills, runtime, live channels, mob, MCP, comms, auth, realm, and
 approval methods enabled.
 
 ## Surface entry points
@@ -59,7 +59,7 @@ approval methods enabled.
 | `BudgetLimits` | `meerkat_core` | Resource constraints (tokens, duration, tool calls) |
 | `RetryPolicy` | `meerkat_core` | Exponential backoff configuration |
 | `RuntimeBuildMode` | `meerkat_core` | Explicit runtime ownership mode (`SessionOwned` vs `StandaloneEphemeral`) |
-| `SessionRuntimeBindings` | `meerkat_core` | Runtime-backed session bindings (`session_id`, `epoch_id`, ops lifecycle, cursor state) |
+| `SessionRuntimeBindings` | `meerkat_core` | Runtime-backed session bindings (`session_id`, `epoch_id`, ops lifecycle, cursor state, tool visibility owner, and session-owned DSL handles) |
 | `SessionBuildOptions` | `meerkat_core::service` | Build-time surface options including provider params, structured output, hooks, skills, auth binding, external callback/MCP tools, mob tools, schedule tools, and runtime mode |
 | `AuthBindingRef` | `meerkat_core` | Realm-scoped provider credential binding reference carried by sessions and mob members |
 | `BlobPayload` | `meerkat_core` | Blob metadata and bytes returned by blob fetch APIs |
@@ -71,7 +71,7 @@ approval methods enabled.
 | `FlowRunConfig` | `meerkat_mob` | Immutable per-run config snapshot |
 | `LiveAdapterStatus` | `meerkat_core` | Live channel adapter status |
 | `LiveChannelCapabilities` | `meerkat_core` | Capabilities advertised by an open live channel (input/output modalities, continuity mode, tool semantics) |
-| `ModelCapabilities` | `meerkat_models` | Per-model capability set; `realtime: bool` gates whether `live/open` succeeds for a session |
+| `ModelCapabilities` | `meerkat_core::model_profile` | Per-model capability set; `realtime: bool` gates whether `live/open` succeeds for a session |
 
 ## Traits
 
@@ -235,8 +235,9 @@ For mob-only MCP hosts, `meerkat-mob-mcp` also exposes:
 - `meerkat_mob_mcp::public_tools_list`
 - `meerkat_mob_mcp::handle_public_tools_call`
 
-Those helpers are for public host control-plane tools. `MobMcpDispatcher`
-remains the agent-side `mob_*` tool surface.
+Those helpers are for public host control-plane tools. `AgentMobToolSurface`
+remains the agent-side `mob_*` tool surface, late-bound through
+`SessionBuildOptions.mob_tools`.
 
 ### Public mob host methods
 
@@ -245,8 +246,8 @@ agent-internal `mob_*` tool dispatcher:
 
 | Surface | Contract |
 |---------|----------|
-| JSON-RPC / SDKs | `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/spawn`, `mob/spawn_many`, `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/member_send`, `mob/turn_start`, `mob/ingress_interaction`, `mob/events`, `mob/stream_open`, `mob/stream_close`, flow, work-lane, wait, snapshot, destroy, supervisor, and profile methods |
-| MCP | `meerkat_mob_*` tools from `meerkat-mob-mcp::public_tools_list()` plus MCP event stream tools from `rkat-mcp` |
+| JSON-RPC / SDKs | `mob/create`, `mob/list`, `mob/status`, `mob/lifecycle`, `mob/spawn`, `mob/spawn_many`, `mob/ensure_member`, `mob/reconcile`, `mob/list_members_matching`, `mob/members`, `mob/retire`, `mob/respawn`, `mob/wire`, `mob/unwire`, `mob/member_send`, `mob/turn_start`, `mob/ingress_interaction`, `mob/append_system_context`, `mob/events`, flow methods, helper methods, work-lane methods, `mob/wait_kickoff`, `mob/wait_ready`, `mob/snapshot`, `mob/destroy`, supervisor methods, profile methods, and stream open/close |
+| MCP | `meerkat_mob_*` tools from `meerkat-mob-mcp::public_tools_list()`, including lifecycle, membership, wiring, member interaction, events, flows, `meerkat_mob_wait_kickoff`, `meerkat_mob_wait_ready`, and profile CRUD (`meerkat_mob_profile_create|get|list|update|delete`) |
 | REST | Helper and observation endpoints (`/mob/{id}/events`, helper spawn/fork, member status/cancel/respawn, wait kickoff); full typed lifecycle remains RPC/SDK |
 
 For cross-surface behavior and examples (CLI/RPC/REST/MCP/Python/TypeScript), see [Mobs](/guides/mobs).
@@ -319,7 +320,7 @@ See the [skills guide](/guides/skills) for usage details.
 | `WireSessionSummary` | Lightweight session summary |
 | `WireEvent` | Event wire format |
 | `WireUsage` | Token/cost usage breakdown |
-| `ContractVersion` | Semver version (`0.6.2` currently) |
+| `ContractVersion` | Semver version (`0.6.5` currently) |
 | `CoreCreateParams` | Session creation parameters |
 | `OutputSchema` + `structured_output_retries` | Structured-output schema and retry settings carried directly on session/turn request surfaces |
 | `CommsParams` | Keep-alive + comms identity parameters |

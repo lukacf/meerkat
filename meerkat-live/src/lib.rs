@@ -9,13 +9,21 @@
 
 pub mod host;
 pub mod transport;
+#[cfg(feature = "webrtc")]
+pub mod webrtc;
 
 pub use host::{
     DEFAULT_LIVE_TOOL_TIMEOUT, LiveAdapterHost, LiveAdapterHostError, LiveChannelId,
-    LiveProjectionError, LiveProjectionSink, LiveTranscriptIdentity, NoOpProjectionSink,
-    ObservationOutcome, ObservationRouting, ToolDispatchSkipReason,
+    LiveProjectionError, LiveProjectionSink, LiveToolDispatchError, LiveToolDispatcher,
+    LiveTranscriptIdentity, NoOpProjectionSink, ObservationOutcome, ObservationRouting,
+    ToolDispatchSkipReason,
 };
 pub use transport::{LIVE_WS_PATH, LiveWsState, live_ws_router, serve_live_ws_listener};
+#[cfg(feature = "webrtc")]
+pub use webrtc::{
+    LIVE_WEBRTC_ANSWER_METHOD, LIVE_WEBRTC_ANSWER_PATH, LiveWebrtcError, LiveWebrtcState,
+    WebrtcAudioBridge, live_webrtc_router, serve_live_ws_and_webrtc_listener,
+};
 
 // E26 regression: `meerkat-live` must not depend on `meerkat-runtime`. The
 // dependency direction is: `meerkat-live` owns the live-adapter host
@@ -45,6 +53,26 @@ mod e26_dependency_direction {
                 !trimmed.starts_with("meerkat-runtime"),
                 "E26 regression: meerkat-live must not depend on meerkat-runtime; \
                  found Cargo.toml line: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn webrtc_media_dependencies_are_feature_gated() {
+        let cargo_toml = include_str!("../Cargo.toml");
+        assert!(
+            cargo_toml.lines().any(|line| line.trim() == "default = []"),
+            "meerkat-live default feature set must not enable WebRTC/media"
+        );
+        for dep in ["webrtc", "webrtc-media", "opus", "rubato"] {
+            let needle = format!("{dep} = ");
+            let dep_line = cargo_toml
+                .lines()
+                .find(|line| line.trim_start().starts_with(&needle))
+                .unwrap_or_else(|| panic!("missing optional {dep} dependency"));
+            assert!(
+                dep_line.contains("optional = true"),
+                "{dep} dependency must stay optional: {dep_line}"
             );
         }
     }

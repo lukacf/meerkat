@@ -5068,6 +5068,17 @@ mod tests {
     }
 
     #[test]
+    fn browser_smoke_scenarios_use_dev_wasm_profile() {
+        for id in [47, 48] {
+            let spec = scenario_spec(id).unwrap();
+            assert!(
+                spec.env.contains(&("MEERKAT_WEB_WASM_PROFILE", "dev")),
+                "scenario {id} should reuse the browser smoke WASM profile"
+            );
+        }
+    }
+
+    #[test]
     fn smoke_scheduler_classifies_high_pressure_specs() {
         assert_eq!(
             smoke_runtime_class(suite_spec("mob-flow-runtime").unwrap()),

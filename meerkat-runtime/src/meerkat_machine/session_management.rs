@@ -680,6 +680,47 @@ impl MeerkatMachine {
         }
     }
 
+    /// Route transcript fork/edit admission through the runtime machine
+    /// authority so RPC shells do not reconstruct activity from projected
+    /// phase and input-list facts.
+    pub async fn admit_transcript_edit(
+        &self,
+        session_id: &SessionId,
+        running_behavior: meerkat_core::TranscriptEditRunningBehavior,
+    ) -> Result<(), meerkat_core::TranscriptEditAdmissionError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::AdmitTranscriptEdit {
+                    session_id: session_id.clone(),
+                    running_behavior,
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineCommandResult::TranscriptEditAdmission(result)) => result,
+            Ok(other) => {
+                tracing::error!(
+                    ?other,
+                    "admit_transcript_edit: unexpected command result variant"
+                );
+                Err(
+                    meerkat_core::TranscriptEditAdmissionError::SourceNotMaterialized {
+                        session_id: session_id.clone(),
+                    },
+                )
+            }
+            Err(error) => {
+                tracing::error!(?error, "admit_transcript_edit command failed");
+                Err(
+                    meerkat_core::TranscriptEditAdmissionError::SourceNotMaterialized {
+                        session_id: session_id.clone(),
+                    },
+                )
+            }
+        }
+    }
+
     /// Check whether a session has an active RuntimeLoop or attachment in
     /// progress. Returns `false` only for `Queuing` sessions (registered via
     /// `prepare_bindings()` with no executor) and unknown sessions.

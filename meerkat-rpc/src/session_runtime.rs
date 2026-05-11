@@ -47,7 +47,8 @@ use meerkat_core::service::{
     SessionHistoryPage, SessionHistoryQuery, SessionQuery, SessionService,
     SessionServiceControlExt, SessionServiceHistoryExt, SessionServiceTranscriptEditExt,
     SessionSummary, SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
-    StartTurnRuntimeSemantics,
+    StartTurnRuntimeSemantics, TranscriptEditAdmissionError, TranscriptEditAdmissionRequest,
+    TranscriptEditAuthority, TranscriptEditRunningBehavior, TranscriptEditSourceLifecycle,
 };
 use meerkat_core::skills::{SkillError, SourceIdentityRegistry};
 use meerkat_core::types::{Message, RunResult, SessionId};
@@ -6745,27 +6746,32 @@ impl SessionRuntime {
             .map(Into::into)
     }
 
-    async fn reject_active_transcript_edit(&self, session_id: &SessionId) -> Result<(), RpcError> {
-        let runtime_running = self
-            .runtime_adapter
-            .runtime_state(session_id)
-            .await
-            .is_ok_and(|state| matches!(state, RuntimeState::Running));
-        let has_active_inputs = self
-            .runtime_adapter
-            .list_active_inputs(session_id)
-            .await
-            .is_ok_and(|inputs| !inputs.is_empty());
-        if runtime_running || has_active_inputs {
-            return Err(RpcError {
-                code: error::SESSION_BUSY,
-                message: format!(
-                    "session {session_id} is active; transcript fork uses running_behavior=reject"
-                ),
-                data: None,
-            });
+    fn transcript_edit_admission_error_to_rpc(err: TranscriptEditAdmissionError) -> RpcError {
+        RpcError {
+            code: error::SESSION_BUSY,
+            message: err.to_string(),
+            data: None,
         }
-        Ok(())
+    }
+
+    async fn admit_transcript_edit(
+        &self,
+        session_id: &SessionId,
+        running_behavior: TranscriptEditRunningBehavior,
+    ) -> Result<(), RpcError> {
+        if self.staged_sessions.contains(session_id).await {
+            return TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+                session_id: session_id.clone(),
+                running_behavior,
+                lifecycle: TranscriptEditSourceLifecycle::NotMaterialized,
+            })
+            .map_err(Self::transcript_edit_admission_error_to_rpc);
+        }
+
+        self.runtime_adapter
+            .admit_transcript_edit(session_id, running_behavior)
+            .await
+            .map_err(Self::transcript_edit_admission_error_to_rpc)
     }
 
     /// Fork an idle materialized session at a transcript index.
@@ -6774,16 +6780,8 @@ impl SessionRuntime {
         session_id: &SessionId,
         req: SessionForkAtRequest,
     ) -> Result<SessionForkResult, RpcError> {
-        if self.staged_sessions.contains(session_id).await {
-            return Err(RpcError {
-                code: error::SESSION_BUSY,
-                message: format!(
-                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
-                ),
-                data: None,
-            });
-        }
-        self.reject_active_transcript_edit(session_id).await?;
+        self.admit_transcript_edit(session_id, req.running_behavior)
+            .await?;
 
         self.service
             .fork_session_at(session_id, req)
@@ -6797,16 +6795,8 @@ impl SessionRuntime {
         session_id: &SessionId,
         req: SessionForkReplaceRequest,
     ) -> Result<SessionForkResult, RpcError> {
-        if self.staged_sessions.contains(session_id).await {
-            return Err(RpcError {
-                code: error::SESSION_BUSY,
-                message: format!(
-                    "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
-                ),
-                data: None,
-            });
-        }
-        self.reject_active_transcript_edit(session_id).await?;
+        self.admit_transcript_edit(session_id, req.running_behavior)
+            .await?;
 
         self.service
             .fork_session_replace(session_id, req)
@@ -7848,6 +7838,44 @@ mod tests {
         assert_eq!(
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn transcript_edit_admission_is_routed_through_machine_authority() {
+        let source = include_str!("session_runtime.rs");
+        let admission = source
+            .split("async fn admit_transcript_edit")
+            .nth(1)
+            .expect("transcript edit admission helper should exist")
+            .split("/// Fork an idle materialized session at a transcript index.")
+            .next()
+            .expect("admission helper should precede fork handlers");
+        assert!(
+            admission.contains(".admit_transcript_edit("),
+            "runtime-backed transcript edit admission must call MeerkatMachine authority"
+        );
+        assert!(
+            !admission.contains(".runtime_state(") && !admission.contains(".list_active_inputs("),
+            "RPC transcript edit admission must not reconstruct activity from projected runtime facts"
+        );
+
+        let fork_handlers = source
+            .split("/// Fork an idle materialized session at a transcript index.")
+            .nth(1)
+            .expect("fork handlers should exist")
+            .split("/// Get the event injector")
+            .next()
+            .expect("fork handlers should precede event injector");
+        assert!(
+            fork_handlers.matches("admit_transcript_edit").count() >= 2,
+            "both transcript fork handlers must route through the shared admission authority"
+        );
+        assert!(
+            !fork_handlers.contains("staged_sessions.contains")
+                && !fork_handlers.contains(".runtime_state(")
+                && !fork_handlers.contains(".list_active_inputs("),
+            "fork handlers must not own staged/running/activity prechecks"
         );
     }
 

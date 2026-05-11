@@ -301,6 +301,10 @@ pub(crate) enum MeerkatMachineCommand {
     ListActiveInputs {
         session_id: SessionId,
     },
+    AdmitTranscriptEdit {
+        session_id: SessionId,
+        running_behavior: meerkat_core::TranscriptEditRunningBehavior,
+    },
     ReconfigureSessionLlmIdentity {
         session_id: SessionId,
         previous_identity: Box<meerkat_core::SessionLlmIdentity>,
@@ -498,6 +502,7 @@ pub(crate) enum MeerkatMachineCommandResult {
     Bindings(meerkat_core::SessionRuntimeBindings),
     InputState(Option<StoredInputState>),
     ActiveInputs(Vec<InputId>),
+    TranscriptEditAdmission(Result<(), meerkat_core::TranscriptEditAdmissionError>),
     LlmReconfigured(SessionLlmReconfigureReport),
     VisibilityRevision(meerkat_core::ToolScopeRevision),
     VisibilityPublished(meerkat_core::SessionToolVisibilityState),
@@ -1163,7 +1168,8 @@ impl MeerkatMachineCommandVariant {
             | Self::RequestSwitchTurn
             | Self::ResolvedSessionLlmCapabilities
             | Self::SessionModelRoutingStatus
-            | Self::PrepareLocalSessionBindings => None,
+            | Self::PrepareLocalSessionBindings
+            | Self::AdmitTranscriptEdit => None,
             Self::RegisterSession => Some(MeerkatMachineCatalogInput::RegisterSession),
             Self::UnregisterSession => Some(MeerkatMachineCatalogInput::UnregisterSession),
             Self::EnsureSessionWithExecutor => {
@@ -1233,6 +1239,7 @@ pub enum MeerkatMachineShellMechanicReason {
     RealtimeTransportObservation,
     SessionModelRoutingObservation,
     LocalSessionBindingBootstrap,
+    TranscriptEditAdmission,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1353,6 +1360,11 @@ const fn meerkat_machine_command_classification(
         MeerkatMachineCommandVariant::ListActiveInputs => {
             MeerkatMachineCommandClassification::CatalogInput(
                 MeerkatMachineCatalogInput::ListActiveInputs,
+            )
+        }
+        MeerkatMachineCommandVariant::AdmitTranscriptEdit => {
+            MeerkatMachineCommandClassification::ShellMechanic(
+                MeerkatMachineShellMechanicReason::TranscriptEditAdmission,
             )
         }
         MeerkatMachineCommandVariant::ReconfigureSessionLlmIdentity => {

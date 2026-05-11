@@ -106,12 +106,14 @@ fn target_error_status(error: &ConnectionTargetError) -> StatusCode {
     match error {
         ConnectionTargetError::UnknownRealm(_)
         | ConnectionTargetError::MissingDefaultBinding { .. }
-        | ConnectionTargetError::BindingInvalid { .. } => StatusCode::NOT_FOUND,
+        | ConnectionTargetError::BindingInvalid { .. }
+        | ConnectionTargetError::MissingProviderBinding { .. } => StatusCode::NOT_FOUND,
         ConnectionTargetError::RealmConfigInvalid { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         ConnectionTargetError::MissingRealm
         | ConnectionTargetError::InvalidRealmId { .. }
         | ConnectionTargetError::InvalidBindingId { .. }
-        | ConnectionTargetError::ProviderMismatch { .. } => StatusCode::BAD_REQUEST,
+        | ConnectionTargetError::ProviderMismatch { .. }
+        | ConnectionTargetError::AmbiguousProviderBinding { .. } => StatusCode::BAD_REQUEST,
     }
 }
 

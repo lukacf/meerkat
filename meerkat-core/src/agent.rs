@@ -1101,8 +1101,8 @@ where
     /// Explicit call-timeout override from the build/config composition seam.
     /// Takes precedence over profile-derived defaults.
     pub(crate) call_timeout_override: crate::config::CallTimeoutOverride,
-    /// Structured-output extraction state carried into RunResult.
-    pub(crate) extraction_state: extraction::ExtractionState,
+    /// Authority-owned structured-output extraction projection for RunResult.
+    pub(crate) extraction_authority: extraction::StructuredOutputExtractionAuthority,
     /// Last published hidden deferred-catalog names.
     pub(crate) last_hidden_deferred_catalog_names: BTreeSet<String>,
     /// Last published pending catalog sources.

@@ -819,7 +819,7 @@ where
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
-        turn_count: u32,
+        _turn_count: u32,
         event_tx: &Option<mpsc::Sender<AgentEvent>>,
     ) {
         for effect in &transition.effects {
@@ -880,10 +880,7 @@ where
                         .await;
 
                         if let Ok(outcome) = outcome {
-                            match self
-                                .index_compaction_discards(&outcome.discarded, turn_count)
-                                .await
-                            {
+                            match self.index_compaction_discards(&outcome.discarded).await {
                                 crate::memory::MemoryIndexDelivery::Rejected {
                                     error,
                                     attempted_entries,
@@ -959,8 +956,7 @@ where
 
     async fn index_compaction_discards(
         &self,
-        discarded: &[Message],
-        turn_count: u32,
+        discarded: &[crate::agent::compact::CompactionDiscard],
     ) -> crate::memory::MemoryIndexDelivery {
         let session_id = self.session.id().clone();
         let scope = crate::memory::MemoryIndexScope::for_session(session_id.clone());
@@ -968,14 +964,14 @@ where
             return crate::memory::MemoryIndexDelivery::NoStore { scope };
         };
         let mut requests = Vec::new();
-        for message in discarded {
-            let content = message.as_indexable_text();
+        for discarded in discarded {
+            let content = discarded.message.as_indexable_text();
             if content.is_empty() {
                 continue;
             }
             let metadata = crate::memory::MemoryMetadata {
                 session_id: session_id.clone(),
-                turn: Some(turn_count),
+                turn: discarded.source_turn,
                 indexed_at: crate::time_compat::SystemTime::now(),
             };
             let request =
@@ -3367,6 +3363,15 @@ mod tests {
                 .map(|(scope, _, _)| scope.clone())
                 .collect()
         }
+
+        fn metadata(&self) -> Vec<MemoryMetadata> {
+            self.entries
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, _, metadata)| metadata.clone())
+                .collect()
+        }
     }
 
     #[async_trait]
@@ -4169,6 +4174,11 @@ mod tests {
                 .all(|scope| scope.session_id() == agent.session().id()),
             "compaction must index discarded memory into the owning session scope"
         );
+        let metadata = memory_store.metadata();
+        assert!(
+            metadata.iter().any(|metadata| metadata.turn == Some(0)),
+            "discarded first turn must retain its source turn instead of compaction-time turn"
+        );
         assert!(
             !agent
                 .session()
@@ -4430,7 +4440,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed,
+            Some(crate::TurnTerminalOutcome::Failed),
             "RunCompleted hook denial should leave the canonical turn snapshot failed"
         );
         assert_eq!(
@@ -4581,7 +4591,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed,
+            Some(crate::TurnTerminalOutcome::Failed),
             "boundary hook denial should terminalize through the turn authority"
         );
         assert_eq!(
@@ -4650,7 +4660,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed,
+            Some(crate::TurnTerminalOutcome::Failed),
             "post-LLM hook denial should terminalize through the turn authority"
         );
         assert_eq!(
@@ -4770,8 +4780,9 @@ mod tests {
         }]);
         agent.config.max_turns = Some(1);
 
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
         let result = agent
-            .run("plain user prompt".to_string().into())
+            .run_with_events("plain user prompt".to_string().into(), tx)
             .await
             .expect("run should succeed");
         assert_eq!(result.turns, 1);
@@ -4790,6 +4801,26 @@ mod tests {
                 .iter()
                 .any(|msg| msg.contains("<skill>injected canonical skill</skill>")),
             "expected runtime prompt to include rendered skill injection, saw: {seen_messages:?}"
+        );
+
+        let mut saw_skills_resolved = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::SkillsResolved {
+                skills,
+                injection_bytes,
+            } = event
+            {
+                saw_skills_resolved = true;
+                assert!(injection_bytes > 0);
+                assert_eq!(
+                    skills.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                    vec!["dc256086-0d2f-4f61-a307-320d4148107f/email-extractor"]
+                );
+            }
+        }
+        assert!(
+            saw_skills_resolved,
+            "typed SkillsResolved event should carry source-pinned activation truth"
         );
     }
 
@@ -5202,7 +5233,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
 
         let mut saw_run_failed = false;
@@ -5505,7 +5536,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed,
+            Some(crate::TurnTerminalOutcome::Failed),
             "post-tool denial should leave the canonical turn snapshot failed"
         );
     }
@@ -6132,7 +6163,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
             snapshot.terminal_cause_kind,
@@ -6279,7 +6310,7 @@ mod tests {
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
             snapshot.terminal_cause_kind, None,
@@ -6473,7 +6504,7 @@ mod tests {
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
             snapshot.terminal_cause_kind, None,
@@ -6546,7 +6577,7 @@ mod tests {
             .expect("test turn-state handle should expose a snapshot");
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
             snapshot.terminal_cause_kind,

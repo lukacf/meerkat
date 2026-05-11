@@ -211,9 +211,8 @@ impl DynamicLease {
         }
     }
 
-    /// Construct a dynamic lease whose freshness is projected from the
-    /// underlying authorizer. This is for authorizer-backed flows such as
-    /// Google ADC and Azure AD where the token is fetched lazily per request.
+    /// Construct a dynamic lease for authorizer-backed flows such as Google
+    /// ADC and Azure AD where the token is fetched lazily per request.
     pub fn from_authorizer(
         authorizer: Arc<dyn HttpAuthorizer>,
         metadata: AuthMetadata,
@@ -237,7 +236,7 @@ impl AuthLease for DynamicLease {
         &self.metadata
     }
     fn expires_at(&self) -> Option<DateTime<Utc>> {
-        self.expires_at.or_else(|| self.authorizer.expires_at())
+        self.expires_at
     }
     fn source_label(&self) -> &str {
         &self.source_label
@@ -303,7 +302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dynamic_lease_projects_authorizer_freshness() {
+    async fn dynamic_lease_does_not_project_authorizer_freshness() {
         #[derive(Debug)]
         struct ExpiringAuthorizer {
             expires_at: DateTime<Utc>,
@@ -335,6 +334,6 @@ mod tests {
             "dynamic:expiring",
         ));
 
-        assert_eq!(lease.expires_at(), Some(expires_at));
+        assert_eq!(lease.expires_at(), None);
     }
 }

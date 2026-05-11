@@ -651,14 +651,11 @@ async fn full_lifecycle_create_turns_read_archive_gone() {
         "archived session should not appear in list"
     );
 
-    // Read after archive still works (returns archived view)
-    let archived_view = service.read(&sid).await;
-    assert!(
-        archived_view.is_ok(),
-        "read after archive should return the archived view"
-    );
-    let archived_view = archived_view.unwrap();
-    assert!(!archived_view.state.is_active);
+    let err = service
+        .read(&sid)
+        .await
+        .expect_err("ephemeral archive must not serve a cached archived view");
+    assert_eq!(err.code(), "SESSION_NOT_FOUND");
 }
 
 // ---------------------------------------------------------------------------
@@ -872,11 +869,11 @@ async fn archive_during_running_turn_gracefully_drains_current_turn() {
         "archive should gracefully drain the admitted/running turn"
     );
 
-    let archived = service.read(&sid).await.unwrap();
-    assert!(
-        !archived.state.is_active,
-        "archived session must be inactive"
-    );
+    let err = service
+        .read(&sid)
+        .await
+        .expect_err("ephemeral archive must not expose local lifecycle cache");
+    assert_eq!(err.code(), "SESSION_NOT_FOUND");
 
     let err = service
         .start_turn(&sid, turn_req("after archive"))
@@ -1243,7 +1240,9 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         loop_state: meerkat_core::state::LoopState::WaitingForOps,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::WaitingForOps,
         active_run_id: Some(RunId::new()),
-        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        primitive_kind: Some(
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        ),
         admitted_content_shape: Some(
             meerkat_core::turn_execution_authority::ContentShape::Conversation,
         ),
@@ -1256,7 +1255,9 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
         barrier_satisfied: false,
         boundary_count: 1,
         cancel_after_boundary: true,
-        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::Cancelled,
+        terminal_outcome: Some(
+            meerkat_core::turn_execution_authority::TurnTerminalOutcome::Cancelled,
+        ),
         terminal_cause_kind: None,
         extraction_attempts: 1,
         max_extraction_retries: 3,
@@ -1300,7 +1301,9 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
         active_run_id: None,
-        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        primitive_kind: Some(
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        ),
         admitted_content_shape: None,
         vision_enabled: false,
         image_tool_results_enabled: false,
@@ -1311,7 +1314,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         barrier_satisfied: true,
         boundary_count: 0,
         cancel_after_boundary: false,
-        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::None,
+        terminal_outcome: Some(meerkat_core::turn_execution_authority::TurnTerminalOutcome::None),
         terminal_cause_kind: None,
         extraction_attempts: 0,
         max_extraction_retries: 2,
@@ -1361,7 +1364,9 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         loop_state: meerkat_core::state::LoopState::CallingLlm,
         turn_phase: meerkat_core::turn_execution_authority::TurnPhase::Ready,
         active_run_id: None,
-        primitive_kind: meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        primitive_kind: Some(
+            meerkat_core::turn_execution_authority::TurnPrimitiveKind::ConversationTurn,
+        ),
         admitted_content_shape: None,
         vision_enabled: false,
         image_tool_results_enabled: false,
@@ -1372,7 +1377,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         barrier_satisfied: true,
         boundary_count: 0,
         cancel_after_boundary: false,
-        terminal_outcome: meerkat_core::turn_execution_authority::TurnTerminalOutcome::None,
+        terminal_outcome: Some(meerkat_core::turn_execution_authority::TurnTerminalOutcome::None),
         terminal_cause_kind: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,

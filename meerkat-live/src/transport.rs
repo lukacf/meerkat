@@ -156,14 +156,77 @@ struct PendingToken {
     expires_at: Instant,
 }
 
+/// Single owner for live WebSocket open-token admission facts.
+///
+/// `LiveWsState` owns transport I/O and the adapter host. This authority owns
+/// token mint, expiry, channel binding, and single-use consume semantics, so
+/// websocket accept code cannot reinterpret token lifecycle from a raw map.
+struct LiveOpenTokenAuthority {
+    pending_tokens: HashMap<LiveTokenString, PendingToken>,
+    token_ttl: Duration,
+}
+
+impl LiveOpenTokenAuthority {
+    fn new(token_ttl: Duration) -> Self {
+        Self {
+            pending_tokens: HashMap::new(),
+            token_ttl,
+        }
+    }
+
+    fn mint(&mut self, channel_id: LiveChannelId) -> LiveTokenString {
+        let token = LiveTokenString::random();
+        let expires_at = Instant::now() + self.token_ttl;
+        self.reap_expired();
+        self.pending_tokens.insert(
+            token.clone(),
+            PendingToken {
+                channel_id,
+                expires_at,
+            },
+        );
+        token
+    }
+
+    fn consume(
+        &mut self,
+        token: &str,
+        expected_channel: &LiveChannelId,
+    ) -> Result<LiveChannelId, TokenConsumeError> {
+        let key = LiveTokenString::new(token).map_err(|_| TokenConsumeError::NotFound)?;
+        self.reap_expired();
+        match self.pending_tokens.remove(&key) {
+            Some(pending) => {
+                if pending.expires_at <= Instant::now() {
+                    Err(TokenConsumeError::Expired)
+                } else if &pending.channel_id != expected_channel {
+                    Err(TokenConsumeError::ChannelMismatch)
+                } else {
+                    Ok(pending.channel_id)
+                }
+            }
+            None => Err(TokenConsumeError::NotFound),
+        }
+    }
+
+    #[cfg(test)]
+    fn pending_count(&self) -> usize {
+        self.pending_tokens.len()
+    }
+
+    fn reap_expired(&mut self) {
+        let now = Instant::now();
+        self.pending_tokens.retain(|_, p| p.expires_at > now);
+    }
+}
+
 /// Shared state for the live WebSocket transport.
 ///
 /// Composable — any surface creates one of these with a shared
 /// `LiveAdapterHost` and either mounts the router or starts a listener.
 pub struct LiveWsState {
     host: Arc<LiveAdapterHost>,
-    pending_tokens: Mutex<HashMap<LiveTokenString, PendingToken>>,
-    token_ttl: Duration,
+    token_authority: Mutex<LiveOpenTokenAuthority>,
 }
 
 impl LiveWsState {
@@ -175,8 +238,7 @@ impl LiveWsState {
     pub fn with_token_ttl(host: Arc<LiveAdapterHost>, token_ttl: Duration) -> Self {
         Self {
             host,
-            pending_tokens: Mutex::new(HashMap::new()),
-            token_ttl,
+            token_authority: Mutex::new(LiveOpenTokenAuthority::new(token_ttl)),
         }
     }
 
@@ -185,21 +247,10 @@ impl LiveWsState {
     }
 
     /// Mint a single-use token for a channel. The token expires after
-    /// [`Self::token_ttl`] if not consumed. Each call also reaps any
-    /// already-expired tokens.
+    /// the authority's configured TTL if not consumed. Each call also reaps
+    /// any already-expired tokens.
     pub async fn mint_token(&self, channel_id: LiveChannelId) -> LiveTokenString {
-        let token = LiveTokenString::random();
-        let expires_at = Instant::now() + self.token_ttl;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        guard.insert(
-            token.clone(),
-            PendingToken {
-                channel_id,
-                expires_at,
-            },
-        );
-        token
+        self.token_authority.lock().await.mint(channel_id)
     }
 
     /// Consume a token, returning the channel ID if the token is valid,
@@ -215,32 +266,16 @@ impl LiveWsState {
         token: &str,
         expected_channel: &LiveChannelId,
     ) -> Result<LiveChannelId, TokenConsumeError> {
-        let key = LiveTokenString::new(token).map_err(|_| TokenConsumeError::NotFound)?;
-        let mut guard = self.pending_tokens.lock().await;
-        reap_expired(&mut guard);
-        match guard.remove(&key) {
-            Some(pending) => {
-                if pending.expires_at <= Instant::now() {
-                    Err(TokenConsumeError::Expired)
-                } else if &pending.channel_id != expected_channel {
-                    Err(TokenConsumeError::ChannelMismatch)
-                } else {
-                    Ok(pending.channel_id)
-                }
-            }
-            None => Err(TokenConsumeError::NotFound),
-        }
+        self.token_authority
+            .lock()
+            .await
+            .consume(token, expected_channel)
     }
 
     #[cfg(test)]
     async fn pending_token_count(&self) -> usize {
-        self.pending_tokens.lock().await.len()
+        self.token_authority.lock().await.pending_count()
     }
-}
-
-fn reap_expired(map: &mut HashMap<LiveTokenString, PendingToken>) {
-    let now = Instant::now();
-    map.retain(|_, p| p.expires_at > now);
 }
 
 #[derive(serde::Deserialize)]
@@ -550,6 +585,31 @@ mod tests {
             LiveTokenString::new(""),
             Err(TokenParseError::Empty)
         ));
+    }
+
+    #[test]
+    fn live_open_token_authority_owns_single_use_channel_binding() {
+        let mut authority = LiveOpenTokenAuthority::new(Duration::from_secs(60));
+        let channel_a = LiveChannelId::new("authority_ch_a");
+        let channel_b = LiveChannelId::new("authority_ch_b");
+
+        let token = authority.mint(channel_a.clone());
+        assert_eq!(authority.pending_count(), 1);
+        assert_eq!(
+            authority.consume(token.as_str(), &channel_b).unwrap_err(),
+            TokenConsumeError::ChannelMismatch
+        );
+        assert_eq!(authority.pending_count(), 0);
+        assert_eq!(
+            authority.consume(token.as_str(), &channel_a).unwrap_err(),
+            TokenConsumeError::NotFound
+        );
+
+        let retry_token = authority.mint(channel_a.clone());
+        assert_eq!(
+            authority.consume(retry_token.as_str(), &channel_a).unwrap(),
+            channel_a
+        );
     }
 
     #[tokio::test]

@@ -143,6 +143,7 @@ impl WorkGraphService {
                 } else {
                     filter.namespace.clone()
                 },
+                all_namespaces: filter.all_namespaces,
                 after_seq: None,
                 limit: None,
             })
@@ -327,7 +328,7 @@ impl WorkGraphService {
         if filter.realm_id.is_none() {
             filter.realm_id = Some(self.default_realm_id.to_string());
         }
-        if filter.namespace.is_none() {
+        if !filter.all_namespaces && filter.namespace.is_none() {
             filter.namespace = Some(self.default_namespace.clone());
         }
         self.store.list_events(filter).await
@@ -390,6 +391,7 @@ impl WorkGraphService {
                     .list_events(WorkGraphEventFilter {
                         realm_id: Some(realm_id.to_string()),
                         namespace: None,
+                        all_namespaces: true,
                         after_seq: None,
                         limit: None,
                     })
@@ -439,6 +441,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
+    use crate::store::WorkGraphEventFilter;
     use crate::types::{ClaimWorkItemRequest, LinkWorkItemsRequest, WorkEdgeKind, WorkOwner};
     use crate::{CreateWorkItemRequest, MemoryWorkGraphStore, WorkGraphService, WorkNamespace};
 
@@ -662,5 +665,41 @@ mod tests {
         assert!(snapshot.ready_item_ids.iter().any(|id| id == &blocker.id));
         assert!(!snapshot.ready_item_ids.iter().any(|id| id == &blocked.id));
         assert!(snapshot.event_high_water_mark.is_some());
+    }
+
+    #[tokio::test]
+    async fn events_can_span_all_namespaces_when_requested() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let default_service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let other_service = WorkGraphService::with_scope(
+            store,
+            "realm",
+            WorkNamespace::new("other").expect("namespace"),
+        );
+
+        default_service
+            .create(create_req("default item"))
+            .await
+            .expect("default item");
+        other_service
+            .create(create_req("other item"))
+            .await
+            .expect("other item");
+
+        let default_events = default_service
+            .events(WorkGraphEventFilter::default())
+            .await
+            .expect("default events");
+        assert_eq!(default_events.len(), 1);
+
+        let all_events = default_service
+            .events(WorkGraphEventFilter {
+                all_namespaces: true,
+                ..WorkGraphEventFilter::default()
+            })
+            .await
+            .expect("all events");
+        assert_eq!(all_events.len(), 2);
     }
 }

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 #[cfg(not(target_arch = "wasm32"))]
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
 use crate::WorkGraphError;
 use crate::types::{
@@ -48,6 +48,8 @@ impl std::fmt::Display for WorkGraphStoreKind {
 pub struct WorkGraphEventFilter {
     pub realm_id: Option<String>,
     pub namespace: Option<WorkNamespace>,
+    #[serde(default)]
+    pub all_namespaces: bool,
     pub after_seq: Option<i64>,
     pub limit: Option<usize>,
 }
@@ -281,9 +283,10 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         event: WorkGraphEvent,
     ) -> Result<WorkEdge, WorkGraphError> {
         let mut guard = self.inner.write().await;
-        if !guard.edges.iter().any(|existing| existing == &edge) {
-            guard.edges.push(edge.clone());
+        if guard.edges.iter().any(|existing| existing == &edge) {
+            return Err(duplicate_edge_error(&edge));
         }
+        guard.edges.push(edge.clone());
         guard.append_event(event);
         Ok(edge)
     }
@@ -372,7 +375,8 @@ fn event_matches_filter(event: &WorkGraphEvent, filter: &WorkGraphEventFilter) -
     {
         return false;
     }
-    if let Some(namespace) = &filter.namespace
+    if !filter.all_namespaces
+        && let Some(namespace) = &filter.namespace
         && &event.namespace != namespace
     {
         return false;
@@ -684,7 +688,7 @@ fn current_revision_tx(
 fn insert_edge_tx(tx: &Transaction<'_>, edge: &WorkEdge) -> Result<(), WorkGraphError> {
     let json = serde_json::to_string(edge).map_err(|err| WorkGraphError::Store(err.to_string()))?;
     tx.execute(
-        "INSERT OR IGNORE INTO workgraph_edges
+        "INSERT INTO workgraph_edges
             (realm_id, namespace, edge_kind, from_id, to_id, edge_json)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
@@ -696,8 +700,27 @@ fn insert_edge_tx(tx: &Transaction<'_>, edge: &WorkEdge) -> Result<(), WorkGraph
             json,
         ],
     )
-    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+    .map_err(|err| map_sqlite_insert_edge_error(err, edge))?;
     Ok(())
+}
+
+fn duplicate_edge_error(edge: &WorkEdge) -> WorkGraphError {
+    WorkGraphError::Conflict(format!(
+        "work edge {:?} {} -> {} already exists",
+        edge.kind, edge.from_id, edge.to_id
+    ))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_sqlite_insert_edge_error(err: rusqlite::Error, edge: &WorkEdge) -> WorkGraphError {
+    match err {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == ErrorCode::ConstraintViolation =>
+        {
+            duplicate_edge_error(edge)
+        }
+        err => WorkGraphError::Store(err.to_string()),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -865,10 +888,36 @@ fn row_json<T: serde::de::DeserializeOwned>(
 mod tests {
     use std::collections::BTreeSet;
 
+    use chrono::Utc;
+    use serde_json::json;
+
+    use crate::types::WorkEdge;
     use crate::{
         CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkEdgeKind,
-        WorkGraphService, WorkGraphStore, WorkItemFilter, WorkNamespace,
+        WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService,
+        WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace,
     };
+
+    fn test_edge() -> WorkEdge {
+        WorkEdge {
+            realm_id: "realm".to_string(),
+            namespace: WorkNamespace::default(),
+            kind: WorkEdgeKind::Blocks,
+            from_id: WorkItemId::generated(),
+            to_id: WorkItemId::generated(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn link_event(edge: &WorkEdge) -> WorkGraphEvent {
+        WorkGraphEvent::graph(
+            edge.realm_id.clone(),
+            edge.namespace.clone(),
+            WorkGraphEventKind::Linked,
+            edge.created_at,
+            json!({ "edge": edge }),
+        )
+    }
 
     #[tokio::test]
     async fn memory_store_namespace_filters_do_not_leak() {
@@ -925,6 +974,34 @@ mod tests {
             .expect("list");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].title, "default");
+    }
+
+    #[tokio::test]
+    async fn memory_store_duplicate_edge_does_not_append_event() {
+        let store = MemoryWorkGraphStore::new();
+        let edge = test_edge();
+        store
+            .insert_edge(edge.clone(), link_event(&edge))
+            .await
+            .expect("insert edge");
+
+        let error = store
+            .insert_edge(edge.clone(), link_event(&edge))
+            .await
+            .expect_err("duplicate edge should fail");
+        assert!(matches!(error, WorkGraphError::Conflict(_)));
+
+        let events = store
+            .list_events(WorkGraphEventFilter {
+                realm_id: Some(edge.realm_id),
+                namespace: Some(edge.namespace),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1049,5 +1126,36 @@ mod tests {
             .await
             .expect("rebuilt edges");
         assert_eq!(rebuilt_edges.len(), 1);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_store_duplicate_edge_does_not_append_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = crate::SqliteWorkGraphStore::open(&path).expect("open");
+        let edge = test_edge();
+        store
+            .insert_edge(edge.clone(), link_event(&edge))
+            .await
+            .expect("insert edge");
+
+        let error = store
+            .insert_edge(edge.clone(), link_event(&edge))
+            .await
+            .expect_err("duplicate edge should fail");
+        assert!(matches!(error, WorkGraphError::Conflict(_)));
+
+        let events = store
+            .list_events(WorkGraphEventFilter {
+                realm_id: Some(edge.realm_id),
+                namespace: Some(edge.namespace),
+                all_namespaces: false,
+                after_seq: None,
+                limit: None,
+            })
+            .await
+            .expect("events");
+        assert_eq!(events.len(), 1);
     }
 }

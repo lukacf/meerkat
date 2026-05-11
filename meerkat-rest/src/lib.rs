@@ -3677,6 +3677,8 @@ struct WorkGraphEventsQuery {
     #[serde(default)]
     namespace: Option<meerkat::WorkNamespace>,
     #[serde(default)]
+    all_namespaces: bool,
+    #[serde(default)]
     after_seq: Option<i64>,
     #[serde(default)]
     limit: Option<usize>,
@@ -3736,6 +3738,7 @@ impl From<WorkGraphEventsQuery> for meerkat::WorkGraphEventFilter {
         Self {
             realm_id: value.realm_id,
             namespace: value.namespace,
+            all_namespaces: value.all_namespaces,
             after_seq: value.after_seq,
             limit: value.limit,
         }
@@ -9002,6 +9005,7 @@ mod tests {
     #[tokio::test]
     async fn test_workgraph_rest_routes_are_read_only() {
         use axum::body::Body;
+        use http_body_util::BodyExt;
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
@@ -9026,6 +9030,24 @@ mod tests {
             })
             .await
             .expect("seed WorkGraph item");
+        state
+            .workgraph_service
+            .create(meerkat::CreateWorkItemRequest {
+                realm_id: None,
+                namespace: Some(meerkat::WorkNamespace::new("other").unwrap()),
+                title: "observe other namespace".to_string(),
+                description: None,
+                priority: Default::default(),
+                labels: Default::default(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                status: None,
+            })
+            .await
+            .expect("seed other WorkGraph item");
         let app = router(state);
 
         for uri in [
@@ -9048,6 +9070,29 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
         }
+
+        let response = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/workgraph/events?all_namespaces=true")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let namespaces = payload["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event["namespace"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(namespaces.contains("default"));
+        assert!(namespaces.contains("other"));
 
         for (method, uri) in [
             ("POST", "/workgraph/items"),
@@ -10708,17 +10753,12 @@ mod tests {
         state.llm_client_override = Some(Arc::new(ErrorLlmClient));
         let app = router(state);
 
-        // Bound the oneshot in a timeout matching the sibling at lib.rs:5370
-        // (`test_create_session_route_completes_in_runtime_backed_mode`). The
-        // post-commit-failure path currently deadlocks when `ErrorLlmClient`
-        // surfaces the failure — see #32 Class B in the triage doc at
-        // `docs/wave-d-prep/workspace-runtime-cascade-triage.md`. The timeout
-        // converts the hang into a visible `Elapsed(())` panic so workspace
-        // nextest runs don't stall indefinitely. The underlying deadlock in
-        // the runtime-backed create-session error branch is a separate
-        // root-cause fix.
+        // Bound the oneshot so a real post-commit-failure hang remains visible
+        // without making saturated nextest runs flaky. This path completes
+        // quickly in isolation, but can run behind thousands of concurrent
+        // fast-lane tests.
         let response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
             app.oneshot(
                 axum::http::Request::builder()
                     .method("POST")

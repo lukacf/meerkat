@@ -137,6 +137,23 @@ import type {
   UpdateScheduleRequest,
   TurnOptions,
   Usage,
+  WorkGraphClaim,
+  WorkGraphEdge,
+  WorkGraphEdgeKind,
+  WorkGraphEvent,
+  WorkGraphEventFilter,
+  WorkGraphEventsResult,
+  WorkGraphEventKind,
+  WorkGraphItemFilter,
+  WorkGraphItemLookupOptions,
+  WorkGraphOwner,
+  WorkGraphPriority,
+  WorkGraphReadyFilter,
+  WorkGraphSnapshot,
+  WorkGraphSnapshotFilter,
+  WorkGraphStatus,
+  WorkItem,
+  WorkItemListResult,
 } from "./types.js";
 
 const MEERKAT_REPO = "lukacf/meerkat";
@@ -1046,6 +1063,63 @@ export class MeerkatClient {
       name: request.name,
       arguments: request.arguments ?? {},
     });
+  }
+
+  async getWorkGraphItem(
+    itemId: string,
+    options?: WorkGraphItemLookupOptions,
+  ): Promise<WorkItem> {
+    const result = await this.request("workgraph/get", {
+      id: itemId,
+      ...MeerkatClient.toWireWorkGraphScope(options),
+    });
+    return MeerkatClient.parseWorkItem(result);
+  }
+
+  async listWorkGraphItems(
+    filter: WorkGraphItemFilter = {},
+  ): Promise<WorkItemListResult> {
+    const result = await this.request(
+      "workgraph/list",
+      MeerkatClient.toWireWorkGraphItemFilter(filter),
+    );
+    return {
+      items: MeerkatClient.parseWorkItemArray(result.items),
+    };
+  }
+
+  async listReadyWorkGraphItems(
+    filter: WorkGraphReadyFilter = {},
+  ): Promise<WorkItemListResult> {
+    const result = await this.request(
+      "workgraph/ready",
+      MeerkatClient.toWireWorkGraphReadyFilter(filter),
+    );
+    return {
+      items: MeerkatClient.parseWorkItemArray(result.items),
+    };
+  }
+
+  async getWorkGraphSnapshot(
+    filter: WorkGraphSnapshotFilter = {},
+  ): Promise<WorkGraphSnapshot> {
+    const result = await this.request(
+      "workgraph/snapshot",
+      MeerkatClient.toWireWorkGraphItemFilter(filter),
+    );
+    return MeerkatClient.parseWorkGraphSnapshot(result);
+  }
+
+  async listWorkGraphEvents(
+    filter: WorkGraphEventFilter = {},
+  ): Promise<WorkGraphEventsResult> {
+    const result = await this.request(
+      "workgraph/events",
+      MeerkatClient.toWireWorkGraphEventFilter(filter),
+    );
+    return {
+      events: MeerkatClient.parseWorkGraphEventArray(result.events),
+    };
   }
 
   async subscribeSessionEvents(sessionId: string): Promise<EventSubscription<AgentEventEnvelope>> {
@@ -3142,6 +3216,168 @@ export class MeerkatClient {
           : data.superseded_by_revision != null
             ? Number(data.superseded_by_revision)
             : undefined,
+    };
+  }
+
+  private static toWireWorkGraphScope(
+    options?: WorkGraphItemLookupOptions,
+  ): Record<string, unknown> {
+    const params: Record<string, unknown> = {};
+    setIfDefined(params, "realm_id", options?.realmId);
+    setIfDefined(params, "namespace", options?.namespace);
+    return params;
+  }
+
+  private static toWireWorkGraphItemFilter(
+    filter: WorkGraphItemFilter,
+  ): Record<string, unknown> {
+    const params = MeerkatClient.toWireWorkGraphScope(filter);
+    setIfDefined(params, "all_namespaces", filter.allNamespaces);
+    setIfDefined(params, "statuses", filter.statuses);
+    setIfDefined(params, "labels", filter.labels);
+    setIfDefined(params, "include_terminal", filter.includeTerminal);
+    setIfDefined(params, "limit", filter.limit);
+    return params;
+  }
+
+  private static toWireWorkGraphReadyFilter(
+    filter: WorkGraphReadyFilter,
+  ): Record<string, unknown> {
+    const params = MeerkatClient.toWireWorkGraphScope(filter);
+    setIfDefined(params, "labels", filter.labels);
+    setIfDefined(params, "limit", filter.limit);
+    return params;
+  }
+
+  private static toWireWorkGraphEventFilter(
+    filter: WorkGraphEventFilter,
+  ): Record<string, unknown> {
+    const params = MeerkatClient.toWireWorkGraphScope(filter);
+    setIfDefined(params, "all_namespaces", filter.allNamespaces);
+    setIfDefined(params, "after_seq", filter.afterSeq);
+    setIfDefined(params, "limit", filter.limit);
+    return params;
+  }
+
+  private static parseStringArray(value: unknown): string[] {
+    return Array.isArray(value) ? value.map((item) => String(item)) : [];
+  }
+
+  private static parseRecordArray(value: unknown): Array<Record<string, unknown>> {
+    return Array.isArray(value)
+      ? value.filter(
+          (item): item is Record<string, unknown> =>
+            typeof item === "object" && item !== null && !Array.isArray(item),
+        )
+      : [];
+  }
+
+  private static parseWorkGraphOwner(raw: unknown): WorkGraphOwner | undefined {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return undefined;
+    }
+    const data = raw as Record<string, unknown>;
+    return {
+      principal: MeerkatClient.parseOptionalString(data.principal),
+      agent: MeerkatClient.parseOptionalString(data.agent),
+      sessionId: MeerkatClient.parseOptionalString(data.session_id),
+      mobId: MeerkatClient.parseOptionalString(data.mob_id),
+      label: MeerkatClient.parseOptionalString(data.label),
+    };
+  }
+
+  private static parseWorkGraphClaim(raw: unknown): WorkGraphClaim | undefined {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return undefined;
+    }
+    const data = raw as Record<string, unknown>;
+    return {
+      owner: MeerkatClient.parseWorkGraphOwner(data.owner) ?? {},
+      claimedAt: String(data.claimed_at ?? ""),
+      leaseExpiresAt: MeerkatClient.parseOptionalString(data.lease_expires_at),
+    };
+  }
+
+  static parseWorkItem(data: Record<string, unknown>): WorkItem {
+    return {
+      id: String(data.id ?? ""),
+      realmId: String(data.realm_id ?? ""),
+      namespace: String(data.namespace ?? ""),
+      title: String(data.title ?? ""),
+      description: MeerkatClient.parseOptionalString(data.description),
+      status: String(data.status ?? "open") as WorkGraphStatus,
+      priority: String(data.priority ?? "medium") as WorkGraphPriority,
+      labels: MeerkatClient.parseStringArray(data.labels),
+      owner: MeerkatClient.parseWorkGraphOwner(data.owner),
+      claim: MeerkatClient.parseWorkGraphClaim(data.claim),
+      revision: Number(data.revision ?? 0),
+      dueAt: MeerkatClient.parseOptionalString(data.due_at),
+      notBefore: MeerkatClient.parseOptionalString(data.not_before),
+      snoozedUntil: MeerkatClient.parseOptionalString(data.snoozed_until),
+      createdAt: String(data.created_at ?? ""),
+      updatedAt: String(data.updated_at ?? ""),
+      terminalAt: MeerkatClient.parseOptionalString(data.terminal_at),
+      externalRefs: MeerkatClient.parseRecordArray(data.external_refs).map((ref) => ({
+        kind: String(ref.kind ?? ""),
+        id: String(ref.id ?? ""),
+        url: MeerkatClient.parseOptionalString(ref.url),
+      })),
+      evidenceRefs: MeerkatClient.parseRecordArray(data.evidence_refs).map((ref) => ({
+        kind: String(ref.kind ?? ""),
+        id: String(ref.id ?? ""),
+        label: MeerkatClient.parseOptionalString(ref.label),
+        summary: MeerkatClient.parseOptionalString(ref.summary),
+      })),
+    };
+  }
+
+  private static parseWorkItemArray(value: unknown): WorkItem[] {
+    return MeerkatClient.parseRecordArray(value).map((item) =>
+      MeerkatClient.parseWorkItem(item),
+    );
+  }
+
+  private static parseWorkGraphEdge(data: Record<string, unknown>): WorkGraphEdge {
+    return {
+      realmId: String(data.realm_id ?? ""),
+      namespace: String(data.namespace ?? ""),
+      kind: String(data.kind ?? "related") as WorkGraphEdgeKind,
+      fromId: String(data.from_id ?? ""),
+      toId: String(data.to_id ?? ""),
+      createdAt: String(data.created_at ?? ""),
+    };
+  }
+
+  private static parseWorkGraphEvent(data: Record<string, unknown>): WorkGraphEvent {
+    return {
+      seq: MeerkatClient.parseOptionalNumber(data.seq),
+      realmId: String(data.realm_id ?? ""),
+      namespace: String(data.namespace ?? ""),
+      itemId: MeerkatClient.parseOptionalString(data.item_id),
+      kind: String(data.kind ?? "updated") as WorkGraphEventKind,
+      at: String(data.at ?? ""),
+      payload: data.payload,
+    };
+  }
+
+  private static parseWorkGraphEventArray(value: unknown): WorkGraphEvent[] {
+    return MeerkatClient.parseRecordArray(value).map((event) =>
+      MeerkatClient.parseWorkGraphEvent(event),
+    );
+  }
+
+  static parseWorkGraphSnapshot(data: Record<string, unknown>): WorkGraphSnapshot {
+    return {
+      realmId: String(data.realm_id ?? ""),
+      namespace: MeerkatClient.parseOptionalString(data.namespace),
+      allNamespaces: Boolean(data.all_namespaces),
+      capturedAt: String(data.captured_at ?? ""),
+      eventHighWaterMark: MeerkatClient.parseOptionalNumber(data.event_high_water_mark),
+      items: MeerkatClient.parseWorkItemArray(data.items),
+      edges: MeerkatClient.parseRecordArray(data.edges).map((edge) =>
+        MeerkatClient.parseWorkGraphEdge(edge),
+      ),
+      readyItemIds: MeerkatClient.parseStringArray(data.ready_item_ids),
     };
   }
 

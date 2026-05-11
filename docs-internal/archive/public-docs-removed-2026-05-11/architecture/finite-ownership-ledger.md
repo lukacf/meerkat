@@ -1,3 +1,9 @@
+---
+title: Finite Ownership Ledger
+description: Generated inventory of Meerkat semantic ownership boundaries.
+icon: diagram-project
+---
+
 # Finite Ownership Ledger
 
 **Status**: Generated
@@ -12,7 +18,7 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | runtime | 7 | 21 | 4 | 0 | 0 | 0 |
 | mcp | 11 | 21 | 2 | 0 | 0 | 0 |
-| mob | 6 | 41 | 3 | 0 | 0 | 0 |
+| mob | 6 | 37 | 3 | 0 | 0 | 0 |
 | auth | 1 | 8 | 0 | 0 | 0 | 0 |
 
 ## Boundary Manifest
@@ -28,8 +34,8 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | runtime-session-adapter | public-inherent | `meerkat-runtime/src/meerkat_machine/comms_drain.rs` | `MeerkatMachine` | `update_peer_ingress_context`, `abort_comms_drains`, `abort_comms_drain`, `wait_comms_drain` |
 | mcp-router | public-inherent | `meerkat-mcp/src/router.rs` | `McpRouter` | `set_removal_timeout`, `add_server`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `take_lifecycle_actions`, `take_external_updates`, `progress_removals`, `call_tool`, `shutdown` |
 | mcp-router-adapter | public-inherent | `meerkat-mcp/src/adapter.rs` | `McpRouterAdapter` | `refresh_tools`, `stage_add`, `stage_remove`, `stage_reload`, `apply_staged`, `poll_lifecycle_actions`, `progress_removals`, `wait_until_ready`, `shutdown` |
-| mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `task_create`, `task_update`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
-| mob-command-dispatch | enum-dispatch | `meerkat-mob/src/runtime/actor.rs` | `MobActor` / `MobCommand` | `enqueue_spawn`, `handle_force_cancel`, `handle_retire`, `handle_respawn`, `handle_submit_work`, `handle_cancel_all_work`, `handle_rotate_supervisor`, `handle_task_create`, `handle_task_update`, `handle_run_flow`, `handle_cancel_flow`, `handle_flow_cleanup`, `handle_complete`, `handle_destroy`, `handle_reset` |
+| mob-handle | public-inherent | `meerkat-mob/src/runtime/handle.rs` | `MobHandle` | `spawn_spec`, `spawn_many`, `retire`, `respawn`, `retire_all`, `wire`, `unwire`, `internal_turn`, `run_flow`, `run_flow_with_stream`, `cancel_flow`, `stop`, `resume`, `complete`, `reset`, `destroy`, `set_spawn_policy`, `shutdown`, `force_cancel_member`, `wait_one`, `wait_all`, `spawn_helper`, `fork_helper` |
+| mob-command-dispatch | enum-dispatch | `meerkat-mob/src/runtime/actor.rs` | `MobActor` / `MobCommand` | `enqueue_spawn`, `handle_force_cancel`, `handle_retire`, `handle_respawn`, `handle_submit_work`, `handle_cancel_all_work`, `handle_rotate_supervisor`, `handle_run_flow`, `handle_cancel_flow`, `handle_flow_cleanup`, `handle_complete`, `handle_destroy`, `handle_reset` |
 | manual-callback | manual-callback | `meerkat-runtime/src/meerkat_machine/comms_drain.rs` | `MeerkatMachine` | `notify_comms_drain_exited` |
 | manual-callback | manual-callback | `meerkat-mcp/src/router.rs` | `McpRouter` | `process_pending_result` |
 | manual-callback | manual-callback | `meerkat-mob/src/runtime/actor.rs` | `MobActor` | `handle_spawn_provisioned_batch` |
@@ -165,8 +171,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/handle.rs` | `complete` | `public-inherent` | `closed` | `MobLifecycleAuthority + RosterAuthority` |
 | `meerkat-mob/src/runtime/handle.rs` | `reset` | `public-inherent` | `closed` | `MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge` |
 | `meerkat-mob/src/runtime/handle.rs` | `destroy` | `public-inherent` | `closed` | `MobLifecycleAuthority + RosterAuthority + SessionBackend runtime bridge` |
-| `meerkat-mob/src/runtime/handle.rs` | `task_create` | `public-inherent` | `closed` | `MobTaskBoardService event + projection contract` |
-| `meerkat-mob/src/runtime/handle.rs` | `task_update` | `public-inherent` | `closed` | `MobTaskBoardService event + projection contract` |
 | `meerkat-mob/src/runtime/handle.rs` | `set_spawn_policy` | `public-inherent` | `closed` | `MobSpawnPolicySurface` |
 | `meerkat-mob/src/runtime/handle.rs` | `shutdown` | `public-inherent` | `closed` | `MobLifecycleAuthority + SessionBackend runtime bridge` |
 | `meerkat-mob/src/runtime/handle.rs` | `force_cancel_member` | `public-inherent` | `closed` | `SessionBackend runtime bridge + InputLifecycle truth` |
@@ -182,8 +186,6 @@ It is the authoritative inventory of semantic state, semantic-operation boundari
 | `meerkat-mob/src/runtime/actor.rs` | `handle_submit_work` | `enum-dispatch` | `closed` | `MobMachine DSL work-origin legality + RosterAuthority + SessionBackend runtime bridge + spawn_from_policy_inline contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_cancel_all_work` | `enum-dispatch` | `closed` | `MobMachine DSL CancelAllWork legality + SessionBackend runtime bridge` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_rotate_supervisor` | `enum-dispatch` | `closed` | `Supervisor-bridge rotation protocol + fail-closed incomplete rotation on partial remote failure` |
-| `meerkat-mob/src/runtime/actor.rs` | `handle_task_create` | `enum-dispatch` | `closed` | `MobTaskBoardService event + projection contract` |
-| `meerkat-mob/src/runtime/actor.rs` | `handle_task_update` | `enum-dispatch` | `closed` | `MobTaskBoardService event + projection contract` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_run_flow` | `enum-dispatch` | `closed` | `MobOrchestratorAuthority + MobLifecycleAuthority` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_cancel_flow` | `enum-dispatch` | `closed` | `MobOrchestratorAuthority + MobLifecycleAuthority` |
 | `meerkat-mob/src/runtime/actor.rs` | `handle_flow_cleanup` | `enum-dispatch` | `closed` | `MobOrchestratorAuthority + MobLifecycleAuthority` |

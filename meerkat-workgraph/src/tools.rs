@@ -243,6 +243,8 @@ struct WorkGraphEventFilterParams {
     #[serde(default)]
     namespace: Option<WorkNamespace>,
     #[serde(default)]
+    all_namespaces: bool,
+    #[serde(default)]
     after_seq: Option<i64>,
     #[serde(default)]
     limit: Option<usize>,
@@ -253,6 +255,7 @@ impl From<WorkGraphEventFilterParams> for WorkGraphEventFilter {
         Self {
             realm_id: value.realm_id,
             namespace: value.namespace,
+            all_namespaces: value.all_namespaces,
             after_seq: value.after_seq,
             limit: value.limit,
         }
@@ -400,6 +403,7 @@ fn snapshot_schema() -> Value {
 fn events_schema() -> Value {
     let mut properties = base_properties();
     properties.extend([
+        ("all_namespaces".to_string(), json!({ "type": "boolean" })),
         (
             "after_seq".to_string(),
             json!({ "type": "integer", "minimum": 0 }),

@@ -1473,6 +1473,8 @@ enum WorkGraphCommands {
         #[arg(long)]
         namespace: Option<String>,
         #[arg(long)]
+        all_namespaces: bool,
+        #[arg(long)]
         after_seq: Option<i64>,
         #[arg(long)]
         limit: Option<usize>,
@@ -5356,6 +5358,7 @@ async fn handle_workgraph_command(
         }
         WorkGraphCommands::Events {
             namespace,
+            all_namespaces,
             after_seq,
             limit,
             json,
@@ -5364,6 +5367,7 @@ async fn handle_workgraph_command(
                 .events(meerkat::WorkGraphEventFilter {
                     realm_id: None,
                     namespace: parse_work_namespace(namespace)?,
+                    all_namespaces,
                     after_seq,
                     limit,
                 })

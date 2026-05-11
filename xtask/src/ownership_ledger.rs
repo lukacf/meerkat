@@ -1053,6 +1053,11 @@ fn build_report(registry: &OwnershipRegistry, findings: Vec<OwnershipFinding>) -
 
 fn render_markdown(report: &OwnershipReport) -> String {
     let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("title: Finite Ownership Ledger\n");
+    out.push_str("description: Generated inventory of Meerkat semantic ownership boundaries.\n");
+    out.push_str("icon: diagram-project\n");
+    out.push_str("---\n\n");
     out.push_str("# Finite Ownership Ledger\n\n");
     out.push_str("**Status**: Generated\n");
     out.push_str("**Source**: `xtask ownership-ledger`\n\n");

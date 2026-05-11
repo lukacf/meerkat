@@ -4132,6 +4132,9 @@ impl MobActor {
                     .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
                     .await?
             };
+            if inherited_tool_filter.is_some() && effective_profile_override.is_none() {
+                build::open_profile_tool_categories_for_inherited_filter(&mut profile);
+            }
             if let Some(model) = model_override {
                 profile.model = model;
             }

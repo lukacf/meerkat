@@ -78,86 +78,43 @@ buildbuddy_e2e_artifacts_bin() {
   return 1
 }
 
-buildbuddy_wasm_pack_bin() {
-  local output_base host_archive alternate_archive candidate
-  output_base="$(buildbuddy_output_base)"
+host_wasm_pack_repo() {
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)
-      host_archive="wasm_pack_darwin_arm64"
-      alternate_archive="wasm_pack_linux_x86_64"
+      printf '%s\n' "wasm_pack_darwin_arm64"
       ;;
     Linux-x86_64)
-      host_archive="wasm_pack_linux_x86_64"
-      alternate_archive="wasm_pack_darwin_arm64"
+      printf '%s\n' "wasm_pack_linux_x86_64"
       ;;
     *)
-      host_archive=""
-      alternate_archive=""
+      return 1
       ;;
   esac
-  if [[ -n "${host_archive}" ]]; then
-    for candidate in \
-      "${output_base}/external/+http_archive+${host_archive}/wasm-pack" \
-      "${output_base}/external/${host_archive}/wasm-pack" \
-      "${output_base}/execroot/_main/external/+http_archive+${host_archive}/wasm-pack" \
-      "${output_base}/execroot/_main/external/${host_archive}/wasm-pack"; do
-      if [[ -x "${candidate}" ]]; then
-        printf '%s\n' "${candidate}"
-        return 0
-      fi
-    done
-    candidate="$(
-      find -L "${output_base}" \
-        -type f \
-        -name wasm-pack \
-        -path "*/${host_archive}/*" \
-        -perm -111 \
-        2>/dev/null |
-        head -n 1
-    )"
-    if [[ -n "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-  fi
+}
+
+buildbuddy_wasm_pack_bin() {
+  local output_base candidate repo
+  output_base="$(buildbuddy_output_base)"
+  repo="$(host_wasm_pack_repo)" || return 1
   for candidate in \
-    "${output_base}/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/external/wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/external/wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/execroot/_main/external/wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/execroot/_main/external/wasm_pack_linux_x86_64/wasm-pack"; do
-    if [[ -n "${alternate_archive}" && "${candidate}" == *"${alternate_archive}"* ]]; then
-      continue
-    fi
+    "${output_base}/external/+http_archive+${repo}/wasm-pack" \
+    "${output_base}/external/${repo}/wasm-pack" \
+    "${output_base}/execroot/_main/external/+http_archive+${repo}/wasm-pack" \
+    "${output_base}/execroot/_main/external/${repo}/wasm-pack"; do
     if [[ -x "${candidate}" ]]; then
       printf '%s\n' "${candidate}"
       return 0
     fi
   done
-  if [[ -n "${host_archive}" ]]; then
-    candidate="$(
-      find -L "${output_base}" \
-        -type f \
-        -name wasm-pack \
-        -path "*/${host_archive}/*" \
-        -perm -111 \
-        2>/dev/null |
-        head -n 1
-    )"
-  else
-    candidate="$(
-      find -L "${output_base}" \
-        -type f \
-        -name wasm-pack \
-        \( -path '*/wasm_pack_darwin_arm64/*' -o -path '*/wasm_pack_linux_x86_64/*' \) \
-        -perm -111 \
-        2>/dev/null |
-        head -n 1
-    )"
-  fi
+  candidate="$(
+    find -L "${output_base}" \
+      -type f \
+      -name wasm-pack \
+      -path "*/${repo}/*" \
+      -perm -111 \
+      2>/dev/null |
+      head -n 1
+  )"
   if [[ -n "${candidate}" ]]; then
     printf '%s\n' "${candidate}"
     return 0

@@ -3660,27 +3660,11 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         .load(&key)
         .await
         .map_err(|e| anyhow::anyhow!("TokenStore load failed: {e}"))?;
-    store
-        .save(&key, tokens)
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to persist tokens: {e}"))?;
-    let transition = match meerkat_core::publish_token_lifecycle_acquired(
-        auth_lease,
-        auth_binding,
-        tokens,
-    ) {
-        Ok(transition) => transition,
-        Err(e) => {
-            if let Err(rollback_error) =
-                restore_cli_tokens_after_lifecycle_failure(store, &key, previous.as_ref()).await
-            {
-                anyhow::bail!(
-                    "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                );
-            }
-            anyhow::bail!("AuthMachine lifecycle acquire failed: {e}");
-        }
-    };
+    let transition =
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
+            Ok(transition) => transition,
+            Err(e) => anyhow::bail!("AuthMachine lifecycle acquire failed: {e}"),
+        };
     let commit = CliTokenCommitSnapshot {
         key,
         lease_key,
@@ -3688,40 +3672,30 @@ async fn save_cli_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle,
         lifecycle_transition: transition,
     };
-    if mark_for_rehydration {
-        mark_cli_token_commit_lifecycle_published_unlocked(store, auth_lease, &commit, tokens)
-            .await?;
-    }
-    Ok(commit)
-}
-
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-async fn mark_cli_token_commit_lifecycle_published_unlocked(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    commit: &CliTokenCommitSnapshot,
-    tokens: &meerkat_providers::auth_store::PersistedTokens,
-) -> anyhow::Result<()> {
-    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
-    let committed_tokens = if current_lifecycle.credential_present {
-        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+    let tokens_to_save = if mark_for_rehydration {
+        let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
+        if current_lifecycle.credential_present {
+            meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+        } else {
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                tokens,
+                commit.lifecycle_transition,
+            )
+        }
     } else {
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            tokens,
-            commit.lifecycle_transition,
-        )
+        tokens.clone()
     };
-    if let Err(e) = store.save(&commit.key, &committed_tokens).await {
-        match rollback_cli_token_commit(store, auth_lease, commit).await {
-            Ok(()) => anyhow::bail!(
-                "TokenStore lifecycle marker save failed: {e}; token commit rolled back"
-            ),
+    if let Err(e) = store.save(&commit.key, &tokens_to_save).await {
+        match rollback_cli_token_commit(store, auth_lease, &commit).await {
+            Ok(()) => {
+                anyhow::bail!("TokenStore save failed: {e}; AuthMachine lifecycle rolled back")
+            }
             Err(rollback_error) => anyhow::bail!(
-                "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+                "TokenStore save failed: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
             ),
         }
     }
-    Ok(())
+    Ok(commit)
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3780,18 +3754,6 @@ async fn save_cli_tokens_and_publish_lifecycle(
     )
     .await?;
     Ok(())
-}
-
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-async fn restore_cli_tokens_after_lifecycle_failure(
-    store: &dyn meerkat_providers::auth_store::TokenStore,
-    key: &meerkat_providers::auth_store::TokenKey,
-    previous: Option<&meerkat_providers::auth_store::PersistedTokens>,
-) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-    match previous {
-        Some(tokens) => store.save(key, tokens).await,
-        None => store.clear(key).await,
-    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

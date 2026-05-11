@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::spawn_blocking;
 
 /// File-based session store using JSONL format
@@ -20,6 +20,7 @@ pub struct JsonlStore {
     /// Whether to use pretty-printed JSON (default: true for readability)
     pretty_print: bool,
     index: RwLock<Option<Arc<SqliteSessionIndex>>>,
+    save_lock: Mutex<()>,
 }
 
 /// Builder for configuring JsonlStore
@@ -52,6 +53,7 @@ impl JsonlStoreBuilder {
             dir: self.dir,
             pretty_print: self.pretty_print,
             index: RwLock::new(None),
+            save_lock: Mutex::new(()),
         }
     }
 }
@@ -63,6 +65,7 @@ impl JsonlStore {
             dir,
             pretty_print: true,
             index: RwLock::new(None),
+            save_lock: Mutex::new(()),
         }
     }
 
@@ -262,22 +265,53 @@ impl JsonlStore {
 
         fs::rename(&temp_path, &path).await?;
 
-        // Write metadata sidecar atomically
-        let meta_temp_path = meta_path.with_extension("meta.tmp");
-        let mut meta_file = fs::File::create(&meta_temp_path).await?;
-        meta_file.write_all(meta_json.as_bytes()).await?;
-        meta_file.flush().await?;
-        meta_file.sync_all().await?;
-        drop(meta_file);
+        let sidecar_result = async {
+            let meta_temp_path = meta_path.with_extension("meta.tmp");
+            let mut meta_file = fs::File::create(&meta_temp_path).await?;
+            meta_file.write_all(meta_json.as_bytes()).await?;
+            meta_file.flush().await?;
+            meta_file.sync_all().await?;
+            drop(meta_file);
+            fs::rename(&meta_temp_path, &meta_path).await?;
+            Ok::<(), StoreError>(())
+        }
+        .await;
+        if let Err(err) = sidecar_result {
+            tracing::warn!(
+                session_id = %session.id(),
+                error = %err,
+                "failed to update JSONL metadata sidecar projection after canonical session save"
+            );
+        }
 
-        fs::rename(&meta_temp_path, &meta_path).await?;
-
-        let index = self.index().await?;
-        let result = spawn_blocking(move || index.insert_meta(meta)).await;
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(StoreError::Join(err)),
+        match self.index().await {
+            Ok(index) => {
+                let result = spawn_blocking(move || index.insert_meta(meta)).await;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(
+                            session_id = %session.id(),
+                            error = %err,
+                            "failed to update JSONL SQLite index projection after canonical session save"
+                        );
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            session_id = %session.id(),
+                            error = %err,
+                            "failed to join JSONL SQLite index projection update after canonical session save"
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    session_id = %session.id(),
+                    error = %err,
+                    "failed to open JSONL SQLite index projection after canonical session save"
+                );
+            }
         }
 
         Ok(())
@@ -304,13 +338,65 @@ impl JsonlStore {
     }
 
     async fn list_impl(&self, filter: SessionFilter) -> Result<Vec<SessionMeta>, StoreError> {
-        let index = self.index().await?;
-        let result = spawn_blocking(move || index.list_meta(filter)).await;
-        match result {
-            Ok(Ok(sessions)) => Ok(sessions),
-            Ok(Err(err)) => Err(err),
-            Err(err) => Err(StoreError::Join(err)),
+        self.init().await?;
+        let mut entries = fs::read_dir(&self.dir).await?;
+        let mut metas = Vec::new();
+
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            let contents = match fs::read(&path).await {
+                Ok(contents) => contents,
+                Err(err) => {
+                    tracing::warn!("failed to read JSONL session source file: {path:?}: {err}");
+                    continue;
+                }
+            };
+            let session =
+                match meerkat_core::session_migrations::deserialize_session_migrating(&contents) {
+                    Ok(session) => session,
+                    Err(err) => {
+                        tracing::warn!(
+                            "failed to parse JSONL session source file: {path:?}: {err}"
+                        );
+                        continue;
+                    }
+                };
+            let meta = SessionMeta::from(&session);
+            if filter
+                .created_after
+                .is_some_and(|created_after| meta.created_at < created_after)
+            {
+                continue;
+            }
+            if filter
+                .updated_after
+                .is_some_and(|updated_after| meta.updated_at < updated_after)
+            {
+                continue;
+            }
+            metas.push(meta);
         }
+
+        metas.sort_by(|left, right| {
+            right
+                .updated_at
+                .cmp(&left.updated_at)
+                .then_with(|| left.id.to_string().cmp(&right.id.to_string()))
+        });
+
+        let offset = filter.offset.unwrap_or(0);
+        if offset >= metas.len() {
+            return Ok(Vec::new());
+        }
+        let mut metas = metas.split_off(offset);
+        if let Some(limit) = filter.limit {
+            metas.truncate(limit);
+        }
+        Ok(metas)
     }
 
     async fn delete_impl(&self, id: &SessionId) -> Result<(), StoreError> {
@@ -348,6 +434,7 @@ impl SessionStore for JsonlStore {
     async fn save(&self, session: &Session) -> Result<(), SessionStoreError> {
         // F1 closure (wave-c C-H1): reject shrink-attempts at the trait
         // boundary before the JSONL row is rewritten on disk.
+        let _guard = self.save_lock.lock().await;
         let previous = self
             .load_impl(session.id())
             .await
@@ -440,7 +527,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_jsonl_store_list_reads_only_metadata() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_jsonl_store_list_ignores_orphaned_metadata_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
         let temp_dir = tempfile::tempdir()?;
         let store = JsonlStore::new(temp_dir.path().to_path_buf());
 
@@ -453,10 +541,9 @@ mod tests {
         let session_path = temp_dir.path().join(format!("{}.jsonl", session.id().0));
         fs::remove_file(&session_path).await?;
 
-        // list() should still work because it reads from metadata sidecar
+        // list() reads canonical session files, not orphaned sidecar metadata.
         let sessions = store.list(SessionFilter::default()).await?;
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].id, *session.id());
+        assert!(sessions.is_empty());
         Ok(())
     }
 
@@ -471,7 +558,7 @@ mod tests {
         let id = session.id().clone();
         store.save(&session).await?;
 
-        // If listing relies on scanning `.meta` sidecars, this would now return 0.
+        // Sidecar metadata is a projection; the session file remains list truth.
         let meta_path = temp_dir.path().join(format!("{}.meta", id.0));
         fs::remove_file(&meta_path).await?;
 
@@ -496,7 +583,7 @@ mod tests {
             id
         };
 
-        // Remove the index file to force an index rebuild from `.meta` sidecars.
+        // Remove the index projection; listing must still read session files.
         let index_path = store_path.join("session_index.sqlite3");
         fs::remove_file(&index_path).await?;
 

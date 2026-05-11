@@ -522,7 +522,7 @@ async fn pre_tool_deny_blocks_dispatch() {
         .execution_snapshot()
         .expect("test turn-state handle should expose a snapshot");
     assert_eq!(snapshot.turn_phase, TurnPhase::Failed);
-    assert_eq!(snapshot.terminal_outcome, TurnTerminalOutcome::Failed);
+    assert_eq!(snapshot.terminal_outcome, Some(TurnTerminalOutcome::Failed));
 
     let mut saw_run_failed = false;
     let mut saw_tool_result_event = false;

@@ -3124,33 +3124,17 @@ fn project_flow_frame_admit_from_machine(
         &state.frame_id,
         state.branch_winners.clone(),
     )?;
-    let admitted_node = if !next_state.last_admitted_node.as_str().is_empty() {
-        next_state.last_admitted_node.clone()
-    } else {
-        state
-            .node_status
-            .iter()
-            .find_map(|(node_id, previous)| {
-                let next = next_state.node_status.get(node_id)?;
-                (*previous == flow_frame::NodeRunStatus::Ready
-                    && *next == flow_frame::NodeRunStatus::Running)
-                    .then(|| node_id.clone())
-            })
-            .or_else(|| {
-                next_state.node_status.iter().find_map(|(node_id, next)| {
-                    (*next == flow_frame::NodeRunStatus::Running
-                        && state.node_status.get(node_id)
-                            != Some(&flow_frame::NodeRunStatus::Running))
-                    .then(|| node_id.clone())
-                })
-            })
-            .ok_or_else(|| {
-                MobError::Internal(format!(
-                    "MobMachine frame '{}' did not project an admitted running node",
-                    state.frame_id
-                ))
-            })?
-    };
+    let frame_key = mob_dsl::FrameId::from(state.frame_id.as_str());
+    let admitted_node = machine_state
+        .frame_last_admitted_node
+        .get(&frame_key)
+        .map(project_flow_node_id)
+        .ok_or_else(|| {
+            MobError::Internal(format!(
+                "MobMachine frame '{}' did not publish frame_last_admitted_node for admission",
+                state.frame_id
+            ))
+        })?;
     let effect = match next_state.node_kind.get(&admitted_node).copied() {
         Some(flow_frame::FlowNodeKind::Step) => {
             flow_frame::Effect::AdmitStepWork(flow_frame::effects::AdmitStepWork {

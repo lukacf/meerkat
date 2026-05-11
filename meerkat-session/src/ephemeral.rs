@@ -762,7 +762,6 @@ fn clear_cancel_after_boundary_request(handle: &Option<Arc<AtomicBool>>) {
 /// Sessions are kept alive as tokio tasks. All state is lost on process exit.
 pub struct EphemeralSessionService<B: SessionAgentBuilder> {
     sessions: RwLock<IndexMap<SessionId, SessionHandle>>,
-    archived_views: RwLock<IndexMap<SessionId, SessionView>>,
     builder: B,
     max_sessions: Option<usize>,
     active_session_capacity: Option<Arc<Semaphore>>,
@@ -928,7 +927,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
     pub fn new(builder: B, max_sessions: usize) -> Self {
         Self {
             sessions: RwLock::new(IndexMap::new()),
-            archived_views: RwLock::new(IndexMap::new()),
             builder,
             max_sessions: Some(max_sessions),
             active_session_capacity: Some(Arc::new(Semaphore::new(max_sessions))),
@@ -1008,28 +1006,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
                 "Max sessions reached ({active}/{max_sessions})"
             )),
         ))
-    }
-
-    fn archived_view_from_handle(id: &SessionId, handle: &SessionHandle) -> SessionView {
-        let cache = handle.summary_rx.borrow();
-        let llm_identity = handle.llm_identity_rx.borrow().clone();
-        SessionView {
-            state: SessionInfo {
-                session_id: id.clone(),
-                created_at: handle.created_at,
-                updated_at: cache.updated_at,
-                message_count: cache.message_count,
-                is_active: false,
-                model: llm_identity.model,
-                provider: llm_identity.provider,
-                last_assistant_text: cache.last_assistant_text.clone(),
-                labels: handle.labels.clone(),
-            },
-            billing: SessionUsage {
-                total_tokens: cache.total_tokens,
-                usage: cache.usage.clone(),
-            },
-        }
     }
 
     /// Export the full session (messages + metadata) for persistence.
@@ -2590,16 +2566,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let sessions = self.sessions.read().await;
         let handle = match sessions.get(id) {
             Some(handle) => handle,
-            None => {
-                drop(sessions);
-                return self
-                    .archived_views
-                    .read()
-                    .await
-                    .get(id)
-                    .cloned()
-                    .ok_or_else(|| SessionError::NotFound { id: id.clone() });
-            }
+            None => return Err(SessionError::NotFound { id: id.clone() }),
         };
 
         // Serve live reads from the service-owned summary/watch state instead
@@ -2677,13 +2644,8 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
         let handle = sessions
             .swap_remove(id)
             .ok_or_else(|| SessionError::NotFound { id: id.clone() })?;
-        let archived_view = Self::archived_view_from_handle(id, &handle);
         drop(sessions);
         release_staged_capacity_permit(&handle.staged_capacity_permit);
-        self.archived_views
-            .write()
-            .await
-            .insert(id.clone(), archived_view);
 
         let phase = {
             let mut slot = lock_turn_admission(&handle.turn_admission);
@@ -2862,13 +2824,7 @@ impl<B: SessionAgentBuilder + 'static> SessionServiceHistoryExt for EphemeralSes
                 session.messages(),
                 query,
             )),
-            Err(SessionError::NotFound { .. }) => {
-                if self.archived_views.read().await.contains_key(id) {
-                    Err(SessionError::PersistenceDisabled)
-                } else {
-                    Err(SessionError::NotFound { id: id.clone() })
-                }
-            }
+            Err(SessionError::NotFound { .. }) => Err(SessionError::NotFound { id: id.clone() }),
             Err(err) => Err(err),
         }
     }

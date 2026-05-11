@@ -825,6 +825,29 @@ test('Mob result decoders preserve generated result truth after validation', asy
   assert.deepEqual(flowStatus.step_ledger, []);
 });
 
+test('Mob memberStatus does not default malformed resolved capabilities', async () => {
+  const mob = new Mob('mob-web-unit', {
+    async mob_member_status() {
+      return JSON.stringify({
+        status: 'active',
+        is_final: false,
+        resolved_capabilities: {
+          vision: 'true',
+          image_input: false,
+          image_tool_results: false,
+          inline_video: false,
+          realtime: false,
+          web_search: false,
+          image_generation: false,
+        },
+      });
+    },
+  });
+
+  const snapshot = await mob.memberStatus('worker-1');
+  assert.equal(snapshot.resolved_capabilities, undefined);
+});
+
 test('Mob.respawn rejects legacy receipt carriers instead of projecting success', async () => {
   const mob = new Mob('mob-web-unit', {
     async mob_respawn() {

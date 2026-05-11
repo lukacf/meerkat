@@ -3390,14 +3390,25 @@ class MeerkatClient:
     ) -> ResolvedModelCapabilities | None:
         if not isinstance(raw, dict):
             return None
+        fields = (
+            "vision",
+            "image_input",
+            "image_tool_results",
+            "inline_video",
+            "realtime",
+            "web_search",
+            "image_generation",
+        )
+        if any(not isinstance(raw.get(field), bool) for field in fields):
+            return None
         return {
-            "vision": bool(raw.get("vision", False)),
-            "image_input": bool(raw.get("image_input", False)),
-            "image_tool_results": bool(raw.get("image_tool_results", False)),
-            "inline_video": bool(raw.get("inline_video", False)),
-            "realtime": bool(raw.get("realtime", False)),
-            "web_search": bool(raw.get("web_search", False)),
-            "image_generation": bool(raw.get("image_generation", False)),
+            "vision": raw["vision"],
+            "image_input": raw["image_input"],
+            "image_tool_results": raw["image_tool_results"],
+            "inline_video": raw["inline_video"],
+            "realtime": raw["realtime"],
+            "web_search": raw["web_search"],
+            "image_generation": raw["image_generation"],
         }
 
     @staticmethod

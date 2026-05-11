@@ -103,6 +103,7 @@ subset.
 | `turn/start` | Turn | Start a new turn on existing session |
 | `turn/interrupt` | Turn | Cancel in-flight turn |
 | `live/open` | Live | Open a live audio/text channel for a session |
+| `live/webrtc/answer` | Live | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Live | Get the status of a live channel |
 | `live/close` | Live | Close a live channel |
 | `live/send_input` | Live | Send an input chunk (audio/text) to a live channel |
@@ -969,6 +970,7 @@ Read the current state of a live channel.
 | Method | Purpose |
 |--------|---------|
 | `live/open` | Open a live audio/text channel for a session |
+| `live/webrtc/answer` | Answer a browser WebRTC offer for an already-open live channel |
 | `live/status` | Get the status of a live channel |
 | `live/close` | Close a live channel |
 | `live/send_input` | Send an input chunk (audio/text) to a live channel |

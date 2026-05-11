@@ -46,19 +46,23 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
 use meerkat_core::SessionMeta;
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::lifecycle::run_primitive::{
     ModelId, OpaqueProviderBody, ProviderParamsOverride, ProviderTag,
 };
+#[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::web_search::{
     WebSearchEvidence, WebSearchNativeEvent, WebSearchRequest, WebSearchResult, WebSearchStatus,
 };
 use meerkat_core::{
     Agent, AgentBuilder, AgentEvent, AgentLlmClient, AgentLlmClientDecorator, AgentSessionStore,
     AgentToolDispatcher, AuthBindingRef, BlobStore, BudgetLimits, Config, HookRunOverrides,
-    Message, ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, RuntimeBuildMode,
-    Session, SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
-    SystemMessage, ToolCategoryOverride, UserMessage,
+    ModelRegistry, OutputSchema, Provider, RealmConnectionSet, RealmId, Session,
+    SessionLlmIdentity, SessionMetadata, SessionToolVisibilityState, SessionTooling,
+    ToolCategoryOverride,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::{Message, RuntimeBuildMode, SystemMessage, UserMessage};
 use meerkat_runtime::{RuntimeOpsLifecycleRegistry, RuntimeTurnStateHandle};
 #[cfg(feature = "jsonl-store")]
 use meerkat_store::JsonlStore;
@@ -817,6 +821,7 @@ fn provider_tool_defaults_for(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
     match provider {
         Provider::Anthropic => config.provider_tools.anthropic.web_search,
@@ -3712,9 +3717,7 @@ impl AgentFactory {
         };
         // Inject pre-resolved metadata entries before the builder reads metadata
         // for early-stage recovery, such as canonical inherited visibility state.
-        let is_resumed_session = build_config.resume_session.as_ref().is_some_and(|session| {
-            !session.messages().is_empty() || !session.metadata().is_empty()
-        });
+        let is_resumed_session = build_config.resume_session.is_some();
         Self::apply_initial_metadata_entries(
             &mut session,
             &build_config.initial_metadata_entries,

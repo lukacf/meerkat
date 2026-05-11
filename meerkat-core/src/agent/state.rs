@@ -20,8 +20,7 @@ use crate::tokio;
 use crate::tool_catalog::{ToolCatalogDeferredEligibility, ToolCatalogMode, ToolPlaneClass};
 use crate::turn_execution_authority::{
     ContentShape, TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition,
-    TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
-    terminal_outcome_for_budget_exceeded,
+    TurnFailureReason, TurnPhase, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 use crate::types::{
     BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
@@ -60,69 +59,6 @@ struct LlmRetryRequest<'a> {
     provider_params: Option<&'a ProviderParamsOverride>,
 }
 
-fn turn_input_run_id(input: &TurnExecutionInput) -> Option<RunId> {
-    match input {
-        TurnExecutionInput::StartConversationRun { run_id }
-        | TurnExecutionInput::StartImmediateAppend { run_id }
-        | TurnExecutionInput::StartImmediateContext { run_id }
-        | TurnExecutionInput::PrimitiveApplied { run_id, .. }
-        | TurnExecutionInput::LlmReturnedToolCalls { run_id, .. }
-        | TurnExecutionInput::LlmReturnedTerminal { run_id }
-        | TurnExecutionInput::RegisterPendingOps { run_id, .. }
-        | TurnExecutionInput::ToolCallsResolved { run_id }
-        | TurnExecutionInput::OpsBarrierSatisfied { run_id, .. }
-        | TurnExecutionInput::BoundaryContinue { run_id }
-        | TurnExecutionInput::BoundaryComplete { run_id }
-        | TurnExecutionInput::RecoverableFailure { run_id, .. }
-        | TurnExecutionInput::FatalFailure { run_id, .. }
-        | TurnExecutionInput::RetryRequested { run_id, .. }
-        | TurnExecutionInput::CancelNow { run_id }
-        | TurnExecutionInput::CancelAfterBoundary { run_id }
-        | TurnExecutionInput::CancellationObserved { run_id }
-        | TurnExecutionInput::AcknowledgeTerminal { run_id }
-        | TurnExecutionInput::TurnLimitReached { run_id }
-        | TurnExecutionInput::BudgetExhausted { run_id }
-        | TurnExecutionInput::TimeBudgetExceeded { run_id }
-        | TurnExecutionInput::BudgetLimitExceeded { run_id, .. }
-        | TurnExecutionInput::EnterExtraction { run_id, .. }
-        | TurnExecutionInput::ExtractionValidationPassed { run_id }
-        | TurnExecutionInput::ExtractionValidationFailed { run_id, .. }
-        | TurnExecutionInput::ExtractionFailed { run_id, .. }
-        | TurnExecutionInput::ExtractionStart { run_id } => Some(run_id.clone()),
-        TurnExecutionInput::ForceCancelNoRun => None,
-    }
-}
-
-fn turn_input_failure_reason(input: &TurnExecutionInput) -> Option<TurnFailureReason> {
-    match input {
-        TurnExecutionInput::FatalFailure { reason, .. } => Some(reason.clone()),
-        TurnExecutionInput::TurnLimitReached { .. } => Some(TurnFailureReason::new(
-            crate::event::AgentErrorClass::MaxTurns,
-            "turn limit reached",
-        )),
-        TurnExecutionInput::BudgetExhausted { .. } => Some(TurnFailureReason::with_cause(
-            crate::TurnTerminalCauseKind::BudgetExhausted,
-            crate::event::AgentErrorClass::Budget,
-            "budget exhausted",
-        )),
-        TurnExecutionInput::TimeBudgetExceeded { .. } => Some(TurnFailureReason::with_cause(
-            crate::TurnTerminalCauseKind::TimeBudgetExceeded,
-            crate::event::AgentErrorClass::Budget,
-            "time budget exceeded",
-        )),
-        TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
-            Some(TurnFailureReason::budget_exceeded(*exceeded))
-        }
-        TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
-            Some(TurnFailureReason::new(
-                crate::event::AgentErrorClass::StructuredOutput,
-                error.clone(),
-            ))
-        }
-        _ => None,
-    }
-}
-
 fn public_terminal_cause_kind(
     cause_kind: Option<TurnTerminalCauseKind>,
 ) -> Option<TurnTerminalCauseKind> {
@@ -148,17 +84,6 @@ fn assistant_image_events_from_effects(
         }
     }
     images
-}
-
-fn validate_turn_input_failure_reason(input: &TurnExecutionInput) -> Result<(), AgentError> {
-    if let Some(reason) = turn_input_failure_reason(input)
-        && !reason.cause_kind.is_specific_failure_cause()
-    {
-        return Err(AgentError::InternalError(format!(
-            "turn input {input:?} has unknown machine-owned terminal_cause_kind"
-        )));
-    }
-    Ok(())
 }
 
 fn budget_warning_event(exceeded: BudgetExceeded) -> AgentEvent {
@@ -615,113 +540,19 @@ where
         Ok(())
     }
 
-    /// Apply a typed input to the runtime-backed turn state when available,
-    /// then mirror through the standalone local fallback and observable
-    /// `LoopState`.
+    /// Apply a typed input to the runtime-backed turn-state authority and
+    /// return the authority-emitted transition effects.
     fn apply_turn_input_via_runtime_handle(
         &self,
         input: &TurnExecutionInput,
-    ) -> Result<(), AgentError> {
-        let Some(handle) = self.turn_state_handle.as_deref() else {
-            return Ok(());
-        };
+    ) -> Result<TurnExecutionTransition, AgentError> {
+        let handle = self.turn_state_handle.as_deref().ok_or_else(|| {
+            AgentError::InternalError(
+                "runtime turn-state handle missing while applying turn input".to_string(),
+            )
+        })?;
 
-        let result = match input {
-            TurnExecutionInput::StartConversationRun { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartConversationRun { run_id } => handle.start_conversation_run(
-                run_id.clone(),
-                TurnPrimitiveKind::ConversationTurn,
-                ContentShape::Conversation,
-                false,
-                false,
-                0,
-            ),
-            TurnExecutionInput::StartImmediateAppend { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartImmediateAppend { run_id } => {
-                handle.start_immediate_append(run_id.clone())
-            }
-            TurnExecutionInput::StartImmediateContext { run_id }
-                if handle.snapshot().active_run_id.as_ref() == Some(run_id) =>
-            {
-                Ok(())
-            }
-            TurnExecutionInput::StartImmediateContext { run_id } => {
-                handle.start_immediate_context(run_id.clone())
-            }
-            TurnExecutionInput::PrimitiveApplied {
-                run_id: _,
-                admitted_content_shape: _,
-                vision_enabled: _,
-                image_tool_results_enabled: _,
-            } => handle.primitive_applied(),
-            TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
-                handle.llm_returned_tool_calls(u64::from(*tool_count))
-            }
-            TurnExecutionInput::LlmReturnedTerminal { .. } => handle.llm_returned_terminal(),
-            TurnExecutionInput::RegisterPendingOps {
-                op_refs,
-                barrier_operation_ids,
-                ..
-            } => handle.register_pending_ops(
-                op_refs.iter().cloned().collect(),
-                barrier_operation_ids.iter().cloned().collect(),
-            ),
-            TurnExecutionInput::ToolCallsResolved { .. } => handle.tool_calls_resolved(),
-            TurnExecutionInput::OpsBarrierSatisfied { operation_ids, .. } => {
-                handle.ops_barrier_satisfied(operation_ids.iter().cloned().collect())
-            }
-            TurnExecutionInput::BoundaryContinue { .. } => handle.boundary_continue(),
-            TurnExecutionInput::BoundaryComplete { .. } => handle.boundary_complete(),
-            TurnExecutionInput::RecoverableFailure { retry, .. } => {
-                handle.recoverable_failure(retry.clone())
-            }
-            TurnExecutionInput::FatalFailure { reason, .. } => handle.fatal_failure(reason.clone()),
-            TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
-                handle.retry_requested(*retry_attempt)
-            }
-            TurnExecutionInput::CancelNow { .. } => handle.cancel_now(),
-            TurnExecutionInput::CancelAfterBoundary { .. } => {
-                handle.request_cancel_after_boundary()
-            }
-            TurnExecutionInput::CancellationObserved { .. } => handle.cancellation_observed(),
-            TurnExecutionInput::AcknowledgeTerminal { .. } => {
-                handle.acknowledge_terminal(self.turn_terminal_outcome()?)
-            }
-            TurnExecutionInput::TurnLimitReached { .. } => handle.turn_limit_reached(),
-            TurnExecutionInput::BudgetExhausted { .. } => handle.budget_exhausted(),
-            TurnExecutionInput::TimeBudgetExceeded { .. } => handle.time_budget_exceeded(),
-            TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
-                match terminal_outcome_for_budget_exceeded(*exceeded) {
-                    TurnTerminalOutcome::TimeBudgetExceeded => handle.time_budget_exceeded(),
-                    TurnTerminalOutcome::BudgetExhausted => handle.budget_exhausted(),
-                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
-                }
-            }
-            TurnExecutionInput::EnterExtraction { max_retries, .. } => {
-                handle.enter_extraction(*max_retries)
-            }
-            TurnExecutionInput::ExtractionValidationPassed { .. } => {
-                handle.extraction_validation_passed()
-            }
-            TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
-                handle.extraction_validation_failed(error.clone())
-            }
-            TurnExecutionInput::ExtractionFailed { error, .. } => {
-                handle.extraction_failed(error.clone())
-            }
-            TurnExecutionInput::ExtractionStart { .. } => handle.extraction_start(),
-            TurnExecutionInput::ForceCancelNoRun => handle.force_cancel_no_run(),
-        };
-
-        result.map_err(|err| {
+        handle.apply_turn_input(input).map_err(|err| {
             AgentError::InternalError(format!(
                 "runtime turn-state handle rejected {input:?}: {err}"
             ))
@@ -732,63 +563,8 @@ where
         &mut self,
         input: TurnExecutionInput,
     ) -> Result<TurnExecutionTransition, AgentError> {
-        validate_turn_input_failure_reason(&input)?;
-        let prev_phase = self.turn_phase()?;
-        self.apply_turn_input_via_runtime_handle(&input)?;
-        let next_phase = self.turn_phase()?;
-
-        // Effects are derived from phase transitions only. The runtime
-        // authority owns all other side-effect decisions; core just
-        // surfaces the compaction tick on CallingLlm entry so the
-        // standalone compactor path still fires.
-        let mut effects = Vec::new();
-        if prev_phase != TurnPhase::CallingLlm && next_phase == TurnPhase::CallingLlm {
-            effects.push(TurnExecutionEffect::CheckCompaction);
-        }
-        if prev_phase != TurnPhase::Completed
-            && next_phase == TurnPhase::Completed
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            effects.push(TurnExecutionEffect::RunCompleted { run_id });
-        }
-        if prev_phase != TurnPhase::Failed
-            && next_phase == TurnPhase::Failed
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            let reason = self.turn_failure_reason_for_failed_transition(&input)?;
-            effects.push(TurnExecutionEffect::RunFailed { run_id, reason });
-        }
-        if prev_phase != TurnPhase::Cancelled
-            && next_phase == TurnPhase::Cancelled
-            && let Some(run_id) = turn_input_run_id(&input)
-        {
-            effects.push(TurnExecutionEffect::RunCancelled { run_id });
-        }
-
-        Ok(TurnExecutionTransition {
-            prev_phase,
-            next_phase,
-            effects,
-        })
-    }
-
-    fn turn_failure_reason_for_failed_transition(
-        &self,
-        input: &TurnExecutionInput,
-    ) -> Result<TurnFailureReason, AgentError> {
-        if let Some(reason) = turn_input_failure_reason(input) {
-            return Ok(reason);
-        }
-
-        let outcome = self.turn_terminal_outcome()?;
-        let cause_kind = self.require_machine_terminal_failure_cause_kind(format!(
-            "failed turn transition for input {input:?}"
-        ))?;
-        Ok(TurnFailureReason::with_cause(
-            cause_kind,
-            cause_kind.agent_error_class(),
-            cause_kind.default_message(outcome),
-        ))
+        input.validate_explicit_failure_reason()?;
+        self.apply_turn_input_via_runtime_handle(&input)
     }
 
     fn require_machine_terminal_failure_cause_kind(
@@ -808,8 +584,9 @@ where
         Ok(cause_kind)
     }
 
-    /// Execute side effects from a transition. Handles CheckCompaction
-    /// effects emitted on CallingLlm entry.
+    /// Execute side effects from a transition. The turn authority emits
+    /// CheckCompaction; core only runs the compactor when that effect marks
+    /// entry to an LLM call.
     async fn execute_turn_effects(
         &mut self,
         transition: &TurnExecutionTransition,
@@ -853,6 +630,9 @@ where
                 | TurnExecutionEffect::CheckCompaction => {}
             }
             if let TurnExecutionEffect::CheckCompaction = effect {
+                if transition.next_phase != TurnPhase::CallingLlm {
+                    continue;
+                }
                 let current_boundary_index = self.compaction_cadence.session_boundary_index;
                 if let Some(ref compactor) = self.compactor {
                     let ctx = crate::agent::compact::build_compaction_context(

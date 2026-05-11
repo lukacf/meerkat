@@ -141,10 +141,7 @@ fn peer_input_from_ingress_fact(
         body: peer_rendered_body(interaction),
         payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
-        handling_mode: match interaction.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => None,
-            mode => Some(mode),
-        },
+        handling_mode: Some(interaction.handling_mode),
     }))
 }
 
@@ -429,6 +426,11 @@ mod tests {
             assert!(matches!(p.convention, Some(PeerConvention::Message)));
             assert_eq!(p.body, "hello");
             assert_eq!(p.header.durability, InputDurability::Durable);
+            assert_eq!(
+                p.handling_mode,
+                Some(meerkat_core::types::HandlingMode::Queue),
+                "explicit queue must survive comms -> runtime projection so it can suppress running-turn interruption"
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -463,6 +465,11 @@ mod tests {
                 p.payload,
                 Some(serde_json::json!({"name": "agent-1"})),
                 "request params must remain structured on PeerInput so runtime prompt projection does not depend on pre-rendered comms prose"
+            );
+            assert_eq!(
+                p.handling_mode,
+                Some(meerkat_core::types::HandlingMode::Queue),
+                "explicit queue request semantics must not collapse to default policy"
             );
         } else {
             panic!("Expected PeerInput");

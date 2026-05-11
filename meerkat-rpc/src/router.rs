@@ -4903,6 +4903,113 @@ args = [{}]
         );
     }
 
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_peer_ingress_steer_interrupts_before_forwarding_to_active_live_adapter() {
+        let (router, session_id, command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-steer-test").await;
+
+        let input = meerkat_runtime::Input::Peer(meerkat_runtime::PeerInput {
+            header: meerkat_runtime::InputHeader {
+                id: meerkat_core::lifecycle::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: meerkat_runtime::InputOrigin::Peer {
+                    peer_id: "550e8400-e29b-41d4-a716-446655440001".to_string(),
+                    display_identity: Some("helper-steer-test".to_string()),
+                    runtime_id: None,
+                },
+                durability: meerkat_runtime::InputDurability::Durable,
+                visibility: meerkat_runtime::InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            convention: Some(meerkat_runtime::PeerConvention::Message),
+            body: "urgent helper update via comms".to_string(),
+            payload: None,
+            blocks: None,
+            handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
+        });
+
+        let (_outcome, handle) = router
+            .runtime_adapter()
+            .accept_input_with_completion(&session_id, input)
+            .await
+            .expect("accept steered peer input");
+        if let Some(handle) = handle {
+            let _ = handle.wait().await;
+        }
+
+        let recorded = command_log.lock().await;
+        assert!(
+            matches!(
+                recorded.as_slice(),
+                [
+                    meerkat_core::live_adapter::LiveAdapterCommand::Interrupt,
+                    meerkat_core::live_adapter::LiveAdapterCommand::SendInput {
+                        chunk: meerkat_core::live_adapter::LiveInputChunk::Text { text }
+                    },
+                    ..
+                ] if text.contains("urgent helper update via comms")
+            ),
+            "steered live peer ingress must interrupt provider output before sending the new text input; got {recorded:?}"
+        );
+    }
+
+    #[cfg(feature = "comms")]
+    #[tokio::test]
+    async fn live_peer_ingress_does_not_forward_context_only_primitives_to_live_adapter() {
+        let (router, session_id, command_log) =
+            open_deferred_keep_alive_live_controller("live-smoke-controller-context-test").await;
+
+        let primitive = meerkat_core::lifecycle::run_primitive::RunPrimitive::StagedInput(
+            meerkat_core::lifecycle::run_primitive::StagedRunInput {
+                boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
+                appends: Vec::new(),
+                context_appends: vec![
+                    meerkat_core::lifecycle::run_primitive::ConversationContextAppend {
+                        key: "peer_response_progress:helper".to_string(),
+                        content: meerkat_core::lifecycle::run_primitive::CoreRenderable::Text {
+                            text: "helper is still working".to_string(),
+                        },
+                    },
+                ],
+                contributing_input_ids: vec![meerkat_core::lifecycle::InputId::new()],
+                turn_metadata: Some(
+                    meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                        execution_kind: Some(
+                            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            },
+        );
+        assert!(
+            primitive.is_context_only_apply_without_turn(),
+            "fixture must exercise the context-only executor path"
+        );
+
+        let forwarded = router
+            .runtime
+            .try_forward_runtime_primitive_to_live_adapter(
+                &session_id,
+                meerkat_core::lifecycle::RunId::new(),
+                &primitive,
+            )
+            .await
+            .expect("live forward check should not fail");
+
+        assert!(
+            forwarded.is_none(),
+            "context-only runtime facts must stay in Meerkat context instead of becoming hosted live user text"
+        );
+        assert!(
+            command_log.lock().await.is_empty(),
+            "context-only primitive must not send commands to the live adapter"
+        );
+    }
+
     #[cfg(feature = "mob")]
     #[tokio::test]
     async fn router_created_deferred_sessions_apply_tool_filter_to_live_open_config() {

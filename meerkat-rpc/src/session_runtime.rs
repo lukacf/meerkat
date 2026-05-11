@@ -3779,6 +3779,10 @@ impl SessionRuntime {
         run_id: RunId,
         primitive: &RunPrimitive,
     ) -> Result<Option<CoreApplyOutput>, String> {
+        if primitive.is_context_only_apply_without_turn() {
+            return Ok(None);
+        }
+
         let Some((host, channel_id)) = self.active_live_channel_for_session(session_id).await
         else {
             return Ok(None);
@@ -3786,6 +3790,19 @@ impl SessionRuntime {
         let Some(text) = Self::live_text_from_runtime_primitive(primitive) else {
             return Ok(None);
         };
+
+        if primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.handling_mode)
+            == Some(meerkat_core::types::HandlingMode::Steer)
+        {
+            host.send_command(
+                &channel_id,
+                meerkat_core::live_adapter::LiveAdapterCommand::Interrupt,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        }
 
         host.send_command(
             &channel_id,

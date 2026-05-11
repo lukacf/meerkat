@@ -553,10 +553,7 @@ fn peer_input_from_delivery_payload(
         body,
         payload: None,
         blocks,
-        handling_mode: match payload.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => None,
-            mode => Some(mode),
-        },
+        handling_mode: Some(payload.handling_mode),
     })
 }
 
@@ -3158,6 +3155,32 @@ mod tests {
                 .expect("bind should accept the configured bootstrap token");
         assert_eq!(authorized.peer_id.as_str(), supervisor.peer_id);
         assert_eq!(advertised_address, runtime.advertised_address().unwrap());
+    }
+
+    #[test]
+    fn bridge_delivery_payload_preserves_explicit_queue_handling_mode() {
+        let input = peer_input_from_delivery_payload(
+            &SessionId::new(),
+            PeerId::parse(PEER_ID_SUPERVISOR).expect("valid supervisor peer id"),
+            InteractionId(Uuid::new_v4()),
+            BridgeDeliveryPayload {
+                supervisor: supervisor_bridge_spec(),
+                epoch: 1,
+                protocol_version: SUPERVISOR_BRIDGE_PROTOCOL_VERSION,
+                input_id: "bridge-delivery-queue-test".to_string(),
+                content: meerkat_core::types::ContentInput::Text("queued follow-up".to_string()),
+                handling_mode: HandlingMode::Queue,
+            },
+        );
+
+        let Input::Peer(peer) = input else {
+            panic!("bridge delivery must project to peer input");
+        };
+        assert_eq!(
+            peer.handling_mode,
+            Some(HandlingMode::Queue),
+            "bridge delivery explicit queue must survive into MeerkatMachine admission"
+        );
     }
 
     #[test]

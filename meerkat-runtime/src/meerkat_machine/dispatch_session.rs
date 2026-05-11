@@ -155,7 +155,7 @@ impl MeerkatMachine {
                 let authority = dsl_authority_shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                authority.state.lifecycle_phase.clone()
+                authority.state.lifecycle_phase
             };
             {
                 let mut driver = driver_handle.lock().await;

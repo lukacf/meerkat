@@ -888,6 +888,18 @@ impl Default for StartTurnRuntimeSemantics {
     }
 }
 
+/// Effective runtime/session fields consumed by a start-turn task after
+/// canonical metadata projection.
+pub type StartTurnEffectiveParts = (
+    Option<RenderMetadata>,
+    HandlingMode,
+    Option<Vec<crate::skills::SkillKey>>,
+    Option<TurnToolOverlay>,
+    Vec<PendingSystemContextAppend>,
+    Vec<ConversationAppend>,
+    Option<RuntimeTurnMetadata>,
+);
+
 impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn new(
@@ -947,17 +959,7 @@ impl StartTurnRuntimeSemantics {
     /// task. Semantic fields are derived from [`RuntimeTurnMetadata`]; the
     /// public split fields exist only as compatibility inputs.
     #[must_use]
-    pub fn into_effective_parts(
-        self,
-    ) -> (
-        Option<RenderMetadata>,
-        HandlingMode,
-        Option<Vec<crate::skills::SkillKey>>,
-        Option<TurnToolOverlay>,
-        Vec<PendingSystemContextAppend>,
-        Vec<ConversationAppend>,
-        Option<RuntimeTurnMetadata>,
-    ) {
+    pub fn into_effective_parts(self) -> StartTurnEffectiveParts {
         let metadata = self.canonical_turn_metadata();
         let render_metadata = metadata
             .as_ref()

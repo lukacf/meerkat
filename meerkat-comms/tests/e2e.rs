@@ -547,8 +547,12 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
     assert_eq!(b_messages.len(), 1);
     match &b_messages[0].content {
         meerkat_core::InteractionContent::Message { body, blocks } => {
-            assert_eq!(body, "A->B blob prelude");
+            assert_eq!(
+                body,
+                "A->B blob prelude\n[image: image/png]\nPrelude after the image so body synthesis has to decide what to do."
+            );
             let blocks = blocks.as_ref().expect("message blocks");
+            assert_eq!(blocks.len(), 3);
             assert!(matches!(
                 &blocks[0],
                 ContentBlock::Text { text } if text == "A->B blob prelude"
@@ -559,6 +563,10 @@ async fn e2e_smoke_mcp_multimodal_blob_current_turn_request_response_loop() {
                     media_type,
                     data: ImageData::Inline { data }
                 } if media_type == "image/png" && data == "bWVzc2FnZS1ibG9i"
+            ));
+            assert!(matches!(
+                &blocks[2],
+                ContentBlock::Text { text } if text == "Prelude after the image so body synthesis has to decide what to do."
             ));
         }
         other => panic!("expected B message, got {other:?}"),

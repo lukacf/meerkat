@@ -6131,7 +6131,7 @@ mod tests {
         match err {
             AgentError::InternalError(message) => {
                 assert!(
-                    message.contains("unknown machine-owned terminal_cause_kind"),
+                    message.contains("non-specific terminal cause Unknown"),
                     "unexpected unknown-cause invariant error: {message}"
                 );
                 assert!(

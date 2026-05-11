@@ -148,7 +148,7 @@ fn admit_bridge_session_for_spawn_with(
     if let Some(session) = build.resume_session.as_ref() {
         return session.id().clone();
     }
-    let session_id = admitted_session_id.unwrap_or_default();
+    let session_id = admitted_session_id.unwrap_or_else(SessionId::new);
     build.resume_session = Some(meerkat_core::session::Session::with_id(session_id.clone()));
     session_id
 }

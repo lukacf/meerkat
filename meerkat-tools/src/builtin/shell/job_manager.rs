@@ -3045,21 +3045,18 @@ mod tests {
             .get_status(&job_id)
             .await
             .expect("job should still be tracked");
-        assert!(
-            matches!(&job.status, JobStatus::Completed { .. }),
-            "registry terminal status must own projection, got {:?}",
-            job.status
-        );
-        if let JobStatus::Completed {
-            exit_code,
-            stdout,
-            duration_secs,
-            ..
-        } = job.status
-        {
-            assert_eq!(exit_code, None);
-            assert_eq!(stdout, "registry-owned completion");
-            assert_eq!(duration_secs, 0.125);
+        match job.status {
+            JobStatus::Completed {
+                exit_code,
+                stdout,
+                duration_secs,
+                ..
+            } => {
+                assert_eq!(exit_code, None);
+                assert_eq!(stdout, "registry-owned completion");
+                assert_eq!(duration_secs, 0.125);
+            }
+            other => panic!("registry terminal status must own projection, got {other:?}"),
         }
 
         let summaries = manager.list_jobs().await;

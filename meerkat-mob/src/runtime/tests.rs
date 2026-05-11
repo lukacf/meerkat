@@ -27001,10 +27001,10 @@ async fn test_supervisor_private_trust_preserves_send_resolution() {
         entry.pubkey
     };
 
-    // The directory-filter side-channel must mark this pubkey private.
+    // The directory-visibility authority must mark this pubkey private.
     assert!(
         member_comms.router().is_private(&supervisor_pubkey),
-        "directory-filter invariant: supervisor pubkey must be marked \
+        "directory-visibility invariant: supervisor pubkey must be marked \
          private so `resolve_peer_directory()` hides it"
     );
 

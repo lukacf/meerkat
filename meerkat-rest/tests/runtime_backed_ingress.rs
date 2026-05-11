@@ -99,6 +99,7 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
     let persistence =
         PersistenceBundle::new(store, None, Arc::new(meerkat_store::MemoryBlobStore::new()));
     let runtime_adapter = persistence.runtime_adapter();
+    let workgraph_store = persistence.workgraph_store();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
     #[cfg(feature = "mob")]
     let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
@@ -136,6 +137,11 @@ async fn runtime_backed_external_events_stay_queued_without_waking_idle_sessions
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
         )),
+        workgraph_service: meerkat::WorkGraphService::with_scope(
+            workgraph_store,
+            "phase1-rest",
+            meerkat::WorkNamespace::default(),
+        ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("phase1-rest").expect("valid realm"),
         instance_id: None,

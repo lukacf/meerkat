@@ -333,6 +333,36 @@
       "result_type": "Value"
     },
     {
+      "description": "Get one WorkGraph item",
+      "name": "workgraph/get",
+      "params_type": "WorkGraphIdParams",
+      "result_type": "WorkItem"
+    },
+    {
+      "description": "List WorkGraph items",
+      "name": "workgraph/list",
+      "params_type": "WorkItemFilter",
+      "result_type": "WorkItemListResult"
+    },
+    {
+      "description": "List ready WorkGraph items",
+      "name": "workgraph/ready",
+      "params_type": "ReadyWorkFilter",
+      "result_type": "WorkItemListResult"
+    },
+    {
+      "description": "Read a WorkGraph snapshot",
+      "name": "workgraph/snapshot",
+      "params_type": "WorkGraphSnapshotFilter",
+      "result_type": "WorkGraphSnapshot"
+    },
+    {
+      "description": "List WorkGraph events",
+      "name": "workgraph/events",
+      "params_type": "WorkGraphEventFilter",
+      "result_type": "WorkGraphEventsResult"
+    },
+    {
       "description": "List available skills",
       "name": "skills/list"
     },

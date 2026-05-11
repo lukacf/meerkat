@@ -52,8 +52,8 @@ use meerkat::{
     AgentEvent, AgentFactory, FactoryAgentBuilder, LlmClient, MachineSessionArchiveProtocol,
     OutputSchema, PersistentSessionService, ScheduleService, ScheduleToolDispatcher, Session,
     SessionId, SessionService, SessionServiceControlExt, SessionServiceHistoryExt,
-    encode_llm_client_override_for_service, handle_schedule_tools_call, open_realm_persistence_in,
-    schedule_tools_list,
+    WorkGraphService, encode_llm_client_override_for_service, handle_schedule_tools_call,
+    open_realm_persistence_in, schedule_tools_list,
 };
 use meerkat_contracts::{
     CommsSendParams, CommsSendResult, ErrorCode, RuntimeStateResult, SessionLocator, SkillsParams,
@@ -144,6 +144,7 @@ pub struct AppState {
     /// Session service for managing agent lifecycle.
     pub session_service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     pub schedule_service: ScheduleService,
+    pub workgraph_service: WorkGraphService,
     /// Webhook authentication, resolved once at startup from RKAT_WEBHOOK_SECRET.
     pub webhook_auth: webhook::WebhookAuth,
     pub realm: meerkat_core::RealmId,
@@ -399,6 +400,11 @@ impl AppState {
                 .await?;
         let session_store = persistence.session_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_service = WorkGraphService::with_scope(
+            persistence.workgraph_store(),
+            realm.to_string(),
+            meerkat::WorkNamespace::default(),
+        );
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm.as_str());
         let resolved_paths = meerkat_core::ConfigResolvedPaths {
             root: realm_paths.root.display().to_string(),
@@ -477,6 +483,7 @@ impl AppState {
             .runtime_root(realm_paths.root.clone())
             .builtins(enable_builtins)
             .shell(enable_shell)
+            .workgraph(config.tools.workgraph_enabled)
             .schedule(true);
         let conventions_context_root = bootstrap.context.context_root.clone();
         let conventions_user_root = bootstrap.context.user_config_root.clone();
@@ -530,6 +537,7 @@ impl AppState {
             event_tx,
             session_service,
             schedule_service,
+            workgraph_service,
             webhook_auth: webhook::WebhookAuth::from_env(),
             realm,
             instance_id,
@@ -1753,6 +1761,9 @@ pub struct CreateSessionRequest {
     /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
     #[serde(default)]
     pub enable_web_search: Option<bool>,
+    /// Enable WorkGraph tools. Omit to use factory defaults.
+    #[serde(default)]
+    pub enable_workgraph: Option<bool>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
@@ -1967,6 +1978,11 @@ pub fn router(state: AppState) -> Router {
         .route("/sessions/{id}/events", get(session_events))
         .route("/schedule/tools", get(schedule_tools))
         .route("/schedule/call", post(schedule_call))
+        .route("/workgraph/items", get(workgraph_list_items))
+        .route("/workgraph/items/{id}", get(workgraph_get_item))
+        .route("/workgraph/ready", get(workgraph_ready))
+        .route("/workgraph/snapshot", get(workgraph_snapshot))
+        .route("/workgraph/events", get(workgraph_events))
         .route("/schedules", get(list_schedules).post(create_schedule))
         .route(
             "/schedules/{id}",
@@ -3610,6 +3626,122 @@ fn schedule_tool_error_to_api(error: meerkat::ScheduleToolError) -> ApiError {
     }
 }
 
+fn workgraph_error_to_api(error: meerkat::WorkGraphError) -> ApiError {
+    match error {
+        meerkat::WorkGraphError::NotFound { .. } => ApiError::NotFound(error.to_string()),
+        meerkat::WorkGraphError::StaleRevision { .. }
+        | meerkat::WorkGraphError::Conflict(_)
+        | meerkat::WorkGraphError::InvalidTransition(_)
+        | meerkat::WorkGraphError::InvalidInput(_) => ApiError::BadRequest(error.to_string()),
+        meerkat::WorkGraphError::UnsupportedBackend(_) => {
+            ApiError::ServiceUnavailable(error.to_string())
+        }
+        meerkat::WorkGraphError::Store(_) => ApiError::Internal(error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WorkGraphItemsQuery {
+    #[serde(default)]
+    realm_id: Option<String>,
+    #[serde(default)]
+    namespace: Option<meerkat::WorkNamespace>,
+    #[serde(default)]
+    all_namespaces: bool,
+    #[serde(default)]
+    statuses: Vec<meerkat::WorkStatus>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    include_terminal: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WorkGraphReadyQuery {
+    #[serde(default)]
+    realm_id: Option<String>,
+    #[serde(default)]
+    namespace: Option<meerkat::WorkNamespace>,
+    #[serde(default)]
+    labels: Vec<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct WorkGraphEventsQuery {
+    #[serde(default)]
+    realm_id: Option<String>,
+    #[serde(default)]
+    namespace: Option<meerkat::WorkNamespace>,
+    #[serde(default)]
+    after_seq: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkGraphItemsResponse {
+    items: Vec<meerkat::WorkItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkGraphEventsResponse {
+    events: Vec<meerkat::WorkGraphEvent>,
+}
+
+impl From<WorkGraphItemsQuery> for meerkat::WorkItemFilter {
+    fn from(value: WorkGraphItemsQuery) -> Self {
+        Self {
+            realm_id: value.realm_id,
+            namespace: value.namespace,
+            all_namespaces: value.all_namespaces,
+            statuses: value.statuses,
+            labels: value.labels,
+            include_terminal: value.include_terminal,
+            limit: value.limit,
+        }
+    }
+}
+
+impl From<WorkGraphItemsQuery> for meerkat::WorkGraphSnapshotFilter {
+    fn from(value: WorkGraphItemsQuery) -> Self {
+        Self {
+            realm_id: value.realm_id,
+            namespace: value.namespace,
+            all_namespaces: value.all_namespaces,
+            statuses: value.statuses,
+            labels: value.labels,
+            include_terminal: value.include_terminal,
+            limit: value.limit,
+        }
+    }
+}
+
+impl From<WorkGraphReadyQuery> for meerkat::ReadyWorkFilter {
+    fn from(value: WorkGraphReadyQuery) -> Self {
+        Self {
+            realm_id: value.realm_id,
+            namespace: value.namespace,
+            labels: value.labels,
+            limit: value.limit,
+        }
+    }
+}
+
+impl From<WorkGraphEventsQuery> for meerkat::WorkGraphEventFilter {
+    fn from(value: WorkGraphEventsQuery) -> Self {
+        Self {
+            realm_id: value.realm_id,
+            namespace: value.namespace,
+            after_seq: value.after_seq,
+            limit: value.limit,
+        }
+    }
+}
+
 /// Extract an optional `RequestContext` from the `X-Meerkat-Request-Id` header
 /// and register it with the canonical surface request executor.
 ///
@@ -3722,6 +3854,7 @@ fn help_request_to_create_session(
         enable_memory: Some(false),
         enable_mob: Some(false),
         enable_web_search: Some(false),
+        enable_workgraph: Some(false),
         budget_limits: None,
         provider_params: None,
         preload_skills: Some(meerkat::help::platform_preload_skills()),
@@ -3949,11 +4082,13 @@ async fn create_session_inner(
         override_builtins: ToolCategoryOverride::from_override(req.enable_builtins),
         override_shell: ToolCategoryOverride::from_override(req.enable_shell),
         override_schedule: ToolCategoryOverride::Inherit,
+        override_workgraph: ToolCategoryOverride::from_override(req.enable_workgraph),
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
         override_mob: ToolCategoryOverride::Inherit,
         override_image_generation: ToolCategoryOverride::Inherit,
         override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
         schedule_tools: None,
+        workgraph_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
         realm_id: Some(state.realm.to_string()),
@@ -4224,6 +4359,68 @@ async fn schedule_call(
         .await
         .map(Json)
         .map_err(schedule_tool_error_to_api)
+}
+
+async fn workgraph_list_items(
+    State(state): State<AppState>,
+    Query(query): Query<WorkGraphItemsQuery>,
+) -> Result<Json<WorkGraphItemsResponse>, ApiError> {
+    state
+        .workgraph_service
+        .list(query.into())
+        .await
+        .map(|items| Json(WorkGraphItemsResponse { items }))
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_get_item(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<WorkGraphReadyQuery>,
+) -> Result<Json<meerkat::WorkItem>, ApiError> {
+    let id = meerkat::WorkItemId::new(id).map_err(workgraph_error_to_api)?;
+    state
+        .workgraph_service
+        .get(query.realm_id, query.namespace, id)
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_ready(
+    State(state): State<AppState>,
+    Query(query): Query<WorkGraphReadyQuery>,
+) -> Result<Json<WorkGraphItemsResponse>, ApiError> {
+    state
+        .workgraph_service
+        .ready(query.into())
+        .await
+        .map(|items| Json(WorkGraphItemsResponse { items }))
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_snapshot(
+    State(state): State<AppState>,
+    Query(query): Query<WorkGraphItemsQuery>,
+) -> Result<Json<meerkat::WorkGraphSnapshot>, ApiError> {
+    state
+        .workgraph_service
+        .snapshot(query.into())
+        .await
+        .map(Json)
+        .map_err(workgraph_error_to_api)
+}
+
+async fn workgraph_events(
+    State(state): State<AppState>,
+    Query(query): Query<WorkGraphEventsQuery>,
+) -> Result<Json<WorkGraphEventsResponse>, ApiError> {
+    state
+        .workgraph_service
+        .events(query.into())
+        .await
+        .map(|events| Json(WorkGraphEventsResponse { events }))
+        .map_err(workgraph_error_to_api)
 }
 
 async fn list_schedules(
@@ -4784,10 +4981,12 @@ async fn continue_session_inner(
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
+            override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
             schedule_tools: None,
+            workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
             realm_id: Some(state.realm.to_string()),
@@ -8798,6 +8997,87 @@ mod tests {
             "reserved mob label rejection should explain the trust boundary: {}",
             String::from_utf8_lossy(&body)
         );
+    }
+
+    #[tokio::test]
+    async fn test_workgraph_rest_routes_are_read_only() {
+        use axum::body::Body;
+        use tower::ServiceExt;
+
+        let temp = TempDir::new().unwrap();
+        let state = AppState::load_from(temp.path().to_path_buf())
+            .await
+            .unwrap();
+        let item = state
+            .workgraph_service
+            .create(meerkat::CreateWorkItemRequest {
+                realm_id: None,
+                namespace: None,
+                title: "observe me".to_string(),
+                description: None,
+                priority: Default::default(),
+                labels: Default::default(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                status: None,
+            })
+            .await
+            .expect("seed WorkGraph item");
+        let app = router(state);
+
+        for uri in [
+            "/workgraph/items",
+            &format!("/workgraph/items/{}", item.id),
+            "/workgraph/ready",
+            "/workgraph/snapshot",
+            "/workgraph/events",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("GET")
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "GET {uri}");
+        }
+
+        for (method, uri) in [
+            ("POST", "/workgraph/items"),
+            ("POST", "/workgraph/claim"),
+            ("POST", "/workgraph/release"),
+            ("PATCH", "/workgraph/items"),
+            ("POST", "/workgraph/close"),
+            ("POST", "/workgraph/link"),
+            ("POST", "/workgraph/evidence"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{method} {uri} must not expose a WorkGraph mutation route; got {}",
+                response.status()
+            );
+        }
     }
 
     #[cfg(feature = "mob")]

@@ -132,6 +132,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -184,6 +185,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -236,6 +238,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -293,6 +296,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -347,6 +351,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -403,6 +408,7 @@ rust_test(
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
         "//meerkat:meerkat_schedule_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,
@@ -459,6 +465,7 @@ rust_test(
         "//meerkat:meerkat_machine_codegen_agent_factory_build",
         "//meerkat:meerkat_machine_schema_agent_factory_build",
         "//meerkat:meerkat_runtime_agent_factory_build",
+        "//meerkat:meerkat_workgraph_agent_factory_build",
     ] + all_crate_deps(
         package_name = "meerkat-machine-codegen",
         normal = True,

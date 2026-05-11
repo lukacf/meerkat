@@ -654,7 +654,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.reviewer]
 model = "claude-sonnet-4-5"
@@ -665,7 +664,6 @@ peer_description = "Reviews code for quality"
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 mcp = ["code-server"]
 
 [wiring]
@@ -699,7 +697,6 @@ path = "skills/reviewer.md"
             .unwrap();
         assert_eq!(lead.model, "claude-opus-4-6");
         assert!(lead.tools.mob);
-        assert!(lead.tools.mob_tasks);
         assert!(lead.tools.comms);
         assert!(lead.external_addressable);
 

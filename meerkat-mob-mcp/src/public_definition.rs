@@ -100,7 +100,6 @@ fn decode_profile(input: MobProfileInput) -> Result<Profile, String> {
             comms: input.tools.comms,
             memory: input.tools.memory,
             mob: input.tools.mob,
-            mob_tasks: input.tools.mob_tasks,
             schedule: input.tools.schedule,
             image_generation: input.tools.image_generation,
             mcp: input.tools.mcp,

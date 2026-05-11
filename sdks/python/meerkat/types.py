@@ -437,7 +437,6 @@ class MobProfileTools(TypedDict, total=False):
     comms: bool
     memory: bool
     mob: bool
-    mob_tasks: bool
     schedule: bool
     mcp: list[str]
 

@@ -21,10 +21,12 @@ The canonical registry is `canonical_machine_schemas()` in
 | `AuthMachine` | `meerkat-runtime` auth handles | Per-binding auth lease and OAuth flow lifecycle. |
 | `ScheduleLifecycleMachine` | `meerkat-schedule` | Schedule definition lifecycle, trigger state, and revision handling. |
 | `OccurrenceLifecycleMachine` | `meerkat-schedule` | Claimed occurrence delivery and terminal outcomes. |
+| `WorkGraphLifecycleMachine` | `meerkat-workgraph` | Work item lifecycle, readiness, dependency eligibility, claim leases, terminal state, and evidence revision handling. |
 
 `MeerkatMachine` and `MobMachine` are the two runtime kernels. Auth and
 scheduling are auxiliary authority machines that protect specific perimeter
-state.
+state. WorkGraph is an optional subsystem authority for durable agent
+commitments and dependency-aware claim state.
 
 ## Canonical Compositions
 

@@ -60,6 +60,25 @@ inventory::submit! {
     }
 }
 
+inventory::submit! {
+    CapabilityRegistration {
+        id: CapabilityId::WorkGraph,
+        description: "Realm-scoped dependency-aware durable work graph",
+        scope: CapabilityScope::Universal,
+        requires_feature: None,
+        prerequisites: &[],
+        status_resolver: Some(|config| {
+            if config.tools.workgraph_enabled {
+                CapabilityStatus::Available
+            } else {
+                CapabilityStatus::DisabledByPolicy {
+                    description: "config.tools.workgraph_enabled is false".into(),
+                }
+            }
+        }),
+    }
+}
+
 /// Collect all registered capabilities, sorted by [`CapabilityId`] ordinal
 /// for deterministic ordering regardless of `inventory` collection order.
 pub fn build_capabilities() -> Vec<&'static CapabilityRegistration> {

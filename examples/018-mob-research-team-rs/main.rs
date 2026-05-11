@@ -12,7 +12,6 @@
 //! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
 //! Production mob deployments use the runtime-backed path.
 //! - Running turns on specific agents and reading mob events
-//! - Task board usage for tracking research items
 //!
 //! ## Run
 //! ```bash
@@ -42,7 +41,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.worker]
 model = "claude-sonnet-4-6"
@@ -54,7 +52,6 @@ external_addressable = false
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true
@@ -76,8 +73,6 @@ fn event_label(kind: &MobEventKind) -> &'static str {
         MobEventKind::MobReset => "MobReset",
         MobEventKind::MemberSpawned(..) => "MemberSpawned",
         MobEventKind::MemberRetired { .. } => "MemberRetired",
-        MobEventKind::TaskCreated { .. } => "TaskCreated",
-        MobEventKind::TaskUpdated { .. } => "TaskUpdated",
         MobEventKind::FlowStarted { .. } => "FlowStarted",
         MobEventKind::FlowCompleted { .. } => "FlowCompleted",
         MobEventKind::FlowFailed { .. } => "FlowFailed",
@@ -133,7 +128,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.market-researcher]
 model = "claude-sonnet-4-6"
@@ -143,7 +137,6 @@ peer_description = "Market researcher -- competitive analysis, market sizing"
 [profiles.market-researcher.tools]
 builtins = true
 comms = true
-mob_tasks = true
 
 [profiles.tech-researcher]
 model = "claude-sonnet-4-6"
@@ -153,7 +146,6 @@ peer_description = "Technology researcher -- technical feasibility, architecture
 [profiles.tech-researcher.tools]
 builtins = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true
@@ -287,17 +279,6 @@ content = "Evaluate technical feasibility, architecture options, scalability con
         );
     }
 
-    // Create a task on the shared task board.
-    let task_id = handle
-        .task_create(
-            "Market sizing for AI code assistants".to_string(),
-            "Research the total addressable market for AI-powered code assistant tools."
-                .to_string(),
-            vec![],
-        )
-        .await?;
-    println!("\nCreated task: {task_id}");
-
     // Send a research question to the lead analyst (live LLM call).
     println!("\nSending research question to lead analyst (live LLM call)...");
     handle
@@ -321,16 +302,6 @@ content = "Evaluate technical feasibility, architecture options, scalability con
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    }
-
-    // Show task board.
-    let tasks = handle.task_list().await?;
-    println!("\nTask board ({} tasks):", tasks.len());
-    for task in &tasks {
-        println!(
-            "  [{}] {} -- status: {:?}",
-            task.id, task.subject, task.status
-        );
     }
 
     // Poll mob events.

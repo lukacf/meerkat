@@ -29,8 +29,11 @@ use meerkat::{
     encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
+use meerkat_core::AgentToolDispatcher;
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::ToolConfigChangedPayload;
+#[cfg(feature = "mcp")]
+use meerkat_core::ToolGateway;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::{
@@ -54,8 +57,6 @@ use meerkat_core::{
     SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
     SurfaceSessionRecoveryOverrides, SystemMessage, ToolScopeSnapshot, build_recovered_session,
 };
-#[cfg(feature = "mcp")]
-use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
@@ -184,6 +185,31 @@ impl RuntimePreAdmissionRestore for SessionRuntime {
     fn restore_or_release(&self, session_id: &SessionId, input_id: &InputId) {
         self.restore_or_release_runtime_pre_admission(session_id, input_id);
     }
+}
+
+fn workgraph_default_realm_id(persistence: &PersistenceBundle) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(manifest) = persistence.manifest() {
+        return manifest.realm.as_str().to_owned();
+    }
+
+    let _ = persistence;
+    "default".to_string()
+}
+
+fn set_default_workgraph_tools(
+    builder: &FactoryAgentBuilder,
+    store: Arc<dyn meerkat::WorkGraphStore>,
+    default_realm_id: String,
+) {
+    let service = meerkat::WorkGraphService::with_scope(
+        store,
+        default_realm_id,
+        meerkat::WorkNamespace::default(),
+    );
+    let dispatcher =
+        Arc::new(meerkat::WorkGraphToolSurface::new(service)) as Arc<dyn AgentToolDispatcher>;
+    meerkat::surface::set_default_workgraph_tools(builder, Some(dispatcher));
 }
 
 #[derive(Clone, Copy)]
@@ -1206,6 +1232,7 @@ pub struct SessionRuntime {
     factory: AgentFactory,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
+    workgraph_store: Arc<dyn meerkat::WorkGraphStore>,
     artifact_store: Arc<dyn meerkat_core::ArtifactStore>,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Canonical staged-session authority (facade-owned). Holds sessions
@@ -1587,6 +1614,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
@@ -1602,6 +1630,11 @@ impl SessionRuntime {
             Some(Arc::new(ScheduleToolDispatcher::new(
                 schedule_service.clone(),
             ))),
+        );
+        set_default_workgraph_tools(
+            &builder,
+            workgraph_store.clone(),
+            workgraph_default_realm_id(&persistence),
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
@@ -1657,6 +1690,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
@@ -1714,6 +1748,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder =
@@ -1730,6 +1765,11 @@ impl SessionRuntime {
             Some(Arc::new(ScheduleToolDispatcher::new(
                 schedule_service.clone(),
             ))),
+        );
+        set_default_workgraph_tools(
+            &builder,
+            workgraph_store.clone(),
+            workgraph_default_realm_id(&persistence),
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
@@ -1785,6 +1825,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
@@ -2981,6 +3022,18 @@ impl SessionRuntime {
 
     pub fn schedule_service(&self) -> ScheduleService {
         self.schedule_service.clone()
+    }
+
+    pub fn workgraph_service(&self) -> meerkat::WorkGraphService {
+        let realm_id = self
+            .realm_id()
+            .map(|realm_id| realm_id.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        meerkat::WorkGraphService::with_scope(
+            self.workgraph_store.clone(),
+            realm_id,
+            meerkat::WorkNamespace::default(),
+        )
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {

@@ -30,6 +30,7 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
         session_events_enabled: true,
         session_streams_enabled: true,
         schedule_enabled: cfg!(feature = "schedule"),
+        workgraph_enabled: true,
         skills_enabled: true,
     };
     let caps = ServerCapabilities {

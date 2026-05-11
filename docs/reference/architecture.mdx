@@ -67,20 +67,21 @@ feature sets, not separate public binaries.
 | Factory | `meerkat` | Builds an agent from config, provider registry, tools, stores, skills, hooks, memory, and runtime bindings. |
 | Session service | `meerkat-session` | Create, resume, run, stream, interrupt, list, and archive sessions. |
 | Runtime kernel | `meerkat-runtime` | `MeerkatMachine`, runtime stores, session registration, input admission, completion wakeups, runtime bindings, auth handles. |
-| Mob runtime | `meerkat-mob` | Mobs, member lifecycle, flows, wiring, task board, supervisor bridge, mob storage. |
+| Mob runtime | `meerkat-mob` | Mobs, member lifecycle, flows, wiring, supervisor bridge, and mob storage. |
 | Live channels | `meerkat-live` + `meerkat-openai` | Live channel host, transport bootstrap, and provider adapter. |
 | Wire contracts | `meerkat-contracts` | JSON-RPC, REST, and SDK-facing wire types plus generated schemas. |
 | Provider adapters | `meerkat-anthropic`, `meerkat-openai`, `meerkat-gemini` | Provider-specific request lowering, streaming, auth, model capabilities, images, and live support. |
 
 ## Machine Authority
 
-The canonical machine catalog contains five machines:
+The canonical machine catalog contains six machines:
 
 - `MeerkatMachine`
 - `MobMachine`
 - `AuthMachine`
 - `ScheduleLifecycleMachine`
 - `OccurrenceLifecycleMachine`
+- `WorkGraphLifecycleMachine`
 
 The catalog also contains five canonical compositions:
 

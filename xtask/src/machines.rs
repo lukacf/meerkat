@@ -1156,10 +1156,6 @@ pub fn collect_mob_runtime_catalog_command_gate_mismatches(root: &Path) -> Resul
             scope: MobCatalogCommandGateScope::Function("handle_cancel_flow"),
         },
         MobCatalogCommandGateSpec {
-            input: "TaskCreate",
-            scope: MobCatalogCommandGateScope::Function("handle_task_create"),
-        },
-        MobCatalogCommandGateSpec {
             input: "SetSpawnPolicy",
             scope: MobCatalogCommandGateScope::CommandArm("SetSpawnPolicy"),
         },

@@ -19,7 +19,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.worker]
 model = "claude-sonnet-4-5"
@@ -31,7 +30,6 @@ external_addressable = false
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true

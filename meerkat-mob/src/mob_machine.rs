@@ -14,7 +14,6 @@ use crate::runtime::MobLifecycleSnapshot;
 use crate::runtime::MobMemberListEntry;
 #[cfg(test)]
 use crate::runtime::MobOrchestratorSnapshot;
-use crate::tasks::MobTask;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use indexmap::IndexSet;
@@ -95,20 +94,6 @@ pub(crate) enum MobMachineCommand {
     Complete,
     Reset,
     Destroy,
-    TaskCreate {
-        subject: String,
-        description: String,
-        blocked_by: Vec<crate::ids::TaskId>,
-    },
-    TaskUpdate {
-        task_id: crate::ids::TaskId,
-        status: crate::tasks::TaskStatus,
-        owner: Option<AgentIdentity>,
-    },
-    TaskList,
-    TaskGet {
-        task_id: crate::ids::TaskId,
-    },
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,
@@ -193,9 +178,6 @@ pub(crate) enum MobMachineCommandResult {
     Reconcile(Box<crate::runtime::ReconcileReport>),
     Respawn(Result<crate::MemberRespawnReceipt, crate::MobRespawnError>),
     DestroyReport(crate::runtime::MobDestroyReport),
-    TaskId(crate::ids::TaskId),
-    TaskList(Vec<MobTask>),
-    TaskGet(Option<MobTask>),
     RosterSnapshot(Roster),
     ListMembers(Vec<MobMemberListEntry>),
     ListMembersIncludingRetiring(Vec<MobMemberListEntry>),
@@ -304,10 +286,6 @@ pub enum MobMachineCatalogInput {
     Complete,
     Reset,
     Destroy,
-    TaskCreate,
-    TaskUpdate,
-    TaskList,
-    TaskGet,
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,
@@ -367,10 +345,6 @@ impl MobMachineCatalogInput {
         Self::Complete,
         Self::Reset,
         Self::Destroy,
-        Self::TaskCreate,
-        Self::TaskUpdate,
-        Self::TaskList,
-        Self::TaskGet,
         Self::RosterSnapshot,
         Self::ListMembers,
         Self::ListMembersIncludingRetiring,
@@ -431,10 +405,6 @@ impl MobMachineCatalogInput {
             Self::Complete => MobMachineInputVariant::Complete,
             Self::Reset => MobMachineInputVariant::Reset,
             Self::Destroy => MobMachineInputVariant::Destroy,
-            Self::TaskCreate => MobMachineInputVariant::TaskCreate,
-            Self::TaskUpdate => MobMachineInputVariant::TaskUpdate,
-            Self::TaskList => MobMachineInputVariant::TaskList,
-            Self::TaskGet => MobMachineInputVariant::TaskGet,
             Self::RosterSnapshot => MobMachineInputVariant::RosterSnapshot,
             Self::ListMembers => MobMachineInputVariant::ListMembers,
             Self::ListMembersIncludingRetiring => {
@@ -518,10 +488,6 @@ impl MobMachineCatalogInput {
             Self::Complete => "Complete",
             Self::Reset => "Reset",
             Self::Destroy => "Destroy",
-            Self::TaskCreate => "TaskCreate",
-            Self::TaskUpdate => "TaskUpdate",
-            Self::TaskList => "TaskList",
-            Self::TaskGet => "TaskGet",
             Self::RosterSnapshot => "RosterSnapshot",
             Self::ListMembers => "ListMembers",
             Self::ListMembersIncludingRetiring => "ListMembersIncludingRetiring",
@@ -593,10 +559,6 @@ impl MobMachineCommandVariant {
             Self::Complete => Some(MobMachineCatalogInput::Complete),
             Self::Reset => Some(MobMachineCatalogInput::Reset),
             Self::Destroy => Some(MobMachineCatalogInput::Destroy),
-            Self::TaskCreate => Some(MobMachineCatalogInput::TaskCreate),
-            Self::TaskUpdate => Some(MobMachineCatalogInput::TaskUpdate),
-            Self::TaskList => Some(MobMachineCatalogInput::TaskList),
-            Self::TaskGet => Some(MobMachineCatalogInput::TaskGet),
             Self::RosterSnapshot => Some(MobMachineCatalogInput::RosterSnapshot),
             Self::ListMembers => Some(MobMachineCatalogInput::ListMembers),
             Self::ListMembersIncludingRetiring => {
@@ -837,18 +799,6 @@ const fn mob_machine_command_classification(
         }
         MobMachineCommandVariant::Destroy => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::Destroy)
-        }
-        MobMachineCommandVariant::TaskCreate => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskCreate)
-        }
-        MobMachineCommandVariant::TaskUpdate => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskUpdate)
-        }
-        MobMachineCommandVariant::TaskList => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskList)
-        }
-        MobMachineCommandVariant::TaskGet => {
-            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::TaskGet)
         }
         MobMachineCommandVariant::RosterSnapshot => {
             MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::RosterSnapshot)

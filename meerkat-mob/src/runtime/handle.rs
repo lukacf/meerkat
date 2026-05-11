@@ -1438,47 +1438,6 @@ impl MobHandle {
                     )),
                 }
             }
-            MobMachineCommand::TaskCreate {
-                subject,
-                description,
-                blocked_by,
-            } => {
-                let task_id = self
-                    .send_actor_command(|reply_tx| MobCommand::TaskCreate {
-                        subject,
-                        description,
-                        blocked_by,
-                        reply_tx,
-                    })
-                    .await??;
-                Ok(MobMachineCommandResult::TaskId(task_id))
-            }
-            MobMachineCommand::TaskUpdate {
-                task_id,
-                status,
-                owner,
-            } => {
-                self.send_actor_command(|reply_tx| MobCommand::TaskUpdate {
-                    task_id,
-                    status,
-                    owner,
-                    reply_tx,
-                })
-                .await??;
-                Ok(MobMachineCommandResult::Unit)
-            }
-            MobMachineCommand::TaskList => {
-                let tasks = self
-                    .send_actor_command(|reply_tx| MobCommand::TaskList { reply_tx })
-                    .await?;
-                Ok(MobMachineCommandResult::TaskList(tasks))
-            }
-            MobMachineCommand::TaskGet { task_id } => {
-                let task = self
-                    .send_actor_command(|reply_tx| MobCommand::TaskGet { task_id, reply_tx })
-                    .await?;
-                Ok(MobMachineCommandResult::TaskGet(task))
-            }
             MobMachineCommand::RosterSnapshot => {
                 let roster = self.roster.read().await.snapshot();
                 Ok(MobMachineCommandResult::RosterSnapshot(roster))
@@ -3037,78 +2996,6 @@ impl MobHandle {
             _ => Err(MobDestroyError::from(MobError::Internal(
                 "unexpected command result variant".into(),
             ))),
-        }
-    }
-
-    /// Create a task in the shared mob task board.
-    pub async fn task_create(
-        &self,
-        subject: String,
-        description: String,
-        blocked_by: Vec<TaskId>,
-    ) -> Result<TaskId, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::TaskCreate {
-                subject,
-                description,
-                blocked_by,
-            })
-            .await?
-        {
-            MobMachineCommandResult::TaskId(task_id) => Ok(task_id),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
-    }
-
-    /// Update task status/owner in the shared mob task board.
-    pub async fn task_update(
-        &self,
-        task_id: TaskId,
-        status: TaskStatus,
-        owner: Option<AgentIdentity>,
-    ) -> Result<(), MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::TaskUpdate {
-                task_id,
-                status,
-                owner,
-            })
-            .await?
-        {
-            MobMachineCommandResult::Unit => Ok(()),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
-    }
-
-    /// List tasks from the in-memory task board projection.
-    pub async fn task_list(&self) -> Result<Vec<MobTask>, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::TaskList)
-            .await?
-        {
-            MobMachineCommandResult::TaskList(tasks) => Ok(tasks),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
-        }
-    }
-
-    /// Get a task by ID from the in-memory task board projection.
-    pub async fn task_get(&self, task_id: &TaskId) -> Result<Option<MobTask>, MobError> {
-        match self
-            .execute_machine_command(MobMachineCommand::TaskGet {
-                task_id: task_id.clone(),
-            })
-            .await?
-        {
-            MobMachineCommandResult::TaskGet(task) => Ok(task),
-            _ => Err(MobError::Internal(
-                "unexpected command result variant".into(),
-            )),
         }
     }
 

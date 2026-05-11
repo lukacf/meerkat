@@ -12,7 +12,6 @@
 //! Key types:
 //! - [`MobDefinition`] - Describes mob structure (profiles, wiring, skills)
 //! - [`MobEvent`] / [`MobEventKind`] - Structural state changes
-//! - [`TaskBoard`] - Projected view of shared tasks
 //! - [`MobEventStore`] - Persistence trait for mob events
 //! - [`MobStorage`] - Storage bundle for a mob
 #![allow(
@@ -66,7 +65,6 @@ pub mod snapshot;
 pub mod spec;
 pub mod storage;
 pub mod store;
-pub mod tasks;
 pub mod validate;
 
 // Re-exports for convenience
@@ -82,8 +80,7 @@ pub use error::MobError;
 pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
-    LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, TaskId, WorkOrigin, WorkRef,
-    WorkSpec,
+    LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, WorkOrigin, WorkRef, WorkSpec,
 };
 pub use launch::{BudgetSplitPolicy, ForkContext, MemberLaunchMode};
 #[doc(hidden)]
@@ -152,7 +149,6 @@ pub use store::{
     SqliteMobEventStore, SqliteMobRunStore, SqliteMobRuntimeMetadataStore, SqliteMobSpecStore,
     SqliteMobStores, SqliteRealmProfileStore,
 };
-pub use tasks::{MobTask, TaskBoard, TaskStatus};
 pub use validate::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, partition_diagnostics, validate_definition,
 };

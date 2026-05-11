@@ -187,6 +187,18 @@ pub use meerkat_schedule::{
     schedule_tools_list,
 };
 pub use meerkat_tools::ToolError;
+#[cfg(not(target_arch = "wasm32"))]
+pub use meerkat_workgraph::SqliteWorkGraphStore;
+pub use meerkat_workgraph::{
+    AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
+    ExternalWorkRef, LinkWorkItemsRequest, MemoryWorkGraphStore, ReadyWorkFilter,
+    ReleaseWorkItemRequest, UpdateWorkItemRequest, WORKGRAPH_TOOL_INVALID_ARGUMENTS,
+    WORKGRAPH_TOOL_NOT_FOUND, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphError,
+    WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphMachine, WorkGraphService,
+    WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
+    WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
+    WorkOwner, WorkPriority, WorkStatus, handle_workgraph_tools_call, workgraph_tools_list,
+};
 
 // AgentFactory and build_agent types
 mod factory;

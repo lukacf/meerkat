@@ -82,8 +82,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "tools": {
         "builtins": true,
         "comms": true,
-        "mob": true,
-        "mob_tasks": true
+        "mob": true
       }
     },
     "signal-analyst": {
@@ -93,8 +92,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     },
     "customer-ops": {
@@ -104,8 +102,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     },
     "rollback-chief": {
@@ -115,8 +112,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     }
   },

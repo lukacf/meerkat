@@ -238,6 +238,8 @@ pub struct SessionBuildOptions {
     pub override_memory: ToolCategoryOverride,
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
+    /// Per-build override for the factory-level WorkGraph capability.
+    pub override_workgraph: ToolCategoryOverride,
     pub override_mob: ToolCategoryOverride,
     /// Per-build override for assistant image generation visibility.
     ///
@@ -254,6 +256,8 @@ pub struct SessionBuildOptions {
     /// Scheduler remains surface-owned. This dispatcher only controls
     /// tool visibility/composition for the built agent.
     pub schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Agent-facing WorkGraph tools supplied by the embedding surface.
+    pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub preload_skills: Option<Vec<crate::skills::SkillKey>>,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
@@ -628,6 +632,7 @@ pub struct ResumeOverrideMask {
     pub override_builtins: bool,
     pub override_shell: bool,
     pub override_memory: bool,
+    pub override_workgraph: bool,
     pub override_mob: bool,
     pub override_image_generation: bool,
     pub override_web_search: bool,
@@ -692,10 +697,12 @@ impl Default for SessionBuildOptions {
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
+            override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::Inherit,
             schedule_tools: None,
+            workgraph_tools: None,
             preload_skills: None,
             realm_id: None,
             instance_id: None,
@@ -744,8 +751,10 @@ impl std::fmt::Debug for SessionBuildOptions {
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
+            .field("override_workgraph", &self.override_workgraph)
             .field("override_mob", &self.override_mob)
             .field("schedule_tools", &self.schedule_tools.is_some())
+            .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field("preload_skills", &self.preload_skills)
             .field("realm_id", &self.realm_id)
             .field("instance_id", &self.instance_id)

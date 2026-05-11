@@ -21,6 +21,7 @@ fn host_surface_options(
         session_events_enabled: true,
         session_streams_enabled: true,
         schedule_enabled: cfg!(feature = "schedule"),
+        workgraph_enabled: true,
         skills_enabled: true,
     };
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(

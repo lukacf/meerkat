@@ -271,7 +271,6 @@ export interface WireMobToolConfig {
   mcp?: string[];
   memory?: boolean;
   mob?: boolean;
-  mob_tasks?: boolean;
   schedule?: boolean;
   shell?: boolean;
 }
@@ -725,7 +724,6 @@ export interface MobToolConfigInput {
   mcp?: string[];
   memory?: boolean;
   mob?: boolean;
-  mob_tasks?: boolean;
   schedule?: boolean;
   shell?: boolean;
 }

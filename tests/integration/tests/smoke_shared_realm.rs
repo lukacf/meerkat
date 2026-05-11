@@ -133,6 +133,39 @@ async fn write_project_config(project_dir: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
+async fn write_project_config_with_workgraph(
+    project_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_project_config(project_dir).await?;
+    let config_path = project_dir.join(".rkat").join("config.toml");
+    let mut config = tokio::fs::read_to_string(&config_path).await?;
+    config.push_str(
+        r#"
+[tools]
+workgraph_enabled = true
+"#,
+    );
+    tokio::fs::write(config_path, config).await?;
+    Ok(())
+}
+
+async fn write_realm_workgraph_config(
+    state_root: &Path,
+    realm_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let realm_paths = meerkat_store::realm_paths_in(state_root, realm_id);
+    tokio::fs::create_dir_all(realm_paths.root.clone()).await?;
+    tokio::fs::write(
+        realm_paths.config_path,
+        format!(
+            "[agent]\nmodel = \"{}\"\nmax_tokens_per_turn = 512\nbudget_warning_threshold = 0.8\n\n[tools]\nworkgraph_enabled = true\n",
+            smoke_model()
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn write_project_config_with_anthropic_realm(
     project_dir: &Path,
     realm_id: &str,
@@ -3196,6 +3229,178 @@ async fn e2e_scenario_55_rpc_rest_callback_peer_storm_resume()
 
     shutdown_child(rest_child).await?;
     eprintln!("[scenario 55] completed");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_scenario_85_workgraph_homecore_agent_spine() -> Result<(), Box<dyn std::error::Error>>
+{
+    let rkat = binary_path("rkat");
+    let rkat_rpc = binary_path("rkat-rpc");
+    if skip_if_missing_binary(&rkat, "rkat") || skip_if_missing_binary(&rkat_rpc, "rkat-rpc") {
+        return Ok(());
+    }
+    let Some(api_key) = anthropic_api_key() else {
+        eprintln!("Skipping: no Anthropic API key configured");
+        return Ok(());
+    };
+    let rkat = rkat.unwrap();
+    let rkat_rpc = rkat_rpc.unwrap();
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config_with_workgraph(&project_dir).await?;
+
+    let realm_id = "scenario-85-workgraph-homecore";
+    write_realm_workgraph_config(&state_root, realm_id).await?;
+    let prompt = r#"You are running Homecore household operations. Use the WorkGraph tools before answering.
+
+Situation: L is taking A to the dentist tomorrow. A has autism and a very strong preference for car P, but car P is unexpectedly in the workshop. A needs preparation the day before for irregularities.
+
+Create a durable WorkGraph spine with label scenario-85-homecore:
+- create a completed/closed item for verifying that car P is in the workshop;
+- create an open ready item for sending L a reminder the day before to explain the alternate car to A;
+- create at least one related or dependent item for preparing A for the alternate car;
+- add at least one WorkGraph edge connecting the work;
+- call workgraph_ready before the final answer.
+
+Final answer: one short paragraph naming the ready work and the label scenario-85-homecore."#;
+
+    let run_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "run",
+        prompt,
+        "--tools",
+        "full",
+        "--allow-tool",
+        "workgraph_create",
+        "--allow-tool",
+        "workgraph_link",
+        "--allow-tool",
+        "workgraph_claim",
+        "--allow-tool",
+        "workgraph_close",
+        "--allow-tool",
+        "workgraph_ready",
+        "--allow-tool",
+        "workgraph_add_evidence",
+        "--max-tool-calls",
+        "16",
+        "--max-duration",
+        "5m",
+        "--output",
+        "json",
+        "--no-stream",
+    ];
+    let run_out = run_binary(&rkat, &project_dir, &run_args, Some(&api_key)).await?;
+    let run_stdout = output_ok_or_err(run_out, "rkat", &run_args).map_err(std::io::Error::other)?;
+    let run_json: Value = serde_json::from_str(&run_stdout)?;
+    assert!(
+        run_json.to_string().contains("scenario-85-homecore"),
+        "agent response should mention the durable WorkGraph label: {run_json}"
+    );
+
+    let snapshot_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "snapshot",
+        "--all-namespaces",
+        "--include-terminal",
+        "--label",
+        "scenario-85-homecore",
+        "--json",
+    ];
+    let snapshot_out = run_binary(&rkat, &project_dir, &snapshot_args, Some(&api_key)).await?;
+    let snapshot_stdout =
+        output_ok_or_err(snapshot_out, "rkat", &snapshot_args).map_err(std::io::Error::other)?;
+    let snapshot: Value = serde_json::from_str(&snapshot_stdout)?;
+    assert_homecore_workgraph_snapshot(&snapshot, realm_id)?;
+
+    let mut rpc = spawn_stdio_process(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+        ],
+        Some(&api_key),
+    )
+    .await?;
+    let rpc_snapshot = rpc_call(
+        &mut rpc,
+        1,
+        "workgraph/snapshot",
+        json!({
+            "all_namespaces": true,
+            "include_terminal": true,
+            "labels": ["scenario-85-homecore"],
+        }),
+        20,
+    )
+    .await?;
+    assert_homecore_workgraph_snapshot(&rpc_snapshot, realm_id)?;
+    shutdown_stdio_process(rpc).await?;
+    Ok(())
+}
+
+fn assert_homecore_workgraph_snapshot(
+    snapshot: &Value,
+    realm_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(snapshot["realm_id"].as_str(), Some(realm_id));
+    let items = snapshot["items"]
+        .as_array()
+        .ok_or("snapshot missing items")?;
+    assert!(
+        items.len() >= 3,
+        "expected at least three Homecore WorkGraph items: {snapshot}"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| item["labels"].as_array().is_some_and(|labels| labels
+                .iter()
+                .any(|label| label.as_str() == Some("scenario-85-homecore")))),
+        "all asserted items should carry the scenario label: {snapshot}"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item["status"].as_str() == Some("completed")),
+        "expected a completed verification item: {snapshot}"
+    );
+    assert!(
+        snapshot["edges"]
+            .as_array()
+            .is_some_and(|edges| !edges.is_empty()),
+        "expected at least one WorkGraph edge: {snapshot}"
+    );
+    assert!(
+        snapshot["ready_item_ids"]
+            .as_array()
+            .is_some_and(|ready| !ready.is_empty()),
+        "expected at least one ready WorkGraph item: {snapshot}"
+    );
+    assert!(
+        snapshot["event_high_water_mark"]
+            .as_i64()
+            .is_some_and(|seq| seq >= 5),
+        "expected WorkGraph event history: {snapshot}"
+    );
     Ok(())
 }
 

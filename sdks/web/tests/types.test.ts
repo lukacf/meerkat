@@ -262,7 +262,7 @@ const mobDef: MobDefinition = {
       model: 'claude-sonnet-4-5',
       peer_description: 'A worker agent.',
       skills: ['research'],
-      tools: { builtins: false, shell: false, comms: true, memory: false, mob: false, mob_tasks: false },
+      tools: { builtins: false, shell: false, comms: true, memory: false, mob: false },
     },
   },
   wiring: {

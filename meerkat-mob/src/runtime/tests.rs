@@ -1863,8 +1863,6 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MembersUnwired { .. } => "MembersUnwired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
-            MobEventKind::TaskCreated { .. } => "TaskCreated",
-            MobEventKind::TaskUpdated { .. } => "TaskUpdated",
             MobEventKind::FlowStarted { .. } => "FlowStarted",
             MobEventKind::FlowCompleted { .. } => "FlowCompleted",
             MobEventKind::FlowFailed { .. } => "FlowFailed",
@@ -2783,7 +2781,6 @@ fn sample_definition() -> MobDefinition {
                 comms: true,
                 memory: false,
                 mob: true,
-                mob_tasks: false,
                 schedule: false,
                 image_generation: false,
                 mcp: vec![],
@@ -2887,7 +2884,6 @@ fn sample_definition_with_mob_tools() -> MobDefinition {
         .and_then(|b| b.as_inline_mut())
         .expect("worker profile exists");
     worker.tools.mob = true;
-    worker.tools.mob_tasks = true;
     worker.tools.comms = true;
     def
 }
@@ -2909,7 +2905,6 @@ fn sample_definition_without_mob_flags() -> MobDefinition {
         .as_inline_mut()
         .unwrap();
     lead.tools.mob = false;
-    lead.tools.mob_tasks = false;
     def
 }
 
@@ -9330,24 +9325,6 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
         "RunFlow must surface the MobMachine stopped-phase rejection: {run_flow:?}"
     );
 
-    let task_create = handle
-        .task_create(
-            "stopped task".to_string(),
-            "must be admitted by MobMachine".to_string(),
-            vec![],
-        )
-        .await;
-    assert!(
-        matches!(
-            task_create,
-            Err(MobError::InvalidTransition {
-                from: MobState::Stopped,
-                to: MobState::Running,
-            })
-        ),
-        "TaskCreate must surface the MobMachine stopped-phase rejection: {task_create:?}"
-    );
-
     let respawn = handle.respawn(AgentIdentity::from("w-1"), None).await;
     assert!(
         matches!(
@@ -9360,31 +9337,6 @@ async fn test_stopped_runtime_commands_are_rejected_by_machine_admission() {
             ))
         ),
         "Respawn must surface the MobMachine stopped-phase rejection: {respawn:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_stopped_empty_task_create_is_rejected_by_machine_admission() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle.stop().await.expect("stop");
-
-    let result = handle
-        .task_create(
-            "   ".to_string(),
-            "empty subject must not shadow stopped admission".to_string(),
-            vec![],
-        )
-        .await;
-
-    assert!(
-        matches!(
-            result,
-            Err(MobError::InvalidTransition {
-                from: MobState::Stopped,
-                to: MobState::Running,
-            })
-        ),
-        "empty task subject must not shadow MobMachine stopped-phase admission: {result:?}"
     );
 }
 
@@ -9491,8 +9443,6 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
         "CancelFlow",
         "SubmitWork",
         "CancelAllWork",
-        "TaskCreate",
-        "TaskUpdate",
     ] {
         let arm = mob_command_arm_source(source, command);
         for disallowed in [
@@ -9530,95 +9480,6 @@ async fn test_stopped_missing_member_wire_is_rejected_by_machine_admission() {
             })
         ),
         "WireMembers must surface the MobMachine stopped-phase admission before shell member lookup: {result:?}"
-    );
-}
-
-#[tokio::test]
-async fn test_task_create_store_failure_does_not_commit_mob_machine_task() {
-    let events = Arc::new(FaultInjectedMobEventStore::new());
-    let (handle, _service) = create_test_mob_with_events(sample_definition(), events.clone()).await;
-
-    events.fail_appends_for("TaskCreated").await;
-    let error = handle
-        .task_create(
-            "uncommitted task".to_string(),
-            "fault-injected append failure".to_string(),
-            vec![],
-        )
-        .await
-        .expect_err("fault-injected TaskCreated append failure should reject task creation");
-    assert!(
-        error.to_string().contains("TaskCreated"),
-        "task create should surface the task-board append failure, got: {error}"
-    );
-
-    let dsl = handle
-        .debug_dsl_t2_snapshot()
-        .await
-        .expect("query DSL task state after failed create");
-    assert!(
-        dsl.tasks.is_empty(),
-        "TaskCreated append failure must not commit MobMachine task projection: {:?}",
-        dsl.tasks
-    );
-    assert!(
-        handle.task_list().await.expect("task list").is_empty(),
-        "TaskCreated append failure must not project a shell task"
-    );
-}
-
-#[tokio::test]
-async fn test_task_update_board_failure_does_not_commit_mob_machine_status() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
-        .await
-        .expect("spawn task owner");
-    let blocker = handle
-        .task_create(
-            "blocker".to_string(),
-            "must complete before dependent can be claimed".to_string(),
-            vec![],
-        )
-        .await
-        .expect("create blocker");
-    let dependent = handle
-        .task_create(
-            "dependent".to_string(),
-            "blocked task".to_string(),
-            vec![blocker],
-        )
-        .await
-        .expect("create dependent");
-
-    let error = handle
-        .task_update(
-            dependent.clone(),
-            crate::tasks::TaskStatus::InProgress,
-            Some(AgentIdentity::from("w-1")),
-        )
-        .await
-        .expect_err("blocked dependency should reject task update");
-    assert!(
-        error
-            .to_string()
-            .contains("blocked by incomplete dependencies"),
-        "task update should surface task-board validation failure, got: {error}"
-    );
-
-    let dsl_task_id = crate::machines::mob_machine::TaskId::from(dependent.as_str());
-    let dsl = handle
-        .debug_dsl_t2_snapshot()
-        .await
-        .expect("query DSL task state after failed update");
-    assert_eq!(
-        dsl.tasks.get(&dsl_task_id).map(|task| task.status),
-        Some(crate::machines::mob_machine::TaskStatus::Pending),
-        "task-board validation failure must leave the MobMachine task status pending"
-    );
-    assert!(
-        !dsl.in_progress_task_ids.contains(&dsl_task_id),
-        "task-board validation failure must not insert the task into the MobMachine in-progress index"
     );
 }
 
@@ -10107,9 +9968,9 @@ async fn profile_tools_mob_true_grants_operator_dispatcher_without_persisted_aut
 
 #[tokio::test]
 async fn profile_tools_mob_false_keeps_operator_dispatcher_off() {
-    // Negative half of the regression: when neither tools.mob nor mob_tasks
-    // is declared, the resolver yields no authority and the dispatcher is
-    // not mounted, even with default (None) persisted authority.
+    // Negative half of the regression: when tools.mob is not declared, the
+    // resolver yields no authority and the dispatcher is not mounted, even
+    // with default (None) persisted authority.
     let (handle, _service) = create_test_mob(sample_definition_without_mob_flags()).await;
     let profile = handle
         .definition()
@@ -10118,7 +9979,7 @@ async fn profile_tools_mob_false_keeps_operator_dispatcher_off() {
         .expect("lead profile")
         .as_inline()
         .unwrap();
-    assert!(!profile.tools.mob && !profile.tools.mob_tasks);
+    assert!(!profile.tools.mob);
 
     let dispatcher = super::tools::compose_external_tools_for_profile(
         profile,
@@ -10144,8 +10005,7 @@ async fn profile_tools_mob_false_keeps_operator_dispatcher_off() {
         ] {
             assert!(
                 !tool_names.contains(forbidden),
-                "operator tool '{forbidden}' must stay hidden when both profile.tools.mob \
-                 and profile.tools.mob_tasks are false"
+                "operator tool '{forbidden}' must stay hidden when profile.tools.mob is false"
             );
         }
     }
@@ -11505,47 +11365,7 @@ async fn test_spawn_member_tool_dispatches_backend_selection() {
 }
 
 #[tokio::test]
-async fn test_mob_task_tools_visible_but_scope_restricted_with_default_authority() {
-    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
-    let sid_1 = handle
-        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
-        .await
-        .expect("spawn w-1")
-        .bridge_session_id()
-        .expect("session-backed")
-        .clone();
-
-    for required in [
-        "mob_task_create",
-        "mob_task_list",
-        "mob_task_update",
-        "mob_task_get",
-    ] {
-        assert!(
-            service
-                .external_tool_names(&sid_1)
-                .await
-                .contains(&required.to_string()),
-            "task operator tool '{required}' must be visible when profile.tools.mob_tasks = true"
-        );
-    }
-
-    let create_err = service
-        .dispatch_external_tool(
-            &sid_1,
-            "mob_task_create",
-            serde_json::json!({
-                "subject": "Foundations",
-                "description": "Prepare prerequisites"
-            }),
-        )
-        .await
-        .expect_err("mob_task_create should be denied without managed_mob_scope");
-    assert!(matches!(create_err, ToolError::AccessDenied { .. }));
-}
-
-#[tokio::test]
-async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
+async fn test_tool_flag_enforcement_blocks_mob_tools() {
     let (handle, service) = create_test_mob(sample_definition_without_mob_flags()).await;
     let sid = handle
         .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
@@ -11560,10 +11380,6 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
         !names.iter().any(|name| name == "spawn_member"),
         "tools.mob=false should hide spawn_member"
     );
-    assert!(
-        !names.iter().any(|name| name == "mob_task_create"),
-        "tools.mob_tasks=false should hide mob_task_create"
-    );
 
     let spawn_err = service
         .dispatch_external_tool(
@@ -11574,16 +11390,6 @@ async fn test_tool_flag_enforcement_blocks_mob_and_task_tools() {
         .await
         .expect_err("spawn tool must be unavailable");
     assert!(matches!(spawn_err, ToolError::NotFound { .. }));
-
-    let task_err = service
-        .dispatch_external_tool(
-            &sid,
-            "mob_task_create",
-            serde_json::json!({"task_id": "t1", "subject": "x", "description": "y"}),
-        )
-        .await
-        .expect_err("task tool must be unavailable");
-    assert!(matches!(task_err, ToolError::NotFound { .. }));
 }
 
 #[tokio::test]
@@ -11877,10 +11683,6 @@ async fn test_resume_restores_missing_sessions_with_tool_wiring() {
     assert!(
         names.contains(&"spawn_member".to_string()),
         "restored sessions must keep operator tools that the profile declares"
-    );
-    assert!(
-        names.contains(&"mob_task_create".to_string()),
-        "restored sessions must keep mob task tools that the profile declares"
     );
     assert!(
         names.contains(&"bundle_echo".to_string()),
@@ -20643,8 +20445,8 @@ fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
         .find("MobCommand::Stop { reply_tx }")
         .expect("Stop command arm exists");
     let end = source[start..]
-        .find("MobCommand::TaskCreate")
-        .expect("TaskCreate command arm follows lifecycle command arms");
+        .find("MobCommand::SubscribeAgentEvents")
+        .expect("SubscribeAgentEvents command arm follows lifecycle command arms");
     let lifecycle_arms = &source[start..start + end];
 
     for command in ["Stop", "ResumeLifecycle", "Complete", "Reset"] {
@@ -20656,7 +20458,7 @@ fn test_lifecycle_commands_admit_on_live_authority_not_clone_probe() {
             "MobCommand::Complete",
             "MobCommand::Destroy",
             "MobCommand::Reset",
-            "MobCommand::TaskCreate",
+            "MobCommand::SubscribeAgentEvents",
         ]
         .into_iter()
         .filter_map(|marker| {
@@ -25901,52 +25703,6 @@ async fn test_reset_rejects_from_destroyed() {
 }
 
 #[tokio::test]
-async fn test_reset_clears_task_board() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    handle
-        .task_create("Task A".into(), "do a".into(), vec![])
-        .await
-        .expect("create task a");
-    handle
-        .task_create("Task B".into(), "do b".into(), vec![])
-        .await
-        .expect("create task b");
-    assert_eq!(handle.task_list().await.unwrap().len(), 2);
-
-    handle.reset().await.expect("reset");
-    assert!(
-        handle.task_list().await.unwrap().is_empty(),
-        "reset should clear the task board"
-    );
-}
-
-#[tokio::test]
-async fn test_task_get_round_trips_through_machine_command_surface() {
-    let (handle, _service) = create_test_mob(sample_definition()).await;
-    let task_id = handle
-        .task_create("Task A".into(), "do a".into(), vec![])
-        .await
-        .expect("create task a");
-
-    let task = handle
-        .task_get(&task_id)
-        .await
-        .expect("task_get")
-        .expect("task exists");
-    assert_eq!(task.id, task_id);
-
-    handle.reset().await.expect("reset");
-    assert!(
-        handle
-            .task_get(&task_id)
-            .await
-            .expect("task_get after reset")
-            .is_none(),
-        "reset should clear the task board for machine-routed task_get"
-    );
-}
-
-#[tokio::test]
 async fn test_structural_roster_reads_round_trip_through_machine_command_surface() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle
@@ -29287,7 +29043,6 @@ struct MobRuntimeParitySnapshotSummary {
     runtime_fence_tokens: BTreeMap<String, u64>,
     active_member_count: usize,
     all_member_count: usize,
-    task_count: Option<usize>,
     coordinator_bound: Option<bool>,
     pending_spawn_count: Option<u32>,
     active_flow_count: Option<u32>,
@@ -29304,9 +29059,6 @@ struct MobRuntimeParitySnapshotSummary {
     wiring_edges: BTreeSet<String>,
     external_peer_edges: BTreeSet<String>,
     identity_to_runtime: BTreeMap<String, String>,
-    tasks: BTreeMap<String, String>,
-    in_progress_task_ids: BTreeSet<String>,
-    completed_task_ids: BTreeSet<String>,
     member_restore_failures: BTreeMap<String, String>,
     // W3-H-1: canonical identity→bridge-session binding map. Stubbed as an
     // empty BTreeMap for the parity evaluator; full projection through the
@@ -29323,9 +29075,9 @@ struct MobRuntimeParitySnapshotSummary {
 
 /// Lock-in test for T2 DSL field projection in the runtime parity snapshot.
 ///
-/// The `MobMachine` DSL owns six fields that the runtime parity snapshot must
-/// project: `member_state_markers`, `wiring_edges`, `identity_to_runtime`,
-/// `tasks`, `in_progress_task_ids`, `completed_task_ids`. The projector at
+/// The `MobMachine` DSL owns topology and membership fields that the runtime
+/// parity snapshot must project: `member_state_markers`, `wiring_edges`,
+/// `external_peer_edges`, and `identity_to_runtime`. The projector at
 /// [`mob_runtime_parity_snapshot_summary`] reads them from the DSL authority
 /// via the `debug_dsl_t2_snapshot()` command-channel seam (dogma #1: one
 /// owner, #13: projection rebuilt from explicit DSL source).
@@ -29349,22 +29101,6 @@ async fn parity_snapshot_projects_t2_dsl_fields() {
         .await
         .expect("wire");
 
-    // Create a task — populates DSL `tasks` (default status is Pending; not
-    // in the in_progress index yet). Then flip to InProgress to exercise the
-    // in_progress_task_ids projection.
-    let task_id = handle
-        .task_create(
-            "parity-t2-lock-in".to_string(),
-            "exercise T2 field projection".to_string(),
-            vec![],
-        )
-        .await
-        .expect("task_create");
-    handle
-        .task_update(task_id.clone(), crate::tasks::TaskStatus::InProgress, None)
-        .await
-        .expect("task_update → in-progress");
-
     let snap = mob_runtime_parity_snapshot_summary(&handle)
         .await
         .expect("parity snapshot must be Some for a running mob");
@@ -29375,22 +29111,6 @@ async fn parity_snapshot_projects_t2_dsl_fields() {
         snap.identity_to_runtime.len() >= 2,
         "DSL `identity_to_runtime` must project both spawned members; got {:?}",
         snap.identity_to_runtime
-    );
-    assert!(
-        snap.tasks
-            .values()
-            .any(|payload| payload.contains("parity-t2-lock-in")),
-        "DSL `tasks` must project the created task payload; got {:?}",
-        snap.tasks
-    );
-    assert!(
-        !snap.in_progress_task_ids.is_empty(),
-        "DSL `in_progress_task_ids` must project the in-progress task after TaskUpdate"
-    );
-    assert!(
-        snap.completed_task_ids.is_empty(),
-        "DSL `completed_task_ids` must project as empty before any task completion; got {:?}",
-        snap.completed_task_ids
     );
     // `member_state_markers` is populated only during the retire-drain window
     // (DSL inserts `Retiring` on Retire and removes on observe-retired). At
@@ -29410,7 +29130,6 @@ struct MobRuntimeParityObservableSnapshot {
     phase: String,
     active_member_count: usize,
     all_member_count: usize,
-    task_count: Option<usize>,
     coordinator_bound: Option<bool>,
     pending_spawn_count: Option<u32>,
     active_flow_count: Option<u32>,
@@ -29447,7 +29166,6 @@ impl MobRuntimeParityInvocationReport {
                     phase: after.phase.clone(),
                     active_member_count: after.active_member_count,
                     all_member_count: after.all_member_count,
-                    task_count: after.task_count,
                     coordinator_bound: after.coordinator_bound,
                     pending_spawn_count: after.pending_spawn_count,
                     active_flow_count: after.active_flow_count,
@@ -29618,8 +29336,6 @@ enum MobRuntimeParityProbeInput {
     Complete,
     Reset,
     Destroy,
-    TaskCreate,
-    TaskUpdate,
     SubscribeAgentEvents,
     SubscribeAllAgentEvents,
     SubscribeMobEvents,
@@ -29635,7 +29351,6 @@ struct MobRuntimeParityFixture {
     worker_identity: AgentIdentity,
     lead_identity: AgentIdentity,
     cancel_identity: AgentIdentity,
-    task_id: Option<TaskId>,
     flow_run_id: Option<RunId>,
     submitted_work_ref: Option<WorkRef>,
     wired_external: bool,
@@ -29700,23 +29415,6 @@ impl MobRuntimeParityFixture {
             .get_member(&self.worker_identity)
             .await
             .ok_or_else(|| "worker member missing after spawn".to_string())
-    }
-
-    async fn ensure_task(&mut self) -> Result<TaskId, String> {
-        if let Some(task_id) = &self.task_id {
-            return Ok(task_id.clone());
-        }
-        let task_id = self
-            .handle
-            .task_create(
-                "mob-runtime-parity".to_string(),
-                "parity task".to_string(),
-                vec![],
-            )
-            .await
-            .map_err(|error| format!("task create: {error:?}"))?;
-        self.task_id = Some(task_id.clone());
-        Ok(task_id)
     }
 
     async fn ensure_wired_edge(&mut self) -> Result<(), String> {
@@ -29873,8 +29571,6 @@ fn mob_runtime_parity_probe_for_input_variant(
         SchemaMobMachineInputVariant::Complete => Some(MobRuntimeParityProbeInput::Complete),
         SchemaMobMachineInputVariant::Reset => Some(MobRuntimeParityProbeInput::Reset),
         SchemaMobMachineInputVariant::Destroy => Some(MobRuntimeParityProbeInput::Destroy),
-        SchemaMobMachineInputVariant::TaskCreate => Some(MobRuntimeParityProbeInput::TaskCreate),
-        SchemaMobMachineInputVariant::TaskUpdate => Some(MobRuntimeParityProbeInput::TaskUpdate),
         SchemaMobMachineInputVariant::SubscribeAgentEvents => {
             Some(MobRuntimeParityProbeInput::SubscribeAgentEvents)
         }
@@ -29902,7 +29598,6 @@ async fn mob_runtime_parity_snapshot_summary(
     let phase = handle.status().await.unwrap();
     let active_members = handle.list_members().await;
     let all_members = handle.list_all_members().await;
-    let tasks = handle.task_list().await.ok();
     let orchestrator = handle.debug_orchestrator_snapshot().await.ok();
     let lifecycle = handle.debug_lifecycle_snapshot().await.ok();
     let dsl_t2 = handle.debug_dsl_t2_snapshot().await.ok();
@@ -30048,9 +29743,6 @@ async fn mob_runtime_parity_snapshot_summary(
         wiring_edges,
         external_peer_edges,
         identity_to_runtime,
-        tasks_map,
-        in_progress_task_ids,
-        completed_task_ids,
         member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
@@ -30075,18 +29767,6 @@ async fn mob_runtime_parity_snapshot_summary(
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), format!("{v:?}")))
                     .collect::<BTreeMap<_, _>>(),
-                snap.tasks
-                    .into_iter()
-                    .map(|(k, v)| (format!("{k:?}"), format!("{:?}", v.subject)))
-                    .collect::<BTreeMap<_, _>>(),
-                snap.in_progress_task_ids
-                    .into_iter()
-                    .map(|id| format!("{id:?}"))
-                    .collect::<BTreeSet<_>>(),
-                snap.completed_task_ids
-                    .into_iter()
-                    .map(|id| format!("{id:?}"))
-                    .collect::<BTreeSet<_>>(),
                 snap.member_restore_failures
                     .into_iter()
                     .map(|(k, v)| (format!("{k:?}"), v))
@@ -30116,7 +29796,6 @@ async fn mob_runtime_parity_snapshot_summary(
         runtime_fence_tokens,
         active_member_count: active_members.len(),
         all_member_count: all_members.len(),
-        task_count: tasks.as_ref().map(std::vec::Vec::len),
         coordinator_bound: orchestrator
             .as_ref()
             .map(|snapshot| snapshot.coordinator_bound),
@@ -30139,9 +29818,6 @@ async fn mob_runtime_parity_snapshot_summary(
         wiring_edges,
         external_peer_edges,
         identity_to_runtime,
-        tasks: tasks_map,
-        in_progress_task_ids,
-        completed_task_ids,
         member_restore_failures,
         member_session_bindings,
         pending_spawn_sessions,
@@ -30191,15 +29867,6 @@ fn mob_runtime_parity_field_value(
                 .map(|k| (k.clone(), 0u64))
                 .collect(),
         )),
-        "tasks" => Some(MobRuntimeParityExprValue::Map(
-            snapshot.tasks.keys().map(|k| (k.clone(), 0u64)).collect(),
-        )),
-        "in_progress_task_ids" => Some(MobRuntimeParityExprValue::Set(
-            snapshot.in_progress_task_ids.clone(),
-        )),
-        "completed_task_ids" => Some(MobRuntimeParityExprValue::Set(
-            snapshot.completed_task_ids.clone(),
-        )),
         "member_restore_failures" => Some(MobRuntimeParityExprValue::Map(
             snapshot
                 .member_restore_failures
@@ -30236,9 +29903,6 @@ fn mob_runtime_parity_field_value(
         )),
         "pending_spawn_count" => Some(MobRuntimeParityExprValue::U64(
             snapshot.pending_spawn_count.unwrap_or_default() as u64,
-        )),
-        "task_count" => Some(MobRuntimeParityExprValue::U64(
-            snapshot.task_count.unwrap_or_default() as u64,
         )),
         "coordinator_bound" => snapshot
             .coordinator_bound
@@ -30510,7 +30174,6 @@ fn mob_modeled_schema_result_summary(
         | MobRuntimeParityProbeInput::Complete
         | MobRuntimeParityProbeInput::Reset
         | MobRuntimeParityProbeInput::Destroy
-        | MobRuntimeParityProbeInput::TaskUpdate
         | MobRuntimeParityProbeInput::RecordOperatorActionProvenance
         | MobRuntimeParityProbeInput::SetSpawnPolicy
         | MobRuntimeParityProbeInput::Shutdown
@@ -30525,9 +30188,6 @@ fn mob_modeled_schema_result_summary(
         }
         MobRuntimeParityProbeInput::InternalTurn => {
             Some(summarize_mob_runtime_success(probe, "member_delivery"))
-        }
-        MobRuntimeParityProbeInput::TaskCreate => {
-            Some(summarize_mob_runtime_success(probe, "task_id"))
         }
         MobRuntimeParityProbeInput::SubscribeAgentEvents => {
             Some(summarize_mob_runtime_success(probe, "event_stream"))
@@ -30553,7 +30213,6 @@ async fn build_mob_runtime_parity_fixture() -> MobRuntimeParityFixture {
         worker_identity: AgentIdentity::from("w-1"),
         lead_identity: AgentIdentity::from("l-1"),
         cancel_identity: AgentIdentity::from("cancel-target"),
-        task_id: None,
         flow_run_id: None,
         submitted_work_ref: None,
         wired_external: false,
@@ -30637,12 +30296,6 @@ async fn mob_runtime_parity_prepare_probe(
             fixture.ensure_lead().await?;
             setup_tags.push("lead_spawned".to_string());
         }
-        MobRuntimeParityProbeInput::TaskUpdate => {
-            fixture.ensure_worker().await?;
-            setup_tags.push("worker_spawned".to_string());
-            let _ = fixture.ensure_task().await?;
-            setup_tags.push("task_created".to_string());
-        }
         MobRuntimeParityProbeInput::ForceCancel => {
             fixture.ensure_force_cancel_member().await?;
             setup_tags.push("turn_driven_member_spawned".to_string());
@@ -30653,7 +30306,6 @@ async fn mob_runtime_parity_prepare_probe(
         | MobRuntimeParityProbeInput::Complete
         | MobRuntimeParityProbeInput::Reset
         | MobRuntimeParityProbeInput::Destroy
-        | MobRuntimeParityProbeInput::TaskCreate
         | MobRuntimeParityProbeInput::SubscribeMobEvents
         | MobRuntimeParityProbeInput::RecordOperatorActionProvenance
         | MobRuntimeParityProbeInput::SetSpawnPolicy
@@ -30853,23 +30505,6 @@ async fn mob_runtime_parity_execute_probe(
             .await
             .map(|_| summarize_mob_runtime_success(probe, "destroy_report"))
             .map_err(|error| MobError::Internal(error.to_string())),
-        MobRuntimeParityProbeInput::TaskCreate => fixture
-            .handle
-            .task_create("mob runtime parity".to_string(), "task".to_string(), vec![])
-            .await
-            .map(|_| summarize_mob_runtime_success(probe, "task_id")),
-        MobRuntimeParityProbeInput::TaskUpdate => {
-            let task_id = fixture.ensure_task().await.map_err(MobError::Internal)?;
-            fixture
-                .handle
-                .task_update(
-                    task_id,
-                    crate::tasks::TaskStatus::InProgress,
-                    Some(fixture.worker_identity.clone()),
-                )
-                .await
-                .map(|()| summarize_mob_runtime_success(probe, "unit"))
-        }
         MobRuntimeParityProbeInput::SubscribeAgentEvents => fixture
             .handle
             .subscribe_agent_events(&fixture.lead_identity)
@@ -31475,8 +31110,6 @@ fn mob_runtime_parity_probe_input_variant(
         MobRuntimeParityProbeInput::Complete => Some(SchemaMobMachineInputVariant::Complete),
         MobRuntimeParityProbeInput::Reset => Some(SchemaMobMachineInputVariant::Reset),
         MobRuntimeParityProbeInput::Destroy => Some(SchemaMobMachineInputVariant::Destroy),
-        MobRuntimeParityProbeInput::TaskCreate => Some(SchemaMobMachineInputVariant::TaskCreate),
-        MobRuntimeParityProbeInput::TaskUpdate => Some(SchemaMobMachineInputVariant::TaskUpdate),
         MobRuntimeParityProbeInput::SubscribeAgentEvents => {
             Some(SchemaMobMachineInputVariant::SubscribeAgentEvents)
         }

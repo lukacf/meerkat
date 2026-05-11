@@ -366,16 +366,6 @@ impl WorkId {
     }
 }
 
-/// Bridging type for task identifier. Maps to a shell-side task reference.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskId(pub String);
-
-impl<T: Into<String>> From<T> for TaskId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
 /// Kickoff lifecycle phase for a member's initial autonomous turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KickoffPhase {
@@ -384,20 +374,6 @@ pub enum KickoffPhase {
     CallbackPending,
     Started,
     Failed,
-    Cancelled,
-}
-
-/// Task lifecycle status. DSL guards enumerate these directly
-/// (`TaskStatus::Pending`, `TaskStatus::InProgress`,
-/// `TaskStatus::Completed`, `TaskStatus::Cancelled`). `Completed` and
-/// `Cancelled` are the two terminal statuses; neither may be transitioned
-/// away from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum TaskStatus {
-    #[default]
-    Pending,
-    InProgress,
-    Completed,
     Cancelled,
 }
 
@@ -618,18 +594,6 @@ pub enum LoopIterationStage {
     AwaitingBodyFrame,
     BodyFrameActive,
     AwaitingUntilEvaluation,
-}
-
-/// Opaque task payload carried through the DSL. The full domain type is
-/// richer than what the DSL models; only `tasks.contains(id)` is observed in
-/// guards. Field projection lives in shell code consuming the DSL state.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct MobTask {
-    pub subject: String,
-    pub description: String,
-    pub status: TaskStatus,
-    pub owner: Option<AgentIdentity>,
-    pub blocked_by: Vec<TaskId>,
 }
 
 /// Per-runtime lifecycle marker tracking whether a member is actively serving

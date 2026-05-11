@@ -1225,7 +1225,6 @@ fn tool_config_schema() -> serde_json::Value {
             "comms": {"type": "boolean", "description": "Enable peer messaging tools."},
             "memory": {"type": "boolean", "description": "Enable semantic memory tools."},
             "mob": {"type": "boolean", "description": "Enable mob/delegation tools."},
-            "mob_tasks": {"type": "boolean", "description": "Enable shared task-list tools."},
             "schedule": {"type": "boolean", "description": "Enable schedule tools."},
             "image_generation": {"type": "boolean", "description": "Enable image generation tools."},
             "mcp": {
@@ -1740,7 +1739,7 @@ fn build_tool_defs_with_profile_support(
              PROFILE FIELDS:\n\
              - model (required): LLM model name, e.g. \"claude-sonnet-4-5\".\n\
              - tools: {builtins: bool, shell: bool, comms: bool, memory: bool, mob: bool, \
-               mob_tasks: bool, schedule: bool, image_generation: bool}. Each defaults to false.\n\
+               schedule: bool, image_generation: bool}. Each defaults to false.\n\
              - skills: Array of skill names to load.\n\
              - peer_description: Human-readable role description visible to other members.\n\
              - runtime_mode: \"autonomous_host\" (default) or \"turn_driven\".\n\

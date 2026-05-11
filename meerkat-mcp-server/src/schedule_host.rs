@@ -194,10 +194,12 @@ impl McpScheduleContext {
             override_shell: meerkat_core::ToolCategoryOverride::Inherit,
             override_memory: meerkat_core::ToolCategoryOverride::Inherit,
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
+            override_workgraph: meerkat_core::ToolCategoryOverride::Inherit,
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
             override_web_search: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
+            workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills: materialized_preload_skills(&create.preload_skills),
             realm_id: create

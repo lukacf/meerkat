@@ -1284,6 +1284,21 @@ impl MethodRouter {
             "schedule/call" => {
                 handlers::schedule::handle_call(id, params, self.runtime.clone()).await
             }
+            "workgraph/get" => {
+                handlers::workgraph::handle_get(id, params, self.runtime.clone()).await
+            }
+            "workgraph/list" => {
+                handlers::workgraph::handle_list(id, params, self.runtime.clone()).await
+            }
+            "workgraph/ready" => {
+                handlers::workgraph::handle_ready(id, params, self.runtime.clone()).await
+            }
+            "workgraph/snapshot" => {
+                handlers::workgraph::handle_snapshot(id, params, self.runtime.clone()).await
+            }
+            "workgraph/events" => {
+                handlers::workgraph::handle_events(id, params, self.runtime.clone()).await
+            }
             "turn/start" => {
                 handlers::turn::handle_start(
                     id,

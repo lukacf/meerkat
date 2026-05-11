@@ -79,8 +79,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "tools": {
         "builtins": true,
         "comms": true,
-        "mob": true,
-        "mob_tasks": true
+        "mob": true
       }
     },
     "metrics-analyst": {
@@ -90,8 +89,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     },
     "rollout-guard": {
@@ -101,8 +99,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     },
     "status-scribe": {
@@ -112,8 +109,7 @@ cat > "$MOB_DIR/definition.json" <<'JSON'
       "external_addressable": false,
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       }
     }
   },

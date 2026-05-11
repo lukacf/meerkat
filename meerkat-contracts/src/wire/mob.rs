@@ -132,8 +132,6 @@ pub struct WireMobToolConfig {
     #[serde(default)]
     pub mob: bool,
     #[serde(default)]
-    pub mob_tasks: bool,
-    #[serde(default)]
     pub schedule: bool,
     #[serde(default)]
     pub image_generation: bool,
@@ -214,8 +212,6 @@ pub struct MobToolConfigInput {
     pub memory: bool,
     #[serde(default)]
     pub mob: bool,
-    #[serde(default)]
-    pub mob_tasks: bool,
     #[serde(default)]
     pub schedule: bool,
     #[serde(default)]

@@ -34,7 +34,7 @@ fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
 
 /// Derive the effective `(override_mob, authority)` for a profile.
 ///
-/// `profile.tools.mob || profile.tools.mob_tasks` is the policy declaration.
+/// `profile.tools.mob` is the policy declaration.
 /// The canonical resolver `resolve_mob_operator_access` synthesizes a typed
 /// `MobToolAuthorityContext` (defaulting to a generated create-only shape) when
 /// the profile says enable and no persisted authority is supplied. This is the
@@ -44,8 +44,7 @@ pub(crate) fn resolve_profile_mob_operator_access(
     profile: &Profile,
     persisted_authority: Option<MobToolAuthorityContext>,
 ) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
-    let enable_mob =
-        ToolCategoryOverride::from_effective(profile.tools.mob || profile.tools.mob_tasks);
+    let enable_mob = ToolCategoryOverride::from_effective(profile.tools.mob);
     resolve_mob_operator_access(enable_mob, persisted_authority)
 }
 
@@ -62,7 +61,6 @@ pub(crate) fn open_profile_tool_categories_for_inherited_filter(profile: &mut Pr
     profile.tools.comms = true;
     profile.tools.memory = true;
     profile.tools.mob = true;
-    profile.tools.mob_tasks = true;
     profile.tools.schedule = true;
     profile.tools.image_generation = true;
     profile.tools.mcp.clear();
@@ -451,7 +449,6 @@ mod tests {
                     comms: true,
                     memory: false,
                     mob: true,
-                    mob_tasks: true,
                     schedule: false,
                     image_generation: true,
                     mcp: vec![],
@@ -477,7 +474,6 @@ mod tests {
                     comms: true,
                     memory: false,
                     mob: false,
-                    mob_tasks: false,
                     schedule: false,
                     image_generation: false,
                     mcp: vec![],

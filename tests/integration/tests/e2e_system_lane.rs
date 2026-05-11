@@ -48,3 +48,7 @@ system_suite!(
     e2e_system_sqlite_shared_realm_cli_rest_cli,
     "sqlite-shared-realm-cli-rest-cli"
 );
+system_suite!(
+    e2e_system_workgraph_shared_realm_observability,
+    "workgraph-shared-realm-observability"
+);

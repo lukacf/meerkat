@@ -6,10 +6,12 @@ import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
+const CURRENT_WASM_VERSION = '0.6.5';
+
 function makeSubscriptionRuntime(overrides = {}) {
   return {
     default: async () => undefined,
-    runtime_version: () => '0.6.0',
+    runtime_version: () => CURRENT_WASM_VERSION,
     init_runtime_from_config: () => JSON.stringify({ status: 'initialized' }),
     destroy_runtime: () => undefined,
     async mob_create(definitionJson) {
@@ -73,10 +75,10 @@ function makeSubscriptionMob(pollSubscription) {
   });
 }
 
-function makeDirectSession(pollEvents) {
+function makeDirectSession(pollEvents, startTurn = async () => '{}') {
   return new Session(
     7,
-    async () => '{}',
+    startTurn,
     () => JSON.stringify({ session_id: 'session-web-unit', phase: 'idle' }),
     () => undefined,
     pollEvents,
@@ -89,7 +91,7 @@ async function runtimeWithMobList(payload) {
     {
       async default() {},
       runtime_version() {
-        return '0.6.0';
+        return CURRENT_WASM_VERSION;
       },
       init_runtime_from_config() {
         return JSON.stringify({ status: 'initialized' });
@@ -478,6 +480,26 @@ test('Session direct polling rejects malformed event items', () => {
 
   assert.throws(() => session.pollEvents(), /missing type/);
   assert.throws(() => session.subscribe().poll(), /missing type/);
+});
+
+test('Session direct turn rejects missing response text instead of fabricating empty text', async () => {
+  const session = makeDirectSession(
+    () => JSON.stringify([]),
+    async () => JSON.stringify({ usage: { input_tokens: 1, output_tokens: 1 }, tool_calls: 0 }),
+  );
+
+  await assert.rejects(() => session.turn('hello'), /missing text/);
+});
+
+test('Session direct turn accepts either canonical response text field', async () => {
+  const session = makeDirectSession(
+    () => JSON.stringify([]),
+    async () => JSON.stringify({ response: 'hello', usage: {}, tool_calls: 0 }),
+  );
+
+  const result = await session.turn('hello');
+  assert.equal(result.text, 'hello');
+  assert.equal(result.response, 'hello');
 });
 
 test('Session destroy does not cache lifecycle state in the browser handle', async () => {

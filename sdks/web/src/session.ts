@@ -54,6 +54,35 @@ function normalizeSessionEvents(raw: unknown): SessionEvent[] {
   return raw.map((item) => normalizeSessionEvent(item));
 }
 
+function parseJsonPayload(json: string, context: string): unknown {
+  try {
+    return JSON.parse(json) as unknown;
+  } catch {
+    throw new Error(`${context}: invalid JSON`);
+  }
+}
+
+function normalizeTurnResult(raw: unknown): TurnResult {
+  const context = 'Invalid turn response';
+  if (!isRecord(raw)) {
+    throw new Error(`${context}: expected object`);
+  }
+  const response =
+    typeof raw.response === 'string'
+      ? raw.response
+      : typeof raw.text === 'string'
+        ? raw.text
+        : undefined;
+  if (response === undefined) {
+    throw new Error(`${context}: missing text`);
+  }
+  return {
+    ...raw,
+    text: typeof raw.text === 'string' ? raw.text : response,
+    response,
+  } as TurnResult;
+}
+
 /** A direct (non-mob) agent session. */
 export class Session {
   /** @internal — browser-local façade handle, not the authoritative session ID. */
@@ -86,21 +115,7 @@ export class Session {
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
     const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
     const json = await this.startTurnFn(this.handle, promptStr);
-    const parsed = JSON.parse(json) as Partial<TurnResult> & {
-      text?: string;
-      response?: string;
-    };
-    const text =
-      typeof parsed.text === 'string'
-        ? parsed.text
-        : typeof parsed.response === 'string'
-          ? parsed.response
-          : '';
-    return {
-      ...parsed,
-      text,
-      response: typeof parsed.response === 'string' ? parsed.response : text,
-    } as TurnResult;
+    return normalizeTurnResult(parseJsonPayload(json, 'Invalid turn response'));
   }
 
   /** Get the current runtime-backed session state. */

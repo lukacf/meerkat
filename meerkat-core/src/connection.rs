@@ -289,6 +289,31 @@ pub struct ResolvedConnectionTarget {
     pub auth_profile: AuthProfile,
 }
 
+/// Config-owned filters for selecting a provider binding without relying on
+/// the realm default binding.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProviderBindingSelection<'a> {
+    pub backend_kind: Option<&'a str>,
+    pub auth_method: Option<&'a str>,
+}
+
+impl ProviderBindingSelection<'_> {
+    fn criteria_label(&self) -> String {
+        let mut filters = Vec::new();
+        if let Some(backend_kind) = self.backend_kind {
+            filters.push(format!("backend_kind={backend_kind}"));
+        }
+        if let Some(auth_method) = self.auth_method {
+            filters.push(format!("auth_method={auth_method}"));
+        }
+        if filters.is_empty() {
+            String::new()
+        } else {
+            format!(" matching {}", filters.join(", "))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ConnectionTargetError {
     #[error("connection target did not name a realm and no configured default realm was available")]
@@ -327,6 +352,19 @@ pub enum ConnectionTargetError {
         expected: Provider,
         backend: Provider,
         auth: Provider,
+    },
+    #[error("realm '{realm}' has no binding for provider {provider:?}{criteria}")]
+    MissingProviderBinding {
+        realm: String,
+        provider: Provider,
+        criteria: String,
+    },
+    #[error("realm '{realm}' has multiple bindings for provider {provider:?}{criteria}: {matches}")]
+    AmbiguousProviderBinding {
+        realm: String,
+        provider: Provider,
+        criteria: String,
+        matches: String,
     },
 }
 
@@ -459,6 +497,97 @@ pub fn resolve_auth_binding_or_default_for_provider(
         preferred_realm,
         allow_env_default,
     )
+}
+
+/// Resolve the configured provider binding owned by the selected realm.
+///
+/// Unlike [`resolve_auth_binding_or_default_for_provider`], this does not use
+/// `default_binding` as semantic truth for the provider. It selects a binding
+/// whose backend and auth profile both belong to `provider`, optionally
+/// narrowed by backend kind and auth method. This is the path for app-facing
+/// login/provisioning surfaces where the provider argument is the request atom.
+pub fn resolve_configured_provider_binding_for_provider(
+    config: &Config,
+    provider: Provider,
+    preferred_realm: Option<&RealmId>,
+    selection: ProviderBindingSelection<'_>,
+) -> Result<ResolvedConnectionTarget, ConnectionTargetError> {
+    let mut candidates: Vec<&str> = Vec::new();
+    if let Some(realm) = preferred_realm {
+        candidates.push(realm.as_str());
+    }
+    if !candidates.contains(&"default") {
+        candidates.push("default");
+    }
+
+    let criteria = selection.criteria_label();
+    let mut missing_provider: Option<String> = None;
+    for realm_id in candidates {
+        let Some(section) = config.realm.get(realm_id) else {
+            continue;
+        };
+        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
+            ConnectionTargetError::RealmConfigInvalid {
+                realm: realm_id.to_string(),
+                source,
+            }
+        })?;
+
+        let matches = realm
+            .bindings
+            .iter()
+            .filter_map(|(binding_id, binding)| {
+                let backend = realm.backends.get(&binding.backend_profile)?;
+                let auth_profile = realm.auth_profiles.get(&binding.auth_profile)?;
+                if backend.provider != provider || auth_profile.provider != provider {
+                    return None;
+                }
+                if let Some(expected_backend_kind) = selection.backend_kind
+                    && backend.backend_kind != expected_backend_kind
+                {
+                    return None;
+                }
+                if let Some(expected_auth_method) = selection.auth_method
+                    && auth_profile.auth_method != expected_auth_method
+                {
+                    return None;
+                }
+                Some(binding_id.as_str())
+            })
+            .collect::<Vec<_>>();
+
+        let binding_id = match matches.as_slice() {
+            [binding_id] => BindingId::parse(*binding_id).map_err(|source| {
+                ConnectionTargetError::InvalidBindingId {
+                    binding: (*binding_id).to_string(),
+                    source,
+                }
+            })?,
+            [] => {
+                missing_provider = Some(realm_id.to_string());
+                continue;
+            }
+            _ => {
+                return Err(ConnectionTargetError::AmbiguousProviderBinding {
+                    realm: realm_id.to_string(),
+                    provider,
+                    criteria,
+                    matches: matches.join(", "),
+                });
+            }
+        };
+
+        return materialize_connection_target(realm, provider, binding_id, None);
+    }
+
+    if let Some(realm) = missing_provider {
+        return Err(ConnectionTargetError::MissingProviderBinding {
+            realm,
+            provider,
+            criteria,
+        });
+    }
+    Err(ConnectionTargetError::MissingRealm)
 }
 
 fn materialize_connection_target(
@@ -934,6 +1063,41 @@ auth_profile = "openai_oauth"
         )
     }
 
+    fn mixed_provider_login_config() -> Config {
+        config_with_realms(
+            r#"
+[dev]
+default_binding = "anthropic_default"
+
+[dev.backend.anthropic_api]
+provider = "anthropic"
+backend_kind = "anthropic_api"
+
+[dev.auth.anthropic_key]
+provider = "anthropic"
+auth_method = "api_key"
+source = { kind = "managed_store" }
+
+[dev.binding.anthropic_default]
+backend_profile = "anthropic_api"
+auth_profile = "anthropic_key"
+
+[dev.backend.openai_chatgpt]
+provider = "openai"
+backend_kind = "chatgpt_backend"
+
+[dev.auth.openai_oauth]
+provider = "openai"
+auth_method = "managed_chatgpt_oauth"
+source = { kind = "managed_store" }
+
+[dev.binding.openai_oauth]
+backend_profile = "openai_chatgpt"
+auth_profile = "openai_oauth"
+"#,
+        )
+    }
+
     #[test]
     fn auth_binding_is_purely_structural() {
         let c = AuthBindingRef {
@@ -1137,6 +1301,45 @@ auth_profile = "default_profile"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn configured_provider_binding_ignores_unrelated_realm_default() {
+        let config = mixed_provider_login_config();
+        let preferred_realm = RealmId::parse("dev").unwrap();
+        let old_default_path = resolve_auth_binding_or_default_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            Some(&preferred_realm),
+            false,
+        )
+        .expect_err("default-binding path should still reject the Anthropic default");
+        assert!(matches!(
+            old_default_path,
+            ConnectionTargetError::ProviderMismatch {
+                expected: Provider::OpenAI,
+                backend: Provider::Anthropic,
+                auth: Provider::Anthropic,
+                ..
+            }
+        ));
+
+        let target = resolve_configured_provider_binding_for_provider(
+            &config,
+            Provider::OpenAI,
+            Some(&preferred_realm),
+            ProviderBindingSelection {
+                backend_kind: Some("chatgpt_backend"),
+                auth_method: Some("managed_chatgpt_oauth"),
+            },
+        )
+        .expect("provider-specific binding should resolve independently of realm default");
+
+        assert_eq!(target.auth_binding.realm.as_str(), "dev");
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
+        assert_eq!(target.backend.provider, Provider::OpenAI);
+        assert_eq!(target.auth_profile.provider, Provider::OpenAI);
     }
 
     #[test]

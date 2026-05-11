@@ -869,13 +869,9 @@ enum Commands {
         )]
         output_schema: Option<String>,
 
-        /// Skill IDs or local skill paths to preload for this run. Repeatable.
+        /// Local skill directory or SKILL.md path to preload for this run. Repeatable.
         #[cfg(feature = "skills")]
-        #[arg(
-            long = "skill",
-            value_name = "PATH_OR_ID",
-            help_heading = "Common options"
-        )]
+        #[arg(long = "skill", value_name = "PATH", help_heading = "Common options")]
         skills: Vec<String>,
 
         /// Per-turn allow list for tools on the first turn (repeatable).
@@ -1199,8 +1195,7 @@ enum AuthCommands {
 
     /// Clear persisted credentials for an auth profile from the TokenStore.
     Logout {
-        /// Auth profile id (either `realm:binding` or bare `binding` — the
-        /// latter assumes realm `dev`).
+        /// Typed auth binding reference `realm:binding[:profile]`.
         profile_id: String,
     },
 
@@ -2398,7 +2393,10 @@ async fn resolve_skill_repo_path(raw: &str) -> anyhow::Result<ResolvedSkillRepoP
 
 async fn resolve_runtime_skill_path(
     raw: &str,
-) -> anyhow::Result<(meerkat_core::skills_config::SkillRepositoryConfig, String)> {
+) -> anyhow::Result<(
+    meerkat_core::skills_config::SkillRepositoryConfig,
+    meerkat_core::skills::SkillKey,
+)> {
     let resolved = resolve_skill_repo_path(raw).await?;
     let skill_id = resolved.implied_skill_id.ok_or_else(|| {
         anyhow::anyhow!(
@@ -2407,27 +2405,29 @@ async fn resolve_runtime_skill_path(
         )
     })?;
     let source_uuid = derive_skill_source_uuid(&resolved.repo_path)?;
+    let skill_name = meerkat_core::skills::SkillName::parse(&skill_id)
+        .map_err(|e| anyhow::anyhow!("invalid skill name derived from path `{skill_id}`: {e}"))?;
 
     Ok((
         meerkat_core::skills_config::SkillRepositoryConfig {
             name: format!("local-{skill_id}"),
-            source_uuid,
+            source_uuid: source_uuid.clone(),
             transport: meerkat_core::skills_config::SkillRepoTransport::Filesystem {
                 path: resolved.repo_path.display().to_string(),
             },
         },
-        skill_id,
+        meerkat_core::skills::SkillKey::new(source_uuid, skill_name),
     ))
 }
 
 async fn resolve_runtime_skills(
     mut config: Config,
     skills: Vec<String>,
-) -> anyhow::Result<(Config, Vec<String>)> {
+) -> anyhow::Result<(Config, Vec<meerkat_core::skills::SkillKey>)> {
     let mut preload = Vec::new();
     for skill in skills {
         if looks_like_path(&skill) {
-            let (repo, skill_id) = resolve_runtime_skill_path(&skill).await?;
+            let (repo, skill_key) = resolve_runtime_skill_path(&skill).await?;
             let already_configured = config.skills.repositories.iter().any(|existing| {
                 existing.source_uuid == repo.source_uuid || existing.name == repo.name
             });
@@ -2435,9 +2435,11 @@ async fn resolve_runtime_skills(
                 config.skills.repositories.push(repo);
             }
             config.skills.enabled = true;
-            preload.push(skill_id);
+            preload.push(skill_key);
         } else {
-            preload.push(skill);
+            anyhow::bail!(
+                "`--skill {skill}` does not name a skill source. Pass a local skill directory or SKILL.md path so the CLI can preserve the canonical source identity."
+            );
         }
     }
     Ok((config, preload))
@@ -2757,8 +2759,10 @@ async fn handle_models_catalog(scope: &RuntimeScope) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn auth_config_realm_or_default(config_realm_override: Option<&str>) -> String {
-    config_realm_override.unwrap_or("dev").to_string()
+fn auth_config_realm_or_scope(config_realm_override: Option<&str>, scope: &RuntimeScope) -> String {
+    config_realm_override
+        .unwrap_or_else(|| scope.locator.realm.as_str())
+        .to_string()
 }
 
 async fn handle_auth_command(
@@ -2771,7 +2775,7 @@ async fn handle_auth_command(
         AuthCommands::Realms => {
             if config.realm.is_empty() {
                 println!(
-                    "No realms configured. Add a [realm.dev] section to your config \
+                    "No realms configured. Add a [realm.<id>] section to your config \
                      or continue using env-var auth (ANTHROPIC_API_KEY etc.)."
                 );
                 return Ok(());
@@ -2789,7 +2793,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Profiles => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             let section = config.realm.get(&realm).ok_or_else(|| {
                 anyhow::anyhow!("Unknown realm '{realm}' — check your config file")
             })?;
@@ -2828,7 +2832,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Profile { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             let section = config
                 .realm
                 .get(&realm)
@@ -2855,7 +2859,7 @@ async fn handle_auth_command(
                 InMemoryCoordinator, TokenStore, TokenStoreBackend,
             };
 
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             let section = config
                 .realm
                 .get(&realm)
@@ -2896,7 +2900,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Status { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             let section = config
                 .realm
                 .get(&realm)
@@ -2946,7 +2950,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::ProfileDelete { profile_id, yes } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             let section = config
                 .realm
                 .get(&realm)
@@ -3067,12 +3071,19 @@ async fn handle_auth_command(
                         backend.as_deref(),
                         method.as_deref(),
                         secret.as_deref(),
+                        &config,
                         scope,
                     )
                     .await?;
                 } else {
-                    let _ = (backend, method);
-                    interactive_login(provider.as_deref(), scope).await?;
+                    interactive_login(
+                        provider.as_deref(),
+                        backend.as_deref(),
+                        method.as_deref(),
+                        &config,
+                        scope,
+                    )
+                    .await?;
                 }
             }
             #[cfg(not(all(feature = "anthropic", feature = "openai", feature = "gemini")))]
@@ -3099,7 +3110,7 @@ async fn handle_auth_command(
             }
         }
         AuthCommands::Refresh { profile_id } => {
-            let realm = auth_config_realm_or_default(config_realm_override);
+            let realm = auth_config_realm_or_scope(config_realm_override, scope);
             #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
             {
                 refresh_auth_profile(&realm, &profile_id, &config, scope).await?;
@@ -3344,57 +3355,11 @@ impl LoginProvider {
         }
     }
 
-    fn binding_id(self) -> &'static str {
+    fn core_provider(self) -> meerkat_core::Provider {
         match self {
-            Self::Anthropic => "anthropic_oauth",
-            Self::OpenAi => "openai_oauth",
-            Self::Google => "google_oauth",
-        }
-    }
-
-    fn config_provider(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "gemini",
-        }
-    }
-
-    fn backend_profile_id(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic_api",
-            Self::OpenAi => "openai_chatgpt",
-            Self::Google => "google_code_assist",
-        }
-    }
-
-    fn backend_kind(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic_api",
-            Self::OpenAi => "chatgpt_backend",
-            Self::Google => "google_code_assist",
-        }
-    }
-
-    fn backend_base_url(self) -> Option<&'static str> {
-        match self {
-            Self::Anthropic => None,
-            Self::OpenAi => Some(
-                meerkat_core::provider_matrix::openai::OpenAiBackendKind::ChatGptBackend
-                    .default_base_url(),
-            ),
-            Self::Google => Some(
-                meerkat_core::provider_matrix::google::GoogleBackendKind::GoogleCodeAssist
-                    .default_base_url(),
-            ),
-        }
-    }
-
-    fn oauth_auth_method(self) -> &'static str {
-        match self {
-            Self::Anthropic => "claude_ai_oauth",
-            Self::OpenAi => "managed_chatgpt_oauth",
-            Self::Google => "google_oauth",
+            Self::Anthropic => meerkat_core::Provider::Anthropic,
+            Self::OpenAi => meerkat_core::Provider::OpenAI,
+            Self::Google => meerkat_core::Provider::Gemini,
         }
     }
 
@@ -3413,6 +3378,14 @@ impl LoginProvider {
             }
             Self::OpenAi => meerkat_providers::oauth_flow::OAuthProviderIdentity::OpenAiChatGpt,
             Self::Google => meerkat_providers::oauth_flow::OAuthProviderIdentity::GoogleCodeAssist,
+        }
+    }
+
+    fn oauth_auth_method(self) -> &'static str {
+        match self {
+            Self::Anthropic => "claude_ai_oauth",
+            Self::OpenAi => "managed_chatgpt_oauth",
+            Self::Google => "google_oauth",
         }
     }
 
@@ -3436,14 +3409,6 @@ impl LoginProvider {
             Self::Anthropic | Self::Google => &[0],
         }
     }
-
-    fn sample_model(self) -> &'static str {
-        match self {
-            Self::Anthropic => "claude-sonnet-4-6",
-            Self::OpenAi => "gpt-5.4",
-            Self::Google => "gemini-2.5-flash",
-        }
-    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3454,8 +3419,6 @@ const ALL_LOGIN_PROVIDERS: &[LoginProvider] = &[
 ];
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-const CLI_INTERACTIVE_OAUTH_REALM_ID: &str = "dev";
-
 fn auth_supports_ansi() -> bool {
     use std::io::IsTerminal;
     std::io::stderr().is_terminal() && std::env::var("NO_COLOR").is_err()
@@ -3477,6 +3440,7 @@ fn auth_dim(s: &str) -> String {
         s.to_string()
     }
 }
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn auth_green(s: &str) -> String {
     if auth_supports_ansi() {
         format!("\x1b[32m{s}\x1b[0m")
@@ -3585,163 +3549,67 @@ struct CliOAuthLoginTarget {
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Config) -> bool {
-    let realm_id = CLI_INTERACTIVE_OAUTH_REALM_ID;
-    let binding_id = provider.binding_id();
-    let backend_profile_id = provider.backend_profile_id();
-    let auth_profile_id = binding_id;
-    let section = config.realm.entry(realm_id.to_string()).or_default();
-    let mut changed = false;
-
-    if let Some(backend) = section.backend.get_mut(backend_profile_id) {
-        if backend.provider == provider.config_provider()
-            && backend.backend_kind == provider.backend_kind()
-            && let Some(base_url) = provider.backend_base_url()
-        {
-            let should_heal_base_url = backend.base_url.as_deref().is_none_or(str::is_empty)
-                || (provider == LoginProvider::OpenAi
-                    && backend
-                        .base_url
-                        .as_deref()
-                        .map(|url| url.trim_end_matches('/') == "https://chatgpt.com/backend-api")
-                        .unwrap_or(false));
-            if should_heal_base_url {
-                backend.base_url = Some(base_url.to_string());
-                changed = true;
-            }
-        }
-    } else {
-        section.backend.insert(
-            backend_profile_id.to_string(),
-            meerkat_core::BackendProfileConfig {
-                provider: provider.config_provider().to_string(),
-                backend_kind: provider.backend_kind().to_string(),
-                base_url: provider.backend_base_url().map(str::to_string),
-                options: serde_json::Value::Null,
-            },
-        );
-        changed = true;
-    }
-
-    if !section.auth.contains_key(auth_profile_id) {
-        section.auth.insert(
-            auth_profile_id.to_string(),
-            meerkat_core::AuthProfileConfig {
-                provider: provider.config_provider().to_string(),
-                auth_method: provider.oauth_auth_method().to_string(),
-                source: meerkat_core::CredentialSourceSpec::ManagedStore,
-                constraints: meerkat_core::AuthConstraints {
-                    allow_interactive_login: true,
-                    ..Default::default()
-                },
-                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
-            },
-        );
-        changed = true;
-    }
-
-    if !section.binding.contains_key(binding_id) {
-        section.binding.insert(
-            binding_id.to_string(),
-            meerkat_core::ProviderBindingConfig {
-                backend_profile: backend_profile_id.to_string(),
-                auth_profile: auth_profile_id.to_string(),
-                default_model: Some(provider.sample_model().to_string()),
-                policy: meerkat_core::BindingPolicy::default(),
-            },
-        );
-        changed = true;
-    } else if provider == LoginProvider::Google
-        && let Some(binding) = section.binding.get_mut(binding_id)
-        && binding.backend_profile == backend_profile_id
-        && binding.auth_profile == auth_profile_id
-        && binding.default_model.as_deref() == Some("gemini-3.1-flash-lite")
-    {
-        binding.default_model = Some(provider.sample_model().to_string());
-        changed = true;
-    }
-
-    if section.default_binding.is_none() {
-        section.default_binding = Some(binding_id.to_string());
-        changed = true;
-    }
-
-    changed
-}
-
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn resolve_configured_cli_interactive_oauth_target(
     provider: LoginProvider,
     config: &Config,
+    preferred_realm: &meerkat_core::RealmId,
+    backend_hint: Option<&str>,
+    method_hint: Option<&str>,
 ) -> anyhow::Result<CliOAuthLoginTarget> {
-    let realm_id = CLI_INTERACTIVE_OAUTH_REALM_ID;
-    let binding_id = provider.binding_id();
-    let section = config.realm.get(realm_id).ok_or_else(|| {
-        anyhow::anyhow!(
-            "OAuth login target '{realm_id}:{binding_id}' is not configured; \
-             add a [realm.{realm_id}] binding for {} OAuth before running interactive login",
-            provider.display_name(),
-        )
-    })?;
-    let realm_set = meerkat_core::RealmConnectionSet::from_config(realm_id, section)
-        .map_err(|e| anyhow::anyhow!("Realm config invalid for '{realm_id}': {e}"))?;
-    let auth_binding = AuthBindingRef {
-        realm: meerkat_core::RealmId::parse(realm_id)
-            .map_err(|e| anyhow::anyhow!("invalid realm id '{realm_id}': {e}"))?,
-        binding: meerkat_core::BindingId::parse(binding_id)
-            .map_err(|e| anyhow::anyhow!("invalid binding id '{binding_id}': {e}"))?,
-        profile: None,
+    let identity = provider.oauth_identity();
+    let strict_target = meerkat_core::resolve_configured_provider_binding_for_provider(
+        config,
+        provider.core_provider(),
+        Some(preferred_realm),
+        meerkat_core::ProviderBindingSelection {
+            backend_kind: Some(backend_hint.unwrap_or(identity.backend_kind())),
+            auth_method: Some(method_hint.unwrap_or(provider.oauth_auth_method())),
+        },
+    );
+    let target = match strict_target {
+        Ok(target) => target,
+        Err(strict_error) if backend_hint.is_none() && method_hint.is_none() => {
+            match meerkat_core::resolve_configured_provider_binding_for_provider(
+                config,
+                provider.core_provider(),
+                Some(preferred_realm),
+                meerkat_core::ProviderBindingSelection::default(),
+            ) {
+                Ok(target) => target,
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "OAuth login target for {} must be configured in realm '{}' or the config default realm: {strict_error}",
+                        provider.display_name(),
+                        preferred_realm.as_str(),
+                    ));
+                }
+            }
+        }
+        Err(strict_error) => {
+            return Err(anyhow::anyhow!(
+                "OAuth login target for {} must be configured in realm '{}' or the config default realm: {strict_error}",
+                provider.display_name(),
+                preferred_realm.as_str(),
+            ));
+        }
     };
-    let (_, backend_profile, auth_profile) =
-        realm_set.lookup_auth_binding(&auth_binding).map_err(|e| {
-            anyhow::anyhow!("OAuth login target '{realm_id}:{binding_id}' invalid: {e}")
-        })?;
     meerkat_providers::oauth_flow::validate_oauth_login_binding(
-        backend_profile,
-        auth_profile,
-        provider.oauth_identity(),
+        &target.backend,
+        &target.auth_profile,
+        identity,
     )
     .map_err(|e| {
         anyhow::anyhow!(
-            "OAuth login target '{realm_id}:{binding_id}' cannot accept {} OAuth credentials: {e}",
+            "OAuth login target '{}:{}' cannot accept {} OAuth credentials: {e}",
+            target.auth_binding.realm.as_str(),
+            target.auth_binding.binding.as_str(),
             provider.display_name(),
         )
     })?;
     Ok(CliOAuthLoginTarget {
-        auth_binding,
-        auth_profile: auth_profile.clone(),
+        auth_binding: target.auth_binding,
+        auth_profile: target.auth_profile,
     })
-}
-
-#[cfg(all(test, feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn resolve_cli_interactive_oauth_target(
-    provider: LoginProvider,
-    config: &Config,
-) -> anyhow::Result<CliOAuthLoginTarget> {
-    match resolve_configured_cli_interactive_oauth_target(provider, config) {
-        Ok(target) => Ok(target),
-        Err(err) => {
-            let binding_missing = config
-                .realm
-                .get(CLI_INTERACTIVE_OAUTH_REALM_ID)
-                .is_none_or(|section| !section.binding.contains_key(provider.binding_id()));
-            if !binding_missing {
-                return Err(err);
-            }
-            let mut synthesized = config.clone();
-            ensure_cli_interactive_oauth_config(provider, &mut synthesized);
-            resolve_configured_cli_interactive_oauth_target(provider, &synthesized)
-        }
-    }
-}
-
-#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-fn auth_binding_from_token_key(key: &meerkat_providers::auth_store::TokenKey) -> AuthBindingRef {
-    AuthBindingRef {
-        realm: key.realm.clone(),
-        binding: key.binding.clone(),
-        profile: key.profile.clone(),
-    }
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -3984,6 +3852,45 @@ async fn save_cli_oauth_tokens_and_consume_browser_flow(
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+fn resolve_configured_cli_noninteractive_token_target(
+    provider: LoginProvider,
+    config: &Config,
+    preferred_realm: &meerkat_core::RealmId,
+    backend_hint: Option<&str>,
+    method: &str,
+) -> anyhow::Result<meerkat_core::ResolvedConnectionTarget> {
+    let target = meerkat_core::resolve_configured_provider_binding_for_provider(
+        config,
+        provider.core_provider(),
+        Some(preferred_realm),
+        meerkat_core::ProviderBindingSelection {
+            backend_kind: backend_hint,
+            auth_method: Some(method),
+        },
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "No configured {} TokenStore binding in realm '{}' or the config default realm: {e}",
+            provider.display_name(),
+            preferred_realm.as_str(),
+        )
+    })?;
+
+    if !meerkat_providers::auth_store::credential_source_uses_persisted_store(
+        &target.auth_profile.source,
+    ) {
+        anyhow::bail!(
+            "Configured auth binding '{}:{}' uses source kind '{}', which cannot store non-interactive credentials",
+            target.auth_binding.realm.as_str(),
+            target.auth_binding.binding.as_str(),
+            source_kind_label(&target.auth_profile.source),
+        );
+    }
+
+    Ok(target)
+}
+
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 /// Plan §4d.cli.1: non-interactive login path. Resolves the secret
 /// (from `--secret` or stdin), validates against the requested
 /// (backend, method) shape, and writes an api_key-style entry into
@@ -3995,19 +3902,18 @@ async fn noninteractive_login(
     backend_hint: Option<&str>,
     method_hint: Option<&str>,
     secret: Option<&str>,
+    config: &Config,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     use meerkat_providers::auth_store::{
         PersistedAuthMode, PersistedTokens, TokenKey, TokenStoreBackend,
     };
 
-    let provider = provider_hint
+    let provider_raw = provider_hint
         .ok_or_else(|| anyhow::anyhow!("--non-interactive requires a positional <provider> arg"))?;
-    let provider_lc = provider.to_lowercase();
-    if !matches!(provider_lc.as_str(), "anthropic" | "openai" | "gemini") {
-        anyhow::bail!("unknown provider '{provider}' — expected anthropic / openai / gemini");
-    }
-
+    let provider = LoginProvider::parse(provider_raw).ok_or_else(|| {
+        anyhow::anyhow!("Unknown provider '{provider_raw}'. Supported: anthropic, openai, google.")
+    })?;
     let method = method_hint.unwrap_or("api_key");
     if method != "api_key" && method != "static_bearer" {
         anyhow::bail!(
@@ -4016,21 +3922,24 @@ async fn noninteractive_login(
              oauth_to_api_key) require the interactive browser flow"
         );
     }
-
-    let backend =
-        backend_hint
-            .map(ToString::to_string)
-            .unwrap_or_else(|| match provider_lc.as_str() {
-                "anthropic" => "anthropic_api".to_string(),
-                "openai" => "openai_api".to_string(),
-                _ => "google_genai".to_string(),
-            });
+    let target = resolve_configured_cli_noninteractive_token_target(
+        provider,
+        config,
+        &scope.locator.realm,
+        backend_hint,
+        method,
+    )?;
 
     let secret_value = match secret {
         Some(s) if !s.trim().is_empty() => s.trim().to_string(),
         _ => {
             use std::io::BufRead;
-            eprintln!("Secret for {provider}/{backend}/{method} (reading from stdin):");
+            eprintln!(
+                "Secret for {}:{} ({}/{method}) (reading from stdin):",
+                target.auth_binding.realm.as_str(),
+                target.auth_binding.binding.as_str(),
+                target.backend.backend_kind,
+            );
             let stdin = std::io::stdin();
             let line = stdin
                 .lock()
@@ -4045,9 +3954,7 @@ async fn noninteractive_login(
     };
 
     let store = TokenStoreBackend::default_auto()?.open()?;
-    let binding_id_str = format!("default_{provider_lc}");
-    let key = TokenKey::parse("dev", &binding_id_str)
-        .map_err(|e| anyhow::anyhow!("invalid token-key realm/binding: {e}"))?;
+    let key = TokenKey::from_auth_binding(&target.auth_binding);
     let auth_mode = if method == "static_bearer" {
         PersistedAuthMode::StaticBearer
     } else {
@@ -4063,13 +3970,13 @@ async fn noninteractive_login(
         scopes: vec![],
         account_id: None,
         metadata: serde_json::json!({
-            "provider": provider_lc,
-            "backend_kind": backend,
+            "provider": target.auth_profile.provider.as_str(),
+            "backend_kind": target.backend.backend_kind,
             "auth_method": method,
             "source": "rkat auth login --non-interactive",
         }),
     };
-    let auth_binding = auth_binding_from_token_key(&key);
+    let auth_binding = target.auth_binding;
     save_cli_tokens_and_publish_lifecycle(
         store.as_ref(),
         scope.auth_lease.as_ref(),
@@ -4077,13 +3984,21 @@ async fn noninteractive_login(
         &persisted,
     )
     .await?;
-    println!("ok: wrote api_key for {provider_lc} into TokenStore under dev:default_{provider_lc}");
+    println!(
+        "ok: wrote {method} credential for {} into TokenStore under {}:{}",
+        target.auth_profile.provider.as_str(),
+        key.realm.as_str(),
+        key.binding.as_str(),
+    );
     Ok(())
 }
 
 #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 async fn interactive_login(
     provider_hint: Option<&str>,
+    backend_hint: Option<&str>,
+    method_hint: Option<&str>,
+    config: &Config,
     scope: &RuntimeScope,
 ) -> anyhow::Result<()> {
     use std::sync::Arc as StdArc;
@@ -4096,28 +4011,18 @@ async fn interactive_login(
 
     // --- Provider selection (interactive if none passed) -----------
     let provider = resolve_login_provider(provider_hint)?;
-    let (config_store, _) = resolve_config_store(scope).await?;
-    let mut config = config_store
-        .get()
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    config
-        .apply_env_overrides()
-        .map_err(|e| anyhow::anyhow!("Failed to apply env overrides: {e}"))?;
-    let config_changed = ensure_cli_interactive_oauth_config(provider, &mut config);
-    let target = resolve_configured_cli_interactive_oauth_target(provider, &config)?;
-    if config_changed {
-        config_store
-            .set(config.clone())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to persist OAuth login target config: {e}"))?;
-    }
+    let target = resolve_configured_cli_interactive_oauth_target(
+        provider,
+        config,
+        &scope.locator.realm,
+        backend_hint,
+        method_hint,
+    )?;
     tracing::debug!(
         realm = %target.auth_binding.realm.as_str(),
         binding = %target.auth_binding.binding.as_str(),
         auth_profile = %target.auth_profile.id,
         auth_method = %target.auth_profile.auth_method,
-        config_provisioned = config_changed,
         "validated CLI OAuth login target"
     );
     let auth_binding = target.auth_binding;
@@ -4149,7 +4054,11 @@ async fn interactive_login(
         print_hint(&format!(
             "`--auth-binding`. OAuth tokens are used when you invoke `{cli_cmd}` with"
         ));
-        print_hint(&format!("`--auth-binding dev:{}`.", provider.binding_id(),));
+        print_hint(&format!(
+            "`--auth-binding {}:{}`.",
+            auth_binding.realm.as_str(),
+            auth_binding.binding.as_str(),
+        ));
     }
 
     // --- Step 1: bind loopback callback ---------------------------
@@ -4350,8 +4259,9 @@ async fn interactive_login(
     eprintln!(
         "  {}",
         auth_cyan(&format!(
-            "{cli_cmd} auth test --realm dev {}",
-            provider.binding_id(),
+            "{cli_cmd} auth test --realm {} {}",
+            key.realm.as_str(),
+            key.binding.as_str(),
         )),
     );
     eprintln!(
@@ -4362,8 +4272,9 @@ async fn interactive_login(
     eprintln!(
         "  {}",
         auth_cyan(&format!(
-            "{cli_cmd} run --auth-binding dev:{} \"hello\"",
-            provider.binding_id()
+            "{cli_cmd} run --auth-binding {}:{} \"hello\"",
+            key.realm.as_str(),
+            key.binding.as_str(),
         )),
     );
     eprintln!(
@@ -4394,21 +4305,9 @@ async fn interactive_logout(profile_id: &str, scope: &RuntimeScope) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?
         .open()
         .map_err(|e| anyhow::anyhow!("Cannot open TokenStore: {e}"))?;
-    // Wave-c C-12: TokenKey now takes typed atoms; parse the raw
-    // `profile_id` form at this logout boundary. This is the
-    // non-AuthBindingRef carve-out `split_once(':')` site explicitly
-    // documented in `cli_parse.rs` — TokenKey shares the same flat
-    // `realm:binding` grammar but has no profile component.
-    let keys = match profile_id.split_once(':') {
-        Some((realm, binding)) => vec![
-            TokenKey::parse(realm, binding)
-                .map_err(|e| anyhow::anyhow!("invalid token-key `{profile_id}`: {e}"))?,
-        ],
-        None => vec![
-            TokenKey::parse("dev", profile_id)
-                .map_err(|e| anyhow::anyhow!("invalid token-key `dev:{profile_id}`: {e}"))?,
-        ],
-    };
+    let auth_binding =
+        cli_parse::parse_auth_binding_user_input(profile_id).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let keys = vec![TokenKey::from_auth_binding(&auth_binding)];
     let mut cleared = 0;
     for key in keys {
         let should_clear = match store.load(&key).await {
@@ -6368,7 +6267,7 @@ async fn run_agent(
     stdin_events: bool,
     line_format: LineFormat,
     config: &Config,
-    preload_skills: Vec<String>,
+    preload_skills: Vec<meerkat_core::skills::SkillKey>,
     allow_tools: Vec<String>,
     block_tools: Vec<String>,
     labels: Vec<(String, String)>,
@@ -6423,26 +6322,7 @@ async fn run_agent(
         let keep_alive = resolve_keep_alive(keep_alive)?;
         let effective_mob = cfg!(feature = "mob") && (enable_mob || config.tools.mob_enabled);
         let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
-        // Wave-c C-12: the canonical runtime identity for a skill is
-        // `SkillKey { source_uuid, skill_name }` (C-1 / C-4 upstream retype).
-        // CLI `--skill NAME` arguments default to the builtin (inventory)
-        // source — explicit source-scoped selection is not a CLI surface
-        // today and would be a separate feature. `SkillName::parse` enforces
-        // the lowercase-slug rule; we surface parse errors directly to the
-        // user rather than silently dropping.
-        let preload_skills = if preload_skills.is_empty() {
-            None
-        } else {
-            let keys: Result<Vec<meerkat_core::skills::SkillKey>, _> = preload_skills
-                .into_iter()
-                .map(|raw| {
-                    meerkat_core::skills::SkillName::parse(&raw)
-                        .map(meerkat_core::skills::SkillKey::builtin)
-                        .map_err(|e| anyhow::anyhow!("invalid --skill value `{raw}`: {e}"))
-                })
-                .collect();
-            Some(keys?)
-        };
+        let preload_skills = materialized_preload_skills(&preload_skills);
         let session = Session::new();
         let session_id = session.id().clone();
         let primary_scope_path = vec![StreamScopeFrame::Primary {
@@ -7233,26 +7113,8 @@ async fn resume_session_with_llm_override(
             }],
         )?;
 
-        // Wave-c C-12: lift runtime-side preload-skill names into typed
-        // `SkillKey`s (builtin source) before the SessionBuildOptions
-        // construction so a parse error surfaces loud on resume instead
-        // of panicking at the collect site.
         let resumed_preload_skills: Option<Vec<meerkat_core::skills::SkillKey>> =
-            if runtime_preload_skills.is_empty() {
-                None
-            } else {
-                let keys: Result<Vec<_>, _> = runtime_preload_skills
-                    .into_iter()
-                    .map(|raw| {
-                        meerkat_core::skills::SkillName::parse(&raw)
-                            .map(meerkat_core::skills::SkillKey::builtin)
-                            .map_err(|e| {
-                                anyhow::anyhow!("invalid preloaded skill name `{raw}`: {e}")
-                            })
-                    })
-                    .collect();
-                Some(keys?)
-            };
+            materialized_preload_skills(&runtime_preload_skills);
 
         let hooks_override =
             (hooks_override != HookRunOverrides::default()).then_some(hooks_override);
@@ -10999,6 +10861,43 @@ mod tests {
         assert_eq!(materialized_preload_skills(&preload_skills), None);
     }
 
+    #[tokio::test]
+    async fn resolve_runtime_skills_rejects_bare_skill_name() {
+        let err = resolve_runtime_skills(Config::default(), vec!["email".to_string()])
+            .await
+            .expect_err("bare skill names must not imply builtin source identity");
+
+        assert!(err.to_string().contains("does not name a skill source"));
+    }
+
+    #[tokio::test]
+    async fn resolve_runtime_skills_preserves_path_source_identity() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let skill_dir = temp.path().join("email-helper");
+        std::fs::create_dir(&skill_dir).expect("skill dir");
+        std::fs::write(skill_dir.join("SKILL.md"), "# Email Helper\n").expect("skill file");
+
+        let (config, preload) = resolve_runtime_skills(
+            Config::default(),
+            vec![skill_dir.to_string_lossy().into_owned()],
+        )
+        .await
+        .expect("path skill resolves");
+
+        assert!(config.skills.enabled);
+        assert_eq!(config.skills.repositories.len(), 1);
+        assert_eq!(preload.len(), 1);
+        assert_eq!(preload[0].skill_name.as_str(), "email-helper");
+        assert_eq!(
+            preload[0].source_uuid,
+            config.skills.repositories[0].source_uuid
+        );
+        assert_ne!(
+            preload[0].source_uuid,
+            meerkat_core::skills::SourceUuid::builtin()
+        );
+    }
+
     #[test]
     fn interrupt_not_ready_noop_is_only_idle_or_attached() {
         assert!(interrupt_not_ready_is_noop(
@@ -11089,126 +10988,6 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
-    fn test_cli_interactive_login_synthesized_oauth_config_is_toml_serializable() {
-        let mut config = Config::default();
-
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
-        let rendered = toml::to_string_pretty(&config)
-            .expect("first-time interactive OAuth config must serialize as TOML");
-        let reparsed: Config =
-            toml::from_str(&rendered).expect("serialized OAuth config must parse back");
-        let target =
-            resolve_configured_cli_interactive_oauth_target(LoginProvider::OpenAi, &reparsed)
-                .expect("reparsed OAuth login target must remain valid");
-
-        assert_eq!(target.auth_binding.realm.as_str(), "dev");
-        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
-        assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
-    }
-
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    #[test]
-    fn test_cli_interactive_google_oauth_config_includes_code_assist_base_url() {
-        let mut config = Config::default();
-
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::Google,
-            &mut config
-        ));
-        let backend = config
-            .realm
-            .get("dev")
-            .expect("dev realm")
-            .backend
-            .get("google_code_assist")
-            .expect("google code assist backend");
-        assert_eq!(
-            backend.base_url.as_deref(),
-            Some("https://cloudcode-pa.googleapis.com")
-        );
-        assert!(
-            !ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
-            "complete synthesized config should not be rewritten"
-        );
-
-        config
-            .realm
-            .get_mut("dev")
-            .expect("dev realm")
-            .backend
-            .get_mut("google_code_assist")
-            .expect("google code assist backend")
-            .base_url = None;
-
-        assert!(
-            ensure_cli_interactive_oauth_config(LoginProvider::Google, &mut config),
-            "legacy synthesized Google OAuth config without base_url should be healed"
-        );
-        let backend = config
-            .realm
-            .get("dev")
-            .expect("dev realm")
-            .backend
-            .get("google_code_assist")
-            .expect("google code assist backend");
-        assert_eq!(
-            backend.base_url.as_deref(),
-            Some("https://cloudcode-pa.googleapis.com")
-        );
-    }
-
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    #[test]
-    fn test_cli_interactive_openai_oauth_config_uses_codex_backend_base_url() {
-        let mut config = Config::default();
-
-        assert!(ensure_cli_interactive_oauth_config(
-            LoginProvider::OpenAi,
-            &mut config
-        ));
-        let backend = config
-            .realm
-            .get("dev")
-            .expect("dev realm")
-            .backend
-            .get("openai_chatgpt")
-            .expect("openai chatgpt backend");
-        assert_eq!(
-            backend.base_url.as_deref(),
-            Some("https://chatgpt.com/backend-api/codex")
-        );
-
-        config
-            .realm
-            .get_mut("dev")
-            .expect("dev realm")
-            .backend
-            .get_mut("openai_chatgpt")
-            .expect("openai chatgpt backend")
-            .base_url = Some("https://chatgpt.com/backend-api".into());
-
-        assert!(
-            ensure_cli_interactive_oauth_config(LoginProvider::OpenAi, &mut config),
-            "legacy ChatGPT backend URL should be healed to the Codex endpoint"
-        );
-        let backend = config
-            .realm
-            .get("dev")
-            .expect("dev realm")
-            .backend
-            .get("openai_chatgpt")
-            .expect("openai chatgpt backend");
-        assert_eq!(
-            backend.base_url.as_deref(),
-            Some("https://chatgpt.com/backend-api/codex")
-        );
-    }
-
-    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
-    #[test]
     fn test_cli_interactive_anthropic_oauth_uses_localhost_redirect_host() {
         assert_eq!(
             LoginProvider::Anthropic.callback_redirect_host(),
@@ -11257,6 +11036,80 @@ mod tests {
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn mixed_default_login_config(
+        openai_backend_kind: &str,
+        openai_auth_method: &str,
+        openai_source: meerkat_core::CredentialSourceSpec,
+    ) -> Config {
+        let mut config = Config::default();
+        let mut section = meerkat_core::RealmConfigSection::default();
+        section.backend.insert(
+            "anthropic_api".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "anthropic".into(),
+                backend_kind: "anthropic_api".into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "anthropic_key".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "anthropic".into(),
+                auth_method: "api_key".into(),
+                source: meerkat_core::CredentialSourceSpec::ManagedStore,
+                constraints: meerkat_core::AuthConstraints::default(),
+                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+            },
+        );
+        section.binding.insert(
+            "anthropic_default".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "anthropic_api".into(),
+                auth_profile: "anthropic_key".into(),
+                default_model: None,
+                policy: meerkat_core::BindingPolicy::default(),
+            },
+        );
+        section.backend.insert(
+            "openai_backend".into(),
+            meerkat_core::BackendProfileConfig {
+                provider: "openai".into(),
+                backend_kind: openai_backend_kind.into(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_auth".into(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".into(),
+                auth_method: openai_auth_method.into(),
+                source: openai_source,
+                constraints: meerkat_core::AuthConstraints::default(),
+                metadata_defaults: meerkat_core::AuthMetadataDefaults::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_target".into(),
+            meerkat_core::ProviderBindingConfig {
+                backend_profile: "openai_backend".into(),
+                auth_profile: "openai_auth".into(),
+                default_model: None,
+                policy: meerkat_core::BindingPolicy::default(),
+            },
+        );
+        section.default_binding = Some("anthropic_default".into());
+        config.realm.insert("dev".into(), section);
+        config
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    fn dev_realm_id() -> meerkat_core::RealmId {
+        meerkat_core::RealmId::parse("dev").expect("dev realm id parses")
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
     fn test_cli_interactive_login_resolves_configured_oauth_binding() {
         let config = openai_oauth_login_config(
@@ -11264,8 +11117,14 @@ mod tests {
             meerkat_core::CredentialSourceSpec::ManagedStore,
         );
 
-        let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
-            .expect("configured OAuth binding resolves");
+        let target = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect("configured OAuth binding resolves");
 
         assert_eq!(target.auth_binding.realm.as_str(), "dev");
         assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
@@ -11274,20 +11133,63 @@ mod tests {
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
     #[test]
-    fn test_cli_interactive_login_allows_first_time_default_oauth_binding() {
+    fn test_cli_interactive_login_selects_requested_provider_not_realm_default() {
+        let config = mixed_default_login_config(
+            "chatgpt_backend",
+            "managed_chatgpt_oauth",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+
+        let target = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect("configured OpenAI OAuth binding resolves even when Anthropic is default");
+
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_target");
+        assert_eq!(target.auth_profile.provider, meerkat_core::Provider::OpenAI);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_noninteractive_login_selects_requested_provider_not_realm_default() {
+        let config = mixed_default_login_config(
+            "openai_api",
+            "api_key",
+            meerkat_core::CredentialSourceSpec::ManagedStore,
+        );
+
+        let target = resolve_configured_cli_noninteractive_token_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            "api_key",
+        )
+        .expect("configured OpenAI TokenStore binding resolves even when Anthropic is default");
+
+        assert_eq!(target.auth_binding.binding.as_str(), "openai_target");
+        assert_eq!(target.auth_profile.provider, meerkat_core::Provider::OpenAI);
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_login_rejects_missing_configured_oauth_binding() {
         let config = Config::default();
 
-        let target = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
-            .expect("fresh config should synthesize the default OpenAI OAuth login target");
+        let err = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect_err("fresh config must not synthesize a default OAuth login target");
 
-        assert_eq!(target.auth_binding.realm.as_str(), "dev");
-        assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
-        assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
-        assert_eq!(
-            target.auth_profile.source,
-            meerkat_core::CredentialSourceSpec::ManagedStore
-        );
-        assert!(target.auth_profile.constraints.allow_interactive_login);
+        assert!(err.to_string().contains("must be configured"));
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
@@ -11296,8 +11198,14 @@ mod tests {
         let config =
             openai_oauth_login_config("api_key", meerkat_core::CredentialSourceSpec::ManagedStore);
 
-        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
-            .expect_err("api_key binding must not accept OAuth login tokens");
+        let err = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect_err("api_key binding must not accept OAuth login tokens");
 
         assert!(err.to_string().contains("auth_method 'api_key'"));
     }
@@ -11318,8 +11226,14 @@ mod tests {
             .expect("default backend exists")
             .backend_kind = "openai_api".into();
 
-        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
-            .expect_err("OAuth login must reject unsupported backend/auth combinations");
+        let err = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect_err("OAuth login must reject unsupported backend/auth combinations");
 
         assert!(err.to_string().contains("backend_kind 'openai_api'"));
     }
@@ -11335,8 +11249,14 @@ mod tests {
             },
         );
 
-        let err = resolve_cli_interactive_oauth_target(LoginProvider::OpenAi, &config)
-            .expect_err("env-source binding must not accept persisted OAuth login tokens");
+        let err = resolve_configured_cli_interactive_oauth_target(
+            LoginProvider::OpenAi,
+            &config,
+            &dev_realm_id(),
+            None,
+            None,
+        )
+        .expect_err("env-source binding must not accept persisted OAuth login tokens");
 
         assert!(err.to_string().contains("source 'env'"));
     }
@@ -13320,14 +13240,15 @@ default_model = "gemma"
         .expect("skill file");
 
         let skill_arg = skill_dir.to_string_lossy().to_string();
-        let (runtime_repo, runtime_skill_id) = resolve_runtime_skill_path(&skill_arg)
+        let (runtime_repo, runtime_skill_key) = resolve_runtime_skill_path(&skill_arg)
             .await
             .expect("runtime repo");
         let config_repo = resolve_skill_repo_for_config(&skill_arg, None)
             .await
             .expect("config repo");
 
-        assert_eq!(runtime_skill_id, "demo-skill");
+        assert_eq!(runtime_skill_key.skill_name.as_str(), "demo-skill");
+        assert_eq!(runtime_skill_key.source_uuid, runtime_repo.source_uuid);
         assert_eq!(runtime_repo.source_uuid, config_repo.source_uuid);
         let filesystem_paths = match (&runtime_repo.transport, &config_repo.transport) {
             (

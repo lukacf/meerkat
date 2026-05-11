@@ -17,6 +17,16 @@ filter = 'binary(e2e_system_lane)'
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
+# OpenAI Realtime audio smoke scenarios are provider-sensitive: the provider
+# can return transcript deltas without output-audio deltas on an otherwise
+# valid audio request. Keep the live audio assertions strict, serialize these
+# two tests inside the broad e2e-smoke lane, and allow a narrow retry for this
+# external no-audio response shape.
+filter = 'test(e2e_smoke_s71_live_adapter_channel_lifecycle_rpc_ws) or test(e2e_smoke_s72_live_adapter_model_switch_continuity)'
+threads-required = "num-test-threads"
+retries = 2
+
+[[profile.default.overrides]]
 # D4 / issue #260: provider_tool_use_boundary race. Reduced from ~20% to ~10%
 # by drain-and-clear-dirty logic; full elimination blocked on deeper
 # runtime-append synchronization work.

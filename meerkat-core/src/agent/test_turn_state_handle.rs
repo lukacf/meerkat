@@ -42,8 +42,9 @@ use crate::lifecycle::RunId;
 use crate::ops::OperationId;
 use crate::retry::LlmRetrySchedule;
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionInput, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    ContentShape, StructuredOutputFailureReason, TurnExecutionInput, TurnFailureReason, TurnPhase,
+    TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 
 #[derive(Debug, Clone)]
@@ -863,16 +864,22 @@ impl TurnStateHandle for TestTurnStateHandle {
         guard.apply(TurnExecutionInput::ExtractionValidationPassed { run_id })
     }
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
+    fn extraction_validation_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "extraction_validation_failed")?;
-        guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, error })
+        guard.apply(TurnExecutionInput::ExtractionValidationFailed { run_id, failure })
     }
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
+    fn extraction_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError> {
         let mut guard = self.lock_state()?;
         let run_id = active_run_or_err(&guard, "extraction_failed")?;
-        guard.apply(TurnExecutionInput::ExtractionFailed { run_id, error })
+        guard.apply(TurnExecutionInput::ExtractionFailed { run_id, failure })
     }
 
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError> {

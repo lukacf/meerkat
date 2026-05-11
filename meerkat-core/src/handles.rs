@@ -44,9 +44,10 @@ use crate::tool_scope::{
     ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
-    ContentShape, TurnExecutionEffectAuthority, TurnExecutionEffectProjection, TurnExecutionInput,
-    TurnExecutionTransition, TurnFailureReason, TurnPhase, TurnPrimitiveKind,
-    TurnTerminalCauseKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    ContentShape, StructuredOutputFailureReason, TurnExecutionEffectAuthority,
+    TurnExecutionEffectProjection, TurnExecutionInput, TurnExecutionTransition, TurnFailureReason,
+    TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 use crate::types::SessionId;
 
@@ -681,11 +682,11 @@ pub trait TurnStateHandle: Send + Sync {
             TurnExecutionInput::ExtractionValidationPassed { .. } => {
                 self.extraction_validation_passed()
             }
-            TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
-                self.extraction_validation_failed(error.clone())
+            TurnExecutionInput::ExtractionValidationFailed { failure, .. } => {
+                self.extraction_validation_failed(failure.clone())
             }
-            TurnExecutionInput::ExtractionFailed { error, .. } => {
-                self.extraction_failed(error.clone())
+            TurnExecutionInput::ExtractionFailed { failure, .. } => {
+                self.extraction_failed(failure.clone())
             }
             TurnExecutionInput::ExtractionStart { .. } => self.extraction_start(),
             TurnExecutionInput::ForceCancelNoRun => self.force_cancel_no_run(),
@@ -757,9 +758,15 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn extraction_validation_passed(&self) -> Result<(), DslTransitionError>;
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_validation_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 

@@ -247,6 +247,32 @@ impl TurnFailureReason {
     }
 }
 
+/// Typed reason carried across the structured-output extraction authority seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredOutputFailureReason {
+    message: String,
+}
+
+impl StructuredOutputFailureReason {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_message(self) -> String {
+        self.message
+    }
+
+    pub fn turn_failure_reason(&self) -> TurnFailureReason {
+        TurnFailureReason::new(AgentErrorClass::StructuredOutput, self.message.clone())
+    }
+}
+
 /// Content shape admitted by the turn primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ContentShape {
@@ -413,11 +439,11 @@ pub enum TurnExecutionInput {
     },
     ExtractionValidationFailed {
         run_id: RunId,
-        error: String,
+        failure: StructuredOutputFailureReason,
     },
     ExtractionFailed {
         run_id: RunId,
-        error: String,
+        failure: StructuredOutputFailureReason,
     },
     ExtractionStart {
         run_id: RunId,
@@ -479,14 +505,8 @@ impl TurnExecutionInput {
             Self::BudgetLimitExceeded { exceeded, .. } => {
                 Some(TurnFailureReason::budget_exceeded(*exceeded))
             }
-            Self::ExtractionValidationFailed { error, .. } => Some(TurnFailureReason::new(
-                crate::event::AgentErrorClass::StructuredOutput,
-                error.clone(),
-            )),
-            Self::ExtractionFailed { error, .. } => Some(TurnFailureReason::new(
-                crate::event::AgentErrorClass::StructuredOutput,
-                error.clone(),
-            )),
+            Self::ExtractionValidationFailed { failure, .. }
+            | Self::ExtractionFailed { failure, .. } => Some(failure.turn_failure_reason()),
             _ => None,
         }
     }

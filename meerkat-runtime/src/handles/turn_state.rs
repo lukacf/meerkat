@@ -8,8 +8,9 @@ use meerkat_core::lifecycle::RunId;
 use meerkat_core::ops::{AsyncOpRef, OperationId, WaitPolicy};
 use meerkat_core::retry::LlmRetrySchedule;
 use meerkat_core::turn_execution_authority::{
-    TurnExecutionEffect, TurnExecutionInput, TurnExecutionTransition, TurnFailureReason, TurnPhase,
-    TurnPrimitiveKind, TurnTerminalOutcome, terminal_outcome_for_budget_exceeded,
+    StructuredOutputFailureReason, TurnExecutionEffect, TurnExecutionInput,
+    TurnExecutionTransition, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 
 use super::HandleDslAuthority;
@@ -289,18 +290,18 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
                     context,
                 )?
             }
-            TurnExecutionInput::ExtractionValidationFailed { error, .. } => {
+            TurnExecutionInput::ExtractionValidationFailed { failure, .. } => {
                 self.dsl.apply_input_with_effects(
                     mm_dsl::MeerkatMachineInput::ExtractionValidationFailed {
-                        error: error.clone(),
+                        error: failure.message().to_string(),
                     },
                     context,
                 )?
             }
-            TurnExecutionInput::ExtractionFailed { error, .. } => {
+            TurnExecutionInput::ExtractionFailed { failure, .. } => {
                 self.dsl.apply_input_with_effects(
                     mm_dsl::MeerkatMachineInput::ExtractionFailed {
-                        error: error.clone(),
+                        error: failure.message().to_string(),
                     },
                     context,
                 )?
@@ -471,18 +472,28 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         )
     }
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError> {
+    fn extraction_validation_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionValidationFailed { error },
+            mm_dsl::MeerkatMachineInput::ExtractionValidationFailed {
+                error: failure.into_message(),
+            },
             "TurnStateHandle::extraction_validation_failed",
         )
     }
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError> {
+    fn extraction_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError> {
         // intra-machine: no route; dispatcher not applicable (handle targets the meerkat DSL directly, not a CompositionDispatcher seam)
         self.dsl.apply_input(
-            mm_dsl::MeerkatMachineInput::ExtractionFailed { error },
+            mm_dsl::MeerkatMachineInput::ExtractionFailed {
+                error: failure.into_message(),
+            },
             "TurnStateHandle::extraction_failed",
         )
     }

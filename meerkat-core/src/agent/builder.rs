@@ -540,7 +540,7 @@ impl AgentBuilder {
             cancel_after_boundary_requested: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             model_defaults_resolver: self.model_defaults_resolver,
             call_timeout_override: self.call_timeout_override,
-            extraction_state: super::extraction::ExtractionState::default(),
+            extraction_authority: super::extraction::StructuredOutputExtractionAuthority::default(),
             last_hidden_deferred_catalog_names: Default::default(),
             last_pending_catalog_sources: Default::default(),
             tool_dispatch_context: Default::default(),

@@ -252,7 +252,9 @@ pub use service::{
     SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
     SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
     SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
-    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptReplacement, TurnToolOverlay,
+    TranscriptEditAdmissionError, TranscriptEditAdmissionRequest, TranscriptEditAuthority,
+    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptEditSourceLifecycle,
+    TranscriptReplacement, TurnToolOverlay,
 };
 pub use session::{
     DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,

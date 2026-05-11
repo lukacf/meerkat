@@ -1,6 +1,7 @@
 ---
 title: "Quickstart"
 description: "Install Meerkat and run your first agent. Single binary, any provider."
+icon: "bolt"
 ---
 
 ## Install
@@ -9,7 +10,9 @@ description: "Install Meerkat and run your first agent. Single binary, any provi
   <Tab title="Rust crate">
     ```toml Cargo.toml
     [dependencies]
-meerkat = "0.6.5"
+    meerkat = { version = "0.6.5", features = ["anthropic", "jsonl-store"] }
+    meerkat-store = "0.6.5"
+    meerkat-tools = "0.6.5"
     tokio = { version = "1", features = ["full"] }
     ```
   </Tab>

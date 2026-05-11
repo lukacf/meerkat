@@ -58,7 +58,8 @@ hash for both Cargo and BuildBuddy output roots.
 
 ## Runtime Dogma (first review lens)
 
-Full doctrine: `docs/architecture/meerkat-runtime-dogma.md`.
+Public doctrine summary: `docs/reference/machine-authority.mdx`.
+Historical internal doctrine archive: `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.
 
 Short version:
 
@@ -77,8 +78,8 @@ Short version:
 
 ### Live audio/video adapter vocabulary (public noun)
 
-Live (audio/video) channels are exposed through the live-adapter MVP
-surface. Capability detection still uses `ModelCapabilities.realtime`
+Live (audio/video) channels are exposed through the caller-initiated
+`live/*` surface. Capability detection still uses `ModelCapabilities.realtime`
 to decide whether a model can back a live channel; channel lifecycle
 is **caller-initiated** through the `live/*` JSON-RPC methods (and
 their typed SDK wrappers). The previous capability-driven attachment
@@ -119,7 +120,7 @@ lives in `meerkat-live`. For a deeper internal reference,
 Exactly five canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
 - **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
-- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed in the live-adapter MVP — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
+- **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 - **AuthMachine** — auth/session authorization state that must remain machine-owned.
@@ -220,8 +221,9 @@ For comprehensive file lists, see the matching reference. This is a minimal poin
 - `meerkat-mob/src/runtime/local_bridge.rs` — in-process MeerkatMachine bridge
 - `meerkat-mob-mcp/src/agent_tools.rs` — agent-facing delegation/orchestration tools
 - `meerkat-contracts/src/wire/supervisor_bridge.rs` — bridge protocol types
-- `docs/architecture/meerkat-runtime-dogma.md` — full dogma
-- `docs/architecture/buildbuddy-bazel-poc.md` — BuildBuddy/Bazel developer and CI backend guide
-- `docs/architecture/identity-first-live-voice-proposal.md` — historical live adapter + identity-first design notes
+- `docs/reference/machine-authority.mdx` — public machine-authority summary
+- `docs/reference/build-and-ci.mdx` — public BuildBuddy/Cargo/CI guide
+- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical internal doctrine archive
+- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/identity-first-live-voice-proposal.md` — historical live + identity design notes
 - `tests/integration/src/e2e_lanes.rs` — authoritative e2e lane catalog
 - `scripts/build-backend-env`, `scripts/run-build-backend-lane`, `scripts/buildbuddy-dev` — local build backend switch and BuildBuddy facade

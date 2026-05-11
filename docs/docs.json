@@ -47,12 +47,10 @@
             ]
           },
           {
-            "group": "Guides: Setup And Hosting",
+            "group": "Guides: Models And Hosting",
             "pages": [
               "guides/self-hosting-models",
-              "guides/self-hosted-gemma4",
-              "guides/image-generation",
-              "guides/mini-surfaces"
+              "guides/image-generation"
             ]
           },
           {
@@ -170,17 +168,16 @@
             "group": "Architecture",
             "pages": [
               "reference/architecture",
-              "reference/design-philosophy",
-              "architecture/RMAT",
-              "architecture/formal-seam-closure",
-              "architecture/finite-ownership-ledger",
-              "architecture/identity-generation-and-runtime-epoch",
-              "architecture/meerkat-runtime-dogma"
+              "reference/runtime-architecture",
+              "reference/machine-authority",
+              "reference/mob-architecture",
+              "reference/design-philosophy"
             ]
           },
           {
             "group": "Operations",
             "pages": [
+              "reference/build-and-ci",
               "guides/cd-and-distribution"
             ]
           }

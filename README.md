@@ -116,8 +116,8 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 **Generate images** from a runtime-backed session:
 
 ```bash
-rkat run --allow-tool generate_image \
-  "Use generate_image to create a square PNG icon for a release dashboard. Return the blob id."
+rkat run --model gpt-5.5 --allow-tool generate_image \
+  "Use generate_image with provider \"openai\" to create a square PNG icon for a release dashboard. Return the blob id."
 rkat blob get <blob_id> --output release-dashboard.png
 ```
 
@@ -224,7 +224,7 @@ make release-preflight
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
-**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the live-adapter MVP surface (`live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, `live/close`) on JSON-RPC and the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
+**Live audio.** Choose a realtime-capable model such as `gpt-realtime-2` and open a live channel through the `live/open`, `live/status`, `live/refresh`, `live/send_input`, `live/commit_input`, `live/interrupt`, `live/truncate`, and `live/close` JSON-RPC methods, or the matching `liveOpen` / `live_open` family in the TypeScript and Python SDKs. JSON-RPC hosts must enable the `--live-ws` listener (`/live/ws`) for the audio WebSocket bootstrap returned by `live/open`.
 
 **Image generation and blobs.** `generate_image` is a session-scoped builtin backed by provider image profiles and realm blob storage. Generated image blocks can be read from history and fetched through blob APIs or SDK helpers.
 

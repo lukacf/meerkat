@@ -207,7 +207,8 @@ Generated protocol adapters land in each crate's `src/generated/` (e.g., `meerka
 
 ## Dogma for machine work
 
-Per `docs/architecture/meerkat-runtime-dogma.md`:
+Per the machine-authority doctrine summarized in `docs/reference/machine-authority.mdx`
+and archived historically at `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`:
 
 1. **One semantic fact, one owner.** If something can mutate machine state, the machine owns it. Shell copies of DSL-owned fields are shadow truth and must be eliminated (see Phase 5G).
 2. **Machines own semantics, shell owns mechanics.** Transition tables belong in the DSL. Handwritten match tables on `(phase, input)` tuples in shell code are authority-reimplementation in disguise.
@@ -235,5 +236,6 @@ Per `docs/architecture/meerkat-runtime-dogma.md`:
 - `meerkat-runtime/src/handles/` — runtime impls of handle traits; the `HandleDslAuthority` shared wrapper
 - `meerkat-core/src/handles.rs` — handle trait definitions
 - `meerkat-core/src/runtime_epoch.rs` — `SessionRuntimeBindings` (the cross-crate seam)
-- `docs/architecture/meerkat-runtime-dogma.md` — dogma rules
+- `docs/reference/machine-authority.mdx` — public machine-authority summary
+- `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md` — historical dogma archive
 - `xtask/src/machines.rs` — codegen/drift/verify xtask command implementations

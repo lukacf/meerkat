@@ -170,7 +170,7 @@ Meerkat fields and OpenAI lowering:
 | `format` | `auto`, `png`, `jpeg`, `jpg`, `webp` | Universal Meerkat field. Lowered to OpenAI `output_format`; `jpg` normalizes to `jpeg`. |
 | `provider_params.background` | `auto`, `opaque` | Advanced OpenAI override. `gpt-image-2` does not support transparent backgrounds. Use an opaque background and post-process if you need transparency. |
 | `provider_params.output_compression` | `0` to `100` | Advanced OpenAI override. Applies only when the universal `format` is `jpeg` or `webp`. |
-| `provider_params.moderation` | `auto`, `low` | Advanced OpenAI override for GPT Image moderation strictness. |
+| `provider_params.moderation` | `auto`, `low` | Advanced GPT Image moderation strictness override. Omit it for OpenAI's default filtering. |
 | `provider_params.action` | `auto`, `generate`, `edit` | Advanced hosted Responses image-tool override. Normal Meerkat calls should use top-level `intent` and omit `action`; Images API routes reject it. |
 
 Model behavior:
@@ -178,7 +178,7 @@ Model behavior:
 - `gpt-image-2` uses the hosted Responses image tool internally, but callers still pass Meerkat's `generate_image` request shape.
 - `gpt-image-2` accepts flexible `WIDTHxHEIGHT` sizes when they satisfy OpenAI's constraints: both edges are multiples of 16 px, max edge is 3840 px, aspect ratio is at most 3:1, and total pixels are between 655,360 and 8,294,400. Common values include `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `2048x1152`, `3840x2160`, and `2160x3840`.
 - Do not copy raw Responses API JSON into `provider_params`. Use Meerkat's universal `size`, `quality`, `format`, and `intent` fields, and reserve `provider_params` for the advanced OpenAI overrides above.
-- Do not pass `background: "transparent"` for `gpt-image-2`; OpenAI rejects it. Do not pass `input_fidelity`; `gpt-image-2` treats image inputs as high fidelity by default and Meerkat's 0.6.5 OpenAI adapter rejects unknown provider params.
+- Do not pass `background: "transparent"` for `gpt-image-2`; OpenAI rejects it. Do not pass `input_fidelity`; Meerkat's 0.6.5 OpenAI adapter uses a closed provider-params shape and rejects unknown fields.
 - Other OpenAI-owned `gpt-image*` or `dall-e*` models use the Images API path.
 - The Images API path currently rejects edit requests, reference images, and `action`.
 
@@ -225,7 +225,7 @@ Gemini image generation runs through a scoped image-model turn internally. The u
   "revised_prompt": { "disposition": "not_requested" },
   "native_metadata": {
     "provider": "open_ai",
-    "target_model": "gpt-5.5",
+    "target_model": "gpt-5.4",
     "response_id": "resp_..."
   },
   "warnings": []
@@ -261,4 +261,4 @@ Important fields:
 - [Tools](/concepts/tools) for how builtins are enabled and scoped.
 - [Built-in tools reference](/reference/builtin-tools) for the concise parameter reference.
 - [Providers](/concepts/providers) for provider credentials and model catalog behavior.
-- `docs/architecture/assistant-image-generation-substrate.md` for the internal design record.
+- [Built-in tools reference](/reference/builtin-tools) for the model-facing tool contract.

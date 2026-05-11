@@ -1,46 +1,98 @@
 ---
 title: "Mobs"
-description: "Meerkat’s multi-agent coordination model built on stable member identity and host-vs-agent surfaces."
+description: "Meerkat's multi-agent model: durable teams, stable member identity, profile-based roles, wiring, flows, and host-vs-agent surfaces."
 icon: "users"
 ---
 
-A mob is Meerkat’s multi-agent runtime model.
+A mob is Meerkat's durable multi-agent unit. It turns several agent sessions
+into a coordinated team with stable member identities, role profiles, peer
+wiring, shared lifecycle events, and optional flows.
 
-It combines:
+## Why Mobs Exist
 
-- stable member identity
-- peer wiring
-- shared flows/tasks
-- host control planes
-- agent-facing mob tools
+Single sessions are excellent for linear work. Mobs are for work that benefits
+from separate participants:
 
-## Why this is a concept
+- one lead plus several analysts
+- independent reviewers that compare findings
+- long-lived helper pools
+- incident rooms with specialized roles
+- browser-deployed teams packaged as mobpacks
 
-Mobs are not just an advanced guide topic. They define how Meerkat thinks about:
+Meerkat does not maintain a separate "sub-agent" substrate. Delegation and
+multi-agent orchestration compile to mob members.
 
-- identity-first long-lived agents
-- orchestration vs collaboration
-- multi-agent runtime ownership
+## The Objects
 
-## Key distinction
+| Object | Role |
+|--------|------|
+| `MobDefinition` | The desired shape: profiles, wiring, topology, limits, flows |
+| Mob | The persisted aggregate: status, roster, events, flow runs, work |
+| Profile | A reusable role contract: model, tools, skills, runtime mode |
+| Member | A spawned agent session addressed by stable `AgentIdentity` |
+| Wiring | The peer graph that controls who can see and message whom |
+| Flow | A repeatable workflow across members |
 
-- **Host-side `mob/*` APIs** are for applications and SDKs
-- **agent-side `mob_*` tools** are for the model inside a running session
+## Stable Identity
 
-This distinction needs to stay visible in both conceptual and practical docs.
-
-## Mental model
+Public mob APIs use `AgentIdentity`. Runtime bindings can rotate when a member
+respawns, moves, or reconnects, but the member's public identity remains the key
+for status, wiring, work, and events.
 
 ```text
-mob definition
-  -> members
-  -> wiring
-  -> flows
-  -> host lifecycle + work lanes
+AgentIdentity  -> durable member handle
+AgentRuntimeId -> current runtime binding
+FenceToken     -> stale-write guard
+Generation     -> respawn counter
 ```
 
-## See also
+This is why callers wire `lead-1` to `analyst-1` instead of wiring internal
+session IDs.
 
-- [Comms](/concepts/comms)
-- [Mobs guide](/guides/mobs)
-- [Examples: Mobs](/examples/mobs)
+## Host Vs Agent Surfaces
+
+Mobs deliberately expose two kinds of interfaces:
+
+| Surface | Caller | Examples |
+|---------|--------|----------|
+| Agent tools | The model inside a session | `delegate`, `mob_create`, `mob_spawn_member`, `mob_wire` |
+| Host APIs | Apps, SDKs, CLI, and services | `mob/create`, `mob/spawn`, `mob/flow_run`, Python/TypeScript/Web `Mob` |
+| Public MCP tools | External MCP clients | `meerkat_mob_create`, `meerkat_mob_spawn`, `meerkat_mob_run_flow` |
+
+Agent tools let an agent create or coordinate helpers while it is working. Host
+APIs let applications create, supervise, inspect, and drive teams directly.
+
+## Runtime Modes
+
+`autonomous_host` is the default when a member's runtime mode is omitted. The
+member behaves like a long-lived peer and receives work through the mob runtime.
+
+`turn_driven` is explicit. Use it when the host wants tighter control over when
+the member starts turns.
+
+## Flows And Work
+
+Flows are repeatable workflows over members. Work lanes are tracked,
+cancellable pieces of work sent to a mob or member. Use a flow when the workflow
+itself is reusable; use work submission when an application needs a handle for
+one unit of work.
+
+## Portability
+
+Mobpacks package a mob definition and optional assets into a `.mobpack` file.
+They are the portable deployment shape for signed teams, repeatable CLI/service
+deployment, and browser-target builds.
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="Mobs guide" icon="users" href="/guides/mobs">
+    Build, spawn, wire, run flows, observe, and troubleshoot mobs.
+  </Card>
+  <Card title="Mob architecture" icon="diagram-project" href="/reference/mob-architecture">
+    Runtime ownership, identity, persistence, and flow internals.
+  </Card>
+  <Card title="Mobpack" icon="box" href="/guides/mobpack">
+    Package and deploy portable mob artifacts.
+  </Card>
+</CardGroup>

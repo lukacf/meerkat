@@ -62,4 +62,5 @@ Load this reference as the first review lens when touching runtime, mob, comms, 
 - If policy depends on dynamic identity, where is recomputation defined?
 - Did the change reduce ambiguity, or merely relocate it?
 
-Full dogma: `docs/architecture/meerkat-runtime-dogma.md`.
+Public doctrine summary: `docs/reference/machine-authority.mdx`.
+Historical internal doctrine archive: `docs-internal/archive/public-docs-removed-2026-05-11/architecture/meerkat-runtime-dogma.md`.

@@ -41,9 +41,8 @@ The `AgentToolDispatcher` trait connects your tools to the agent:
 
 ```rust
 use async_trait::async_trait;
-use meerkat::{AgentToolDispatcher, ToolCallView, ToolDef, ToolResult};
-use meerkat::error::ToolError;
-use meerkat_core::ops::ToolDispatchOutcome;
+use meerkat::{AgentToolDispatcher, ToolDef, ToolError, ToolResult};
+use meerkat_core::{ToolCallView, ToolDispatchOutcome};
 use serde_json::json;
 use std::sync::Arc;
 

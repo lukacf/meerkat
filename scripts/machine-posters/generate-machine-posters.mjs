@@ -9,9 +9,8 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const outputDir = path.join(
   repoRoot,
-  "docs",
-  "architecture",
-  "posters",
+  "docs-internal",
+  "machine-posters",
 );
 
 const THEME = {

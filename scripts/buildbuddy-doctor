@@ -301,7 +301,7 @@ if [[ -x scripts/run-build-backend-lane ]] &&
   grep -Fq 'e2e-smoke-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'e2e-auth-rbe' scripts/buildbuddy-dev &&
   grep -Fq 'BUILDBUDDY_DRY_RUN' scripts/buildbuddy-dev &&
-  grep -Fq 'BUILDBUDDY_DRY_RUN=1' docs/architecture/buildbuddy-bazel-poc.md; then
+  grep -Fq 'BUILDBUDDY_DRY_RUN=1' docs/reference/build-and-ci.mdx; then
   pass "Developer build, check, lint, and test lanes use BuildBuddy when MEERKAT_BUILDBUDDY is enabled"
 else
   bad "Developer build, lint, or test lanes do not honor the BuildBuddy opt-in"
@@ -375,12 +375,12 @@ if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy
   ! grep -Fq "mode: \${{ (github.event_name == 'workflow_dispatch'" .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' CLAUDE.md &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' AGENTS.md &&
-  grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/architecture/buildbuddy-bazel-poc.md &&
-  grep -Fq 'scripts/buildbuddy-dev' docs/architecture/buildbuddy-bazel-poc.md &&
+  grep -Fq 'MEERKAT_BUILDBUDDY=1' docs/reference/build-and-ci.mdx &&
+  grep -Fq 'scripts/buildbuddy-dev' docs/reference/build-and-ci.mdx &&
   grep -Fq 'MEERKAT_BUILDBUDDY=1' scripts/agent-gate &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND' scripts/build-backend-env &&
   ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' README.md &&
-  ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' docs/architecture/buildbuddy-bazel-poc.md &&
+  ! grep -Fq 'MEERKAT_AGENT_GATE_BACKEND=buildbuddy' docs/reference/build-and-ci.mdx &&
   grep -Fq '. ./scripts/build-backend-env' Makefile &&
   grep -Fq 'source "${ROOT}/scripts/build-backend-env"' scripts/pre-push-unit.sh &&
   grep -Fq 'scripts/agent-gate" --staged' scripts/test-changed-crates.sh &&

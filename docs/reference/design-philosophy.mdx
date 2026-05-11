@@ -1,264 +1,141 @@
 ---
 title: "Design Philosophy"
-description: "Architectural principles and Rust implementation idioms that shape the Meerkat codebase."
+description: "The engineering principles behind Meerkat's runtime, API boundaries, Rust implementation style, and validation model."
 icon: "compass-drafting"
 ---
 
-## Part I: Architectural Principles
+Meerkat is built as infrastructure, not as a single assistant application. The
+runtime should be easy to embed, strict about semantic ownership, and honest
+about which surface owns which behavior.
 
-### The agent loop is infrastructure, not application
+## Principles
 
-Meerkat treats the LLM execution loop the way a database engine treats storage — as a composable, embeddable primitive with no opinions about what you build on top. The entire architecture flows from this.
+### The Agent Loop Is A Primitive
 
-### Trait contracts own the architecture
+The agent loop is provider-neutral. It owns messages, tool calls, streaming
+assembly, retryable/fatal error classification, and transcript updates. It does
+not own CLI policy, REST transport details, OAuth flows, or mob orchestration.
 
-`meerkat-core` defines nine trait contracts (`AgentLlmClient`, `AgentToolDispatcher`, `AgentSessionStore`, `SessionService`, `Compactor`, `MemoryStore`, `HookEngine`, `SkillEngine`, `SkillSource`) and contains zero I/O dependencies. Everything else — providers, storage backends, tool registries — lives in separate crates that implement these traits.
+That split lets the same loop run behind a CLI command, an RPC server, a Rust
+embedding, a mob member, or a browser runtime.
 
-This is a hard constraint, not an aspiration. The core agent loop is testable in-memory without mocks, embeddable in any Rust binary, and provably independent of any specific LLM provider or storage backend.
+### Surfaces Are Adapters
 
-### Surfaces are skins, not authorities
+CLI, REST, JSON-RPC, MCP, Python, TypeScript, and Web SDKs should expose the
+same underlying concepts with surface-appropriate ergonomics. A surface may own
+transport details, but it should not create a second semantic model for
+sessions, tools, auth, live channels, or mobs.
 
-CLI, REST, JSON-RPC, and MCP Server all follow the same path:
+Runtime-backed surfaces enter through `MeerkatMachine` and consume
+`SessionRuntimeBindings`. Standalone embeddings use
+`RuntimeBuildMode::StandaloneEphemeral` explicitly.
 
-```
-Surface → SessionService → AgentFactory::build_agent() → Agent<C, T, S>
-```
+### One Semantic Fact, One Owner
 
-No surface constructs agents directly. `AgentFactory` consolidates provider resolution, tool dispatch wiring, comms setup, hook resolution, and skill injection into a single construction pipeline.
+State that changes what the system *is* needs a clear owner:
 
-The important distinction is ownership:
+| Fact | Owner |
+| --- | --- |
+| Session runtime admission and completion | `MeerkatMachine` |
+| Mob roster, wiring, flow, and task state | `MobMachine` / `meerkat-mob` |
+| Auth lease lifecycle | `AuthMachine` via runtime auth handles |
+| Schedule and occurrence lifecycle | `meerkat-schedule` machines |
+| Transcript content | `SessionService` and session stores |
+| Provider request lowering | Provider crates |
 
-- runtime-backed surfaces own `keep_alive`, Queue/Steer routing, comms drain, and commit/cancel semantics
-- `SessionService` is the substrate seam they route through
-- `EphemeralSessionService` remains useful, but it is not a co-equal product path for runtime semantics
+Derived projections are allowed, but they must be rebuildable from the owner.
 
-That ownership is expressed through the explicit runtime-binding contract:
+### Typed Boundaries Beat String Folklore
 
-- runtime-backed surfaces obtain `SessionRuntimeBindings` from `MeerkatMachine::prepare_bindings(session_id)`
-- those bindings flow through `SessionBuildOptions.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings)`
-- standalone/testing/embedded paths opt into `RuntimeBuildMode::StandaloneEphemeral`
+Public APIs should expose domain handles such as `session_id`,
+`AgentIdentity`, `blob_id`, `mob_id`, and `job_id`. Internal raw identities and
+provider-specific handles should stay behind typed wrappers unless they are part
+of an explicit contract.
 
-### Composition over configuration
+Provider capabilities come from catalogs and profiles, not from substring
+matching. If a model supports realtime, images, web search, or compaction, that
+fact should be represented in a typed profile.
 
-Optional capabilities are genuinely optional — not feature-flagged defaults that are always present:
+### Composition Over Hidden Defaults
 
-- `CommsRuntime` is `Option<Arc<dyn CommsRuntime>>` — when `None`, the loop skips comms entirely
-- `HookEngine` is `Option<Arc<dyn HookEngine>>` — no hooks configured, no overhead
-- `Compactor`, `MemoryStore` — same pattern
+Optional subsystems are injected through traits and handles:
 
-Nothing is embedded; everything is injected. The `Agent<C, T, S>` generic parameters make this explicit at the type level. Tool dispatch uses `CompositeDispatcher` to layer builtins, MCP, external, and policy filters — each layer is independently testable and swappable.
+- provider clients
+- tool dispatchers
+- session stores
+- memory stores
+- hook engines
+- skill engines
+- comms runtimes
+- runtime bindings
 
-### Sessions are first-class, persistence is optional
+When a subsystem is absent, the behavior should degrade explicitly. Hidden
+global state and implicit runtime reconstruction make recovery and testing
+harder.
 
-`SessionService` defines the substrate lifecycle. Production surfaces (CLI, REST, RPC, MCP) use `PersistentSessionService` under a `MeerkatMachine` that owns `keep_alive`, Queue/Steer routing, comms drain, and ingress admission. `EphemeralSessionService` is the in-memory substrate for testing and embedded use — it supports Queue-only turns and rejects runtime-owned semantics (Steer, render_metadata). The `.rkat/sessions/` files are derived projections materialized by `SessionProjector` — delete them and replay from the event store to get identical content.
+## Rust Implementation Style
 
-### Errors separate mechanism from policy
+### Keep Core I/O-Free
 
-Three-tier typed errors (`ToolError` → `AgentError` → `SessionError`) capture what happened without prescribing what to do about it. `LlmFailureReason` distinguishes retryable (`RateLimited { retry_after }`) from fatal (`AuthError`) at the type level. The agent loop implements retry logic; callers decide whether to resume or abort. Every error variant carries a stable `error_code() -> &'static str` for SDK wire formats.
+`meerkat-core` defines shared types and contracts. Network, filesystem, OAuth,
+SQLite, MCP, and provider-specific behavior live in satellite crates.
 
-### Wire types and domain types are separate concerns
+This keeps core tests fast and lets embedders choose the pieces they need.
 
-`meerkat-contracts` owns the wire format (`WireRunResult`, `WireEvent`), emits JSON schemas via `schemars`, and feeds SDK codegen for Python and TypeScript. Domain types in `meerkat-core` are richer and not constrained by serialization compatibility. The conversion is explicit (`From` impls), lossy where appropriate, and version-locked — `ContractVersion::CURRENT` must equal `workspace.package.version`.
+### Use Newtypes For Domain Identity
 
-### Configuration is layered and declarative
-
-Config resolution follows a strict precedence: `Config::default()` → file load → env overrides (API keys only) → per-request `SessionBuildOptions`. No cascading merges. No global mutable state. Running agents are not affected by config file changes mid-turn.
-
-### Testing is a design constraint, not an afterthought
-
-The named test lanes exist because the architecture makes them possible. Core has no I/O, so unit tests need no mocks. Every trait has a test implementation. The repo separates `unit`, `integration-fast`, deterministic `e2e-fast`, real-local-resource `e2e-system`, targeted live-provider `e2e-live`, and compound live-provider `e2e-smoke` coverage, with Cargo aliases and hooks aligned to those lanes.
-
----
-
-## Part II: Rust Implementation Principles
-
-### Ownership topology
-
-The agent loop maintains a clear split: **shared immutable infrastructure** (`Arc<C>`, `Arc<T>`, `Arc<S>` for client, tools, store) vs **exclusively-owned mutable state** (session, budget, loop state). `Agent::run(&mut self)` needs no mutex — the RPC `SessionRuntime` spawns a dedicated tokio task per session that exclusively owns the `Agent`. Cancellation works via `&mut self` state transition, not shared atomics.
-
-### Copy-on-write session history
-
-Session messages live in `Arc<Vec<Message>>`. `Session::fork()` clones the `Arc` (O(1)), and `Arc::make_mut` triggers a copy only on first mutation when the refcount exceeds one. Forked conversation branches get independent session copies cheaply — no full history duplication at fork time.
-
-```rust
-pub fn fork(&self) -> Self {
-    Session {
-        messages: Arc::clone(&self.messages),  // O(1) — shared buffer
-        // ...
-    }
-}
-
-pub fn push(&mut self, message: Message) {
-    Arc::make_mut(&mut self.messages).push(message);  // CoW on mutation
-}
-```
-
-### Zero-allocation iteration
-
-`ToolCallView<'a>` is `Copy` — it borrows `&'a str` for id and name, `&'a RawValue` for args, all from the message buffer. `ToolCallIter` adapts a slice iterator, filtering for tool-use blocks on the fly. No `Vec<ToolCall>` is ever materialized. The trait contract returns `Arc<[Arc<ToolDef>]>` — an arc'd slice, not a `Vec` — so cloning the tool list is O(1).
+Primitive strings and UUIDs should become semantic types at boundaries:
 
 ```rust
-#[derive(Debug, Clone, Copy)]
-pub struct ToolCallView<'a> {
-    pub id: &'a str,
-    pub name: &'a str,
-    pub args: &'a RawValue,
-}
-
-pub struct ToolCallIter<'a> {
-    inner: std::slice::Iter<'a, AssistantBlock>,
-}
-
-impl<'a> Iterator for ToolCallIter<'a> {
-    type Item = ToolCallView<'a>;
-    // Filters on the fly — no intermediate collection
-}
+pub struct SessionId(uuid::Uuid);
+pub struct AgentIdentity(String);
+pub struct BlobId(uuid::Uuid);
 ```
 
-### Deferred parsing via `Box<RawValue>`
+This keeps member identity, runtime binding identity, sessions, blobs, and
+provider handles from being mixed accidentally.
 
-Tool arguments are preserved as unparsed JSON (`Box<RawValue>`) from provider response through the core loop to the dispatcher. Parsing happens at most once — when the dispatcher calls `parse_args::<T>()` — and only if the tool actually executes. A custom `deserialize_tool_use_args` handles the serde buffering quirk where `Box<RawValue>` can't deserialize directly from internally-tagged enum content.
+### Preserve Raw Provider Payloads Only Where They Are Truly Opaque
 
-```rust
-ToolUse {
-    id: String,
-    name: String,
-    #[serde(deserialize_with = "deserialize_tool_use_args")]
-    args: Box<RawValue>,  // Untouched until dispatch
-}
+Tool arguments use `Box<RawValue>` so the runtime can pass provider-emitted JSON
+to the dispatcher without reparsing or reserializing it. Provider metadata that
+Meerkat understands should be typed instead of left as arbitrary
+`serde_json::Value`.
+
+### Prefer Explicit Runtime Modes
+
+Runtime-backed and standalone execution are different contracts:
+
+| Mode | Use |
+| --- | --- |
+| `SessionOwned(bindings)` | Runtime-backed surfaces with machine-owned handles and recovery semantics. |
+| `StandaloneEphemeral` | Tests, browser runtime, and narrow embeddings without durable runtime services. |
+
+Do not silently fall back from runtime-backed behavior to standalone behavior.
+
+### Make Generated Surfaces Checkable
+
+Schemas, SDK wrappers, machine specs, and generated kernels are checked into the
+repo and verified by gates. Generated files should be reproducible, and drift
+should fail locally before it reaches CI.
+
+## Operational Bias
+
+Meerkat favors boring, repeatable commands:
+
+```bash
+make check
+make lint
+make test
+make agent-gate
 ```
 
-### Typed enums over `serde_json::Value`
+Cargo remains the default backend. BuildBuddy accelerates the same lanes when
+explicitly enabled with `MEERKAT_BUILDBUDDY=1`.
 
-Provider metadata is a typed enum, not `Option<serde_json::Value>`. The compiler enforces exhaustive matching. No runtime "does this object have a signature field?" checks.
+## See Also
 
-```rust
-#[non_exhaustive]
-#[serde(tag = "provider", rename_all = "snake_case")]
-pub enum ProviderMeta {
-    Anthropic { signature: String },
-    AnthropicRedacted { data: String },
-    Gemini { thought_signature: String },
-    OpenAi { id: String, encrypted_content: Option<String> },
-}
-```
-
-`#[non_exhaustive]` allows future provider variants without breaking downstream consumers.
-
-### Newtype discipline
-
-Semantic types get their own newtypes even when wrapping primitives. `BlockKey(usize)` can't be confused with a message index. `OperationId(Uuid)` is distinct from `SessionId`. `SourceUuid` and `SkillName` are separate types in the skills system.
-
-```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockKey(usize);  // Can't mix with tool buffer index
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct OperationId(pub Uuid);  // Distinct from SessionId
-```
-
-### Serde as a design tool
-
-Three distinct tagging strategies, each chosen for the data shape:
-
-- **Internally tagged** (`#[serde(tag = "role")]`) for `Message` — discriminant in its own field, enables two-stage parsing
-- **Adjacently tagged** (`#[serde(tag = "block_type", content = "data")]`) for `AssistantBlock` — compact, supports custom deserializers on nested fields
-- **Externally tagged** (`#[serde(tag = "provider")]`) for `ProviderMeta` — each variant carries different provider-specific fields
-
-`#[serde(skip_serializing_if = "Option::is_none")]` keeps wire payloads minimal. Custom `Default` impls provide semantic defaults (`structured_output_retries: 2`, not `0`). Custom `Debug` impls hide sensitive fields, showing `.is_some()` instead of session content.
-
-### Streaming block assembly
-
-The `BlockAssembler` handles out-of-order streaming events with a slot-based design. `Vec<BlockSlot>` is append-only — `Pending` placeholders inserted at start-time are overwritten with `Finalized` blocks on completion. `IndexMap<String, ToolCallBuffer>` preserves insertion order for deterministic assembly. The tool call ID is the map key only — never duplicated in the buffer value. Text deltas coalesce with the previous text block via `push_str` when possible.
-
-```rust
-enum BlockSlot {
-    Finalized(AssistantBlock),
-    Pending,
-}
-
-pub struct BlockAssembler {
-    slots: Vec<BlockSlot>,                          // Append-only, stable indices
-    tool_buffers: IndexMap<String, ToolCallBuffer>,  // ID is key, not in value
-}
-```
-
-Errors like `DuplicateToolStart` are returned to the caller — never swallowed.
-
-### Generic type erasure at boundaries
-
-`Agent<C, T, S>` keeps generics for monomorphization in tests and single-provider deployments. The core loop impl block uses `C: AgentLlmClient + ?Sized`, so it works with both concrete types and trait objects. Boxing to `DynAgent` happens only at surface boundaries — inside the agent loop, dispatch is direct.
-
-```rust
-// Concrete in tests — monomorphized, zero indirection
-let agent: Agent<TestClient, TestDispatcher, MemoryStore> = ...;
-
-// Erased at surface boundary — dynamic dispatch
-pub type DynAgent = Agent<
-    dyn AgentLlmClient,
-    dyn AgentToolDispatcher,
-    dyn AgentSessionStore,
->;
-```
-
-### Async without interior mutability
-
-The agent loop runs as `&mut self` — exclusive ownership, no mutex. The RPC `SessionRuntime` achieves this by giving each session a dedicated tokio task that owns its `Agent`. Commands flow in via channels; events stream out as notifications. Cancellation is a state machine transition on `&mut self`, not a shared `AtomicBool`.
-
-The `emit_event!` macro broadcasts to both an `EventTap` (local subscribers) and an optional `mpsc::Sender<AgentEvent>` (external channel). When the receiver drops, it sets a local `event_stream_open` flag and logs once — no panics, no repeated error spam.
-
-### Feature gating at the type level
-
-Optional crates are `#[cfg(feature)]`-gated at the type level — `PersistentSessionService` exists only with `session-store`, `DefaultCompactor` only with `session-compaction`. The facade re-exports only what features enable, so downstream code can't accidentally depend on disabled components. Fallback implementations are always available.
-
-```rust
-#[cfg(feature = "session-store")]
-pub use service_factory::PersistentSessionService;
-
-#[cfg(feature = "session-compaction")]
-pub use meerkat_session::DefaultCompactor;
-```
-
-### Trait composition with graceful degradation
-
-Optional trait methods provide default implementations that return `Err(Unsupported(...))`. Required methods define the minimal contract. This is better than downcasting — the trait is the interface, and optional features degrade at the type level rather than at runtime.
-
-```rust
-#[async_trait]
-pub trait CommsRuntime: Send + Sync {
-    // Optional — defaults to Unsupported
-    async fn send(&self, _cmd: CommsCommand) -> Result<SendReceipt, SendError> {
-        Err(SendError::Unsupported("...".to_string()))
-    }
-
-    // Required — defines the minimal contract
-    async fn drain_messages(&self) -> Vec<String>;
-    fn inbox_notify(&self) -> Arc<tokio::sync::Notify>;
-}
-```
-
-### Error propagation across crate boundaries
-
-Three-tier errors with `From` impls for ergonomic `?` chaining. Each tier captures minimal context — tool name, timeout duration, not full stack traces. `thiserror` generates `Display` implementations. Every variant has a stable `error_code()` for wire protocols.
-
-```rust
-// Tool layer
-#[derive(thiserror::Error)]
-pub enum ToolError {
-    #[error("Tool '{name}' timed out after {timeout_ms}ms")]
-    Timeout { name: String, timeout_ms: u64 },
-}
-
-// Agent layer wraps tool errors
-#[derive(thiserror::Error)]
-pub enum AgentError {
-    Llm { provider: &'static str, reason: LlmFailureReason, message: String },
-}
-
-// Session layer wraps agent errors
-#[derive(thiserror::Error)]
-pub enum SessionError {
-    Agent(#[from] AgentError),
-    NotFound { id: SessionId },
-}
-```
+- [Architecture](/reference/architecture)
+- [Runtime Architecture](/reference/runtime-architecture)
+- [Machine Authority](/reference/machine-authority)
+- [Build And CI](/reference/build-and-ci)

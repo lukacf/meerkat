@@ -50,7 +50,7 @@ Surface binaries:
   └── meerkat-mcp-server    → rkat-mcp                    (MCP server)
 ```
 
-There are no separate `rkat-mini` or `rkat-rpc-mini` binaries in 0.6.5. Reduced-surface distributions are source builds of the same `rkat` / `rkat-rpc` crates with a narrower Cargo feature set.
+There are no separate public reduced-surface binaries in 0.6.5. Reduced-surface distributions are source builds of the same surface crates with a narrower Cargo feature set.
 
 ## Key Traits
 

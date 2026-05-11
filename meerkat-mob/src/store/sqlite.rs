@@ -36,6 +36,7 @@ use tokio::sync::broadcast;
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 5_000;
 const EVENT_SUBSCRIPTION_CHANNEL_CAPACITY: usize = 4096;
 const EVENT_WATCH_CATCH_UP_LIMIT: usize = 1024;
+const EVENT_WATCH_POLL_FALLBACK_MS: u64 = 250;
 
 const CREATE_SCHEMA_SQL: &str = r"
 CREATE TABLE IF NOT EXISTS mob_events (
@@ -330,17 +331,23 @@ impl SqliteMobEventBus {
         let thread_builder = thread::Builder::new().name("sqlite-mob-event-watch".to_string());
         if let Err(error) = thread_builder.spawn(move || {
             loop {
-                match wake_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(()) => {
-                        thread::sleep(Duration::from_millis(10));
-                        while wake_rx.try_recv().is_ok() {}
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                let received_wake = match wake_rx
+                    .recv_timeout(Duration::from_millis(EVENT_WATCH_POLL_FALLBACK_MS))
+                {
+                    Ok(()) => true,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => false,
                     Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                if received_wake {
+                    thread::sleep(Duration::from_millis(10));
                 }
+                while wake_rx.try_recv().is_ok() {}
                 let Some(bus) = thread_bus.upgrade() else {
                     break;
                 };
+                if !received_wake && bus.event_tx.receiver_count() == 0 {
+                    continue;
+                }
                 if let Err(error) = bus.publish_available_from_storage() {
                     tracing::warn!(
                         error = %error,

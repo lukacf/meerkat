@@ -1714,37 +1714,16 @@ impl RunPrimitive {
     /// Consolidates the 5 near-identical `extract_prompt` / `extract_runtime_prompt`
     /// functions that were duplicated across RPC, REST, MCP, mob, and CLI surfaces.
     pub fn extract_content_input(&self) -> crate::types::ContentInput {
-        use crate::types::ContentInput;
         match self {
             RunPrimitive::StagedInput(staged) => {
                 content_input_from_conversation_appends(&staged.appends)
             }
-            RunPrimitive::ImmediateAppend(append) => match &append.content {
-                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-                CoreRenderable::SystemNotice { kind, body, blocks } => ContentInput::Text(
-                    crate::types::SystemNoticeMessage::with_blocks(
-                        *kind,
-                        body.clone(),
-                        blocks.clone(),
-                    )
-                    .model_projection_text(),
-                ),
-                _ => ContentInput::Text(String::new()),
-            },
-            RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-                CoreRenderable::SystemNotice { kind, body, blocks } => ContentInput::Text(
-                    crate::types::SystemNoticeMessage::with_blocks(
-                        *kind,
-                        body.clone(),
-                        blocks.clone(),
-                    )
-                    .model_projection_text(),
-                ),
-                _ => ContentInput::Text(String::new()),
-            },
+            RunPrimitive::ImmediateAppend(append) => {
+                content_input_from_core_renderable(&append.content)
+            }
+            RunPrimitive::ImmediateContextAppend(ctx) => {
+                content_input_from_core_renderable(&ctx.content)
+            }
         }
     }
 
@@ -1823,30 +1802,67 @@ impl RunPrimitive {
 pub fn content_input_from_conversation_appends(
     appends: &[ConversationAppend],
 ) -> crate::types::ContentInput {
-    use crate::types::{ContentBlock, ContentInput};
     let mut all_blocks = Vec::new();
     for append in appends {
-        match &append.content {
-            CoreRenderable::Text { text } => {
-                all_blocks.push(ContentBlock::Text { text: text.clone() });
-            }
-            CoreRenderable::Blocks { blocks } => {
-                all_blocks.extend(blocks.iter().cloned());
-            }
-            CoreRenderable::SystemNotice { kind, body, blocks } => {
-                let notice = crate::types::SystemNoticeMessage::with_blocks(
-                    *kind,
-                    body.clone(),
-                    blocks.clone(),
-                );
-                let text = notice.model_projection_text();
-                if !text.is_empty() {
-                    all_blocks.push(ContentBlock::Text { text });
-                }
-            }
-            _ => {}
-        }
+        append_content_blocks(&append.content, &mut all_blocks);
     }
+    content_input_from_blocks(all_blocks)
+}
+
+fn content_input_from_core_renderable(content: &CoreRenderable) -> crate::types::ContentInput {
+    let mut all_blocks = Vec::new();
+    append_content_blocks(content, &mut all_blocks);
+    content_input_from_blocks(all_blocks)
+}
+
+fn append_content_blocks(
+    content: &CoreRenderable,
+    all_blocks: &mut Vec<crate::types::ContentBlock>,
+) {
+    use crate::types::ContentBlock;
+    match content {
+        CoreRenderable::Text { text } => {
+            all_blocks.push(ContentBlock::Text { text: text.clone() });
+        }
+        CoreRenderable::Blocks { blocks } => {
+            all_blocks.extend(blocks.iter().cloned());
+        }
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            let notice =
+                crate::types::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone());
+            let text = notice.model_projection_text();
+            if !text.is_empty() {
+                all_blocks.push(ContentBlock::Text { text });
+            }
+            append_system_notice_media_blocks(blocks, all_blocks);
+        }
+        _ => {}
+    }
+}
+
+fn append_system_notice_media_blocks(
+    blocks: &[SystemNoticeBlock],
+    all_blocks: &mut Vec<crate::types::ContentBlock>,
+) {
+    for block in blocks {
+        let content = match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+            _ => continue,
+        };
+        all_blocks.extend(content.iter().filter_map(|block| match block {
+            crate::types::ContentBlock::Image { .. } | crate::types::ContentBlock::Video { .. } => {
+                Some(block.clone())
+            }
+            crate::types::ContentBlock::Text { .. } => None,
+        }));
+    }
+}
+
+fn content_input_from_blocks(
+    all_blocks: Vec<crate::types::ContentBlock>,
+) -> crate::types::ContentInput {
+    use crate::types::{ContentBlock, ContentInput};
     if all_blocks.is_empty() {
         ContentInput::Text(String::new())
     } else if all_blocks.len() == 1 {

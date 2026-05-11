@@ -30,7 +30,18 @@ fn gemini_api_key() -> Option<String> {
 }
 
 fn image_comms_model() -> String {
-    std::env::var("RKAT_MOB_IMAGE_COMMS_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+    first_env(&[
+        "RKAT_MOB_IMAGE_COMMS_MODEL",
+        "SMOKE_MODEL_ANTHROPIC",
+        "SMOKE_MODEL",
+    ])
+    .unwrap_or_else(|| "claude-sonnet-4-6".to_string())
+}
+
+fn is_provider_empty_output_attempt_error(error: &(dyn std::error::Error + 'static)) -> bool {
+    error
+        .to_string()
+        .contains("completed without user-visible text")
 }
 
 fn generated_image_comms_profile(
@@ -149,8 +160,12 @@ async fn spawn_generated_image_comms_members(
                         .to_string(),
                 ))
                 .with_additional_instructions(vec![
-                    "When asked to run the generated-image comms smoke, use tools, not prose. \
-                     If a user says 'Turn 1', your only valid action is one generate_image tool call. \
+                    "When asked to run the generated-image comms smoke, use tools before prose. \
+                     If a user says 'Turn 1', your only valid tool action is one generate_image tool call with \
+                     a nested request object: {\"request\":{\"intent\":\"generate\",\"provider\":\"gemini\",\
+                     \"model\":\"gemini-3.1-flash-image-preview\",\"prompt\":\"...\",\"size\":\"1024x1024\",\
+                     \"quality\":\"low\",\"format\":\"png\",\"count\":1}}; after that tool returns, reply exactly \
+                     MAKER-GENERATED-IMAGE-TURN1-DONE. \
                      If a user says 'Turn 2', do not generate a new image; send the prior generated blob. \
                      Generate images with provider gemini and model gemini-3.1-flash-image-preview. \
                      When sending a generated image through comms, use the comms tool's blob-backed image_ref block support."
@@ -175,7 +190,7 @@ async fn spawn_generated_image_comms_members(
                      blob-backed image_ref block support. \
                      Do not answer with prose only. Do not send any peer message until maker sends you a request."
                         .to_string(),
-                    "For checksum_token requests about image_receipt_check, the only successful terminal action is send_response with a blob-backed image_ref block."
+                    "For checksum_token requests about image_receipt_check, the only successful terminal action is send_response with a blob-backed image_ref block, then reply exactly REVIEWER-RESPONSE-SENT."
                         .to_string(),
                 ]),
         )
@@ -516,12 +531,36 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         return;
     };
     let model = image_comms_model();
-    let (handle, service, _tmp) = setup_generated_image_comms_mob(api_key, &model)
-        .await
-        .expect("generated image comms mob setup");
-    spawn_generated_image_comms_members(&handle)
-        .await
-        .expect("spawn generated image comms members");
+    let mut last_error = None;
+    for attempt in 1..=3 {
+        match run_generated_image_comms_blob_request_response_once(api_key.clone(), &model).await {
+            Ok(()) => return,
+            Err(error) => {
+                if attempt < 3 && is_provider_empty_output_attempt_error(error.as_ref()) {
+                    eprintln!(
+                        "[generated-image-comms] retrying isolated smoke attempt after provider empty-output turn on attempt {attempt}: {error}"
+                    );
+                    last_error = Some(error.to_string());
+                    sleep(Duration::from_secs(5 * attempt)).await;
+                    continue;
+                }
+                panic!("generated image comms mob smoke failed: {error}");
+            }
+        }
+    }
+
+    panic!(
+        "generated image comms mob smoke exhausted retries after provider empty-output turns: {}",
+        last_error.unwrap_or_else(|| "unknown error".to_string())
+    );
+}
+
+async fn run_generated_image_comms_blob_request_response_once(
+    api_key: String,
+    model: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (handle, service, _tmp) = setup_generated_image_comms_mob(api_key, model).await?;
+    spawn_generated_image_comms_members(&handle).await?;
     wait_for_member_histories_to_settle(
         &handle,
         service.as_ref(),
@@ -530,27 +569,26 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         Duration::from_secs(5),
     )
     .await
-    .expect("spawn turns should settle before queued two-turn smoke");
+    .map_err(std::io::Error::other)?;
 
-    let maker = handle
-        .member(&AgentIdentity::from("maker"))
-        .await
-        .expect("maker member");
+    let maker = handle.member(&AgentIdentity::from("maker")).await?;
     maker
         .send(
             ContentInput::Text(
                 "Turn 1 of the generated-image comms smoke. \
                  You MUST call the generate_image tool exactly once now. \
-                 Use request provider gemini, model gemini-3.1-flash-image-preview, \
-                 prompt 'a simple cyan square with a small magenta dot, no text', size square1024, \
-                 quality low, format png, count 1. After the tool returns, stop. Do not call send_request, \
-                 send_message, or send_response in this turn. Do not answer with prose instead of the tool call."
-                    .to_string(),
+                 Use exactly this tool argument shape: \
+                 {\"request\":{\"intent\":\"generate\",\"provider\":\"gemini\",\
+                 \"model\":\"gemini-3.1-flash-image-preview\",\
+                 \"prompt\":\"a simple cyan square with a small magenta dot, no text\",\
+                 \"size\":\"1024x1024\",\"quality\":\"low\",\"format\":\"png\",\"count\":1}}. \
+                 After the tool returns, reply exactly MAKER-GENERATED-IMAGE-TURN1-DONE. Do not call send_request, \
+                 send_message, or send_response in this turn. Do not answer with prose before the tool call."
+                .to_string(),
             ),
             HandlingMode::Queue,
         )
-        .await
-        .expect("kick off maker image generation turn");
+        .await?;
 
     let maker_image = wait_for_first_generated_image(
         &handle,
@@ -559,7 +597,7 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
         Duration::from_secs(120),
     )
     .await
-    .expect("maker should generate an image in turn 1");
+    .map_err(std::io::Error::other)?;
 
     maker
         .send(
@@ -570,26 +608,27 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
                  Step 2: call send_request to reviewer as a checksum_token request about subject image_receipt_check, \
                  handling_mode steer, and blocks containing one text block plus one blob-backed image_ref exactly for \
                  that previous-turn generated image. \
-                 The image_ref source must be blob. Do not use source current_turn.",
+                 The image_ref source must be blob. Do not use source current_turn. After send_request returns, \
+                 reply exactly MAKER-REQUEST-SENT.",
                 maker_image.blob_ref.blob_id.as_str(),
                 maker_image.media_type.as_str()
             )),
             HandlingMode::Queue,
         )
-        .await
-        .expect("kick off maker generated-image comms send turn");
+        .await?;
 
     wait_for_generated_image_comms_success(&handle, service.as_ref(), Duration::from_secs(360))
         .await
-        .expect("generated image request/response comms loop should complete");
+        .map_err(std::io::Error::other)?;
 
     let maker_messages = member_messages(&handle, service.as_ref(), "maker").await;
-    assert!(
-        maker_messages.iter().any(|message| image_ref_matches_blob(
-            message,
-            "send_request",
-            &maker_image.blob_ref
-        )),
-        "maker should send the image generated in the previous turn as a blob image_ref"
-    );
+    if !maker_messages
+        .iter()
+        .any(|message| image_ref_matches_blob(message, "send_request", &maker_image.blob_ref))
+    {
+        return Err(
+            "maker should send the image generated in the previous turn as a blob image_ref".into(),
+        );
+    }
+    Ok(())
 }

@@ -25,6 +25,7 @@ pub mod comms;
 pub mod compact;
 pub mod completion_feed;
 pub mod config;
+pub mod config_contract;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod config_runtime;
 #[cfg(not(target_arch = "wasm32"))]
@@ -147,15 +148,13 @@ pub use config::{
     SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
     StorageConfig, StoreConfig, ToolsConfig,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use config_runtime::{
-    ConfigEnvelope, ConfigEnvelopePolicy, ConfigRuntime, ConfigRuntimeError, ConfigSnapshot,
+pub use config_contract::{
+    ConfigEnvelope, ConfigEnvelopePolicy, ConfigResolvedPaths, ConfigSnapshot, ConfigStoreMetadata,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use config_store::{
-    ConfigResolvedPaths, ConfigStore, ConfigStoreMetadata, FileConfigStore, MemoryConfigStore,
-    TaggedConfigStore,
-};
+pub use config_runtime::{ConfigRuntime, ConfigRuntimeError};
+#[cfg(not(target_arch = "wasm32"))]
+pub use config_store::{ConfigStore, FileConfigStore, MemoryConfigStore, TaggedConfigStore};
 pub use error::{AgentError, ToolError};
 pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType, EventEnvelope,

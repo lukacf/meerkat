@@ -12,11 +12,15 @@ use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
-use meerkat_contracts::wire::WireMobProfile;
+use meerkat_contracts::wire::{MobToolConfigInput, WireMobProfile, WireMobToolConfig};
 use meerkat_contracts::{
-    ErrorCode, MobCreateParams, MobCreateResult, MobMemberListEntryWire, MobRotateSupervisorResult,
-    MobSpawnManyResult, MobSpawnManyResultEntry, SupervisorRotationReportWire, WireMemberState,
-    WireMobBackendKind, WireMobMemberStatus, WireMobRuntimeMode,
+    ErrorCode, MobCreateParams, MobCreateResult, MobEventsParams as WireMobEventsParams,
+    MobEventsResult as WireMobEventsResult, MobFlowStatusParams as WireMobFlowStatusParams,
+    MobFlowStatusResult as WireMobFlowStatusResult, MobMemberListEntryWire, MobProfileCreateParams,
+    MobProfileDeleteParams, MobProfileDeleteResult, MobProfileListResult, MobProfileLookupResult,
+    MobProfileNameParams, MobProfileUpdateParams, MobRotateSupervisorResult, MobSpawnManyResult,
+    MobSpawnManyResultEntry, SupervisorRotationReportWire, WireMemberState, WireMobBackendKind,
+    WireMobEvent, WireMobMemberStatus, WireMobRun, WireMobRuntimeMode,
 };
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
@@ -34,6 +38,10 @@ use std::sync::Arc;
 
 fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
     RpcResponse::error(id, error::INVALID_PARAMS, message.into())
+}
+
+fn internal_error(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
+    RpcResponse::error(id, error::INTERNAL_ERROR, message.into())
 }
 
 fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse {
@@ -140,6 +148,99 @@ fn profile_from_wire(profile: WireMobProfile) -> Profile {
         max_inline_peer_notifications: profile.max_inline_peer_notifications,
         output_schema: profile.output_schema,
         provider_params: profile.provider_params,
+    }
+}
+
+fn tool_config_from_wire_input(tools: MobToolConfigInput) -> ToolConfig {
+    ToolConfig {
+        builtins: tools.builtins,
+        shell: tools.shell,
+        comms: tools.comms,
+        memory: tools.memory,
+        mob: tools.mob,
+        schedule: tools.schedule,
+        image_generation: tools.image_generation,
+        mcp: tools.mcp,
+        rust_bundles: Vec::new(),
+    }
+}
+
+fn profile_input_from_wire(profile: meerkat_contracts::MobProfileInput) -> Result<Profile, String> {
+    Ok(Profile {
+        model: profile.model,
+        skills: profile.skills,
+        tools: tool_config_from_wire_input(profile.tools),
+        peer_description: profile.peer_description,
+        external_addressable: profile.external_addressable,
+        backend: profile.backend.map(mob_backend_kind_from_wire),
+        runtime_mode: mob_runtime_mode_from_wire(profile.runtime_mode),
+        max_inline_peer_notifications: profile.max_inline_peer_notifications,
+        output_schema: profile
+            .output_schema
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("invalid output_schema: {error}"))?,
+        provider_params: profile
+            .provider_params
+            .map(serde_json::to_value)
+            .transpose()
+            .map_err(|error| format!("invalid provider_params: {error}"))?,
+    })
+}
+
+fn wire_tool_config_from_profile(tools: &ToolConfig) -> WireMobToolConfig {
+    WireMobToolConfig {
+        builtins: tools.builtins,
+        shell: tools.shell,
+        comms: tools.comms,
+        memory: tools.memory,
+        mob: tools.mob,
+        schedule: tools.schedule,
+        image_generation: tools.image_generation,
+        mcp: tools.mcp.clone(),
+    }
+}
+
+fn profile_to_wire(profile: &Profile) -> WireMobProfile {
+    WireMobProfile {
+        model: profile.model.clone(),
+        skills: profile.skills.clone(),
+        tools: wire_tool_config_from_profile(&profile.tools),
+        peer_description: profile.peer_description.clone(),
+        external_addressable: profile.external_addressable,
+        backend: profile.backend.map(|kind| match kind {
+            MobBackendKind::Session => WireMobBackendKind::Session,
+            MobBackendKind::External => WireMobBackendKind::External,
+        }),
+        runtime_mode: match profile.runtime_mode {
+            MobRuntimeMode::AutonomousHost => WireMobRuntimeMode::AutonomousHost,
+            MobRuntimeMode::TurnDriven => WireMobRuntimeMode::TurnDriven,
+        },
+        max_inline_peer_notifications: profile.max_inline_peer_notifications,
+        output_schema: profile.output_schema.clone(),
+        provider_params: profile.provider_params.clone(),
+    }
+}
+
+fn stored_realm_profile_to_wire(stored: meerkat_mob::StoredRealmProfile) -> MobProfileLookupResult {
+    MobProfileLookupResult {
+        not_found: false,
+        name: stored.name,
+        profile: Some(profile_to_wire(&stored.profile)),
+        revision: Some(stored.revision),
+        created_at: Some(stored.created_at.to_rfc3339()),
+        updated_at: Some(stored.updated_at.to_rfc3339()),
+    }
+}
+
+fn missing_realm_profile(name: String) -> MobProfileLookupResult {
+    MobProfileLookupResult {
+        not_found: true,
+        name,
+        profile: None,
+        revision: None,
+        created_at: None,
+        updated_at: None,
     }
 }
 
@@ -1009,27 +1110,12 @@ pub struct MobFlowsParams {
     pub mob_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MobEventsParams {
-    pub mob_id: String,
-    #[serde(default)]
-    pub after_cursor: u64,
-    #[serde(default = "default_events_limit")]
-    pub limit: usize,
-    #[serde(default)]
-    pub strict: bool,
-}
-
-const fn default_events_limit() -> usize {
-    100
-}
-
 pub async fn handle_events(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: MobEventsParams = match parse_params(params) {
+    let params: WireMobEventsParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -1044,7 +1130,22 @@ pub async fn handle_events(
             .await
     };
     match result {
-        Ok(events) => RpcResponse::success(id, serde_json::json!({ "events": events })),
+        Ok(events) => {
+            let events = match events
+                .iter()
+                .map(WireMobEvent::from_serializable)
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(events) => events,
+                Err(err) => {
+                    return internal_error(
+                        id,
+                        format!("mob/events runtime projection failed generated contract: {err}"),
+                    );
+                }
+            };
+            RpcResponse::success(id, WireMobEventsResult { events })
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1104,18 +1205,12 @@ pub async fn handle_flow_run(
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub struct MobFlowStatusParams {
-    pub mob_id: String,
-    pub run_id: String,
-}
-
 pub async fn handle_flow_status(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: MobFlowStatusParams = match parse_params(params) {
+    let params: WireMobFlowStatusParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -1128,7 +1223,20 @@ pub async fn handle_flow_status(
         Err(err) => return invalid_params(id, format!("Invalid run_id: {err}")),
     };
     match state.mob_flow_status(&mob_id, run_id).await {
-        Ok(run) => RpcResponse::success(id, serde_json::json!({"run": run})),
+        Ok(run) => {
+            let run = match run.as_ref().map(WireMobRun::from_serializable).transpose() {
+                Ok(run) => run,
+                Err(err) => {
+                    return internal_error(
+                        id,
+                        format!(
+                            "mob/flow_status runtime projection failed generated contract: {err}"
+                        ),
+                    );
+                }
+            };
+            RpcResponse::success(id, WireMobFlowStatusResult { run })
+        }
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1717,44 +1825,21 @@ pub async fn handle_wait_ready(
 // mob/profile/* — realm profile CRUD
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-struct ProfileCreateParams {
-    name: String,
-    profile: meerkat_mob::Profile,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileNameParams {
-    name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileUpdateParams {
-    name: String,
-    profile: meerkat_mob::Profile,
-    expected_revision: u64,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProfileDeleteParams {
-    name: String,
-    expected_revision: u64,
-}
-
 pub async fn handle_profile_create(
     id: Option<RpcId>,
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: ProfileCreateParams = match parse_params(params) {
+    let params: MobProfileCreateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
-    match state
-        .realm_profile_create(&params.name, &params.profile)
-        .await
-    {
-        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+    let profile = match profile_input_from_wire(params.profile) {
+        Ok(profile) => profile,
+        Err(err) => return invalid_params(id, err),
+    };
+    match state.realm_profile_create(&params.name, &profile).await {
+        Ok(stored) => RpcResponse::success(id, stored_realm_profile_to_wire(stored)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1764,23 +1849,28 @@ pub async fn handle_profile_get(
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: ProfileNameParams = match parse_params(params) {
+    let params: MobProfileNameParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
     match state.realm_profile_get(&params.name).await {
-        Ok(Some(stored)) => RpcResponse::success(id, serde_json::json!(stored)),
-        Ok(None) => RpcResponse::success(
-            id,
-            serde_json::json!({"not_found": true, "name": params.name}),
-        ),
+        Ok(Some(stored)) => RpcResponse::success(id, stored_realm_profile_to_wire(stored)),
+        Ok(None) => RpcResponse::success(id, missing_realm_profile(params.name)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
 
 pub async fn handle_profile_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
     match state.realm_profile_list().await {
-        Ok(profiles) => RpcResponse::success(id, serde_json::json!({"profiles": profiles})),
+        Ok(profiles) => RpcResponse::success(
+            id,
+            MobProfileListResult {
+                profiles: profiles
+                    .into_iter()
+                    .map(stored_realm_profile_to_wire)
+                    .collect(),
+            },
+        ),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1790,15 +1880,19 @@ pub async fn handle_profile_update(
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: ProfileUpdateParams = match parse_params(params) {
+    let params: MobProfileUpdateParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
+    let profile = match profile_input_from_wire(params.profile) {
+        Ok(profile) => profile,
+        Err(err) => return invalid_params(id, err),
+    };
     match state
-        .realm_profile_update(&params.name, &params.profile, params.expected_revision)
+        .realm_profile_update(&params.name, &profile, params.expected_revision)
         .await
     {
-        Ok(stored) => RpcResponse::success(id, serde_json::json!(stored)),
+        Ok(stored) => RpcResponse::success(id, stored_realm_profile_to_wire(stored)),
         Err(err) => invalid_params(id, err.to_string()),
     }
 }
@@ -1808,7 +1902,7 @@ pub async fn handle_profile_delete(
     params: Option<&RawValue>,
     state: &Arc<MobMcpState>,
 ) -> RpcResponse {
-    let params: ProfileDeleteParams = match parse_params(params) {
+    let params: MobProfileDeleteParams = match parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp.with_id(id),
     };
@@ -1818,7 +1912,10 @@ pub async fn handle_profile_delete(
     {
         Ok(deleted) => RpcResponse::success(
             id,
-            serde_json::json!({"name": deleted.name, "deleted_revision": deleted.revision}),
+            MobProfileDeleteResult {
+                name: deleted.name,
+                deleted_revision: deleted.revision,
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -2209,12 +2306,13 @@ pub async fn handle_list_members_matching(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use meerkat_mob::event::MemberSpawnedEvent;
     use meerkat_mob::store::{
         InMemoryMobEventStore, MobEventReceiver, MobEventStore, MobStoreError,
     };
     use meerkat_mob::{
-        AgentIdentity, AgentRuntimeId, FenceToken, MobBuilder, MobDefinition, MobEvent, MobStorage,
-        NewMobEvent,
+        AgentIdentity, AgentRuntimeId, FenceToken, Generation, MobBuilder, MobDefinition, MobEvent,
+        MobEventKind, MobRun, MobStorage, NewMobEvent, ProfileName, StepId,
     };
     use std::sync::Arc;
 
@@ -2355,6 +2453,55 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn generated_mob_event_contract_accepts_runtime_event_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let event = MobEvent {
+            cursor: 7,
+            timestamp: chrono::Utc::now(),
+            mob_id: MobId::from("mob-typed-events"),
+            kind: MobEventKind::MemberSpawned(MemberSpawnedEvent::new(
+                AgentIdentity::from("worker"),
+                Generation::INITIAL,
+                FenceToken::new(42),
+                AgentRuntimeId::initial(AgentIdentity::from("worker")),
+                ProfileName::from("worker"),
+            )),
+        };
+
+        let wire = WireMobEvent::from_serializable(&event)?;
+
+        match wire.kind {
+            meerkat_contracts::WireMobEventKind::MemberSpawned(spawned) => {
+                assert_eq!(spawned.agent_identity, "worker");
+                assert_eq!(spawned.agent_runtime_id.identity, "worker");
+                assert_eq!(spawned.agent_runtime_id.generation, 0);
+            }
+            other => panic!("unexpected event kind: {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn generated_mob_flow_status_contract_accepts_runtime_run_projection()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let flow_state = MobRun::flow_state_for_steps([StepId::from("step-a")])?;
+        let run = MobRun::pending(
+            MobId::from("mob-typed-run"),
+            FlowId::from("main"),
+            flow_state,
+            serde_json::json!({"input": true}),
+        );
+
+        let wire = WireMobRun::from_serializable(&run)?;
+
+        assert_eq!(wire.mob_id, "mob-typed-run");
+        assert_eq!(wire.flow_id, "main");
+        assert_eq!(wire.status, meerkat_contracts::WireMobRunStatus::Pending);
+        assert_eq!(wire.activation_params, serde_json::json!({"input": true}));
+        Ok(())
+    }
+
     fn assert_destroy_incomplete_rpc_error_with_message(
         response: RpcResponse,
         expected_error: &str,
@@ -2416,6 +2563,76 @@ mod tests {
         let response = handle_lifecycle(Some(RpcId::Num(9)), Some(params.as_ref()), &state).await;
 
         assert_destroy_incomplete_rpc_error(response);
+    }
+
+    #[tokio::test]
+    async fn realm_profile_handlers_return_generated_profile_contracts()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let state = MobMcpState::new_in_memory();
+        let create_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "name": "worker",
+            "profile": {
+                "model": "claude-sonnet-4-6",
+                "skills": ["planning"],
+                "tools": {
+                    "builtins": true,
+                    "image_generation": true,
+                    "mcp": ["linear"]
+                },
+                "peer_description": "worker profile",
+                "runtime_mode": "turn_driven",
+                "max_inline_peer_notifications": 4
+            }
+        }))?;
+
+        let create_response =
+            handle_profile_create(Some(RpcId::Num(10)), Some(create_params.as_ref()), &state).await;
+        assert!(create_response.error.is_none());
+        let created: MobProfileLookupResult = serde_json::from_str(
+            create_response
+                .result
+                .as_ref()
+                .expect("create result")
+                .get(),
+        )?;
+        let created_profile = created.profile.as_ref().expect("typed profile result");
+        assert!(!created.not_found);
+        assert_eq!(created.name, "worker");
+        assert_eq!(created_profile.model, "claude-sonnet-4-6");
+        assert_eq!(created_profile.runtime_mode, WireMobRuntimeMode::TurnDriven);
+        assert_eq!(created_profile.skills, vec!["planning".to_string()]);
+        assert!(created_profile.tools.builtins);
+        assert!(created_profile.tools.image_generation);
+        assert_eq!(created_profile.tools.mcp, vec!["linear".to_string()]);
+
+        let get_params = serde_json::value::to_raw_value(&serde_json::json!({
+            "name": "worker",
+        }))?;
+        let get_response =
+            handle_profile_get(Some(RpcId::Num(11)), Some(get_params.as_ref()), &state).await;
+        let fetched: MobProfileLookupResult =
+            serde_json::from_str(get_response.result.as_ref().expect("get result").get())?;
+        assert_eq!(
+            fetched
+                .profile
+                .as_ref()
+                .map(|profile| profile.model.as_str()),
+            Some("claude-sonnet-4-6")
+        );
+
+        let list_response = handle_profile_list(Some(RpcId::Num(12)), &state).await;
+        let listed: MobProfileListResult =
+            serde_json::from_str(list_response.result.as_ref().expect("list result").get())?;
+        assert_eq!(listed.profiles.len(), 1);
+        assert_eq!(
+            listed.profiles[0]
+                .profile
+                .as_ref()
+                .map(|profile| profile.model.as_str()),
+            Some("claude-sonnet-4-6")
+        );
+
+        Ok(())
     }
 
     #[test]

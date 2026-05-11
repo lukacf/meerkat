@@ -191,6 +191,241 @@ pub mod fields {
     }
 }
 
+/// Generated adapters for production seam code.
+/// These enums are the typed bridge between domain effect/input/signal
+/// values and schema-owned route, variant, and field facts.
+pub mod adapters {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Field {
+        AgentRuntimeId,
+        FenceToken,
+        Generation,
+        Origin,
+        RuntimeId,
+        SessionId,
+        WorkId,
+    }
+
+    impl Field {
+        pub fn id(self) -> FieldId {
+            match self {
+                Self::AgentRuntimeId => fields::agent_runtime_id(),
+                Self::FenceToken => fields::fence_token(),
+                Self::Generation => fields::generation(),
+                Self::Origin => fields::origin(),
+                Self::RuntimeId => fields::runtime_id(),
+                Self::SessionId => fields::session_id(),
+                Self::WorkId => fields::work_id(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Input {
+        Destroy,
+        Ingest,
+        PrepareBindings,
+        Retire,
+    }
+
+    impl Input {
+        pub fn from_variant(id: &InputVariantId) -> Option<Self> {
+            if id == &inputs::destroy() {
+                return Some(Self::Destroy);
+            }
+            if id == &inputs::ingest() {
+                return Some(Self::Ingest);
+            }
+            if id == &inputs::prepare_bindings() {
+                return Some(Self::PrepareBindings);
+            }
+            if id == &inputs::retire() {
+                return Some(Self::Retire);
+            }
+            None
+        }
+
+        pub fn variant_id(self) -> InputVariantId {
+            match self {
+                Self::Destroy => inputs::destroy(),
+                Self::Ingest => inputs::ingest(),
+                Self::PrepareBindings => inputs::prepare_bindings(),
+                Self::Retire => inputs::retire(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Signal {
+        ObserveRuntimeDestroyed,
+        ObserveRuntimeReady,
+        ObserveRuntimeRetired,
+    }
+
+    impl Signal {
+        pub fn from_variant(id: &SignalVariantId) -> Option<Self> {
+            if id == &signals::observe_runtime_destroyed() {
+                return Some(Self::ObserveRuntimeDestroyed);
+            }
+            if id == &signals::observe_runtime_ready() {
+                return Some(Self::ObserveRuntimeReady);
+            }
+            if id == &signals::observe_runtime_retired() {
+                return Some(Self::ObserveRuntimeRetired);
+            }
+            None
+        }
+
+        pub fn variant_id(self) -> SignalVariantId {
+            match self {
+                Self::ObserveRuntimeDestroyed => signals::observe_runtime_destroyed(),
+                Self::ObserveRuntimeReady => signals::observe_runtime_ready(),
+                Self::ObserveRuntimeRetired => signals::observe_runtime_retired(),
+            }
+        }
+    }
+
+    pub mod meerkat {
+        use super::super::*;
+        use super::Field;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Effect {
+            RuntimeBound,
+            RuntimeDestroyed,
+            RuntimeRetired,
+        }
+
+        impl Effect {
+            pub fn variant_id(self) -> EffectVariantId {
+                match self {
+                    Self::RuntimeBound => effects::meerkat::runtime_bound(),
+                    Self::RuntimeDestroyed => effects::meerkat::runtime_destroyed(),
+                    Self::RuntimeRetired => effects::meerkat::runtime_retired(),
+                }
+            }
+
+            pub fn input_route(self) -> Option<TypedRoutedInput> {
+                route_to_input(&producers::meerkat_instance_id(), &self.variant_id())
+            }
+
+            pub fn signal_route(self) -> Option<TypedRoutedSignal> {
+                route_to_signal(&producers::meerkat_instance_id(), &self.variant_id())
+            }
+
+            pub fn field(self, id: &FieldId) -> Option<Field> {
+                match self {
+                    Self::RuntimeBound => {
+                        if id == &Field::AgentRuntimeId.id() {
+                            return Some(Field::AgentRuntimeId);
+                        }
+                        if id == &Field::FenceToken.id() {
+                            return Some(Field::FenceToken);
+                        }
+                        None
+                    }
+                    Self::RuntimeDestroyed => {
+                        if id == &Field::AgentRuntimeId.id() {
+                            return Some(Field::AgentRuntimeId);
+                        }
+                        if id == &Field::FenceToken.id() {
+                            return Some(Field::FenceToken);
+                        }
+                        None
+                    }
+                    Self::RuntimeRetired => {
+                        if id == &Field::AgentRuntimeId.id() {
+                            return Some(Field::AgentRuntimeId);
+                        }
+                        if id == &Field::FenceToken.id() {
+                            return Some(Field::FenceToken);
+                        }
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    pub mod mob {
+        use super::super::*;
+        use super::Field;
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub enum Effect {
+            RequestRuntimeBinding,
+            RequestRuntimeDestroy,
+            RequestRuntimeIngress,
+            RequestRuntimeRetire,
+        }
+
+        impl Effect {
+            pub fn variant_id(self) -> EffectVariantId {
+                match self {
+                    Self::RequestRuntimeBinding => effects::mob::request_runtime_binding(),
+                    Self::RequestRuntimeDestroy => effects::mob::request_runtime_destroy(),
+                    Self::RequestRuntimeIngress => effects::mob::request_runtime_ingress(),
+                    Self::RequestRuntimeRetire => effects::mob::request_runtime_retire(),
+                }
+            }
+
+            pub fn input_route(self) -> Option<TypedRoutedInput> {
+                route_to_input(&producers::mob_instance_id(), &self.variant_id())
+            }
+
+            pub fn signal_route(self) -> Option<TypedRoutedSignal> {
+                route_to_signal(&producers::mob_instance_id(), &self.variant_id())
+            }
+
+            pub fn field(self, id: &FieldId) -> Option<Field> {
+                match self {
+                    Self::RequestRuntimeBinding => {
+                        if id == &Field::AgentRuntimeId.id() {
+                            return Some(Field::AgentRuntimeId);
+                        }
+                        if id == &Field::FenceToken.id() {
+                            return Some(Field::FenceToken);
+                        }
+                        if id == &Field::Generation.id() {
+                            return Some(Field::Generation);
+                        }
+                        if id == &Field::SessionId.id() {
+                            return Some(Field::SessionId);
+                        }
+                        None
+                    }
+                    Self::RequestRuntimeDestroy => {
+                        if id == &Field::SessionId.id() {
+                            return Some(Field::SessionId);
+                        }
+                        None
+                    }
+                    Self::RequestRuntimeIngress => {
+                        if id == &Field::AgentRuntimeId.id() {
+                            return Some(Field::AgentRuntimeId);
+                        }
+                        if id == &Field::Origin.id() {
+                            return Some(Field::Origin);
+                        }
+                        if id == &Field::WorkId.id() {
+                            return Some(Field::WorkId);
+                        }
+                        None
+                    }
+                    Self::RequestRuntimeRetire => {
+                        if id == &Field::SessionId.id() {
+                            return Some(Field::SessionId);
+                        }
+                        None
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Generated facts for input route `binding_request_reaches_meerkat`.
 pub fn route_binding_request_reaches_meerkat() -> TypedRoutedInput {
     TypedRoutedInput {

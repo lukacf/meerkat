@@ -2759,7 +2759,7 @@ async fn e2e_scenario_54_shared_realm_mob_sessions_visible_to_cli()
     rpc_send_line(
         &mut ordinary_rpc,
         &format!(
-            r#"{{"jsonrpc":"2.0","id":350,"method":"session/create","params":{{"prompt":"Create an ordinary session with a mob-shaped comms name and confirm ORDINARY_SHAPED_54.","model":"{}","max_tokens":32,"comms_name":"{mob_id}/reviewer/alice"}}}}"#,
+            r#"{{"jsonrpc":"2.0","id":350,"method":"session/create","params":{{"prompt":"Reply with exactly ORDINARY_SHAPED_54.","model":"{}","max_tokens":64,"comms_name":"{mob_id}/reviewer/alice"}}}}"#,
             smoke_model()
         ),
     )

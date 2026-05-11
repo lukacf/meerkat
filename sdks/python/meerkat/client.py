@@ -38,8 +38,17 @@ from .errors import CapabilityUnavailableError, MeerkatError
 from .events import Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
+    BindingIdParams,
+    CommsCommandRequest,
+    CommsPeersResult,
+    CommsSendResult,
+    CreateProfileParams,
+    DeviceCompleteParams,
+    DeviceStartParams,
     LiveRefreshResult,
     LiveRefreshStatus,
+    LoginCompleteParams,
+    LoginStartParams,
     McpServerConfig,
     MobDefinitionInput,
     MobSpawnManyFailedResult,
@@ -48,13 +57,29 @@ from .generated.types import (
     MobSpawnManySpawnedResult,
     MobRotateSupervisorResult,
     MobTurnStartParams,
+    ProvisionApiKeyParams,
+    RealmIdParams,
     WireBudgetSplitPolicy,
+    WireAuthProfileCleared,
+    WireAuthProfileCreated,
+    WireAuthProfileDetail,
+    WireAuthProfilesList,
+    WireAuthStatusDetail,
     WireAuthBindingRef,
     WireContentInput,
+    WireDeviceCompleteResult,
+    WireDeviceStart,
+    WireLoginReady,
+    WireLoginStart,
+    WIRE_LIVE_ADAPTER_OBSERVATION_TAGS,
+    WireLiveAdapterObservation,
     WireMemberLaunchMode,
     WireMobBackendKind,
     WireMobProfile,
     WireMobRuntimeMode,
+    WireProvisionApiKeyResult,
+    WireRealmConnectionSet,
+    WireRealmList,
     WireRuntimeBinding,
     WireToolAccessPolicy,
     WireToolFilter,
@@ -101,6 +126,7 @@ from .types import (
     ScheduleRecord,
     ScheduleToolsResult,
     ScheduleToolCall,
+    ScheduleToolCallResult,
     EventEnvelope,
     EventSourceIdentity,
     McpLiveOpResponse,
@@ -108,6 +134,7 @@ from .types import (
     RunResult,
     SchemaWarning,
     SessionDetails,
+    WireMobRun,
     SessionAssistantBlock,
     SessionForkResult,
     SessionHistory,
@@ -424,58 +451,88 @@ class MeerkatClient:
 
     # -- Auth (Phase 4c.11 wrapper over auth.* RPC methods) ---------------
 
-    async def list_realms(self) -> list[dict[str, Any]]:
-        """List realms in the active rkat config. Delegates to
-        `realm/list`. Returns a list of `{realm_id, default_binding,
-        backend_count, auth_profile_count, binding_count}`."""
-        result = await self._request("realm/list", {})
-        return list(result.get("realms", []))
+    async def list_realms(self) -> WireRealmList:
+        """List realms in the active rkat config via `realm/list`."""
+        return cast(WireRealmList, await self._request("realm/list", {}))
 
-    async def get_realm(self, realm_id: str) -> dict[str, Any]:
-        """Fetch one realm's full WireRealmConnectionSet. Delegates to
-        `realm/get`."""
-        return await self._request("realm/get", {"realm_id": realm_id})
+    async def get_realm(self, realm_id: str) -> WireRealmConnectionSet:
+        """Fetch one realm's full generated connection set via `realm/get`."""
+        return cast(
+            WireRealmConnectionSet,
+            await self._request("realm/get", _wire_params(RealmIdParams(realm_id))),
+        )
 
-    async def list_auth_profiles(self, realm_id: str) -> dict[str, Any]:
-        """List auth profiles / backend profiles / bindings for one
-        realm. Delegates to `auth/profile/list`."""
-        return await self._request("auth/profile/list", {"realm_id": realm_id})
+    async def list_auth_profiles(self, realm_id: str) -> WireAuthProfilesList:
+        """List auth/backend profiles and bindings for one realm."""
+        return cast(
+            WireAuthProfilesList,
+            await self._request(
+                "auth/profile/list",
+                _wire_params(RealmIdParams(realm_id)),
+            ),
+        )
 
     async def get_auth_profile(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
-    ) -> dict[str, Any]:
+    ) -> WireAuthProfileDetail:
         """Fetch a binding-scoped auth profile via `auth/profile/get`."""
-        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/profile/get", params)
+        return cast(
+            WireAuthProfileDetail,
+            await self._request(
+                "auth/profile/get",
+                _wire_params(BindingIdParams(binding_id, realm_id, profile_id)),
+            ),
+        )
 
     async def create_auth_profile(
-        self, params: dict[str, Any]
-    ) -> dict[str, Any]:
+        self, params: CreateProfileParams
+    ) -> WireAuthProfileCreated:
         """Create binding-scoped credentials via `auth/profile/create`."""
-        return await self._request("auth/profile/create", params)
+        return cast(
+            WireAuthProfileCreated,
+            await self._request("auth/profile/create", _wire_params(params)),
+        )
 
     async def delete_auth_profile(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
-    ) -> None:
+    ) -> WireAuthProfileCleared:
         """Clear a profile's persisted credentials via
         `auth/profile/delete`."""
-        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        await self._request("auth/profile/delete", params)
+        return cast(
+            WireAuthProfileCleared,
+            await self._request(
+                "auth/profile/delete",
+                _wire_params(BindingIdParams(binding_id, realm_id, profile_id)),
+            ),
+        )
 
     async def auth_login_start(
-        self, provider: str, redirect_uri: str = "http://127.0.0.1:0/callback"
-    ) -> dict[str, Any]:
+        self,
+        provider: str,
+        *,
+        realm_id: str,
+        binding_id: str,
+        profile_id: str | None = None,
+        redirect_uri: str = "http://127.0.0.1:0/callback",
+    ) -> WireLoginStart:
         """Start an OAuth authorization-code login via
         `auth/login/start`. Returns `{authorize_url, state}`; client directs
         user to the URL then calls `auth_login_complete` once the redirect
         carries a code."""
-        return await self._request(
-            "auth/login/start",
-            {"provider": provider, "redirect_uri": redirect_uri},
+        return cast(
+            WireLoginStart,
+            await self._request(
+                "auth/login/start",
+                _wire_params(
+                    LoginStartParams(
+                        binding_id=binding_id,
+                        provider=provider,
+                        realm_id=realm_id,
+                        redirect_uri=redirect_uri,
+                        profile_id=profile_id,
+                    )
+                ),
+            ),
         )
 
     async def auth_login_complete(
@@ -488,28 +545,52 @@ class MeerkatClient:
         binding_id: str,
         profile_id: str | None = None,
         redirect_uri: str = "http://127.0.0.1:0/callback",
-    ) -> dict[str, Any]:
+    ) -> WireLoginReady:
         """Exchange an authorization code for tokens via
         `auth/login/complete`. Tokens land in the server-side credential
         source for the resolved binding."""
-        params: dict[str, Any] = {
-            "provider": provider,
-            "code": code,
-            "state": state,
-            "realm_id": realm_id,
-            "binding_id": binding_id,
-            "redirect_uri": redirect_uri,
-        }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/login/complete", params)
+        return cast(
+            WireLoginReady,
+            await self._request(
+                "auth/login/complete",
+                _wire_params(
+                    LoginCompleteParams(
+                        binding_id=binding_id,
+                        code=code,
+                        provider=provider,
+                        realm_id=realm_id,
+                        redirect_uri=redirect_uri,
+                        state=state,
+                        profile_id=profile_id,
+                    )
+                ),
+            ),
+        )
 
-    async def auth_login_device_start(self, provider: str) -> dict[str, Any]:
+    async def auth_login_device_start(
+        self,
+        provider: str,
+        *,
+        realm_id: str,
+        binding_id: str,
+        profile_id: str | None = None,
+    ) -> WireDeviceStart:
         """Start an OAuth device-code flow via
         `auth/login/device_start`. Returns the user_code to display +
         verification_uri + interval."""
-        return await self._request(
-            "auth/login/device_start", {"provider": provider}
+        return cast(
+            WireDeviceStart,
+            await self._request(
+                "auth/login/device_start",
+                _wire_params(
+                    DeviceStartParams(
+                        binding_id=binding_id,
+                        provider=provider,
+                        realm_id=realm_id,
+                        profile_id=profile_id,
+                    )
+                ),
+            ),
         )
 
     async def auth_login_device_complete(
@@ -520,19 +601,25 @@ class MeerkatClient:
         realm_id: str,
         binding_id: str,
         profile_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> WireDeviceCompleteResult:
         """Poll once for device-code completion via
         `auth/login/device_complete`. Returns `{state: "pending" |
         "slow_down" | "access_denied" | "expired" | "ready", ...}`."""
-        params: dict[str, Any] = {
-            "provider": provider,
-            "device_code": device_code,
-            "realm_id": realm_id,
-            "binding_id": binding_id,
-        }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/login/device_complete", params)
+        return cast(
+            WireDeviceCompleteResult,
+            await self._request(
+                "auth/login/device_complete",
+                _wire_params(
+                    DeviceCompleteParams(
+                        binding_id=binding_id,
+                        device_code=device_code,
+                        provider=provider,
+                        realm_id=realm_id,
+                        profile_id=profile_id,
+                    )
+                ),
+            ),
+        )
 
     async def auth_provision_api_key(
         self,
@@ -541,40 +628,52 @@ class MeerkatClient:
         realm_id: str,
         binding_id: str,
         profile_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> WireProvisionApiKeyResult:
         """Anthropic Console-OAuth → API key provisioning via
         `auth/login/provision_api_key` (plan §4b.5). The caller runs
         the Console-scope OAuth flow first; hands the resulting
         access_token here; the server POSTs to Anthropic's
         create_api_key endpoint and persists the returned key."""
-        params: dict[str, Any] = {
-            "access_token": access_token,
-            "realm_id": realm_id,
-            "binding_id": binding_id,
-        }
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/login/provision_api_key", params)
+        return cast(
+            WireProvisionApiKeyResult,
+            await self._request(
+                "auth/login/provision_api_key",
+                _wire_params(
+                    ProvisionApiKeyParams(
+                        access_token=access_token,
+                        realm_id=realm_id,
+                        binding_id=binding_id,
+                        profile_id=profile_id,
+                    )
+                ),
+            ),
+        )
 
     async def auth_status(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
-    ) -> dict[str, Any]:
+    ) -> WireAuthStatusDetail:
         """Report persisted-credential status for a binding via
         `auth/status/get`."""
-        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/status/get", params)
+        return cast(
+            WireAuthStatusDetail,
+            await self._request(
+                "auth/status/get",
+                _wire_params(BindingIdParams(binding_id, realm_id, profile_id)),
+            ),
+        )
 
     async def auth_logout(
         self, realm_id: str, binding_id: str, profile_id: str | None = None
-    ) -> dict[str, Any]:
+    ) -> WireAuthProfileCleared:
         """Revoke + delete a binding's persisted credentials via
         `auth/logout`."""
-        params: dict[str, Any] = {"realm_id": realm_id, "binding_id": binding_id}
-        if profile_id is not None:
-            params["profile_id"] = profile_id
-        return await self._request("auth/logout", params)
+        return cast(
+            WireAuthProfileCleared,
+            await self._request(
+                "auth/logout",
+                _wire_params(BindingIdParams(binding_id, realm_id, profile_id)),
+            ),
+        )
 
     # -- Session lifecycle -------------------------------------------------
 
@@ -1131,11 +1230,10 @@ class MeerkatClient:
 
     async def list_schedule_tools(self) -> ScheduleToolsResult:
         raw = await self._request("schedule/tools", {})
-        tools = raw.get("tools", [])
-        return {"tools": tools if isinstance(tools, list) else []}
+        return cast(ScheduleToolsResult, raw)
 
-    async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
-        return await self._request("schedule/call", dict(request))
+    async def call_schedule_tool(self, request: ScheduleToolCall) -> ScheduleToolCallResult:
+        return cast(ScheduleToolCallResult, await self._request("schedule/call", dict(request)))
 
     async def get_workgraph_item(
         self,
@@ -1606,7 +1704,7 @@ class MeerkatClient:
             },
         )
         events = raw.get("events", [])
-        return {"events": events if isinstance(events, list) else []}
+        return MobEventsResult(events=events if isinstance(events, list) else [])
 
     async def mob_ingress_interaction(
         self, params: dict[str, Any]
@@ -2178,7 +2276,7 @@ class MeerkatClient:
         result = await self._request("mob/flow_run", {"mob_id": mob_id, "flow_id": flow_id, "params": params or {}})
         return str(result.get("run_id", ""))
 
-    async def get_mob_flow_status(self, mob_id: str, run_id: str) -> dict[str, Any] | None:
+    async def get_mob_flow_status(self, mob_id: str, run_id: str) -> WireMobRun | None:
         result = await self._request("mob/flow_status", {"mob_id": mob_id, "run_id": run_id})
         return result.get("run")
 
@@ -2401,75 +2499,30 @@ class MeerkatClient:
     async def _archive(self, session_id: str) -> None:
         await self._request("session/archive", {"session_id": session_id})
 
-    async def _send(self, session_id: str, **kwargs: Any) -> dict[str, Any]:
-        return await self.send(session_id, **kwargs)
+    async def _send(
+        self,
+        session_id: str,
+        command: CommsCommandRequest,
+    ) -> CommsSendResult:
+        return await self.send(session_id, command)
 
-    async def _peers(self, session_id: str) -> dict[str, Any]:
+    async def _peers(self, session_id: str) -> CommsPeersResult:
         return await self.peers(session_id)
-
-    # Typed literal aliases mirror the Rust `CommsCommandRequest` enum
-    # (`meerkat-core/src/comms.rs`). Invalid discriminator values are rejected
-    # at the server's typed-serde boundary — these aliases document the
-    # closed-world shape for callers.
-    _CommsKind = Literal["input", "peer_message", "peer_lifecycle", "peer_request", "peer_response"]
-    _HandlingMode = Literal["queue", "steer"]
-    _InputSource = Literal["tcp", "uds", "stdin", "webhook", "rpc"]
-    _InputStreamMode = Literal["none", "reserve_interaction"]
-    _ResponseStatus = Literal["accepted", "completed", "failed"]
-    _PeerLifecycleKind = Literal["mob.peer_added", "mob.peer_retired", "mob.peer_unwired"]
 
     async def send(
         self,
         session_id: str,
-        *,
-        kind: "MeerkatClient._CommsKind",
-        to: str | None = None,
-        body: str | None = None,
-        blocks: list[ContentBlock] | None = None,
-        lifecycle_kind: "MeerkatClient._PeerLifecycleKind | None" = None,
-        intent: str | None = None,
-        params: dict[str, Any] | None = None,
-        in_reply_to: str | None = None,
-        status: "MeerkatClient._ResponseStatus | None" = None,
-        result: Any = None,
-        source: "MeerkatClient._InputSource | None" = None,
-        stream: "MeerkatClient._InputStreamMode | None" = None,
-        allow_self_session: bool | None = None,
-        handling_mode: "MeerkatClient._HandlingMode | None" = None,
-    ) -> dict[str, Any]:
-        """Send a typed comms command.
+        command: CommsCommandRequest,
+    ) -> CommsSendResult:
+        """Send a generated `CommsCommandRequest` through `comms/send`."""
+        payload = {"session_id": session_id, **cast(dict[str, Any], command)}
+        return cast(CommsSendResult, await self._request("comms/send", payload))
 
-        Mirrors the Rust `CommsCommandRequest` variants:
-        - ``kind="input"`` — inject input into the local session.
-        - ``kind="peer_message"`` — fire-and-forget peer message.
-        - ``kind="peer_lifecycle"`` — one-way peer topology notification.
-        - ``kind="peer_request"`` — request/response with correlated reply.
-        - ``kind="peer_response"`` — reply to a prior peer request.
-
-        Invalid discriminator values (``source``, ``stream``, ``handling_mode``,
-        ``status``) are rejected at the server's typed-serde boundary.
-        """
-        fields: dict[str, Any] = {
-            "to": to,
-            "body": body,
-            "blocks": blocks,
-            "lifecycle_kind": lifecycle_kind,
-            "intent": intent,
-            "params": params,
-            "in_reply_to": in_reply_to,
-            "status": status,
-            "result": result,
-            "source": source,
-            "stream": stream,
-            "allow_self_session": allow_self_session,
-            "handling_mode": handling_mode,
-        }
-        payload: dict[str, Any] = {"session_id": session_id, "kind": kind}
-        payload.update({k: v for k, v in fields.items() if v is not None})
-        return await self._request("comms/send", payload)
-
-    async def peers(self, session_id: str) -> dict[str, Any]:
-        return await self._request("comms/peers", {"session_id": session_id})
+    async def peers(self, session_id: str) -> CommsPeersResult:
+        return cast(
+            CommsPeersResult,
+            await self._request("comms/peers", {"session_id": session_id}),
+        )
 
     @staticmethod
     def _retired_runtime_session_control_error() -> MeerkatError:
@@ -2787,7 +2840,7 @@ class MeerkatClient:
         )
 
     @staticmethod
-    def parse_live_observation(raw: dict[str, Any]) -> dict[str, Any]:
+    def parse_live_observation(raw: dict[str, Any]) -> WireLiveAdapterObservation:
         """Type-narrow an inbound live-adapter observation against
         :class:`meerkat.types.WireLiveAdapterObservation`.
 
@@ -2797,7 +2850,8 @@ class MeerkatClient:
         ``assistant_audio_chunk``, ``command_rejected``, …). The Meerkat
         SDK does not own the WS transport (the browser/Python client opens
         the URL from ``LiveOpenResult.transport`` directly), so this helper
-        is a no-op cast that exists so callers can type-narrow inbound
+        validates the discriminator against generated contract metadata so
+        callers can type-narrow inbound
         frames against the regenerated ``WireLiveAdapterObservation``
         TypedDict union without copying the discriminator wiring.
 
@@ -2813,17 +2867,23 @@ class MeerkatClient:
 
         FIX-SDK-OBS: closes the verifier gap that left
         ``WireLiveAdapterObservation`` invisible at the SDK boundary.
-        Validation is deferred to the static type checker (mypy /
-        pyright); the helper raises ``ValueError`` only if the
-        ``observation`` discriminator is missing.
+        The allowed discriminator vocabulary is emitted by SDK codegen from
+        the Rust wire schema, so a wire/schema drift cannot be papered over
+        by a manually-maintained SDK string list.
         """
         if not isinstance(raw, dict):
             raise ValueError("live observation must be a JSON object")
-        if "observation" not in raw:
+        observation = raw.get("observation")
+        if not isinstance(observation, str):
             raise ValueError(
                 "live observation missing `observation` discriminator"
             )
-        return raw
+        if observation not in WIRE_LIVE_ADAPTER_OBSERVATION_TAGS:
+            raise ValueError(
+                f"live observation discriminator {observation!r} is not in "
+                "the generated WireLiveAdapterObservation contract"
+            )
+        return cast(WireLiveAdapterObservation, raw)
 
     async def mob_ensure_member(
         self, mob_id: str, spec: dict[str, Any]

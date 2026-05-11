@@ -4,6 +4,7 @@ use super::connection::WireAuthBindingRef;
 use super::session::WireContentInput;
 use super::supervisor_bridge::BridgeBootstrapToken;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use chrono::{DateTime, Utc};
 use meerkat_core::OutputSchema;
 use meerkat_core::{
     HandlingMode,
@@ -880,7 +881,204 @@ const fn default_mob_events_limit() -> usize {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobEventsResult {
-    pub events: Vec<Value>,
+    pub events: Vec<WireMobEvent>,
+}
+
+/// Conversion error raised when a runtime-owned mob projection no longer
+/// matches the public generated wire contract.
+#[derive(Debug, thiserror::Error)]
+pub enum WireMobProjectionError {
+    #[error("serialize runtime mob projection: {0}")]
+    Serialize(serde_json::Error),
+    #[error("runtime mob projection does not match generated wire contract: {0}")]
+    Deserialize(serde_json::Error),
+}
+
+/// Public identity for one mob member incarnation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobAgentRuntimeId {
+    pub identity: String,
+    pub generation: u64,
+}
+
+/// Public structural event from the mob event log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobEvent {
+    pub cursor: u64,
+    pub timestamp: DateTime<Utc>,
+    pub mob_id: String,
+    pub kind: WireMobEventKind,
+}
+
+impl WireMobEvent {
+    pub fn from_serializable<T: Serialize>(event: &T) -> Result<Self, WireMobProjectionError> {
+        serde_json::to_value(event)
+            .map_err(WireMobProjectionError::Serialize)
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(WireMobProjectionError::Deserialize)
+            })
+    }
+}
+
+/// Public structural event kinds covering mob state transitions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WireMobEventKind {
+    MobCreated {
+        definition: Value,
+    },
+    MobCompleted,
+    MobDestroying,
+    MobDestroyStorageFinalizing,
+    MobReset,
+    MemberSpawned(WireMobMemberSpawnedEvent),
+    MemberRetired {
+        agent_identity: String,
+        generation: u64,
+        role: String,
+    },
+    MemberReset {
+        agent_identity: String,
+        previous_generation: u64,
+        new_generation: u64,
+        fence_token: u64,
+        agent_runtime_id: WireMobAgentRuntimeId,
+    },
+    MemberKickoffUpdated {
+        member: String,
+        kickoff: Value,
+    },
+    MembersWired {
+        a: String,
+        b: String,
+    },
+    MembersUnwired {
+        a: String,
+        b: String,
+    },
+    ExternalPeerWired {
+        local: String,
+        spec: Value,
+    },
+    ExternalPeerUnwired {
+        local: String,
+        peer_name: String,
+    },
+    TaskCreated {
+        task_id: String,
+        subject: String,
+        description: String,
+        blocked_by: Vec<String>,
+    },
+    TaskUpdated {
+        task_id: String,
+        status: WireMobTaskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
+    },
+    FlowStarted {
+        run_id: String,
+        flow_id: String,
+        params: Value,
+    },
+    FlowCompleted {
+        run_id: String,
+        flow_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        structured_output: Option<Value>,
+    },
+    FlowFailed {
+        run_id: String,
+        flow_id: String,
+        reason: String,
+    },
+    FlowCanceled {
+        run_id: String,
+        flow_id: String,
+    },
+    StepDispatched {
+        run_id: String,
+        step_id: String,
+        target: WireMobAgentRuntimeId,
+    },
+    StepTargetCompleted {
+        run_id: String,
+        step_id: String,
+        target: WireMobAgentRuntimeId,
+    },
+    StepTargetFailed {
+        run_id: String,
+        step_id: String,
+        target: WireMobAgentRuntimeId,
+        reason: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_report: Option<meerkat_core::event::AgentErrorReport>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<meerkat_core::event::TurnErrorMetadata>,
+    },
+    StepCompleted {
+        run_id: String,
+        step_id: String,
+    },
+    StepFailed {
+        run_id: String,
+        step_id: String,
+        reason: String,
+    },
+    StepSkipped {
+        run_id: String,
+        step_id: String,
+        reason: String,
+    },
+    TopologyViolation {
+        from_role: String,
+        to_role: String,
+    },
+    SupervisorEscalation {
+        run_id: String,
+        step_id: String,
+        escalated_to: String,
+    },
+    OperatorActionRecorded {
+        tool_name: String,
+        principal_token: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        caller_provenance: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_invocation_id: Option<String>,
+    },
+}
+
+/// Public identity-native member spawn payload.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobMemberSpawnedEvent {
+    pub agent_identity: String,
+    pub generation: u64,
+    pub fence_token: u64,
+    pub agent_runtime_id: WireMobAgentRuntimeId,
+    pub role: String,
+    #[serde(default)]
+    pub runtime_mode: WireMobRuntimeMode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub labels: BTreeMap<String, String>,
+}
+
+/// Task lifecycle states emitted by the mob event log.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobTaskStatus {
+    Open,
+    InProgress,
+    Completed,
+    Cancelled,
 }
 
 /// Typed external peer identity for public mob wiring surfaces.
@@ -1582,7 +1780,112 @@ pub struct MobFlowStatusParams {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobFlowStatusResult {
-    pub run: Value,
+    pub run: Option<WireMobRun>,
+}
+
+/// Public flow-run projection returned by `mob/flow_status`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobRun {
+    pub run_id: String,
+    pub mob_id: String,
+    pub flow_id: String,
+    pub status: WireMobRunStatus,
+    pub flow_state: Value,
+    pub activation_params: Value,
+    pub created_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_ledger: Vec<WireMobStepLedgerEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failure_ledger: Vec<WireMobFailureLedgerEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub frames: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loops: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_iteration_ledger: Vec<WireMobLoopIterationLedgerEntry>,
+    #[serde(default)]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub root_step_outputs: BTreeMap<String, Value>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub loop_iteration_outputs: BTreeMap<String, Vec<BTreeMap<String, Value>>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub flow_authority_inputs: Vec<Value>,
+}
+
+impl WireMobRun {
+    pub fn from_serializable<T: Serialize>(run: &T) -> Result<Self, WireMobProjectionError> {
+        serde_json::to_value(run)
+            .map_err(WireMobProjectionError::Serialize)
+            .and_then(|value| {
+                serde_json::from_value(value).map_err(WireMobProjectionError::Deserialize)
+            })
+    }
+}
+
+/// Flow run lifecycle states.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobRunStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Canceled,
+}
+
+/// Per-target step execution ledger entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobStepLedgerEntry {
+    pub step_id: String,
+    pub agent_identity: String,
+    pub status: WireMobStepRunStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Value>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Step execution states.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireMobStepRunStatus {
+    Dispatched,
+    Completed,
+    Failed,
+    Skipped,
+    Canceled,
+}
+
+/// Flow-level failure log entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobFailureLedgerEntry {
+    pub step_id: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_report: Option<meerkat_core::event::AgentErrorReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<meerkat_core::event::TurnErrorMetadata>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Mapping from loop iteration to body frame.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct WireMobLoopIterationLedgerEntry {
+    pub loop_instance_id: String,
+    pub iteration: u64,
+    pub frame_id: String,
 }
 
 /// Request payload for `mob/flow_cancel`.
@@ -1870,7 +2173,7 @@ pub struct MobProfileLookupResult {
     pub not_found: bool,
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<Value>,
+    pub profile: Option<WireMobProfile>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revision: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

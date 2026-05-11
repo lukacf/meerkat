@@ -305,6 +305,7 @@ pub struct DiscoveredBoundary {
     pub path: String,
     pub symbol: String,
     pub boundary_kind: BoundaryKind,
+    pub owner_shell: String,
 }
 
 pub fn run_ownership_ledger(args: OwnershipLedgerArgs) -> Result<()> {
@@ -470,6 +471,15 @@ pub fn collect_ownership_findings(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    let discovered_owner_by_key = discovered
+        .iter()
+        .map(|boundary| {
+            (
+                (boundary.path.clone(), boundary.symbol.clone()),
+                boundary.owner_shell.clone(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let entry_keys = registry
         .semantic_operations
         .iter()
@@ -598,6 +608,20 @@ pub fn collect_ownership_findings(
                 format!(
                     "semantic operation `{}` declares boundary kind `{}` but manifest discovery is `{}`",
                     entry.symbol, entry.boundary_kind, discovered_kind
+                ),
+            ));
+        }
+        if let Some(discovered_owner) =
+            discovered_owner_by_key.get(&(entry.path.clone(), entry.symbol.clone()))
+            && discovered_owner != &entry.owner_shell
+        {
+            findings.push(error_finding(
+                "OwnershipOperationOwnerMismatch",
+                &entry.path,
+                &entry.symbol,
+                format!(
+                    "semantic operation `{}` declares owner_shell `{}` but manifest discovery resolves `{}`",
+                    entry.symbol, entry.owner_shell, discovered_owner
                 ),
             ));
         }
@@ -1291,6 +1315,7 @@ fn discover_boundaries(
                 path: family.path_suffix.clone(),
                 symbol: method_name.clone(),
                 boundary_kind: BoundaryKind::TraitImpl,
+                owner_shell: family.type_name.clone(),
             });
         }
     }
@@ -1311,6 +1336,7 @@ fn discover_boundaries(
                 path: family.path_suffix.clone(),
                 symbol: method_name.clone(),
                 boundary_kind: BoundaryKind::PublicInherent,
+                owner_shell: family.type_name.clone(),
             });
         }
     }
@@ -1331,6 +1357,7 @@ fn discover_boundaries(
                 path: family.path_suffix.clone(),
                 symbol: handler_name.clone(),
                 boundary_kind: BoundaryKind::EnumDispatch,
+                owner_shell: family.owner_type_name.clone(),
             });
         }
     }
@@ -1353,6 +1380,10 @@ fn discover_boundaries(
             path: callback.path_suffix.clone(),
             symbol: callback.method_name.clone(),
             boundary_kind: BoundaryKind::ManualCallback,
+            owner_shell: callback
+                .owner_type_name
+                .clone()
+                .unwrap_or_else(|| "<free fn>".into()),
         });
     }
     boundaries.sort_by(|a, b| {
@@ -3555,6 +3586,35 @@ mod tests {
         assert!(
             structural.is_empty(),
             "manifest/operation drift: {structural:#?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn closed_operation_owner_shell_must_match_discovered_owner_type() {
+        let root = match repo_root() {
+            Ok(root) => root,
+            Err(err) => panic!("repo root: {err}"),
+        };
+        let mut registry = ownership_registry();
+        let operation = registry
+            .semantic_operations
+            .iter_mut()
+            .find(|entry| entry.symbol == "register_session")
+            .expect("register_session semantic operation must exist");
+        operation.owner_shell = "StaleOwnerName".into();
+
+        let findings = match collect_ownership_findings(&root, &registry) {
+            Ok(findings) => findings,
+            Err(err) => panic!("ownership findings: {err}"),
+        };
+        assert!(
+            findings.iter().any(|finding| {
+                finding.key.rule == "OwnershipOperationOwnerMismatch"
+                    && finding.key.path == "meerkat-runtime/src/meerkat_machine/mod.rs"
+                    && finding.key.symbol == "register_session"
+            }),
+            "stale owner_shell should produce a ledger finding: {findings:#?}"
         );
     }
 

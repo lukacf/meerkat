@@ -807,6 +807,7 @@ test('Mob result decoders preserve generated result truth after validation', asy
 
   const receipt = await deliveryMob.member('worker-1').send('hello', 'steer');
   assert.deepEqual(receipt, {
+    mob_id: 'mob-web-unit',
     agent_identity: 'worker-1',
     member_ref: 'ref-worker-1',
     handling_mode: 'steer',
@@ -945,13 +946,15 @@ test('Mob event decoders reject malformed envelopes instead of synthesizing unkn
 
   const eventLogMob = new Mob('mob-web-unit', {
     async mob_events() {
-      return JSON.stringify([
-        {
-          cursor: 1,
-          timestamp: '2026-05-03T00:00:00Z',
-          mob_id: 'mob-web-unit',
-        },
-      ]);
+      return JSON.stringify({
+        events: [
+          {
+            cursor: 1,
+            timestamp: '2026-05-03T00:00:00Z',
+            mob_id: 'mob-web-unit',
+          },
+        ],
+      });
     },
   });
   await assert.rejects(

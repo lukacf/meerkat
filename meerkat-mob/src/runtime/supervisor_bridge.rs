@@ -140,13 +140,13 @@ impl MobSupervisorBridge {
         .map_err(|error| MobError::WiringError(format!("invalid supervisor spec: {error}")))
     }
 
-    /// Send a typed bridge command and return the raw JSON response.
+    /// Send a typed bridge command and return the typed reply envelope.
     pub(crate) async fn send_bridge_command(
         &self,
         recipient: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
-    ) -> Result<serde_json::Value, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeReply, MobError> {
         self.request_json(
             recipient,
             super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT,
@@ -162,7 +162,7 @@ impl MobSupervisorBridge {
         recipient: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
-    ) -> Result<serde_json::Value, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeReply, MobError> {
         let _request_guard = self.request_lock.lock().await;
         let probe_participant_name = format!(
             "{}/pending-supervisor-probe/{}",
@@ -201,7 +201,7 @@ impl MobSupervisorBridge {
         intent: &str,
         payload: &T,
         timeout: Duration,
-    ) -> Result<serde_json::Value, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeReply, MobError> {
         let _request_guard = self.request_lock.lock().await;
         let runtime = self.runtime().await;
         self.request_json_with_runtime(&runtime, recipient, intent, payload, timeout)
@@ -215,7 +215,7 @@ impl MobSupervisorBridge {
         intent: &str,
         payload: &T,
         timeout: Duration,
-    ) -> Result<serde_json::Value, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeReply, MobError> {
         let to = PeerRoute::with_display_name(recipient.peer_id, recipient.name.clone());
         let params = serde_json::to_value(payload).map_err(|error| {
             MobError::Internal(format!("serialize supervisor payload: {error}"))
@@ -243,7 +243,7 @@ impl MobSupervisorBridge {
         runtime: &Arc<meerkat_comms::CommsRuntime>,
         request_envelope_id: uuid::Uuid,
         timeout: Duration,
-    ) -> Result<serde_json::Value, MobError> {
+    ) -> Result<super::bridge_protocol::BridgeReply, MobError> {
         if let Some(result) = self.take_buffered_response(request_envelope_id).await? {
             return Ok(result);
         }
@@ -281,7 +281,7 @@ impl MobSupervisorBridge {
     async fn take_buffered_response(
         &self,
         request_envelope_id: uuid::Uuid,
-    ) -> Result<Option<serde_json::Value>, MobError> {
+    ) -> Result<Option<super::bridge_protocol::BridgeReply>, MobError> {
         let mut buffered = self.buffered_candidates.lock().await;
         let mut retained = VecDeque::new();
         let mut matched = None;
@@ -301,7 +301,7 @@ impl MobSupervisorBridge {
         &self,
         drained: Vec<PeerInputCandidate>,
         request_envelope_id: uuid::Uuid,
-    ) -> Result<Option<serde_json::Value>, MobError> {
+    ) -> Result<Option<super::bridge_protocol::BridgeReply>, MobError> {
         let mut buffered = self.buffered_candidates.lock().await;
         let mut matched = None;
 
@@ -323,7 +323,7 @@ impl MobSupervisorBridge {
     fn response_value(
         candidate: &PeerInputCandidate,
         request_envelope_id: uuid::Uuid,
-    ) -> Result<Option<serde_json::Value>, MobError> {
+    ) -> Result<Option<super::bridge_protocol::BridgeReply>, MobError> {
         let InteractionContent::Response {
             in_reply_to,
             status: _,
@@ -339,7 +339,14 @@ impl MobSupervisorBridge {
         }
 
         match candidate.response_terminality {
-            Some(TerminalityClass::Terminal { .. }) => Ok(Some(result.clone())),
+            Some(TerminalityClass::Terminal { .. }) => {
+                let reply = serde_json::from_value(result.clone()).map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to decode supervisor bridge reply envelope: {error}"
+                    ))
+                })?;
+                Ok(Some(reply))
+            }
             Some(TerminalityClass::Progress) | None => Ok(None),
             _ => Ok(None),
         }
@@ -373,8 +380,13 @@ impl BridgeRequestDeadline {
 mod tests {
     use super::*;
 
+    use super::super::bridge_protocol::{BridgeAck, BridgeRejectionCause, BridgeReply};
     use meerkat_core::PeerIngressMachinePolicy;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
+
+    fn reply_value(reply: BridgeReply) -> serde_json::Value {
+        serde_json::to_value(reply).expect("bridge reply should serialize")
+    }
 
     fn response_candidate(
         request_envelope_id: uuid::Uuid,
@@ -424,11 +436,11 @@ mod tests {
     #[test]
     fn response_value_completed_returns_payload() {
         let request_envelope_id = uuid::Uuid::new_v4();
-        let expected = serde_json::json!({"ok": true});
+        let expected = BridgeReply::Ack(BridgeAck { ok: true });
         let candidate = response_candidate(
             request_envelope_id,
             ResponseStatus::Completed,
-            expected.clone(),
+            reply_value(expected.clone()),
         );
 
         let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
@@ -458,11 +470,14 @@ mod tests {
     #[test]
     fn response_value_failed_returns_payload() {
         let request_envelope_id = uuid::Uuid::new_v4();
-        let expected = serde_json::json!({"error": "boom"});
+        let expected = BridgeReply::Rejected {
+            cause: BridgeRejectionCause::Internal,
+            reason: "boom".to_string(),
+        };
         let candidate = response_candidate(
             request_envelope_id,
             ResponseStatus::Failed,
-            expected.clone(),
+            reply_value(expected.clone()),
         );
 
         let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
@@ -485,8 +500,9 @@ mod tests {
             ResponseStatus::Failed,
         ] {
             let request_envelope_id = uuid::Uuid::new_v4();
-            let payload = serde_json::json!({"status": format!("{status:?}")});
-            let candidate = response_candidate(request_envelope_id, status, payload.clone());
+            let payload = BridgeReply::Ack(BridgeAck { ok: true });
+            let candidate =
+                response_candidate(request_envelope_id, status, reply_value(payload.clone()));
 
             let value = MobSupervisorBridge::response_value(&candidate, request_envelope_id)
                 .expect("status-response should parse");

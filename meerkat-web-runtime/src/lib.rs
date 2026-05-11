@@ -70,7 +70,6 @@ pub mod external_auth;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -144,15 +143,6 @@ fn patch_fetch_response_url() {}
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
 const MAX_SESSIONS: usize = 100_000;
-
-// ═══════════════════════════════════════════════════════════
-// Mobpack Types
-// ═══════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-struct MobDefinitionHeader {
-    id: String,
-}
 
 // ═══════════════════════════════════════════════════════════
 // Session Config (from JavaScript)
@@ -640,32 +630,15 @@ async fn resolve_mob_member_bridge_session_id(
 #[derive(Debug)]
 struct ParsedMobpack {
     manifest: meerkat_mob_pack::manifest::MobpackManifest,
-    definition: MobDefinitionHeader,
+    definition: MobDefinition,
     skills: BTreeMap<String, String>,
 }
 
 fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
-    let files =
-        extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+    let archive = meerkat_mob_pack::archive::MobpackArchive::from_archive_bytes(bytes)
+        .map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
 
-    let manifest_text = std::str::from_utf8(
-        files
-            .get("manifest.toml")
-            .ok_or_else(|| "manifest.toml is missing".to_string())?,
-    )
-    .map_err(|e| format!("manifest.toml is not valid UTF-8: {e}"))?;
-
-    let manifest: meerkat_mob_pack::manifest::MobpackManifest =
-        toml::from_str(manifest_text).map_err(|e| format!("invalid manifest.toml: {e}"))?;
-
-    let definition: MobDefinitionHeader = serde_json::from_slice(
-        files
-            .get("definition.json")
-            .ok_or_else(|| "definition.json is missing".to_string())?,
-    )
-    .map_err(|e| format!("invalid definition.json: {e}"))?;
-
-    if let Some(requires) = &manifest.requires {
+    if let Some(requires) = &archive.manifest.requires {
         for capability in requires.typed_capabilities() {
             if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
                 .is_forbidden()
@@ -678,22 +651,13 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
         }
     }
 
-    let mut skills = BTreeMap::new();
-    for (path, content) in &files {
-        if let Some(name) = path.strip_prefix("skills/") {
-            let text = std::str::from_utf8(content)
-                .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
-            let key = name
-                .strip_suffix(".md")
-                .or_else(|| name.strip_suffix(".txt"))
-                .unwrap_or(name);
-            skills.insert(key.to_string(), text.to_string());
-        }
-    }
+    let skills = archive
+        .manifest_profile_skill_texts()
+        .map_err(|e| format!("invalid mobpack profile skill binding: {e}"))?;
 
     Ok(ParsedMobpack {
-        manifest,
-        definition,
+        manifest: archive.manifest,
+        definition: archive.definition,
         skills,
     })
 }
@@ -722,69 +686,6 @@ fn compile_system_prompt(
     } else {
         joined
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-// Archive Extraction
-// ═══════════════════════════════════════════════════════════
-
-fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let cursor = std::io::Cursor::new(bytes);
-    let decoder = flate2::read::GzDecoder::new(cursor);
-    let mut archive = tar::Archive::new(decoder);
-    let mut files = BTreeMap::new();
-    let entries = archive
-        .entries()
-        .map_err(|e| format!("failed to read archive entries: {e}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|e| format!("failed reading archive entry: {e}"))?;
-        let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
-            return Err("archive contains unsupported entry type".to_string());
-        }
-        let path = entry
-            .path()
-            .map_err(|e| format!("invalid archive path: {e}"))?;
-        if !kind.is_file() {
-            continue;
-        }
-        let normalized = normalize_for_archive(path.to_string_lossy().as_ref())?;
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|e| format!("failed reading archive file '{normalized}': {e}"))?;
-        files.insert(normalized, contents);
-    }
-    Ok(files)
-}
-
-fn normalize_for_archive(path: &str) -> Result<String, String> {
-    let replaced = path.replace('\\', "/");
-    if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
-        return Err("archive contains absolute path entry".to_string());
-    }
-    let mut parts = Vec::new();
-    for segment in replaced.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return Err("archive contains parent directory traversal entry".to_string());
-        }
-        parts.push(segment);
-    }
-    if parts.is_empty() {
-        return Err("archive contains empty path entry".to_string());
-    }
-    Ok(parts.join("/"))
-}
-
-fn looks_like_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 // Plan §6.14 deleted the legacy flat-path `create_llm_client` helper.
@@ -1299,12 +1200,16 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<String,
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
     let system_prompt = compile_system_prompt(
-        &parsed.definition.id,
+        parsed.definition.id.as_str(),
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-    create_runtime_backed_session(config, Some(system_prompt), parsed.definition.id)
+    create_runtime_backed_session(
+        config,
+        Some(system_prompt),
+        parsed.definition.id.as_str().to_string(),
+    )
 }
 
 /// Create a standalone session through initialized runtime state.
@@ -1502,7 +1407,7 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
             "version": parsed.manifest.mobpack.version,
             "description": parsed.manifest.mobpack.description,
         },
-        "definition": { "id": parsed.definition.id },
+        "definition": { "id": parsed.definition.id.as_str() },
         "skills": skills,
         "capabilities": parsed.manifest.requires.as_ref().map(|r| &r.capabilities),
     });
@@ -1590,10 +1495,12 @@ pub fn poll_events(session_id: &str) -> Result<String, JsValue> {
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 Err(crate::tokio::sync::broadcast::error::TryRecvError::Lagged(skipped)) => {
-                    events.push(serde_json::json!({
-                        "type": "lagged",
-                        "skipped": skipped,
-                    }));
+                    events.push(
+                        serde_json::to_value(meerkat_contracts::StreamLaggedEvent::Lagged {
+                            skipped,
+                        })
+                        .map_err(|err| err_str("serialize_error", err))?,
+                    );
                 }
             }
         }
@@ -1689,7 +1596,7 @@ fn parse_mob_lifecycle_action_arg(
 
 /// Fetch mob events.
 ///
-/// Returns JSON array of mob events.
+/// Returns a generated `MobEventsResult` JSON envelope.
 ///
 /// Note: `after_cursor` is u32 at the JS boundary (wasm_bindgen limitation),
 /// internally widened to u64. Cursors beyond 4B are not supported via this export.
@@ -1701,7 +1608,13 @@ pub async fn mob_events(mob_id: &str, after_cursor: u32, limit: u32) -> Result<J
         .mob_events(&id, after_cursor as u64, limit as usize)
         .await
         .map_err(err_mob)?;
-    let json = serde_json::to_string(&events).map_err(|e| err_str("serialize_error", e))?;
+    let events = events
+        .iter()
+        .map(meerkat_contracts::WireMobEvent::from_serializable)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| err_str("contract_projection_error", e))?;
+    let json = serde_json::to_string(&meerkat_contracts::MobEventsResult { events })
+        .map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
 
@@ -2336,7 +2249,12 @@ pub async fn mob_flow_status(mob_id: &str, run_id: &str) -> Result<JsValue, JsVa
         .parse()
         .map_err(|e| err_str("invalid_run_id", format!("{e}")))?;
     let status = mob_state.mob_flow_status(&id, rid).await.map_err(err_mob)?;
-    let json = serde_json::to_string(&serde_json::json!({ "run": status }))
+    let run = status
+        .as_ref()
+        .map(meerkat_contracts::WireMobRun::from_serializable)
+        .transpose()
+        .map_err(|e| err_str("contract_projection_error", e))?;
+    let json = serde_json::to_string(&meerkat_contracts::MobFlowStatusResult { run })
         .map_err(|e| err_str("serialize_error", e))?;
     Ok(JsValue::from_str(&json))
 }
@@ -2510,10 +2428,12 @@ pub fn poll_subscription(subscription_ref: &str) -> Result<String, JsValue> {
                         ),
                         Err(TryRecvError::Lagged(n)) => {
                             tracing::warn!(skipped = n, "subscription lagged");
-                            events.push(serde_json::json!({
-                                "type": "lagged",
-                                "skipped": n,
-                            }));
+                            events.push(
+                                serde_json::to_value(
+                                    meerkat_contracts::StreamLaggedEvent::Lagged { skipped: n },
+                                )
+                                .map_err(|err| err_js("serialize_error", &err.to_string()))?,
+                            );
                             continue;
                         }
                         Err(TryRecvError::Empty | TryRecvError::Closed) => break,
@@ -2604,6 +2524,7 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_mob::{MobId, SpawnMemberSpec};
     use serde_json::json;
+    use std::collections::BTreeMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::collections::HashMap;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2931,6 +2852,34 @@ capabilities = [{capability_values}]
                 "unexpected error for {capability}: {error}"
             );
         }
+    }
+
+    #[test]
+    fn parse_mobpack_binds_only_manifest_profile_skills() {
+        let manifest = br#"
+[mobpack]
+name = "browser-test"
+version = "1.0.0"
+
+[profiles.worker]
+skills = ["skills/review.md"]
+"#;
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_test_mobpack_file(&mut builder, "manifest.toml", manifest);
+        append_test_mobpack_file(&mut builder, "definition.json", br#"{"id":"browser-test"}"#);
+        append_test_mobpack_file(&mut builder, "skills/review.md", b"selected");
+        append_test_mobpack_file(&mut builder, "skills/unreferenced.md", b"not selected");
+        builder.finish().expect("finish tar archive");
+        let encoder = builder.into_inner().expect("take gzip encoder");
+        let bytes = encoder.finish().expect("finish gzip archive");
+
+        let parsed = parse_mobpack(&bytes).expect("manifest-selected skills parse");
+
+        assert_eq!(
+            parsed.skills,
+            BTreeMap::from([("skills/review.md".to_string(), "selected".to_string())])
+        );
     }
 
     #[cfg(not(target_arch = "wasm32"))]

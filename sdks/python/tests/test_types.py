@@ -28,11 +28,22 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
     import tomli as tomllib
 
 from meerkat import (
+    BindingIdParams,
     CONTRACT_VERSION,
     Capability,
+    CommsCommandRequest,
+    CommsPeersResult,
+    CommsSendResult,
+    CreateProfileParams,
+    DeviceCompleteParams,
+    DeviceStartParams,
+    LoginCompleteParams,
+    LoginStartParams,
     McpAddParams,
     McpLiveOpResponse,
     MeerkatClient,
+    ProvisionApiKeyParams,
+    RealmIdParams,
     RunResult,
     SchemaWarning,
     SessionAssistantBlock,
@@ -50,6 +61,18 @@ from meerkat import (
     Session,
     DeferredSession,
     Usage,
+    WireAuthProfileCleared,
+    WireAuthProfileCreated,
+    WireAuthProfileDetail,
+    WireAuthProfilesList,
+    WireAuthStatusDetail,
+    WireDeviceCompleteResult,
+    WireDeviceStart,
+    WireLoginReady,
+    WireLoginStart,
+    WireProvisionApiKeyResult,
+    WireRealmConnectionSet,
+    WireRealmList,
 )
 from meerkat.errors import (
     CapabilityUnavailableError,
@@ -121,6 +144,84 @@ def test_generated_runtime_state_result_carries_state():
     result = GeneratedRuntimeStateResult(state="idle")
 
     assert result.state == "idle"
+
+
+def test_auth_sdk_helpers_use_generated_contract_types():
+    assert RealmIdParams(realm_id="prod").realm_id == "prod"
+    assert BindingIdParams(
+        binding_id="claude-console",
+        realm_id="prod",
+        profile_id="primary",
+    ).profile_id == "primary"
+    assert CreateProfileParams(
+        auth_method="api_key",
+        binding_id="claude-console",
+        realm_id="prod",
+        secret="sk-test",
+    ).auth_method == "api_key"
+    assert LoginStartParams(
+        binding_id="claude-console",
+        provider="anthropic",
+        realm_id="prod",
+        redirect_uri="http://127.0.0.1:0/callback",
+    ).provider == "anthropic"
+    assert LoginCompleteParams(
+        binding_id="claude-console",
+        code="code",
+        provider="anthropic",
+        realm_id="prod",
+        redirect_uri="http://127.0.0.1:0/callback",
+        state="state",
+    ).state == "state"
+    assert DeviceStartParams(
+        binding_id="claude-console",
+        provider="anthropic",
+        realm_id="prod",
+    ).provider == "anthropic"
+    assert DeviceCompleteParams(
+        binding_id="claude-console",
+        device_code="device-code",
+        provider="anthropic",
+        realm_id="prod",
+    ).device_code == "device-code"
+    assert ProvisionApiKeyParams(
+        access_token="access-token",
+        realm_id="prod",
+        binding_id="claude-console",
+    ).access_token == "access-token"
+
+    method_hints = {
+        name: get_type_hints(getattr(MeerkatClient, name))
+        for name in [
+            "list_realms",
+            "get_realm",
+            "list_auth_profiles",
+            "get_auth_profile",
+            "create_auth_profile",
+            "delete_auth_profile",
+            "auth_login_start",
+            "auth_login_complete",
+            "auth_login_device_start",
+            "auth_login_device_complete",
+            "auth_provision_api_key",
+            "auth_status",
+            "auth_logout",
+        ]
+    }
+    assert method_hints["list_realms"]["return"] is WireRealmList
+    assert method_hints["get_realm"]["return"] is WireRealmConnectionSet
+    assert method_hints["list_auth_profiles"]["return"] is WireAuthProfilesList
+    assert method_hints["get_auth_profile"]["return"] is WireAuthProfileDetail
+    assert method_hints["create_auth_profile"]["params"] is CreateProfileParams
+    assert method_hints["create_auth_profile"]["return"] is WireAuthProfileCreated
+    assert method_hints["delete_auth_profile"]["return"] is WireAuthProfileCleared
+    assert method_hints["auth_login_start"]["return"] is WireLoginStart
+    assert method_hints["auth_login_complete"]["return"] is WireLoginReady
+    assert method_hints["auth_login_device_start"]["return"] is WireDeviceStart
+    assert method_hints["auth_login_device_complete"]["return"] == WireDeviceCompleteResult
+    assert method_hints["auth_provision_api_key"]["return"] is WireProvisionApiKeyResult
+    assert method_hints["auth_status"]["return"] is WireAuthStatusDetail
+    assert method_hints["auth_logout"]["return"] is WireAuthProfileCleared
 
 
 def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
@@ -1832,10 +1933,12 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
     ]
     send_receipt = await client.send(
         "s1",
-        kind="peer_message",
-        to="agent-a",
-        body="hello",
-        blocks=blocks,
+        {
+            "kind": "peer_message",
+            "to": "agent-a",
+            "body": "hello",
+            "blocks": blocks,
+        },
     )
     peers = await client.peers("s1")
 
@@ -1843,6 +1946,12 @@ async def test_client_comms_send_and_peers_call_expected_rpc_methods():
     assert peers["peers"] == [{"name": "agent-a"}]
     assert [m for m, _ in calls] == ["comms/send", "comms/peers"]
     assert calls[0][1]["blocks"] == blocks
+
+    send_hints = get_type_hints(MeerkatClient.send)
+    peers_hints = get_type_hints(MeerkatClient.peers)
+    assert send_hints["command"] == CommsCommandRequest
+    assert send_hints["return"] == CommsSendResult
+    assert peers_hints["return"] is CommsPeersResult
 
 
 @pytest.mark.asyncio
@@ -3108,6 +3217,14 @@ def test_generated_wire_live_adapter_observation_is_typed_union():
     # R5-9: typed `code` field on the rejection variant — not a free-form
     # blob.
     assert rejected_hints["code"] == WireLiveAdapterErrorCode
+
+
+def test_live_observation_parser_uses_generated_discriminator_metadata():
+    parsed = MeerkatClient.parse_live_observation({"observation": "ready"})
+    assert parsed["observation"] == "ready"
+
+    with pytest.raises(ValueError, match="generated WireLiveAdapterObservation contract"):
+        MeerkatClient.parse_live_observation({"observation": "not_generated"})
 
 
 def test_generated_wire_assistant_block_variant_data_is_typed_typeddict():

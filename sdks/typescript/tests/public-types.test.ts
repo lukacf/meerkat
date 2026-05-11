@@ -1,19 +1,41 @@
 import { MeerkatClient } from "../src/index.js";
 import type {
   AgentErrorReport,
+  BindingIdParams,
   CommsCommand,
+  CommsPeersResult,
+  CommsSendReceipt,
   ContentBlock,
+  CreateProfileParams,
+  DeviceCompleteParams,
+  DeviceStartParams,
+  LoginCompleteParams,
+  LoginStartParams,
   MobCreateOptions,
   MobDefinition,
   MobRotateSupervisorResult,
   MobTurnStartOptions,
   PeerCorrelationId,
   PeerId,
+  ProvisionApiKeyParams,
+  RealmIdParams,
   RunFailedEvent,
   SpawnManySpec,
   SpawnSpec,
   SupervisorRotationReportWire,
   ToolCallRequestedEvent,
+  WireAuthProfileCleared,
+  WireAuthProfileCreated,
+  WireAuthProfileDetail,
+  WireAuthProfilesList,
+  WireAuthStatusDetail,
+  WireDeviceCompleteResult,
+  WireDeviceStart,
+  WireLoginReady,
+  WireLoginStart,
+  WireProvisionApiKeyResult,
+  WireRealmConnectionSet,
+  WireRealmList,
 } from "../src/index.js";
 import type {
   MobSpawnParams as PublicMobSpawnParams,
@@ -271,6 +293,85 @@ void publicMobTurnStartClient.mobTurnStart(
   publicMobTurnStartOptions,
 );
 void publicMobTurnStartOptions;
+
+const authContractClient = null as unknown as MeerkatClient;
+const authRealmIdParams: RealmIdParams = { realm_id: "prod" };
+const authBindingIdParams: BindingIdParams = {
+  realm_id: "prod",
+  binding_id: "claude-console",
+};
+const authCreateProfileParams: CreateProfileParams = {
+  realm_id: "prod",
+  binding_id: "claude-console",
+  profile_id: "primary",
+  auth_method: "api_key",
+  secret: "sk-test",
+};
+const authLoginStartParams: LoginStartParams = {
+  realm_id: "prod",
+  binding_id: "claude-console",
+  provider: "anthropic",
+  redirect_uri: "http://127.0.0.1:0/callback",
+};
+const authLoginCompleteParams: LoginCompleteParams = {
+  ...authLoginStartParams,
+  code: "code",
+  state: "state",
+};
+const authDeviceStartParams: DeviceStartParams = {
+  realm_id: "prod",
+  binding_id: "claude-console",
+  provider: "anthropic",
+};
+const authDeviceCompleteParams: DeviceCompleteParams = {
+  ...authDeviceStartParams,
+  device_code: "device-code",
+};
+const authProvisionApiKeyParams: ProvisionApiKeyParams = {
+  realm_id: "prod",
+  binding_id: "claude-console",
+  access_token: "access-token",
+};
+void authRealmIdParams;
+void authBindingIdParams;
+const authRealmListPromise: Promise<WireRealmList> = authContractClient.realmList();
+const authRealmGetPromise: Promise<WireRealmConnectionSet> =
+  authContractClient.realmGet("prod");
+const authProfileListPromise: Promise<WireAuthProfilesList> =
+  authContractClient.authProfileList("prod");
+const authProfileGetPromise: Promise<WireAuthProfileDetail> =
+  authContractClient.authProfileGet("prod", "claude-console");
+const authProfileCreatePromise: Promise<WireAuthProfileCreated> =
+  authContractClient.authProfileCreate(authCreateProfileParams);
+const authProfileDeletePromise: Promise<WireAuthProfileCleared> =
+  authContractClient.authProfileDelete("prod", "claude-console");
+const authLoginStartPromise: Promise<WireLoginStart> =
+  authContractClient.authLoginStart(authLoginStartParams);
+const authLoginCompletePromise: Promise<WireLoginReady> =
+  authContractClient.authLoginComplete(authLoginCompleteParams);
+const authDeviceStartPromise: Promise<WireDeviceStart> =
+  authContractClient.authLoginDeviceStart(authDeviceStartParams);
+const authDeviceCompletePromise: Promise<WireDeviceCompleteResult> =
+  authContractClient.authLoginDeviceComplete(authDeviceCompleteParams);
+const authProvisionApiKeyPromise: Promise<WireProvisionApiKeyResult> =
+  authContractClient.authLoginProvisionApiKey(authProvisionApiKeyParams);
+const authStatusPromise: Promise<WireAuthStatusDetail> =
+  authContractClient.authStatusGet("prod", "claude-console");
+const authLogoutPromise: Promise<WireAuthProfileCleared> =
+  authContractClient.authLogout("prod", "claude-console");
+void authRealmListPromise;
+void authRealmGetPromise;
+void authProfileListPromise;
+void authProfileGetPromise;
+void authProfileCreatePromise;
+void authProfileDeletePromise;
+void authLoginStartPromise;
+void authLoginCompletePromise;
+void authDeviceStartPromise;
+void authDeviceCompletePromise;
+void authProvisionApiKeyPromise;
+void authStatusPromise;
+void authLogoutPromise;
 
 const toolCallRequestedEvent: ToolCallRequestedEvent = {
   type: "tool_call_requested",
@@ -652,7 +753,6 @@ const sdkCommsPeerRequestIntentMismatch: CommsCommand = {
   kind: "peer_request",
   to: "agent-a",
   intent: "supervisor.bridge",
-  // @ts-expect-error supervisor.bridge requests must carry BridgeCommand params.
   params: { subject: "attached" },
 };
 
@@ -660,6 +760,15 @@ void sdkCommsPeerMessageWithBlocks;
 void sdkCommsPeerRequestWithBlocks;
 void sdkCommsSupervisorBridgeWithPublicBlocks;
 void sdkCommsPeerRequestIntentMismatch;
+
+const sdkCommsClient = null as unknown as MeerkatClient;
+const sdkCommsSendReceipt: Promise<CommsSendReceipt> = sdkCommsClient.send(
+  "session-1",
+  sdkCommsPeerMessageWithBlocks,
+);
+const sdkCommsPeers: Promise<CommsPeersResult> = sdkCommsClient.peers("session-1");
+void sdkCommsSendReceipt;
+void sdkCommsPeers;
 
 // R5-10: `LiveSendInputParams.chunk` must be the typed `LiveInputChunkWire`
 // discriminated union, not an opaque `Record<string, unknown>`. Each typed

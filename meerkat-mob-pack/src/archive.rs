@@ -1,6 +1,6 @@
 use crate::manifest::MobpackManifest;
 use crate::pack::{ValidatedPackFiles, validate_extracted_pack_files};
-use crate::targz::extract_targz_safe;
+use crate::targz::{extract_targz_safe, normalize_for_archive};
 use crate::validate::PackValidationError;
 use meerkat_mob::MobDefinition;
 use std::collections::BTreeMap;
@@ -71,6 +71,57 @@ impl MobpackArchive {
         let bytes = std::fs::read(path)?;
         Self::from_archive_bytes(&bytes)
     }
+
+    /// Skill text selected by typed manifest profile skill references.
+    ///
+    /// This intentionally does not return every `skills/*` archive entry.
+    /// Browser/runtime consumers use this as the packaging-owned authority for
+    /// which packed skills are bound into profile prompts.
+    pub fn manifest_profile_skill_texts(
+        &self,
+    ) -> Result<BTreeMap<String, String>, PackValidationError> {
+        let mut selected = BTreeMap::new();
+        for (profile_name, profile) in &self.manifest.profiles {
+            for skill_path in &profile.skills {
+                let normalized = normalize_for_archive(skill_path).map_err(|err| {
+                    PackValidationError::InvalidSkillPath {
+                        skill_name: profile_name.clone(),
+                        path: skill_path.clone(),
+                        reason: err.to_string(),
+                    }
+                })?;
+                if normalized != *skill_path {
+                    return Err(PackValidationError::InvalidSkillPath {
+                        skill_name: profile_name.clone(),
+                        path: skill_path.clone(),
+                        reason: format!("must use canonical archive path `{normalized}`"),
+                    });
+                }
+                if !normalized.starts_with("skills/") {
+                    return Err(PackValidationError::InvalidSkillPath {
+                        skill_name: profile_name.clone(),
+                        path: skill_path.clone(),
+                        reason: "must be under skills/".to_string(),
+                    });
+                }
+                let bytes = self.skills.get(&normalized).ok_or_else(|| {
+                    PackValidationError::MissingSkillFile {
+                        skill_name: profile_name.clone(),
+                        path: normalized.clone(),
+                    }
+                })?;
+                let text = std::str::from_utf8(bytes).map_err(|err| {
+                    PackValidationError::InvalidSkillUtf8 {
+                        skill_name: profile_name.clone(),
+                        path: normalized.clone(),
+                        reason: err.to_string(),
+                    }
+                })?;
+                selected.insert(normalized, text.to_string());
+            }
+        }
+        Ok(selected)
+    }
 }
 
 #[cfg(test)]
@@ -133,6 +184,68 @@ mod tests {
         assert!(archive.hooks.contains_key("hooks/run.sh"));
         assert!(archive.mcp.contains_key("mcp/server.toml"));
         assert!(archive.config.contains_key("config/defaults.toml"));
+    }
+
+    #[test]
+    fn test_manifest_profile_skill_texts_use_manifest_selectors() {
+        let files = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                br#"
+[mobpack]
+name = "fixture"
+version = "1.0.0"
+
+[profiles.worker]
+skills = ["skills/review.md"]
+"#
+                .to_vec(),
+            ),
+            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+            ("skills/review.md".to_string(), b"selected".to_vec()),
+            (
+                "skills/unreferenced.md".to_string(),
+                b"not selected".to_vec(),
+            ),
+        ]);
+        let archive_bytes = create_targz(&files).unwrap();
+        let archive = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap();
+
+        let skills = archive.manifest_profile_skill_texts().unwrap();
+
+        assert_eq!(
+            skills,
+            BTreeMap::from([("skills/review.md".to_string(), "selected".to_string())])
+        );
+    }
+
+    #[test]
+    fn test_manifest_profile_skill_texts_reject_missing_selector() {
+        let files = BTreeMap::from([
+            (
+                "manifest.toml".to_string(),
+                br#"
+[mobpack]
+name = "fixture"
+version = "1.0.0"
+
+[profiles.worker]
+skills = ["skills/missing.md"]
+"#
+                .to_vec(),
+            ),
+            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+        ]);
+        let archive_bytes = create_targz(&files).unwrap();
+        let archive = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap();
+
+        let err = archive.manifest_profile_skill_texts().unwrap_err();
+
+        assert!(matches!(
+            err,
+            PackValidationError::MissingSkillFile { skill_name, path }
+                if skill_name == "worker" && path == "skills/missing.md"
+        ));
     }
 
     #[test]

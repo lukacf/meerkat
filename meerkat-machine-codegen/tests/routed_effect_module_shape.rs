@@ -128,6 +128,28 @@ fn emitted_seam_module_declares_generated_identity_modules() {
         rendered.contains("pub mod fields"),
         "missing field facts module:\n{rendered}"
     );
+    for expected in [
+        "pub mod adapters",
+        "pub enum Field",
+        "pub enum Input",
+        "pub enum Signal",
+        "pub mod mob",
+        "pub enum Effect",
+        "pub fn field(self, id: &FieldId) -> Option<Field>",
+    ] {
+        assert!(
+            rendered.contains(expected),
+            "missing generated production adapter `{expected}`:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.contains("Self::RequestRuntimeBinding => effects::mob::request_runtime_binding()"),
+        "mob effect adapter must own RequestRuntimeBinding variant mapping:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("if id == &Field::AgentRuntimeId.id()"),
+        "producer field adapter must own field-id membership checks:\n{rendered}"
+    );
     assert!(
         !rendered.contains("pub enum MeerkatMobSeamEffect"),
         "generated-shape seam effect mirror must not be emitted:\n{rendered}"

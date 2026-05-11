@@ -1,8 +1,307 @@
 {
   "components": {
     "schemas": {
+      "AgentConfig": {
+        "description": "Agent behavior configuration",
+        "properties": {
+          "budget_warning_threshold": {
+            "default": 0.800000011920929,
+            "description": "Warning threshold for budget (0.0-1.0)",
+            "format": "float",
+            "type": "number"
+          },
+          "extraction_prompt": {
+            "description": "Custom prompt for the structured output extraction turn.\n\nWhen `output_schema` is set, this prompt is sent as a user message\nafter the agentic loop to elicit schema-valid JSON. Defaults to a\nbuilt-in prompt if `None`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_tokens_per_turn": {
+            "default": 16384,
+            "description": "Maximum tokens to generate per turn",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_turns": {
+            "default": null,
+            "description": "Maximum turns before forced stop",
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "default": "claude-opus-4-7",
+            "description": "Model identifier (provider-specific)",
+            "type": "string"
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Output schema for structured output extraction.\n\nWhen set, the agent will perform an extraction turn after completing\nthe agentic work, forcing the LLM to output validated JSON. The main\nresponse text remains the committed agentic output; extraction populates\nstructured output on success or extraction error details on failure."
+          },
+          "provider_params": {
+            "description": "Provider-specific parameters (e.g., thinking config, reasoning effort)\n\nThis is a generic JSON bag that providers can extract provider-specific\noptions from. Each provider implementation is responsible for reading\nand applying relevant parameters."
+          },
+          "structured_output_retries": {
+            "default": 2,
+            "description": "Maximum retries for structured output validation failures.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "system_prompt": {
+            "default": null,
+            "description": "System prompt to prepend",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "system_prompt_file": {
+            "default": null,
+            "description": "Path to system prompt file (alternative to inline system_prompt)",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "temperature": {
+            "default": null,
+            "description": "Temperature for sampling",
+            "format": "float",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "tool_instructions": {
+            "default": null,
+            "description": "Optional tool usage instructions appended to system prompt",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AnthropicAuthMetadata": {
+        "description": "Anthropic-specific metadata (subscription tier for Claude.ai OAuth,\nBedrock/Vertex/Foundry region/project hints).",
+        "properties": {
+          "aws_region": {
+            "description": "AWS region for Bedrock.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "foundry_deployment": {
+            "description": "Azure deployment URL prefix for Foundry.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "subscription_tier": {
+            "description": "Claude.ai subscription tier (\"free\" / \"pro\" / \"max\" / \"team\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vertex_project_id": {
+            "description": "GCP project ID for Vertex.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vertex_region": {
+            "description": "GCP region for Vertex / Vertex model endpoints.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AnthropicProviderToolsConfig": {
+        "description": "Anthropic provider-native tool defaults.",
+        "properties": {
+          "web_search": {
+            "default": true,
+            "description": "Enable web search for Anthropic models that support it.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "AnthropicRouteHints": {
+        "type": "object"
+      },
       "AssistantImageId": {
         "type": "string"
+      },
+      "AuthConstraints": {
+        "description": "Non-secret constraints on a resolved binding (per-realm or per-profile).",
+        "properties": {
+          "allow_interactive_login": {
+            "default": false,
+            "type": "boolean"
+          },
+          "allow_refresh": {
+            "default": true,
+            "type": "boolean"
+          },
+          "require_account_id": {
+            "default": false,
+            "type": "boolean"
+          },
+          "require_workspace_id": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "AuthMetadataDefaults": {
+        "description": "Non-secret defaults merged during auth profile resolution.",
+        "properties": {
+          "organization_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderAuthMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "route_hints": {
+            "$ref": "#/components/schemas/AuthRouteHints",
+            "default": {
+              "provider": "none"
+            }
+          },
+          "workspace_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "AuthProfileConfig": {
+        "description": "Serialized auth profile (pre-normalization).",
+        "properties": {
+          "auth_method": {
+            "type": "string"
+          },
+          "constraints": {
+            "$ref": "#/components/schemas/AuthConstraints",
+            "default": {
+              "allow_interactive_login": false,
+              "allow_refresh": true,
+              "require_account_id": false,
+              "require_workspace_id": false
+            }
+          },
+          "metadata_defaults": {
+            "$ref": "#/components/schemas/AuthMetadataDefaults",
+            "default": {
+              "route_hints": {
+                "provider": "none"
+              }
+            }
+          },
+          "provider": {
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/components/schemas/CredentialSourceSpec"
+          }
+        },
+        "required": [
+          "provider",
+          "auth_method",
+          "source"
+        ],
+        "type": "object"
+      },
+      "AuthRouteHints": {
+        "description": "Provider-specific route hints (boxed to keep the enum small).",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "none",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/OpenAiRouteHints",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/AnthropicRouteHints",
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/GoogleRouteHints",
+            "properties": {
+              "provider": {
+                "const": "google",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "AuthStatusPhase": {
         "description": "Public auth status phase shared by REST, RPC, CLI, and generated SDK wire\npayloads.\n\nThis is the compatibility projection of typed auth lease truth. Surfaces\nshould map to this enum first and only then emit [`Self::as_public_str`].",
@@ -15,6 +314,29 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "BackendProfileConfig": {
+        "description": "Serialized backend profile (pre-normalization).",
+        "properties": {
+          "backend_kind": {
+            "type": "string"
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "options": true,
+          "provider": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "backend_kind"
+        ],
+        "type": "object"
       },
       "BackgroundJobTerminalStatus": {
         "enum": [
@@ -30,6 +352,24 @@
       "BindingId": {
         "description": "Opaque slug identifying a binding inside a realm.",
         "type": "string"
+      },
+      "BindingPolicy": {
+        "description": "Policy overrides carried on a binding.",
+        "properties": {
+          "allow_auth_override": {
+            "default": false,
+            "type": "boolean"
+          },
+          "require_metadata_account": {
+            "default": false,
+            "type": "boolean"
+          },
+          "require_metadata_workspace": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
       },
       "BlobId": {
         "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
@@ -954,6 +1294,40 @@
         ],
         "title": "BridgeReply"
       },
+      "BudgetConfig": {
+        "description": "Budget configuration",
+        "properties": {
+          "max_duration": {
+            "default": null,
+            "description": "Maximum duration",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "default": null,
+            "description": "Maximum tokens to consume",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_tool_calls": {
+            "default": null,
+            "description": "Maximum tool calls",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "CalendarFieldSpec": {
         "oneOf": [
           {
@@ -1041,6 +1415,34 @@
           "timezone"
         ],
         "type": "object"
+      },
+      "CallTimeoutOverride": {
+        "description": "Tri-state override for per-call LLM timeout policy.\n\nThis type exists because `Option<Duration>` cannot distinguish between\n\"inherit lower-layer/profile default\" and \"explicitly disable timeout.\"\nBuild and config seams use this type; the resolved effective policy on\n`RetryPolicy` collapses to `Option<Duration>`.\n\nTOML representation:\n- omitted key => `Inherit`\n- `call_timeout = \"disabled\"` => `Disabled`\n- `call_timeout = \"45s\"` => `Value(45s)`",
+        "oneOf": [
+          {
+            "const": "Inherit",
+            "description": "Inherit the lower-layer or profile-derived default.",
+            "type": "string"
+          },
+          {
+            "const": "Disabled",
+            "description": "Explicitly disable call timeout (no timeout applied regardless of profile).",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Explicitly set the call timeout to this duration.",
+            "properties": {
+              "Value": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "Value"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "CapabilitiesResponse": {
         "description": "Response to a `capabilities/get` request.",
@@ -1236,6 +1638,14 @@
         "title": "CatalogModelEntry",
         "type": "object"
       },
+      "CommsAuthMode": {
+        "description": "Authentication mode for comms listeners.\n\n`Open` (default) accepts plain JSON messages over TCP/UDS — no cryptographic\nverification. Suitable for local agent-to-agent communication where the OS\nprovides process isolation. Non-loopback binding with `Open` auth is a hard\nerror unless explicitly overridden.\n\n`Ed25519` requires signed CBOR envelopes and a trusted peers list. Use for\nmulti-machine or untrusted network communication.",
+        "enum": [
+          "none",
+          "ed25519"
+        ],
+        "type": "string"
+      },
       "CommsChecksumTokenParams": {
         "additionalProperties": false,
         "description": "Typed params for the actionable checksum-token request used by peer\nrequest/response terminal-flow fixtures.",
@@ -1359,6 +1769,50 @@
         ],
         "title": "CommsPeersResult",
         "type": "object"
+      },
+      "CommsRuntimeConfig": {
+        "description": "Runtime comms configuration (portable across interfaces).",
+        "properties": {
+          "address": {
+            "default": null,
+            "description": "Address for agent-to-agent (signed) listener.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "auth": {
+            "$ref": "#/components/schemas/CommsAuthMode",
+            "default": "none"
+          },
+          "event_address": {
+            "default": null,
+            "description": "Address for the plain-text external event listener.\nOnly active when `auth = \"none\"`. Accepts newline-delimited JSON or text.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "mode": {
+            "$ref": "#/components/schemas/CommsRuntimeMode",
+            "default": "inproc"
+          },
+          "require_peer_auth": {
+            "default": true,
+            "description": "Whether inter-agent peer traffic requires cryptographic validation.\n\n- `true`: messages require signatures and trusted-sender checks.\n- `false`: signatures are not verified and outgoing peer envelopes are\n  sent without signing.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "CommsRuntimeMode": {
+        "description": "Transport mode for comms runtime.",
+        "enum": [
+          "inproc",
+          "tcp",
+          "uds"
+        ],
+        "type": "string"
       },
       "CommsSendParams": {
         "description": "Request payload for `comms/send`.",
@@ -1736,36 +2190,354 @@
         ],
         "title": "CommsSendResult"
       },
+      "CompactionRuntimeConfig": {
+        "description": "Runtime compaction configuration (portable across interfaces).\n\nThis config is serialized/deserialized in realm config and mapped to\n`meerkat_core::CompactionConfig` when wiring the session compactor.",
+        "properties": {
+          "auto_compact_threshold": {
+            "default": 100000,
+            "description": "Trigger compaction when input tokens for a turn reach this threshold.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_summary_tokens": {
+            "default": 4096,
+            "description": "Maximum tokens for the compaction summary response.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min_turns_between_compactions": {
+            "default": 3,
+            "description": "Minimum session-scoped pre-LLM boundaries between compactions.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "recent_turn_budget": {
+            "default": 4,
+            "description": "Number of recent complete turns to retain after compaction.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "Config": {
+        "description": "Complete configuration for Meerkat",
+        "properties": {
+          "agent": {
+            "$ref": "#/components/schemas/AgentConfig",
+            "default": {
+              "budget_warning_threshold": 0.800000011920929,
+              "max_tokens_per_turn": 16384,
+              "max_turns": null,
+              "model": "claude-opus-4-7",
+              "structured_output_retries": 2,
+              "system_prompt": null,
+              "system_prompt_file": null,
+              "temperature": null,
+              "tool_instructions": null
+            }
+          },
+          "budget": {
+            "$ref": "#/components/schemas/BudgetConfig",
+            "default": {
+              "max_duration": null,
+              "max_tokens": null,
+              "max_tool_calls": null
+            }
+          },
+          "comms": {
+            "$ref": "#/components/schemas/CommsRuntimeConfig",
+            "default": {
+              "address": null,
+              "auth": "none",
+              "event_address": null,
+              "mode": "inproc",
+              "require_peer_auth": true
+            }
+          },
+          "compaction": {
+            "$ref": "#/components/schemas/CompactionRuntimeConfig",
+            "default": {
+              "auto_compact_threshold": 100000,
+              "max_summary_tokens": 4096,
+              "min_turns_between_compactions": 3,
+              "recent_turn_budget": 4
+            }
+          },
+          "hooks": {
+            "$ref": "#/components/schemas/HooksConfig",
+            "default": {
+              "background_max_concurrency": 32,
+              "default_timeout_ms": 5000,
+              "entries": [],
+              "payload_max_bytes": 131072
+            }
+          },
+          "limits": {
+            "$ref": "#/components/schemas/LimitsConfig",
+            "default": {
+              "budget": null,
+              "max_duration": null,
+              "max_sessions": null
+            }
+          },
+          "max_tokens": {
+            "default": 16384,
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "models": {
+            "$ref": "#/components/schemas/ModelDefaults",
+            "default": {
+              "anthropic": "claude-opus-4-7",
+              "gemini": "gemini-3-flash-preview",
+              "openai": "gpt-5.5"
+            }
+          },
+          "presentation": {
+            "$ref": "#/components/schemas/PresentationConfig",
+            "default": {
+              "html": {
+                "default_template": "polished",
+                "templates": {}
+              }
+            }
+          },
+          "provider_tools": {
+            "$ref": "#/components/schemas/ProviderToolsConfig",
+            "default": {
+              "anthropic": {
+                "web_search": true
+              },
+              "gemini": {
+                "google_search": true
+              },
+              "openai": {
+                "web_search": true
+              }
+            }
+          },
+          "realm": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RealmConfigSection"
+            },
+            "description": "Realm-scoped connection sets (backend profiles, auth profiles,\nbindings). TOML keys use the singular `[realm.<id>.*]` namespace\neven though the Rust field is plural-adjacent — `#[serde(rename)]`\nbridges the two. See\n`/Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md`.",
+            "type": "object"
+          },
+          "rest": {
+            "$ref": "#/components/schemas/RestServerConfig",
+            "default": {
+              "host": "127.0.0.1",
+              "port": 8080
+            }
+          },
+          "retry": {
+            "$ref": "#/components/schemas/RetryConfig",
+            "default": {
+              "initial_delay": "500ms",
+              "max_delay": "30s",
+              "max_retries": 3,
+              "multiplier": 2.0
+            }
+          },
+          "self_hosted": {
+            "$ref": "#/components/schemas/SelfHostedConfig",
+            "default": {
+              "models": {},
+              "servers": {}
+            }
+          },
+          "shell": {
+            "$ref": "#/components/schemas/ShellDefaults",
+            "default": {
+              "program": "nu",
+              "security_mode": "unrestricted",
+              "security_patterns": [],
+              "timeout_secs": 30
+            }
+          },
+          "skills": {
+            "$ref": "#/components/schemas/SkillsConfig",
+            "default": {
+              "enabled": true,
+              "health_thresholds": {
+                "degraded_failure_streak": 3,
+                "degraded_invalid_ratio": 0.05000000074505806,
+                "unhealthy_failure_streak": 10,
+                "unhealthy_invalid_ratio": 0.4000000059604645
+              },
+              "identity": {
+                "aliases": [],
+                "lineage": [],
+                "remaps": []
+              },
+              "inventory_threshold": 12,
+              "max_injection_bytes": 32768,
+              "repositories": []
+            }
+          },
+          "storage": {
+            "$ref": "#/components/schemas/StorageConfig"
+          },
+          "store": {
+            "$ref": "#/components/schemas/StoreConfig",
+            "default": {
+              "database_dir": null,
+              "sessions_path": null,
+              "tasks_path": null
+            }
+          },
+          "tools": {
+            "$ref": "#/components/schemas/ToolsConfig",
+            "default": {
+              "builtins_enabled": false,
+              "comms_enabled": false,
+              "default_timeout": "10m",
+              "max_concurrent": 10,
+              "mcp_servers": [],
+              "mob_enabled": false,
+              "schedule_enabled": true,
+              "shell_enabled": false,
+              "tool_timeouts": {},
+              "workgraph_enabled": false
+            }
+          }
+        },
+        "type": "object"
+      },
       "ConfigEnvelope": {
+        "description": "Wire envelope returned by config APIs across surfaces.",
         "properties": {
           "backend": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "config": {
-            "$ref": "#/components/schemas/JsonValue"
+            "$ref": "#/components/schemas/Config"
           },
           "generation": {
+            "format": "uint64",
             "minimum": 0,
             "type": "integer"
           },
           "instance_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "realm_id": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "resolved_paths": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConfigResolvedPaths"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "config",
           "generation"
         ],
+        "title": "ConfigEnvelope",
         "type": "object"
+      },
+      "ConfigPatchParams": {
+        "anyOf": [
+          {
+            "properties": {
+              "expected_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "patch": true
+            },
+            "required": [
+              "patch"
+            ],
+            "type": "object"
+          },
+          true
+        ],
+        "description": "Request payload for `config/patch`.",
+        "title": "ConfigPatchParams"
+      },
+      "ConfigResolvedPaths": {
+        "description": "Resolved paths attached to a config store context.",
+        "properties": {
+          "config_path": {
+            "type": "string"
+          },
+          "manifest_path": {
+            "type": "string"
+          },
+          "root": {
+            "type": "string"
+          },
+          "sessions_jsonl_dir": {
+            "type": "string"
+          },
+          "sessions_sqlite_path": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "root",
+          "manifest_path",
+          "config_path",
+          "sessions_jsonl_dir"
+        ],
+        "type": "object"
+      },
+      "ConfigSetParams": {
+        "anyOf": [
+          {
+            "properties": {
+              "config": {
+                "$ref": "#/components/schemas/Config"
+              },
+              "expected_generation": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "config"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/Config"
+          }
+        ],
+        "description": "Request payload for `config/set`.",
+        "title": "ConfigSetParams"
       },
       "ContentBlock": {
         "oneOf": [
@@ -1928,6 +2700,263 @@
         ],
         "title": "ContractVersion",
         "type": "object"
+      },
+      "CreateProfileParams": {
+        "description": "Request payload for `auth/profile/create`.",
+        "properties": {
+          "auth_method": {
+            "type": "string"
+          },
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "realm_id",
+          "binding_id",
+          "auth_method",
+          "secret"
+        ],
+        "title": "CreateProfileParams",
+        "type": "object"
+      },
+      "CreateScheduleRequest": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "misfire_policy": {
+            "$ref": "#/components/schemas/MisfirePolicy",
+            "default": {
+              "type": "skip"
+            }
+          },
+          "missing_target_policy": {
+            "$ref": "#/components/schemas/MissingTargetPolicy",
+            "default": "mark_misfired"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overlap_policy": {
+            "$ref": "#/components/schemas/OverlapPolicy",
+            "default": "skip_if_running"
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/TargetBinding"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/TriggerSpec"
+          }
+        },
+        "required": [
+          "trigger",
+          "target"
+        ],
+        "title": "CreateScheduleRequest",
+        "type": "object"
+      },
+      "CredentialSourceSpec": {
+        "description": "Where credentials come from.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "inline_secret",
+                "type": "string"
+              },
+              "secret": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "secret"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Binding-scoped credential material stored in the configured\n[`TokenStore`](crate::auth::TokenStore). The storage key is the\nresolved typed binding identity (`realm`, `binding`), not a\nsecond free-form profile string.",
+            "properties": {
+              "kind": {
+                "const": "managed_store",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "env": {
+                "type": "string"
+              },
+              "fallback": {
+                "description": "Ordered fallback env var names consulted when `env` is\nunset. Used for providers with multiple well-known names\n(e.g. Gemini falls back to `GOOGLE_API_KEY` when\n`GEMINI_API_KEY` is absent). The resolver's RKAT_*-prefix\nprecedence applies to each name in turn.",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "kind": {
+                "const": "env",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "env"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "handle": {
+                "$ref": "#/components/schemas/ExternalAuthResolverId"
+              },
+              "kind": {
+                "const": "external_resolver",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "handle"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "kind": {
+                "const": "platform_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "External command that prints a bearer token on stdout. Reference:\nCodex `external_bearer.rs:17-157`. The runner lives in\n`meerkat-client/src/auth_store/command.rs`.",
+            "properties": {
+              "args": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "cwd": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "env": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {},
+                "type": "object"
+              },
+              "kind": {
+                "const": "command",
+                "type": "string"
+              },
+              "program": {
+                "type": "string"
+              },
+              "refresh_interval_ms": {
+                "description": "Optional cached-token lifetime. `None` disables caching.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "timeout_ms": {
+                "default": 30000,
+                "description": "Timeout for the subprocess in milliseconds.",
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind",
+              "program"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Read credentials from an inherited file descriptor (Claude Code\npattern for sandboxed host-injected tokens).",
+            "properties": {
+              "fd": {
+                "format": "int32",
+                "type": "integer"
+              },
+              "kind": {
+                "const": "file_descriptor",
+                "type": "string"
+              },
+              "scope_override": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "fd"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "DeferredCatalogDelta": {
         "description": "Additive hidden-catalog delta metadata for runtime notices.",
@@ -2099,6 +3128,10 @@
         "title": "DeviceStartParams",
         "type": "object"
       },
+      "EmptyScheduleToolArguments": {
+        "additionalProperties": false,
+        "type": "object"
+      },
       "ErrorCategory": {
         "description": "Error category for grouping.",
         "enum": [
@@ -2137,6 +3170,10 @@
           "SUPERVISOR_ROTATION_INCOMPLETE"
         ],
         "title": "ErrorCode",
+        "type": "string"
+      },
+      "ExternalAuthResolverId": {
+        "description": "Opaque slug identifying a host-owned external auth resolver.",
         "type": "string"
       },
       "ExternalToolDeltaPhase": {
@@ -2230,6 +3267,63 @@
         "required": [
           "target_model"
         ],
+        "type": "object"
+      },
+      "GeminiProviderToolsConfig": {
+        "description": "Gemini provider-native tool defaults.",
+        "properties": {
+          "google_search": {
+            "default": true,
+            "description": "Enable Google Search for Gemini models that support it.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "GitRefType": {
+        "description": "Git ref type for version pinning.",
+        "enum": [
+          "branch",
+          "tag",
+          "commit"
+        ],
+        "type": "string"
+      },
+      "GoogleAuthMetadata": {
+        "description": "Google-specific metadata (ADC account, Vertex project/region hints).",
+        "properties": {
+          "account_email": {
+            "description": "Identifier for the Google account (email address).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code_assist_tier": {
+            "description": "Code Assist user tier (\"free\" / \"standard\" / \"enterprise\").",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project_id": {
+            "description": "GCP project ID for Vertex / Code Assist.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "region": {
+            "description": "Preferred region for Vertex model endpoints.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "GoogleRouteHints": {
         "type": "object"
       },
       "HandlingMode": {
@@ -2420,6 +3514,227 @@
         },
         "type": "object"
       },
+      "HookCapability": {
+        "description": "Declared capability determines default failure behavior and constraints.",
+        "oneOf": [
+          {
+            "enum": [
+              "observe",
+              "guardrail"
+            ],
+            "type": "string"
+          },
+          {
+            "const": "rewrite",
+            "description": "Legacy fail-closed capability label. Semantic patch authority has been\nremoved from hooks; retained entries may observe and deny only.",
+            "type": "string"
+          }
+        ]
+      },
+      "HookEntryConfig": {
+        "description": "One hook registration entry.",
+        "properties": {
+          "capability": {
+            "$ref": "#/components/schemas/HookCapability",
+            "default": "observe"
+          },
+          "enabled": {
+            "default": true,
+            "type": "boolean"
+          },
+          "failure_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HookFailurePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "$ref": "#/components/schemas/HookId",
+            "default": "hook"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/HookExecutionMode",
+            "default": "foreground"
+          },
+          "point": {
+            "$ref": "#/components/schemas/HookPoint",
+            "default": "turn_boundary"
+          },
+          "priority": {
+            "default": 100,
+            "format": "int32",
+            "type": "integer"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/HookRuntimeConfig",
+            "default": {
+              "handler": "noop",
+              "type": "in_process"
+            }
+          },
+          "timeout_ms": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "HookExecutionMode": {
+        "description": "Foreground hooks block loop progression; background hooks run asynchronously.",
+        "enum": [
+          "foreground",
+          "background"
+        ],
+        "type": "string"
+      },
+      "HookFailurePolicy": {
+        "description": "Failure policy can be explicitly configured per hook.",
+        "enum": [
+          "fail_open",
+          "fail_closed"
+        ],
+        "type": "string"
+      },
+      "HookId": {
+        "description": "Stable identifier for a configured hook.",
+        "type": "string"
+      },
+      "HookPoint": {
+        "description": "Hook points available in V1.",
+        "enum": [
+          "run_started",
+          "run_completed",
+          "run_failed",
+          "pre_llm_request",
+          "post_llm_response",
+          "pre_tool_execution",
+          "post_tool_execution",
+          "turn_boundary"
+        ],
+        "type": "string"
+      },
+      "HookRunOverrides": {
+        "description": "Run-scoped hook overrides.",
+        "properties": {
+          "disable": {
+            "default": [],
+            "description": "Hook ids disabled for this run.",
+            "items": {
+              "$ref": "#/components/schemas/HookId"
+            },
+            "type": "array"
+          },
+          "entries": {
+            "default": [],
+            "description": "Additional hooks appended after layered config entries.",
+            "items": {
+              "$ref": "#/components/schemas/HookEntryConfig"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "HookRuntimeConfig": {
+        "additionalProperties": true,
+        "properties": {
+          "config": {},
+          "handler": {
+            "type": "string"
+          },
+          "name": {
+            "deprecated": true,
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "HooksConfig": {
+        "description": "Hook configuration root.",
+        "properties": {
+          "background_max_concurrency": {
+            "default": 32,
+            "description": "Max number of background hook tasks allowed to run concurrently.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default_timeout_ms": {
+            "default": 5000,
+            "description": "Default timeout for one hook invocation.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "entries": {
+            "default": [],
+            "description": "Ordered hook registrations.",
+            "items": {
+              "$ref": "#/components/schemas/HookEntryConfig"
+            },
+            "type": "array"
+          },
+          "payload_max_bytes": {
+            "default": 131072,
+            "description": "Max serialized invocation payload size.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "HtmlPresentationConfig": {
+        "description": "Defaults for CLI HTML output mode.\n\nThis config controls template selection only. It does not enable HTML output\nfor ordinary runs; surfaces must request the HTML presentation explicitly.",
+        "properties": {
+          "default_template": {
+            "default": "polished",
+            "type": "string"
+          },
+          "templates": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/HtmlTemplateConfig"
+            },
+            "default": {},
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "HtmlTemplateConfig": {
+        "description": "User-defined HTML output template.",
+        "properties": {
+          "body": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "InputSource": {
         "description": "Source for an input event posted to an agent.",
         "enum": [
@@ -2478,6 +3793,38 @@
       "JsonValue": {
         "description": "Arbitrary JSON value."
       },
+      "LimitsConfig": {
+        "description": "Runtime limits configured at the config layer.",
+        "properties": {
+          "budget": {
+            "default": null,
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "max_duration": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_sessions": {
+            "default": null,
+            "description": "Active session admission capacity. Persisted history does not consume\nthis limit. RPC observes runtime config updates dynamically; REST/MCP\nprocess-local services apply changes on service restart.",
+            "format": "uint",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "ListSessionsResponse": {
         "properties": {
           "sessions": {
@@ -2529,6 +3876,37 @@
           "binding_id"
         ],
         "title": "LoginCompleteParams",
+        "type": "object"
+      },
+      "LoginStartParams": {
+        "description": "Request payload for `auth/login/start`.",
+        "properties": {
+          "binding_id": {
+            "type": "string"
+          },
+          "profile_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "realm_id": {
+            "type": "string"
+          },
+          "redirect_uri": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "redirect_uri",
+          "realm_id",
+          "binding_id"
+        ],
+        "title": "LoginStartParams",
         "type": "object"
       },
       "McpAddParams": {
@@ -2918,6 +4296,39 @@
           }
         ]
       },
+      "ModelDefaults": {
+        "description": "Model defaults by provider.",
+        "properties": {
+          "anthropic": {
+            "default": "claude-opus-4-7",
+            "type": "string"
+          },
+          "gemini": {
+            "default": "gemini-3-flash-preview",
+            "type": "string"
+          },
+          "openai": {
+            "default": "gpt-5.5",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ModelTier": {
+        "description": "Model recommendation tier.",
+        "oneOf": [
+          {
+            "const": "recommended",
+            "description": "Tested and recommended for production use with Meerkat.",
+            "type": "string"
+          },
+          {
+            "const": "supported",
+            "description": "Supported but not the primary recommendation.",
+            "type": "string"
+          }
+        ]
+      },
       "ModelsCatalogResponse": {
         "description": "Response for `models/catalog` — the compiled-in model catalog.",
         "properties": {
@@ -3089,6 +4500,7 @@
           "missing_target_policy",
           "created_at_utc"
         ],
+        "title": "Occurrence",
         "type": "object"
       },
       "OccurrenceFailureClass": {
@@ -3122,6 +4534,47 @@
         ],
         "type": "string"
       },
+      "OpenAiAuthMetadata": {
+        "description": "ChatGPT-specific claims lifted from the ID token per Codex\n`token_data.rs:71-160`.",
+        "properties": {
+          "account_id": {
+            "description": "`chatgpt_account_id` — used as the `ChatGPT-Account-ID` wire header.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "description": "Primary email address on the account.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_fedramp": {
+            "description": "`chatgpt_account_is_fedramp` — when true, emit `X-OpenAI-Fedramp`.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "plan_type": {
+            "description": "`chatgpt_plan_type` — e.g. \"free\", \"plus\", \"pro\", \"enterprise\".",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "user_id": {
+            "description": "`chatgpt_user_id`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "OpenAiImageMetadata": {
         "properties": {
           "image_generation_call_id": {
@@ -3143,6 +4596,20 @@
         "required": [
           "target_model"
         ],
+        "type": "object"
+      },
+      "OpenAiProviderToolsConfig": {
+        "description": "OpenAI provider-native tool defaults.",
+        "properties": {
+          "web_search": {
+            "default": true,
+            "description": "Enable web search for OpenAI models that support it.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "OpenAiRouteHints": {
         "type": "object"
       },
       "OutputSchema": {
@@ -3392,6 +4859,19 @@
       "PlainTextResponse": {
         "type": "string"
       },
+      "PresentationConfig": {
+        "description": "Presentation defaults for surface-owned renderings.",
+        "properties": {
+          "html": {
+            "$ref": "#/components/schemas/HtmlPresentationConfig",
+            "default": {
+              "default_template": "polished",
+              "templates": {}
+            }
+          }
+        },
+        "type": "object"
+      },
       "ProfileId": {
         "description": "Opaque slug identifying an auth profile override on a connection.",
         "type": "string"
@@ -3411,12 +4891,86 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
         ],
         "type": "string"
+      },
+      "ProviderAuthMetadata": {
+        "description": "Provider-tagged auth metadata. Content is opaque to `meerkat-core`.",
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/OpenAiAuthMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/AnthropicAuthMetadata",
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/GoogleAuthMetadata",
+            "properties": {
+              "provider": {
+                "const": "google",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "ProviderBindingConfig": {
+        "description": "Serialized binding (pre-normalization).",
+        "properties": {
+          "auth_profile": {
+            "type": "string"
+          },
+          "backend_profile": {
+            "type": "string"
+          },
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy": {
+            "$ref": "#/components/schemas/BindingPolicy",
+            "default": {
+              "allow_auth_override": false,
+              "require_metadata_account": false,
+              "require_metadata_workspace": false
+            }
+          }
+        },
+        "required": [
+          "backend_profile",
+          "auth_profile"
+        ],
+        "type": "object"
       },
       "ProviderCatalog": {
         "description": "Provider-level grouping in the catalog response.",
@@ -3486,6 +5040,60 @@
           }
         ]
       },
+      "ProviderToolsConfig": {
+        "description": "Per-provider defaults for provider-native tools (web search, etc.).\n\nThese defaults are resolved at factory build time and injected as\nnon-persisted `AgentConfig.provider_tool_defaults`. The `enabled` flags\nhere control whether the factory injects tool config for models whose\n`ModelProfile.supports_web_search` is `true`.",
+        "properties": {
+          "anthropic": {
+            "$ref": "#/components/schemas/AnthropicProviderToolsConfig",
+            "default": {
+              "web_search": true
+            }
+          },
+          "gemini": {
+            "$ref": "#/components/schemas/GeminiProviderToolsConfig",
+            "default": {
+              "google_search": true
+            }
+          },
+          "openai": {
+            "$ref": "#/components/schemas/OpenAiProviderToolsConfig",
+            "default": {
+              "web_search": true
+            }
+          }
+        },
+        "type": "object"
+      },
+      "RealmConfigSection": {
+        "description": "Ingestion wrapper for `[realm.<id>.*]` TOML tables.\n\nThe singular nouns `backend`/`auth`/`binding` match TOML dotted-key\nnotation (`[realm.dev.backend.openai_default]`) so that one `.backend.X`\ntable becomes one entry in the `backend` map.",
+        "properties": {
+          "auth": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/AuthProfileConfig"
+            },
+            "type": "object"
+          },
+          "backend": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/BackendProfileConfig"
+            },
+            "type": "object"
+          },
+          "binding": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProviderBindingConfig"
+            },
+            "type": "object"
+          },
+          "default_binding": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "RealmId": {
         "description": "Opaque slug identifying a realm.",
         "type": "string"
@@ -3542,12 +5150,19 @@
         "type": "string"
       },
       "RestAppendSystemContextRequest": {
+        "description": "Request body for `POST /sessions/{id}/system_context`.",
         "properties": {
           "idempotency_key": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "source": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "text": {
             "type": "string"
@@ -3556,113 +5171,145 @@
         "required": [
           "text"
         ],
-        "type": "object"
-      },
-      "RestAuthLoginStartRequest": {
-        "properties": {
-          "binding_id": {
-            "type": "string"
-          },
-          "profile_id": {
-            "type": "string"
-          },
-          "provider": {
-            "type": "string"
-          },
-          "realm_id": {
-            "type": "string"
-          },
-          "redirect_uri": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "provider",
-          "redirect_uri",
-          "realm_id",
-          "binding_id"
-        ],
-        "type": "object"
-      },
-      "RestAuthProfileCreateRequest": {
-        "additionalProperties": true,
-        "required": [
-          "realm_id",
-          "binding_id",
-          "auth_method"
-        ],
+        "title": "RestAppendSystemContextRequest",
         "type": "object"
       },
       "RestContinueSessionRequest": {
+        "description": "Request body for `POST /sessions/{id}/messages`.",
         "properties": {
           "additional_instructions": {
+            "description": "Additional instruction sections prepended as system notices to the prompt.",
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "comms_name": {
-            "type": "string"
+            "description": "Agent name for inter-agent communication. Required for keep_alive.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enable_web_search": {
+            "description": "Enable Meerkat-owned fallback web search. Omit to inherit.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "flow_tool_overlay": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "hooks_override": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "keep_alive": {
             "anyOf": [
               {
-                "type": "boolean"
+                "$ref": "#/components/schemas/TurnToolOverlay"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional per-turn flow tool overlay."
+          },
+          "hooks_override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HookRunOverrides"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional run-scoped hook overrides."
+          },
+          "keep_alive": {
+            "description": "Keep session alive after turn completes, listening for comms messages.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_schema": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OutputSchema"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "JSON schema for structured output extraction (wrapper or raw schema)."
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Friendly metadata for peer discovery."
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/ContentInput"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
               },
               {
                 "type": "null"
               }
             ]
           },
-          "max_tokens": {
-            "minimum": 0,
-            "type": "integer"
-          },
-          "model": {
-            "type": "string"
-          },
-          "output_schema": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "peer_meta": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "prompt": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "$ref": "#/components/schemas/WireContentInput"
-              }
-            ]
-          },
-          "provider": {
-            "type": "string"
-          },
           "session_id": {
             "type": "string"
           },
           "skill_refs": {
+            "description": "Structured refs for per-turn skill injection.",
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillRef"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "structured_output_retries": {
+            "description": "Max retries for structured output validation.",
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "verbose": {
+            "default": false,
+            "description": "Enable verbose event logging (server-side).",
             "type": "boolean"
           }
         },
@@ -3670,144 +5317,261 @@
           "session_id",
           "prompt"
         ],
+        "title": "RestContinueSessionRequest",
         "type": "object"
       },
       "RestCreateSessionRequest": {
+        "description": "Request body for `POST /sessions`.",
         "properties": {
           "additional_instructions": {
+            "description": "Additional instruction sections appended to the system prompt.",
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "app_context": {
-            "$ref": "#/components/schemas/JsonValue"
+            "description": "Opaque application context passed through to custom builders."
           },
           "budget_limits": {
-            "$ref": "#/components/schemas/JsonValue"
+            "description": "Explicit budget limits for this run."
           },
           "comms_name": {
-            "type": "string"
+            "description": "Agent name for inter-agent communication. Required for keep_alive.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "enable_builtins": {
-            "type": "boolean"
+            "description": "Enable built-in tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "enable_memory": {
-            "type": "boolean"
+            "description": "Enable semantic memory. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "enable_mob": {
-            "type": "boolean"
-          },
-          "enable_schedule": {
-            "type": "boolean"
+            "description": "Enable mob tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "enable_shell": {
-            "type": "boolean"
+            "description": "Enable shell tool. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "enable_web_search": {
+            "description": "Enable Meerkat-owned fallback web search. Omit to keep hidden.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "enable_workgraph": {
-            "type": "boolean"
+            "description": "Enable WorkGraph tools. Omit to use factory defaults.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           },
           "hooks_override": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "keep_alive": {
             "anyOf": [
               {
-                "type": "boolean"
+                "$ref": "#/components/schemas/HookRunOverrides"
               },
               {
                 "type": "null"
               }
+            ],
+            "description": "Optional run-scoped hook overrides."
+          },
+          "keep_alive": {
+            "description": "Keep session alive after turn completes, listening for comms messages.",
+            "type": [
+              "boolean",
+              "null"
             ]
           },
           "labels": {
             "additionalProperties": {
               "type": "string"
             },
-            "type": "object"
+            "description": "Optional key-value labels attached at session creation.",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "max_tokens": {
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "model": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "output_schema": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "peer_meta": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "preload_skills": {
-            "items": {
-              "$ref": "#/components/schemas/JsonValue"
-            },
-            "type": "array"
-          },
-          "prompt": {
-            "oneOf": [
+            "anyOf": [
               {
-                "type": "string"
+                "$ref": "#/components/schemas/OutputSchema"
               },
               {
-                "$ref": "#/components/schemas/WireContentInput"
+                "type": "null"
+              }
+            ],
+            "description": "JSON schema for structured output extraction (wrapper or raw schema)."
+          },
+          "peer_meta": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerMeta"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Friendly metadata for peer discovery."
+          },
+          "preload_skills": {
+            "description": "Skills to preload into the system prompt.",
+            "items": {
+              "$ref": "#/components/schemas/SkillKey"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/ContentInput"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Provider"
+              },
+              {
+                "type": "null"
               }
             ]
           },
-          "provider": {
-            "type": "string"
-          },
           "provider_params": {
-            "$ref": "#/components/schemas/JsonValue"
+            "description": "Provider-specific parameters (for example reasoning config)."
           },
           "shell_env": {
             "additionalProperties": {
               "type": "string"
             },
-            "type": "object"
+            "description": "Per-agent environment variables injected into shell tool subprocesses.",
+            "type": [
+              "object",
+              "null"
+            ]
           },
           "skill_refs": {
+            "description": "Structured refs for per-turn skill injection.",
             "items": {
-              "$ref": "#/components/schemas/JsonValue"
+              "$ref": "#/components/schemas/SkillRef"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "structured_output_retries": {
+            "description": "Max retries for structured output validation.",
+            "format": "uint32",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "system_prompt": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "verbose": {
+            "default": false,
+            "description": "Enable verbose event logging (server-side).",
             "type": "boolean"
           }
         },
         "required": [
           "prompt"
         ],
+        "title": "RestCreateSessionRequest",
         "type": "object"
       },
       "RestMobForkHelperRequest": {
+        "description": "Request body for `POST /mob/{id}/fork-helper`.",
         "properties": {
           "agent_identity": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backend": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "fork_context": {
-            "$ref": "#/components/schemas/JsonValue"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireForkContext"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "type": "string"
           },
           "role_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime_mode": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "source_member_id": {
             "type": "string"
@@ -3817,74 +5581,91 @@
           "source_member_id",
           "prompt"
         ],
+        "title": "RestMobForkHelperRequest",
         "type": "object"
       },
       "RestMobHelperRequest": {
+        "description": "Request body for `POST /mob/{id}/spawn-helper`.",
         "properties": {
           "agent_identity": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "backend": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobBackendKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "prompt": {
             "type": "string"
           },
           "role_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "runtime_mode": {
-            "type": "string"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireMobRuntimeMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
           "prompt"
         ],
+        "title": "RestMobHelperRequest",
         "type": "object"
       },
       "RestMobWaitRequest": {
+        "description": "Optional request body for `POST /mob/{id}/wait-kickoff`.",
         "properties": {
           "member_ids": {
             "items": {
               "type": "string"
             },
-            "type": "array"
+            "type": [
+              "array",
+              "null"
+            ]
           },
           "timeout_ms": {
+            "format": "uint64",
             "minimum": 0,
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
-        "required": [],
+        "title": "RestMobWaitRequest",
         "type": "object"
-      },
-      "RestPatchConfigRequest": {
-        "oneOf": [
-          {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          {
-            "properties": {
-              "expected_generation": {
-                "minimum": 0,
-                "type": "integer"
-              },
-              "patch": {
-                "$ref": "#/components/schemas/JsonValue"
-              }
-            },
-            "required": [
-              "patch"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "RestPeerResponseTerminalRequest": {
         "additionalProperties": false,
+        "description": "Request body for `POST /sessions/{id}/peer-response-terminal`.",
         "properties": {
           "display_name": {
-            "$ref": "#/components/schemas/PeerName"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PeerName"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "peer_id": {
             "$ref": "#/components/schemas/PeerId"
@@ -3892,9 +5673,7 @@
           "request_id": {
             "$ref": "#/components/schemas/PeerCorrelationId"
           },
-          "result": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
+          "result": true,
           "status": {
             "$ref": "#/components/schemas/PeerResponseTerminalStatusWire"
           }
@@ -3905,43 +5684,103 @@
           "status",
           "result"
         ],
+        "title": "RestPeerResponseTerminalRequest",
         "type": "object"
       },
-      "RestScheduleToolCallRequest": {
+      "RestServerConfig": {
+        "description": "REST server configuration sourced from config.",
         "properties": {
-          "arguments": {
-            "$ref": "#/components/schemas/JsonValue"
-          },
-          "name": {
+          "host": {
+            "default": "127.0.0.1",
             "type": "string"
+          },
+          "port": {
+            "default": 8080,
+            "format": "uint16",
+            "maximum": 65535,
+            "minimum": 0,
+            "type": "integer"
           }
         },
-        "required": [
-          "name"
-        ],
         "type": "object"
       },
-      "RestSetConfigRequest": {
+      "RestSessionExternalEventEnvelope": {
+        "description": "Request body for `POST /sessions/{id}/external-events`.",
         "oneOf": [
           {
-            "$ref": "#/components/schemas/JsonValue"
+            "properties": {
+              "blocks": {
+                "items": {
+                  "$ref": "#/components/schemas/WireContentBlock"
+                },
+                "type": [
+                  "array",
+                  "null"
+                ]
+              },
+              "event_type": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "generic_json",
+                "type": "string"
+              },
+              "payload": true
+            },
+            "required": [
+              "kind",
+              "event_type",
+              "payload"
+            ],
+            "type": "object"
           },
           {
             "properties": {
-              "config": {
-                "$ref": "#/components/schemas/JsonValue"
-              },
-              "expected_generation": {
-                "minimum": 0,
-                "type": "integer"
+              "kind": {
+                "const": "peer_response_terminal",
+                "type": "string"
               }
             },
             "required": [
-              "config"
+              "kind"
             ],
             "type": "object"
           }
-        ]
+        ],
+        "title": "RestSessionExternalEventEnvelope"
+      },
+      "RetryConfig": {
+        "description": "Retry configuration",
+        "properties": {
+          "call_timeout": {
+            "$ref": "#/components/schemas/CallTimeoutOverride",
+            "description": "Tri-state call-timeout override for per-LLM-call timeout policy.\n\n- `Inherit` (default / omitted): defer to profile-derived or build-override default\n- `Disabled`: explicitly disable call timeout\n- `Value(duration)`: explicitly set call timeout"
+          },
+          "initial_delay": {
+            "default": "500ms",
+            "description": "Initial delay before first retry (supports humantime format: \"500ms\", \"1s\")",
+            "type": "string"
+          },
+          "max_delay": {
+            "default": "30s",
+            "description": "Maximum delay between retries (supports humantime format: \"30s\", \"1m\")",
+            "type": "string"
+          },
+          "max_retries": {
+            "default": 3,
+            "description": "Maximum number of retry attempts",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "multiplier": {
+            "default": 2.0,
+            "description": "Multiplier for exponential backoff",
+            "format": "double",
+            "type": "number"
+          }
+        },
+        "type": "object"
       },
       "RevisedPromptDisposition": {
         "oneOf": [
@@ -4454,6 +6293,7 @@
           "created_at_utc",
           "updated_at_utc"
         ],
+        "title": "Schedule",
         "type": "object"
       },
       "ScheduleId": {
@@ -4497,6 +6337,418 @@
           "deleted"
         ],
         "type": "string"
+      },
+      "ScheduleToolCallParams": {
+        "oneOf": [
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/CreateScheduleRequest"
+              },
+              "name": {
+                "const": "meerkat_schedule_create",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolIdArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_get",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/EmptyScheduleToolArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_list",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolUpdateArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_update",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolIdArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_pause",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolIdArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_resume",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolIdArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_delete",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "arguments": {
+                "$ref": "#/components/schemas/ScheduleToolIdArguments"
+              },
+              "name": {
+                "const": "meerkat_schedule_occurrences",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "arguments"
+            ],
+            "type": "object"
+          }
+        ],
+        "title": "ScheduleToolCallParams"
+      },
+      "ScheduleToolCallResult": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/Schedule"
+          },
+          {
+            "$ref": "#/components/schemas/ScheduleListResult"
+          },
+          {
+            "$ref": "#/components/schemas/ScheduleOccurrencesResult"
+          }
+        ],
+        "title": "ScheduleToolCallResult"
+      },
+      "ScheduleToolDescriptor": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "inputSchema": true,
+          "name": {
+            "$ref": "#/components/schemas/ScheduleToolName"
+          }
+        },
+        "required": [
+          "name",
+          "description",
+          "inputSchema"
+        ],
+        "title": "ScheduleToolDescriptor",
+        "type": "object"
+      },
+      "ScheduleToolIdArguments": {
+        "additionalProperties": false,
+        "properties": {
+          "schedule_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "type": "object"
+      },
+      "ScheduleToolName": {
+        "enum": [
+          "meerkat_schedule_create",
+          "meerkat_schedule_get",
+          "meerkat_schedule_list",
+          "meerkat_schedule_update",
+          "meerkat_schedule_pause",
+          "meerkat_schedule_resume",
+          "meerkat_schedule_delete",
+          "meerkat_schedule_occurrences"
+        ],
+        "type": "string"
+      },
+      "ScheduleToolUpdateArguments": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "misfire_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MisfirePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing_target_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MissingTargetPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overlap_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OverlapPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "schedule_id": {
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TargetBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriggerSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "schedule_id"
+        ],
+        "type": "object"
+      },
+      "ScheduleToolsResult": {
+        "properties": {
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/ScheduleToolDescriptor"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "tools"
+        ],
+        "title": "ScheduleToolsResult",
+        "type": "object"
+      },
+      "ScheduleUpdateRequest": {
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_revision": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "misfire_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MisfirePolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "missing_target_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MissingTargetPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "overlap_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OverlapPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "planning_horizon_days": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "planning_horizon_occurrences": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "target": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TargetBinding"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "trigger": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TriggerSpec"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "UpdateScheduleRequest",
+        "type": "object"
       },
       "ScheduledMobAction": {
         "oneOf": [
@@ -4652,6 +6904,166 @@
           "message"
         ],
         "type": "object"
+      },
+      "SecurityMode": {
+        "description": "Security mode for tool execution (e.g. shell)",
+        "oneOf": [
+          {
+            "const": "unrestricted",
+            "description": "No restrictions. (Default)",
+            "type": "string"
+          },
+          {
+            "const": "allow_list",
+            "description": "Only allow commands matching specified patterns.",
+            "type": "string"
+          },
+          {
+            "const": "deny_list",
+            "description": "Block commands matching specified patterns.",
+            "type": "string"
+          }
+        ]
+      },
+      "SelfHostedApiStyle": {
+        "enum": [
+          "responses",
+          "chat_completions"
+        ],
+        "type": "string"
+      },
+      "SelfHostedConfig": {
+        "properties": {
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SelfHostedModelConfig"
+            },
+            "default": {},
+            "type": "object"
+          },
+          "servers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SelfHostedServerConfig"
+            },
+            "default": {},
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "SelfHostedModelConfig": {
+        "properties": {
+          "call_timeout_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "context_window": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "display_name": {
+            "default": "",
+            "type": "string"
+          },
+          "family": {
+            "default": "",
+            "type": "string"
+          },
+          "image_tool_results": {
+            "default": false,
+            "type": "boolean"
+          },
+          "inline_video": {
+            "default": false,
+            "type": "boolean"
+          },
+          "max_output_tokens": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "remote_model": {
+            "default": "",
+            "type": "string"
+          },
+          "server": {
+            "default": "",
+            "type": "string"
+          },
+          "supports_reasoning": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supports_temperature": {
+            "default": true,
+            "type": "boolean"
+          },
+          "supports_thinking": {
+            "default": false,
+            "type": "boolean"
+          },
+          "supports_web_search": {
+            "default": false,
+            "description": "Whether the model supports provider-native web search tools.",
+            "type": "boolean"
+          },
+          "tier": {
+            "$ref": "#/components/schemas/ModelTier",
+            "default": "supported"
+          },
+          "vision": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
+      "SelfHostedServerConfig": {
+        "properties": {
+          "api_style": {
+            "$ref": "#/components/schemas/SelfHostedApiStyle",
+            "default": "chat_completions"
+          },
+          "base_url": {
+            "default": "",
+            "type": "string"
+          },
+          "bearer_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "writeOnly": true
+          },
+          "bearer_token_env": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "transport": {
+            "$ref": "#/components/schemas/SelfHostedTransport",
+            "default": "open_ai_compatible"
+          }
+        },
+        "type": "object"
+      },
+      "SelfHostedTransport": {
+        "enum": [
+          "open_ai_compatible"
+        ],
+        "type": "string"
       },
       "SessionDetailsResponse": {
         "properties": {
@@ -4887,6 +7299,51 @@
           }
         ]
       },
+      "ShellDefaults": {
+        "description": "Shell defaults configured at the config layer.",
+        "properties": {
+          "program": {
+            "default": "nu",
+            "type": "string"
+          },
+          "security_mode": {
+            "$ref": "#/components/schemas/SecurityMode",
+            "default": "unrestricted",
+            "description": "Security mode: unrestricted, allow_list, deny_list"
+          },
+          "security_patterns": {
+            "default": [],
+            "description": "Patterns for allow/deny lists (glob format)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "timeout_secs": {
+            "default": 30,
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "SkillAlias": {
+        "description": "Alias mapping a short user-facing string to a canonical `SkillKey`.",
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "to": {
+            "$ref": "#/components/schemas/SkillKey"
+          }
+        },
+        "required": [
+          "alias",
+          "to"
+        ],
+        "type": "object"
+      },
       "SkillEntry": {
         "description": "Wire representation of a skill entry (for list responses).",
         "properties": {
@@ -4953,6 +7410,28 @@
         ],
         "type": "object"
       },
+      "SkillKeyRemap": {
+        "description": "Per-skill remap entry for lineage split/merge/rotate operations.",
+        "properties": {
+          "from": {
+            "$ref": "#/components/schemas/SkillKey"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "$ref": "#/components/schemas/SkillKey"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "type": "object"
+      },
       "SkillListResponse": {
         "description": "Wire response for listing skills with introspection data.",
         "properties": {
@@ -4970,7 +7449,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillQuarantineDiagnostic": {
@@ -4987,8 +7466,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "identity_hint": {
+            "type": "string"
+          },
           "key": {
-            "$ref": "#/components/schemas/SkillKey"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -5003,7 +7492,7 @@
           }
         },
         "required": [
-          "key",
+          "identity_hint",
           "location",
           "error_code",
           "error_class",
@@ -5030,6 +7519,187 @@
             "type": "object"
           }
         ]
+      },
+      "SkillRepositoryConfig": {
+        "description": "A named skill repository.",
+        "oneOf": [
+          {
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "type": {
+                "const": "filesystem",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "path"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "args": {
+                "default": [],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "command": {
+                "type": "string"
+              },
+              "cwd": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "env": {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "default": {},
+                "type": "object"
+              },
+              "timeout_seconds": {
+                "default": 15,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "stdio",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "auth_header": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "auth_token": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "refresh_seconds": {
+                "default": 300,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "timeout_seconds": {
+                "default": 15,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "http",
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "url"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "auth_token": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "depth": {
+                "default": 1,
+                "format": "uint",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "git_ref": {
+                "default": "main",
+                "type": "string"
+              },
+              "ref_type": {
+                "$ref": "#/components/schemas/GitRefType",
+                "default": "branch"
+              },
+              "refresh_seconds": {
+                "default": 300,
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "skills_root": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ssh_key": {
+                "default": null,
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "type": {
+                "const": "git",
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "url"
+            ],
+            "type": "object"
+          }
+        ],
+        "properties": {
+          "name": {
+            "description": "Human-readable name (used in browsing, tracing, shadowing logs).",
+            "type": "string"
+          },
+          "source_uuid": {
+            "$ref": "#/components/schemas/SourceUuid",
+            "description": "Stable UUID for source governance."
+          }
+        },
+        "required": [
+          "name",
+          "source_uuid"
+        ],
+        "type": "object"
       },
       "SkillRuntimeDiagnostics": {
         "description": "Runtime-visible diagnostics for skill health and quarantined entries.",
@@ -5076,6 +7746,85 @@
           "transport_kind",
           "fingerprint"
         ],
+        "type": "object"
+      },
+      "SkillsConfig": {
+        "description": "Complete skills configuration.",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "description": "Whether skills are enabled.",
+            "type": "boolean"
+          },
+          "health_thresholds": {
+            "$ref": "#/components/schemas/SourceHealthThresholds",
+            "default": {
+              "degraded_failure_streak": 3,
+              "degraded_invalid_ratio": 0.05000000074505806,
+              "unhealthy_failure_streak": 10,
+              "unhealthy_invalid_ratio": 0.4000000059604645
+            },
+            "description": "Health classification thresholds for source state transitions."
+          },
+          "identity": {
+            "$ref": "#/components/schemas/SkillsIdentityConfig",
+            "default": {
+              "aliases": [],
+              "lineage": [],
+              "remaps": []
+            },
+            "description": "Source identity governance overlays (lineage/remaps/aliases)."
+          },
+          "inventory_threshold": {
+            "default": 12,
+            "description": "Inventory mode threshold. When total skill count <= this value,\nthe system prompt uses flat skill listing. When > this value,\nit uses collection summary mode. Default: 12.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_injection_bytes": {
+            "default": 32768,
+            "description": "Maximum injection content size in bytes.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "repositories": {
+            "default": [],
+            "description": "Skill repository configurations (precedence = order).",
+            "items": {
+              "$ref": "#/components/schemas/SkillRepositoryConfig"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "SkillsIdentityConfig": {
+        "description": "Source identity governance controls.",
+        "properties": {
+          "aliases": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SkillAlias"
+            },
+            "type": "array"
+          },
+          "lineage": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SourceIdentityLineage"
+            },
+            "type": "array"
+          },
+          "remaps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/SkillKeyRemap"
+            },
+            "type": "array"
+          }
+        },
         "type": "object"
       },
       "SourceHealthSnapshot": {
@@ -5126,6 +7875,159 @@
         ],
         "type": "string"
       },
+      "SourceHealthThresholds": {
+        "description": "Thresholds for source health transitions.",
+        "properties": {
+          "degraded_failure_streak": {
+            "description": "Degrade when failure streak >= this value.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "degraded_invalid_ratio": {
+            "description": "Degrade when invalid_ratio >= this value.",
+            "format": "float",
+            "type": "number"
+          },
+          "unhealthy_failure_streak": {
+            "description": "Unhealthy when failure streak >= this value.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "unhealthy_invalid_ratio": {
+            "description": "Unhealthy when invalid_ratio >= this value.",
+            "format": "float",
+            "type": "number"
+          }
+        },
+        "required": [
+          "degraded_invalid_ratio",
+          "unhealthy_invalid_ratio",
+          "degraded_failure_streak",
+          "unhealthy_failure_streak"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityLineage": {
+        "description": "Lineage record carrying provenance metadata.",
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/SourceIdentityLineageEvent"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "recorded_at_unix_secs": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "required_from_skills": {
+            "items": {
+              "$ref": "#/components/schemas/SkillName"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "event_id",
+          "recorded_at_unix_secs",
+          "event"
+        ],
+        "type": "object"
+      },
+      "SourceIdentityLineageEvent": {
+        "description": "Lineage event for source identity governance.",
+        "oneOf": [
+          {
+            "properties": {
+              "event": {
+                "const": "rename_or_relocate",
+                "type": "string"
+              },
+              "from": {
+                "$ref": "#/components/schemas/SourceUuid"
+              },
+              "to": {
+                "$ref": "#/components/schemas/SourceUuid"
+              }
+            },
+            "required": [
+              "event",
+              "from",
+              "to"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "const": "rotate",
+                "type": "string"
+              },
+              "from": {
+                "$ref": "#/components/schemas/SourceUuid"
+              },
+              "to": {
+                "$ref": "#/components/schemas/SourceUuid"
+              }
+            },
+            "required": [
+              "event",
+              "from",
+              "to"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "const": "split",
+                "type": "string"
+              },
+              "from": {
+                "$ref": "#/components/schemas/SourceUuid"
+              },
+              "into": {
+                "items": {
+                  "$ref": "#/components/schemas/SourceUuid"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "event",
+              "from",
+              "into"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "event": {
+                "const": "merge",
+                "type": "string"
+              },
+              "from": {
+                "items": {
+                  "$ref": "#/components/schemas/SourceUuid"
+                },
+                "type": "array"
+              },
+              "to": {
+                "$ref": "#/components/schemas/SourceUuid"
+              }
+            },
+            "required": [
+              "event",
+              "from",
+              "to"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "SourceIdentityStatus": {
         "description": "Source lifecycle status in the identity registry.",
         "enum": [
@@ -5156,6 +8058,47 @@
       },
       "StatusResponse": {
         "additionalProperties": true,
+        "type": "object"
+      },
+      "StorageConfig": {
+        "description": "Storage configuration",
+        "properties": {
+          "directory": {
+            "description": "Directory for file-based storage",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "StoreConfig": {
+        "description": "Paths for session and task persistence.",
+        "properties": {
+          "database_dir": {
+            "default": null,
+            "description": "Directory for the realm-scoped session database (server surfaces).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sessions_path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tasks_path": {
+            "default": null,
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
         "type": "object"
       },
       "SystemNoticeBlock": {
@@ -5773,6 +8716,70 @@
         "type": "array",
         "uniqueItems": true
       },
+      "ToolsConfig": {
+        "description": "Tools configuration",
+        "properties": {
+          "builtins_enabled": {
+            "default": false,
+            "description": "Builtin tools enabled",
+            "type": "boolean"
+          },
+          "comms_enabled": {
+            "default": false,
+            "description": "Comms tools enabled",
+            "type": "boolean"
+          },
+          "default_timeout": {
+            "default": "10m",
+            "description": "Default timeout for tool execution (supports humantime format: \"30s\", \"1m\")",
+            "type": "string"
+          },
+          "max_concurrent": {
+            "default": 10,
+            "description": "Maximum concurrent tool executions",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "mcp_servers": {
+            "default": [],
+            "description": "MCP server configurations",
+            "items": {
+              "$ref": "#/components/schemas/McpServerConfig"
+            },
+            "type": "array"
+          },
+          "mob_enabled": {
+            "default": false,
+            "description": "Mob (multi-agent orchestration) tools enabled",
+            "type": "boolean"
+          },
+          "schedule_enabled": {
+            "default": true,
+            "description": "Scheduler tools enabled",
+            "type": "boolean"
+          },
+          "shell_enabled": {
+            "default": false,
+            "description": "Shell tools enabled",
+            "type": "boolean"
+          },
+          "tool_timeouts": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "description": "Per-tool timeout overrides (supports humantime format: \"30s\", \"1m\")",
+            "type": "object"
+          },
+          "workgraph_enabled": {
+            "default": false,
+            "description": "WorkGraph tools enabled",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "TriggerSpec": {
         "oneOf": [
           {
@@ -5837,6 +8844,34 @@
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "TurnToolOverlay": {
+        "description": "Ephemeral per-turn tool overlay for flow-dispatched turns.",
+        "properties": {
+          "allowed_tools": {
+            "default": null,
+            "description": "Optional allow-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "blocked_tools": {
+            "default": null,
+            "description": "Optional deny-list for this turn.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
       },
       "WireAssistantBlock": {
         "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
@@ -6679,6 +9714,41 @@
         "title": "WireError",
         "type": "object"
       },
+      "WireForkContext": {
+        "description": "Conversation history scope used when forking a mob member.",
+        "oneOf": [
+          {
+            "properties": {
+              "type": {
+                "const": "full_history",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "count": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": {
+                "const": "last_messages",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "count"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WireLoginReady": {
         "description": "`POST /auth/login/complete` / ready leg of device-code success body.\n\nThe optional `state` field distinguishes the flat `POST\n/auth/login/complete` response (no `state` set) from the device-code\nready leg (`state = \"ready\"`) which is part of the pending/slow_down/\naccess_denied/expired/ready tagged protocol.",
         "properties": {
@@ -6755,6 +9825,20 @@
         ],
         "title": "WireLoginStart",
         "type": "object"
+      },
+      "WireMobBackendKind": {
+        "enum": [
+          "session",
+          "external"
+        ],
+        "type": "string"
+      },
+      "WireMobRuntimeMode": {
+        "enum": [
+          "autonomous_host",
+          "turn_driven"
+        ],
+        "type": "string"
       },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
@@ -8325,7 +11409,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestAuthLoginStartRequest"
+                "$ref": "#/components/schemas/LoginStartParams"
               }
             }
           },
@@ -8389,7 +11473,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestAuthProfileCreateRequest"
+                "$ref": "#/components/schemas/CreateProfileParams"
               }
             }
           },
@@ -8547,7 +11631,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestPatchConfigRequest"
+                "$ref": "#/components/schemas/ConfigPatchParams"
               }
             }
           },
@@ -8583,7 +11667,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestSetConfigRequest"
+                "$ref": "#/components/schemas/ConfigSetParams"
               }
             }
           },
@@ -9224,7 +12308,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/RestScheduleToolCallRequest"
+                "$ref": "#/components/schemas/ScheduleToolCallParams"
               }
             }
           },
@@ -9235,7 +12319,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ScheduleToolCallResult"
                 }
               }
             },
@@ -9263,7 +12347,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/ScheduleToolsResult"
                 }
               }
             },
@@ -9316,7 +12400,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/CreateScheduleRequest"
               }
             }
           },
@@ -9327,7 +12411,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9365,7 +12449,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9401,7 +12485,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9436,7 +12520,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/ScheduleUpdateRequest"
               }
             }
           },
@@ -9447,7 +12531,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9523,7 +12607,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9561,7 +12645,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JsonValue"
+                  "$ref": "#/components/schemas/Schedule"
                 }
               }
             },
@@ -9774,7 +12858,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/JsonValue"
+                "$ref": "#/components/schemas/RestSessionExternalEventEnvelope"
               }
             }
           },

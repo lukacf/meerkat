@@ -1,4 +1,5 @@
 import { EventSubscription } from './events.js';
+import { STREAM_LAGGED_EVENT_TYPE } from './generated/events.js';
 import type {
   AuthBindingRef,
   ContentInput,
@@ -29,13 +30,16 @@ import type {
 } from './types.js';
 import type {
   MobAppendSystemContextResult as WireMobAppendSystemContextResult,
+  MobEventsResult as WireMobEventsResult,
   MobFlowStatusResult as WireMobFlowStatusResult,
   MobHelperResult as WireMobHelperResult,
   MobMemberSendResult as WireMobMemberSendResult,
   MobMemberStatusResult as WireMobMemberStatusResult,
   MobRespawnResult as WireMobRespawnResult,
   MobStatusResult as WireMobStatusResult,
+  WireMemberState,
   WireMobMemberStatus,
+  WireMobRuntimeMode,
 } from './generated/mob.js';
 
 // WASM function signatures (bound at construction)
@@ -287,6 +291,30 @@ function parseWireMobMemberStatus(raw: unknown, message: string): WireMobMemberS
   throw new Error(message);
 }
 
+const WIRE_MOB_RUNTIME_MODES: readonly WireMobRuntimeMode[] = [
+  'autonomous_host',
+  'turn_driven',
+];
+
+function parseWireMobRuntimeMode(raw: unknown, message: string): WireMobRuntimeMode {
+  if (
+    typeof raw === 'string' &&
+    WIRE_MOB_RUNTIME_MODES.includes(raw as WireMobRuntimeMode)
+  ) {
+    return raw as WireMobRuntimeMode;
+  }
+  throw new Error(message);
+}
+
+const WIRE_MEMBER_STATES: readonly WireMemberState[] = ['active', 'retiring'];
+
+function parseWireMemberState(raw: unknown, message: string): WireMemberState {
+  if (typeof raw === 'string' && WIRE_MEMBER_STATES.includes(raw as WireMemberState)) {
+    return raw as WireMemberState;
+  }
+  throw new Error(message);
+}
+
 const WIRE_HANDLING_MODES: readonly HandlingMode[] = ['queue', 'steer'];
 
 function parseWireHandlingMode(raw: unknown, message: string): HandlingMode {
@@ -404,7 +432,7 @@ function parseSubscriptionLaggedEvent(
   context: string,
 ): SubscriptionLaggedEvent {
   return {
-    type: 'lagged',
+    type: STREAM_LAGGED_EVENT_TYPE,
     skipped: requireNumberField(record, 'skipped', `${context}: lagged skipped must be number`),
   };
 }
@@ -515,7 +543,7 @@ function parseEventEnvelope(raw: unknown, context: string): EventEnvelope {
 
 function parseMemberEventItem(raw: unknown, context: string): MemberEventItem {
   const record = requireRecord(raw, `${context}: malformed event item`);
-  if (record.type === 'lagged') {
+  if (record.type === STREAM_LAGGED_EVENT_TYPE) {
     return parseSubscriptionLaggedEvent(record, context);
   }
   return parseEventEnvelope(record, context);
@@ -534,7 +562,7 @@ function parseAttributedSource(raw: unknown, context: string): AgentRuntimeId {
 
 function parseAttributedEventItem(raw: unknown, context: string): AttributedEventItem {
   const record = requireRecord(raw, `${context}: malformed attributed event`);
-  if (record.type === 'lagged') {
+  if (record.type === STREAM_LAGGED_EVENT_TYPE) {
     return parseSubscriptionLaggedEvent(record, context);
   }
   const source = parseAttributedSource(record.source, context);
@@ -567,16 +595,24 @@ function parseEventItems<T>(
 
 function parseMobEvent(raw: unknown, context: string): MobEvent {
   const record = requireRecord(raw, `${context}: malformed mob event`);
+  const kind = requireRecord(record.kind, `${context}: missing kind`);
+  if (typeof kind.type !== 'string' || kind.type.length === 0) {
+    throw new Error(`${context}: mob event kind missing type`);
+  }
   return {
     cursor: requireNumberField(record, 'cursor', `${context}: cursor must be number`),
     timestamp: requireStringField(record, 'timestamp', `${context}: missing timestamp`),
     mob_id: requireStringField(record, 'mob_id', `${context}: missing mob_id`),
-    kind: requireRecord(record.kind, `${context}: missing kind`),
+    kind: kind as unknown as MobEvent['kind'],
   };
 }
 
 function parseMobEvents(raw: unknown): MobEvent[] {
-  return parseEventItems(raw, 'Invalid mob/events response', parseMobEvent);
+  const record = requireRecord(raw, 'Invalid mob/events response: malformed envelope') as Partial<
+    WireMobEventsResult
+  > &
+    Record<string, unknown>;
+  return parseEventItems(record.events, 'Invalid mob/events response', parseMobEvent);
 }
 
 function parseMobMemberSnapshot(raw: unknown): MobMemberSnapshot {
@@ -672,7 +708,7 @@ function parseMobRespawnResult(raw: unknown): MobRespawnResult {
   return {
     status,
     receipt: {
-      agent_identity: identity,
+      identity,
       member_ref: memberRef,
     },
     failed_peer_ids: optionalStringArrayField(
@@ -709,6 +745,7 @@ function parseMemberDeliveryReceipt(
     throw new Error('Invalid mob member delivery response: agent_identity mismatch');
   }
   return {
+    mob_id: mobId,
     agent_identity: agentIdentity,
     member_ref: requireStringField(
       receipt,
@@ -756,11 +793,9 @@ function parseMobFlowStatusResult(raw: unknown): FlowStatus | null {
     return null;
   }
   const run = requireRecord(record.run, `${context}: run must be object`);
-  return {
-    ...run,
-    run_id: requireStringField(run, 'run_id', `${context}: run missing run_id`),
-    status: requireStringField(run, 'status', `${context}: run missing status`),
-  };
+  requireStringField(run, 'run_id', `${context}: run missing run_id`);
+  requireStringField(run, 'status', `${context}: run missing status`);
+  return run as unknown as FlowStatus;
 }
 
 /** Capability-bearing handle for one mob member. */
@@ -901,9 +936,22 @@ export class Mob {
       if (!profile) {
         throw new Error('Invalid mob list_members entry: missing profile');
       }
+      const runtimeMode = parseWireMobRuntimeMode(
+        member.runtime_mode,
+        'Invalid mob list_members entry: missing runtime_mode',
+      );
+      const state = parseWireMemberState(
+        member.state,
+        'Invalid mob list_members entry: missing state',
+      );
+      const status = parseWireMobMemberStatus(
+        member.status,
+        'Invalid mob list_members entry: missing status',
+      );
       return {
         agent_identity: agentIdentity,
         member_ref: memberRef,
+        role: profile,
         profile,
         peer_id: member.peer_id != null ? String(member.peer_id) : undefined,
         external_peer_specs:
@@ -914,8 +962,8 @@ export class Mob {
                 ),
               )
             : undefined,
-        runtime_mode: member.runtime_mode != null ? String(member.runtime_mode) : undefined,
-        state: member.state != null ? String(member.state) : undefined,
+        runtime_mode: runtimeMode,
+        state,
         wired_to: Array.isArray(member.wired_to)
           ? member.wired_to.map((peer) => String(peer))
           : undefined,
@@ -925,9 +973,13 @@ export class Mob {
                 Object.entries(member.labels as Record<string, unknown>).map(([key, value]) => [key, String(value)]),
               )
             : undefined,
-        status: member.status != null ? String(member.status) : undefined,
+        status,
         error: member.error != null ? String(member.error) : undefined,
-        is_final: member.is_final != null ? Boolean(member.is_final) : undefined,
+        is_final: requireBooleanField(
+          member,
+          'is_final',
+          'Invalid mob list_members entry: missing is_final',
+        ),
         kickoff:
           member.kickoff && typeof member.kickoff === 'object'
             ? (member.kickoff as Record<string, unknown>)

@@ -16,12 +16,14 @@ pub struct CodeAnchor {
     pub id: String,
     pub path: String,
     pub note: String,
+    pub covers_semantics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioCoverage {
     pub id: String,
     pub summary: String,
+    pub covers_semantics: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +58,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         machine_manifest_from_schema(
             &dsl_meerkat_machine(),
             &[
-                anchor(
+                anchor_all(
                     "meerkat_machine",
                     "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "authoritative MeerkatMachine command dispatch and state ownership for initialize, recover initializing, register, unregister, reconfigure, stage filters and tools, prepare bindings, drain, interrupt, cancel boundary, cancellation, abort, wait, ingest, publish event, accept input, recover input lifecycle, classify envelope, append/context starts, run preparation, primitive applied conversation/immediate, enter extraction, extraction validation passed/failed retry/exhausted, recoverable/fatal failure, retry requested, budget exhausted, steer accepted, increment attempt count, rollback staged, consume on accept, commit, fail, pending/call/finalize tool surface, retire/retired, reset, stop/stopped executor, destroy/destroyed, ensure executor, runtime notice, silent intents, recycle, realtime binding, MCP server, interaction stream, product turn, live topology, ingress, supervisor, trust reconcile, ops barrier, local endpoint, admission, completion, compaction, submit op event, progress reported op, terminate op, notify op watcher, collect/enqueue, terminal records, model routing status, set model routing baseline, finite switch turn, until changed switch turn, assistant turn admission, image operation begin activate complete restore, routing approval, routing denial, scoped override, sync visibility revisions, and persistent reconfigure",
@@ -73,7 +75,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "bind-run-boundary-terminal",
                     "runtime binds, runs work, applies a boundary, and reports a terminal outcome",
                 ),
@@ -135,14 +137,14 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "meerkat-mob/src/runtime/handle.rs",
                     "identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing",
                 ),
-                anchor(
+                anchor_all(
                     "mob_actor_authority",
                     "meerkat-mob/src/runtime/actor.rs",
                     "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding",
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "spawn-work-terminal",
                     "member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure",
                 ),
@@ -174,13 +176,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         ),
         machine_manifest_from_schema(
             &dsl_schedule_lifecycle_machine(),
-            &[anchor(
+            &[anchor_all(
                 "schedule_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
                 "Schedule::apply domain-facing lifecycle transition seam over create, revise, planning window, pause, resume, delete, supersede pending occurrences, revision, and planning cursor rules",
             )],
             &[
-                scenario(
+                scenario_all(
                     "schedule_pause_resume_delete",
                     "schedule transitions through create, pause, resume, and delete while advancing revision",
                 ),
@@ -192,13 +194,13 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         ),
         machine_manifest_from_schema(
             &dsl_occurrence_lifecycle_machine(),
-            &[anchor(
+            &[anchor_all(
                 "occurrence_lifecycle",
                 "meerkat-schedule/src/lifecycle.rs",
                 "Occurrence::apply domain-facing lifecycle transition seam over claim, claimed, dispatch, await completion, complete, completed, skip, skipped, misfire, misfired, supersede, superseded, delivery failure, lease expiry, live owner, revision, and failure classification",
             )],
             &[
-                scenario(
+                scenario_all(
                     "occurrence_start_complete_fail",
                     "occurrence transitions through pending, running, and terminal lifecycle states",
                 ),
@@ -219,7 +221,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         machine_manifest_from_schema(
             &dsl_auth_machine(),
             &[
-                anchor(
+                anchor_all(
                     "auth_lease_handle",
                     "meerkat-runtime/src/handles/auth_lease.rs",
                     "per-binding AuthMachine registry; AuthLeaseHandle trait impl drives acquire, expiring, refresh, reauth, release, lifecycle event, and wake loop DSL transitions through it",
@@ -231,7 +233,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "acquire_expire_refresh_complete",
                     "lease transitions through valid, expiring, refreshing, and back to valid on successful refresh",
                 ),
@@ -251,27 +253,81 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
         ),
         machine_manifest_from_schema(
             &dsl_workgraph_lifecycle_machine(),
-            &[anchor(
+            &[anchor_all(
                 "workgraph_lifecycle",
                 "meerkat-workgraph/src/machine.rs",
-                "WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, and topology legality",
+                "WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, topology_snapshot_is_stateless, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, and topology legality",
             )],
             &[
-                scenario(
+                scenario_with_semantics(
                     "workgraph_create_update_ready_claim",
                     "CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, and CAS revision",
+                    &[
+                        "CreateOpen",
+                        "CreateBlocked",
+                        "UpdateOpen",
+                        "UpdateInProgress",
+                        "UpdateBlocked",
+                        "RefreshEligibilityOpen",
+                        "RefreshEligibilityInProgress",
+                        "RefreshEligibilityBlocked",
+                        "ClaimOpen",
+                        "ClaimExpiredInProgress",
+                        "Created",
+                        "Updated",
+                        "Claimed",
+                        "live_has_positive_revision",
+                    ],
                 ),
-                scenario(
+                scenario_with_semantics(
                     "workgraph_claim_release_recovery",
                     "only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim",
+                    &[
+                        "ReleaseInProgress",
+                        "Released",
+                        "claim_only_in_progress",
+                        "blocked_has_no_claim",
+                        "terminal_has_no_claim",
+                    ],
                 ),
-                scenario(
+                scenario_with_semantics(
                     "workgraph_block_close_evidence",
                     "BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time",
+                    &[
+                        "BlockOpen",
+                        "BlockInProgress",
+                        "BlockBlocked",
+                        "CloseOpenCompleted",
+                        "CloseInProgressCompleted",
+                        "CloseBlockedCompleted",
+                        "CloseOpenCancelled",
+                        "CloseInProgressCancelled",
+                        "CloseBlockedCancelled",
+                        "CloseOpenFailed",
+                        "CloseInProgressFailed",
+                        "CloseBlockedFailed",
+                        "AddEvidenceOpen",
+                        "AddEvidenceInProgress",
+                        "AddEvidenceBlocked",
+                        "AddEvidenceCompleted",
+                        "AddEvidenceCancelled",
+                        "AddEvidenceFailed",
+                        "Blocked",
+                        "Closed",
+                        "EvidenceAdded",
+                        "absent_has_zero_revision",
+                        "live_has_positive_revision",
+                        "terminal_has_terminal_time",
+                    ],
                 ),
-                scenario(
+                scenario_with_semantics(
                     "workgraph_topology_legality",
-                    "ValidateLink and LinkValidated reject missing endpoints, self edges, duplicate edges, and dependency cycles without adding a separate topology machine",
+                    "ValidateLink, LinkValidated, and topology_snapshot_is_stateless reject missing endpoints, self edges, duplicate edges, and dependency cycles without adding a separate topology machine",
+                    &[
+                        "ValidateLink",
+                        "LinkValidated",
+                        "topology_snapshot_is_stateless",
+                    ],
                 ),
             ],
         ),
@@ -283,7 +339,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
         composition_manifest_from_schema(
             &meerkat_mob_seam_composition(),
             &[
-                anchor(
+                anchor_all(
                     "mob_meerkat_seam",
                     "meerkat-mob/src/runtime/actor.rs",
                     "MobMachine to MeerkatMachine seam realization for binding requests, work submission, cancellation, lifecycle notices, terminal outcomes, and peer ingress",
@@ -293,9 +349,39 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "meerkat-runtime/src/meerkat_machine/mod.rs",
                     "MeerkatMachine command authority consuming runtime binding, admitted work, cancellation, lifecycle, terminal, and peer ingress seam traffic",
                 ),
+                anchor(
+                    "ops_barrier_satisfaction_protocol_covered",
+                    "meerkat-core/src/generated/protocol_ops_barrier_satisfaction.rs",
+                    "generated ops barrier satisfaction handoff helper covered by the canonical seam",
+                ),
+                anchor(
+                    "surface_completion_protocol_covered",
+                    "meerkat-mcp/src/generated/protocol_surface_completion.rs",
+                    "generated surface completion handoff helper covered by the canonical seam",
+                ),
+                anchor(
+                    "surface_snapshot_alignment_protocol_covered",
+                    "meerkat-mcp/src/generated/protocol_surface_snapshot_alignment.rs",
+                    "generated surface snapshot alignment handoff helper covered by the canonical seam",
+                ),
+                anchor(
+                    "supervisor_trust_publish_protocol_covered",
+                    "meerkat-runtime/src/generated/protocol_supervisor_trust_publish.rs",
+                    "generated supervisor trust publish handoff helper covered by the canonical seam",
+                ),
+                anchor(
+                    "supervisor_trust_revoke_protocol_covered",
+                    "meerkat-runtime/src/generated/protocol_supervisor_trust_revoke.rs",
+                    "generated supervisor trust revoke handoff helper covered by the canonical seam",
+                ),
+                anchor(
+                    "mob_destroying_session_ingress_protocol_covered",
+                    "meerkat-mob/src/generated/protocol_mob_destroying_session_ingress.rs",
+                    "generated mob destroy session ingress handoff helper covered by the canonical seam",
+                ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "binding_round_trip",
                     "mob runtime binding request becomes a Meerkat binding and feeds readiness back to Mob",
                 ),
@@ -306,6 +392,30 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 scenario(
                     "peer-ingress-and-cancellation",
                     "peer input admission and cancellation requests cross the MobMachine to MeerkatMachine seam with explicit lifecycle notice feedback",
+                ),
+                scenario(
+                    "ops_barrier_satisfaction_protocol_covered",
+                    "ops barrier satisfaction closes through the generated handoff protocol",
+                ),
+                scenario(
+                    "surface_completion_protocol_covered",
+                    "surface completion closes through the generated handoff protocol",
+                ),
+                scenario(
+                    "surface_snapshot_alignment_protocol_covered",
+                    "surface snapshot alignment closes through the generated handoff protocol",
+                ),
+                scenario(
+                    "supervisor_trust_publish_protocol_covered",
+                    "supervisor trust publish closes through the generated handoff protocol",
+                ),
+                scenario(
+                    "supervisor_trust_revoke_protocol_covered",
+                    "supervisor trust revoke closes through the generated handoff protocol",
+                ),
+                scenario(
+                    "mob_destroying_session_ingress_protocol_covered",
+                    "mob destroy session ingress closes through the generated handoff protocol",
                 ),
             ],
         ),
@@ -322,14 +432,14 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "meerkat-schedule/src/store.rs",
                     "schedule store contract precursor for transactional claim, supersede persistence, occurrence progress, and revision-aware planning cursor updates",
                 ),
-                anchor(
+                anchor_all(
                     "schedule_bundle_schema",
                     "meerkat-machine-schema/src/catalog/compositions.rs",
                     "formal schedule bundle composition",
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "revision-supersede-route",
                     "revision-affecting schedule updates supersede pending future occurrences through the explicit route",
                 ),
@@ -346,7 +456,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
         composition_manifest_from_schema(
             &schedule_runtime_bundle_composition(),
             &[
-                anchor(
+                anchor_all(
                     "schedule_driver",
                     "meerkat-schedule/src/driver.rs",
                     "mechanical scheduler driver precursor for runtime-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback",
@@ -363,7 +473,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "runtime-delivery-feedback",
                     "DispatchToRuntime is realized by runtime-owned delivery and closed by typed completion feedback",
                 ),
@@ -380,7 +490,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
         composition_manifest_from_schema(
             &schedule_mob_bundle_composition(),
             &[
-                anchor(
+                anchor_all(
                     "schedule_driver",
                     "meerkat-schedule/src/driver.rs",
                     "mechanical scheduler driver precursor for mob-target claim, revision supersede, handoff, lease expiry, delivery failure, and completion feedback",
@@ -397,7 +507,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                 ),
             ],
             &[
-                scenario(
+                scenario_all(
                     "mob-delivery-feedback",
                     "DispatchToMob is realized by mob-owned delivery and closed by typed completion feedback",
                 ),
@@ -414,7 +524,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
         composition_manifest_from_schema(
             &auth_lease_bundle_composition(),
             &[
-                anchor(
+                anchor_all(
                     "auth_lease_handle",
                     "meerkat-runtime/src/handles/auth_lease.rs",
                     "runtime auth lease owner consumes canonical AuthMachine lifecycle acquire, refresh, reauth, release, wake, and publication events",
@@ -425,7 +535,7 @@ pub fn canonical_composition_coverage_manifests() -> Vec<CompositionCoverageMani
                     "formal AuthMachine lifecycle publication handoff composition",
                 ),
             ],
-            &[scenario(
+            &[scenario_all(
                 "auth-lease-lifecycle-publication",
                 "AuthMachine acquire, refresh, reauth, release, wake, and lifecycle transitions publish through the explicit auth lease handoff protocol",
             )],
@@ -517,7 +627,7 @@ fn semantic_anchor_ids(name: &str, anchors: &[CodeAnchor]) -> Vec<String> {
         name,
         anchors,
         |anchor| anchor.id.as_str(),
-        |anchor| anchor.note.as_str(),
+        |anchor| anchor.covers_semantics.as_slice(),
     )
 }
 
@@ -526,7 +636,7 @@ fn semantic_scenario_ids(name: &str, scenarios: &[ScenarioCoverage]) -> Vec<Stri
         name,
         scenarios,
         |scenario| scenario.id.as_str(),
-        |scenario| scenario.summary.as_str(),
+        |scenario| scenario.covers_semantics.as_slice(),
     )
 }
 
@@ -534,73 +644,59 @@ fn semantic_ids<T>(
     name: &str,
     items: &[T],
     id: impl Fn(&T) -> &str,
-    description: impl Fn(&T) -> &str,
+    covers_semantics: impl Fn(&T) -> &[String],
 ) -> Vec<String> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-
-    let tokens = semantic_tokens(name);
-    let scored = items
+    items
         .iter()
-        .map(|item| {
-            let haystack = format!("{} {}", id(item), description(item)).to_ascii_lowercase();
-            let score = tokens
+        .filter(|item| {
+            covers_semantics(item)
                 .iter()
-                .filter(|token| haystack.contains(token.as_str()))
-                .count();
-            (item, score)
+                .any(|covered| covered == "*" || covered == name)
         })
-        .collect::<Vec<_>>();
-    let max_score = scored.iter().map(|(_, score)| *score).max().unwrap_or(0);
-    if max_score == 0 {
-        return Vec::new();
-    }
-
-    scored
-        .into_iter()
-        .filter(|(_, score)| *score == max_score)
-        .map(|(item, _)| id(item).to_owned())
+        .map(|item| id(item).to_owned())
         .collect::<Vec<_>>()
 }
 
-fn semantic_tokens(name: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    let mut previous_lower = false;
-    for ch in name.chars() {
-        if ch == '_' || ch == '-' || ch == ' ' || ch == '(' || ch == ')' || ch == ',' {
-            if current.len() >= 3 {
-                tokens.push(current.to_ascii_lowercase());
-            }
-            current.clear();
-            previous_lower = false;
-            continue;
-        }
-        if ch.is_ascii_uppercase() && previous_lower && current.len() >= 3 {
-            tokens.push(current.to_ascii_lowercase());
-            current.clear();
-        }
-        previous_lower = ch.is_ascii_lowercase();
-        current.push(ch);
-    }
-    if current.len() >= 3 {
-        tokens.push(current.to_ascii_lowercase());
-    }
-    tokens
+fn anchor(id: &str, path: &str, note: &str) -> CodeAnchor {
+    anchor_with_semantics(id, path, note, &[])
 }
 
-fn anchor(id: &str, path: &str, note: &str) -> CodeAnchor {
+fn anchor_all(id: &str, path: &str, note: &str) -> CodeAnchor {
+    anchor_with_semantics(id, path, note, &["*"])
+}
+
+fn anchor_with_semantics(
+    id: &str,
+    path: &str,
+    note: &str,
+    covers_semantics: &[&str],
+) -> CodeAnchor {
     CodeAnchor {
         id: id.into(),
         path: path.into(),
         note: note.into(),
+        covers_semantics: covers_semantics
+            .iter()
+            .map(|semantic| (*semantic).to_owned())
+            .collect(),
     }
 }
 
 fn scenario(id: &str, summary: &str) -> ScenarioCoverage {
+    scenario_with_semantics(id, summary, &[])
+}
+
+fn scenario_all(id: &str, summary: &str) -> ScenarioCoverage {
+    scenario_with_semantics(id, summary, &["*"])
+}
+
+fn scenario_with_semantics(id: &str, summary: &str, covers_semantics: &[&str]) -> ScenarioCoverage {
     ScenarioCoverage {
         id: id.into(),
         summary: summary.into(),
+        covers_semantics: covers_semantics
+            .iter()
+            .map(|semantic| (*semantic).to_owned())
+            .collect(),
     }
 }

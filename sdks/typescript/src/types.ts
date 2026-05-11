@@ -5,7 +5,26 @@
  */
 
 import type {
-  CommsChecksumTokenParams as WireCommsChecksumTokenParams,
+  BridgeBootstrapToken as WireBridgeBootstrapToken,
+  BridgeCommand as WireBridgeCommand,
+  BridgeCommandAuthorizeSupervisor as WireBridgeCommandAuthorizeSupervisor,
+  BridgeCommandBindMember as WireBridgeCommandBindMember,
+  BridgeCommandDeliverMemberInput as WireBridgeCommandDeliverMemberInput,
+  BridgeCommandDestroyMember as WireBridgeCommandDestroyMember,
+  BridgeCommandHardCancelMember as WireBridgeCommandHardCancelMember,
+  BridgeCommandInterruptMember as WireBridgeCommandInterruptMember,
+  BridgeCommandObserveMember as WireBridgeCommandObserveMember,
+  BridgeCommandRetireMember as WireBridgeCommandRetireMember,
+  BridgeCommandRevokeSupervisor as WireBridgeCommandRevokeSupervisor,
+  BridgeCommandUnwireMember as WireBridgeCommandUnwireMember,
+  BridgeCommandWireMember as WireBridgeCommandWireMember,
+  BridgePeerSpec as WireBridgePeerSpec,
+  BridgeProtocolVersion as WireBridgeProtocolVersion,
+  CommsCommandRequest as WireCommsCommandRequest,
+  CommsPeersResult as WireCommsPeersResult,
+  CommsSendResult as WireCommsSendResult,
+  WireMobEvent,
+  WireMobRun,
   MobBackendConfigInput,
   MobEventRouterConfigInput,
   MobFlowSpecInput,
@@ -17,6 +36,10 @@ import type {
   MobToolConfigInput,
   MobTopologySpecInput,
   MobTurnStartParams,
+  ScheduleToolCallParams as WireScheduleToolCallParams,
+  ScheduleToolCallResult as WireScheduleToolCallResult,
+  ScheduleToolDescriptor as WireScheduleToolDescriptor,
+  ScheduleToolsResult as WireScheduleToolsResult,
   MobWiringRulesInput,
   WireBudgetSplitPolicy,
   WireAuthBindingRef,
@@ -28,6 +51,7 @@ import type {
   WireRuntimeBinding,
   WireToolAccessPolicy,
   WireToolFilter,
+  WireTranscriptReplacement,
 } from "./generated/types.js";
 import type { TurnTerminalCauseKind, Usage } from "./events.js";
 
@@ -261,40 +285,25 @@ export interface TranscriptEditOptions {
   readonly runningBehavior?: TranscriptEditRunningBehavior;
 }
 
-/** Canonical message-shaped replacement payload for `session/fork_replace`. */
-export interface TranscriptMessageReplacement {
-  readonly type: "message";
-  readonly message: Record<string, unknown>;
-}
+export type TranscriptMessageReplacement = Extract<
+  WireTranscriptReplacement,
+  { type: "message" }
+>;
+export type TranscriptUserContentBlockReplacement = Extract<
+  WireTranscriptReplacement,
+  { type: "user_content_block" }
+>;
+export type TranscriptAssistantBlockReplacement = Extract<
+  WireTranscriptReplacement,
+  { type: "assistant_block" }
+>;
+export type TranscriptToolResultContentBlockReplacement = Extract<
+  WireTranscriptReplacement,
+  { type: "tool_result_content_block" }
+>;
 
-/** Replace one content block in a user message. */
-export interface TranscriptUserContentBlockReplacement {
-  readonly type: "user_content_block";
-  readonly blockIndex: number;
-  readonly block: ContentBlock;
-}
-
-/** Replace one block in a block-assistant message. */
-export interface TranscriptAssistantBlockReplacement {
-  readonly type: "assistant_block";
-  readonly blockIndex: number;
-  readonly block: Record<string, unknown>;
-}
-
-/** Replace one content block inside one tool-result payload. */
-export interface TranscriptToolResultContentBlockReplacement {
-  readonly type: "tool_result_content_block";
-  readonly resultIndex: number;
-  readonly blockIndex: number;
-  readonly block: ContentBlock;
-}
-
-/** Typed transcript replacement used to create an edited session fork. */
-export type TranscriptReplacement =
-  | TranscriptMessageReplacement
-  | TranscriptUserContentBlockReplacement
-  | TranscriptAssistantBlockReplacement
-  | TranscriptToolResultContentBlockReplacement;
+/** Generated transcript replacement contract used by `session/fork_replace`. */
+export type TranscriptReplacement = WireTranscriptReplacement;
 
 /** Result of creating a forked transcript branch. */
 export interface SessionForkResult {
@@ -454,7 +463,7 @@ export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "r
 export type MobMemberRef = string;
 
 export interface MobFlowStatus {
-  readonly run?: Record<string, unknown> | null;
+  readonly run?: WireMobRun | null;
 }
 
 type MobTurnStartWireOptions = Omit<
@@ -485,7 +494,7 @@ export interface MobEventsOptions {
 }
 
 export interface MobEventsResult {
-  readonly events: readonly Record<string, unknown>[];
+  readonly events: readonly WireMobEvent[];
 }
 
 export interface MobStoredProfile {
@@ -525,174 +534,48 @@ export interface ConfigEnvelope {
   readonly resolvedPaths?: Readonly<Record<string, string>>;
 }
 
-export interface CommsSendReceipt extends Record<string, unknown> {
-  readonly kind?: string;
-  readonly requestId?: string;
-  readonly interactionId?: string;
-  readonly inputId?: string;
-}
-
-// ---------------------------------------------------------------------------
-// comms/send typed command surface.
-//
-// Mirrors the Rust `CommsCommandRequest` enum (`meerkat-core/src/comms.rs`).
-// Invalid discriminator values are rejected at the server's typed-serde
-// boundary — these aliases document the closed-world shape for callers.
-// ---------------------------------------------------------------------------
-
-export type CommsHandlingMode = "queue" | "steer";
-export type CommsInputSource = "tcp" | "uds" | "stdin" | "webhook" | "rpc";
-export type CommsInputStreamMode = "none" | "reserve_interaction";
-export type CommsResponseStatus = "accepted" | "completed" | "failed";
-
-export interface CommsInputCommand {
-  kind: "input";
-  body: string;
-  blocks?: readonly ContentBlock[];
-  source?: CommsInputSource;
-  stream?: CommsInputStreamMode;
-  handling_mode?: CommsHandlingMode;
-  allow_self_session?: boolean;
-}
-
-export interface CommsPeerMessageCommand {
-  kind: "peer_message";
-  to: string;
-  body: string;
-  blocks?: readonly ContentBlock[];
-  handling_mode?: CommsHandlingMode;
-}
-
-export interface CommsPeerLifecycleCommand {
-  kind: "peer_lifecycle";
-  to: string;
-  lifecycle_kind: "mob.peer_added" | "mob.peer_retired" | "mob.peer_unwired";
-  params?: unknown;
-}
-
-export type BridgeProtocolVersion = number;
-
-export type BridgeBootstrapToken = string;
-
-export interface BridgePeerSpec {
-  readonly address: string;
-  readonly name: string;
-  readonly peer_id: string;
-  readonly pubkey?: readonly number[];
-}
-
-interface BridgeCommandBase {
-  readonly epoch: number;
-  readonly protocol_version: BridgeProtocolVersion;
-  readonly supervisor: BridgePeerSpec;
-}
-
-export interface BridgeCommandBindMember extends BridgeCommandBase {
-  readonly command: "bind_member";
-  readonly bootstrap_token: BridgeBootstrapToken;
-  readonly expected_address: string;
-  readonly expected_peer_id: string;
-}
-
-export interface BridgeCommandAuthorizeSupervisor extends BridgeCommandBase {
-  readonly command: "authorize_supervisor";
-}
-
-export interface BridgeCommandRevokeSupervisor extends BridgeCommandBase {
-  readonly command: "revoke_supervisor";
-}
-
-export interface BridgeCommandDeliverMemberInput extends BridgeCommandBase {
-  readonly command: "deliver_member_input";
-  readonly content: ContentInput;
-  readonly handling_mode: CommsHandlingMode;
-  readonly input_id: string;
-}
-
-export interface BridgeCommandObserveMember extends BridgeCommandBase {
-  readonly command: "observe_member";
-}
-
-export interface BridgeCommandInterruptMember extends BridgeCommandBase {
-  readonly command: "interrupt_member";
-}
-
-export interface BridgeCommandHardCancelMember extends BridgeCommandBase {
-  readonly command: "hard_cancel_member";
-  readonly reason: string;
-}
-
-export interface BridgeCommandRetireMember extends BridgeCommandBase {
-  readonly command: "retire_member";
-}
-
-export interface BridgeCommandDestroyMember extends BridgeCommandBase {
-  readonly command: "destroy_member";
-}
-
-export interface BridgeCommandWireMember extends BridgeCommandBase {
-  readonly command: "wire_member";
-  readonly peer_spec: BridgePeerSpec;
-}
-
-export interface BridgeCommandUnwireMember extends BridgeCommandBase {
-  readonly command: "unwire_member";
-  readonly peer_spec: BridgePeerSpec;
-}
-
-export type BridgeCommand =
-  | BridgeCommandBindMember
-  | BridgeCommandAuthorizeSupervisor
-  | BridgeCommandRevokeSupervisor
-  | BridgeCommandDeliverMemberInput
-  | BridgeCommandObserveMember
-  | BridgeCommandInterruptMember
-  | BridgeCommandHardCancelMember
-  | BridgeCommandRetireMember
-  | BridgeCommandDestroyMember
-  | BridgeCommandWireMember
-  | BridgeCommandUnwireMember;
-
-export interface CommsChecksumTokenPeerRequestCommand {
-  kind: "peer_request";
-  to: string;
-  intent: "checksum_token";
-  params: WireCommsChecksumTokenParams;
-  blocks?: readonly ContentBlock[];
-  handling_mode?: CommsHandlingMode;
-  stream?: CommsInputStreamMode;
-}
-
-export interface CommsSupervisorBridgePeerRequestCommand {
-  kind: "peer_request";
-  to: string;
-  intent: "supervisor.bridge";
-  params: BridgeCommand;
-  blocks?: readonly ContentBlock[];
-  handling_mode?: CommsHandlingMode;
-  stream?: CommsInputStreamMode;
-}
-
+export type CommsSendReceipt = WireCommsSendResult;
+export type CommsPeersResult = WireCommsPeersResult;
+export type CommsCommand = WireCommsCommandRequest;
+export type CommsHandlingMode = Extract<
+  WireCommsCommandRequest,
+  { handling_mode?: unknown }
+>["handling_mode"];
+export type CommsInputSource = Extract<WireCommsCommandRequest, { kind: "input" }>["source"];
+export type CommsInputStreamMode = Extract<
+  WireCommsCommandRequest,
+  { kind: "input" | "peer_request" }
+>["stream"];
+export type CommsResponseStatus = Extract<
+  WireCommsCommandRequest,
+  { kind: "peer_response" }
+>["status"];
+export type BridgeProtocolVersion = WireBridgeProtocolVersion;
+export type BridgeBootstrapToken = WireBridgeBootstrapToken;
+export type BridgePeerSpec = WireBridgePeerSpec;
+export type BridgeCommand = WireBridgeCommand;
+export type BridgeCommandBindMember = WireBridgeCommandBindMember;
+export type BridgeCommandAuthorizeSupervisor = WireBridgeCommandAuthorizeSupervisor;
+export type BridgeCommandRevokeSupervisor = WireBridgeCommandRevokeSupervisor;
+export type BridgeCommandDeliverMemberInput = WireBridgeCommandDeliverMemberInput;
+export type BridgeCommandObserveMember = WireBridgeCommandObserveMember;
+export type BridgeCommandInterruptMember = WireBridgeCommandInterruptMember;
+export type BridgeCommandHardCancelMember = WireBridgeCommandHardCancelMember;
+export type BridgeCommandRetireMember = WireBridgeCommandRetireMember;
+export type BridgeCommandDestroyMember = WireBridgeCommandDestroyMember;
+export type BridgeCommandWireMember = WireBridgeCommandWireMember;
+export type BridgeCommandUnwireMember = WireBridgeCommandUnwireMember;
+export type CommsChecksumTokenPeerRequestCommand = Extract<
+  WireCommsCommandRequest,
+  { kind: "peer_request"; intent: "checksum_token" }
+>;
+export type CommsSupervisorBridgePeerRequestCommand = Extract<
+  WireCommsCommandRequest,
+  { kind: "peer_request"; intent: "supervisor.bridge" }
+>;
 export type CommsPeerRequestCommand =
   | CommsChecksumTokenPeerRequestCommand
   | CommsSupervisorBridgePeerRequestCommand;
-
-export interface CommsPeerResponseCommand {
-  kind: "peer_response";
-  to: string;
-  in_reply_to: string;
-  status: CommsResponseStatus;
-  result?: unknown;
-  handling_mode?: CommsHandlingMode;
-}
-
-/** Typed comms/send command — serde-tagged on `kind`. */
-export type CommsCommand =
-  | CommsInputCommand
-  | CommsPeerMessageCommand
-  | CommsPeerLifecycleCommand
-  | CommsPeerRequestCommand
-  | CommsPeerResponseCommand;
 
 export type ModelTier = "recommended" | "supported";
 
@@ -831,9 +714,8 @@ export interface ScheduleOccurrencesResult {
   readonly occurrences: readonly ScheduleOccurrence[];
 }
 
-export interface ScheduleToolsResult {
-  readonly tools: readonly Record<string, unknown>[];
-}
+export type ScheduleToolDescriptor = WireScheduleToolDescriptor;
+export type ScheduleToolsResult = WireScheduleToolsResult;
 
 export interface ScheduleListOptions {
   readonly labels?: Readonly<Record<string, string>>;
@@ -845,10 +727,8 @@ export interface ScheduleOccurrencesOptions {
   readonly includeTerminal?: boolean;
 }
 
-export interface ScheduleToolCallRequest {
-  readonly name: string;
-  readonly arguments?: unknown;
-}
+export type ScheduleToolCallRequest = WireScheduleToolCallParams;
+export type ScheduleToolCallResult = WireScheduleToolCallResult;
 
 export type WorkGraphStatus =
   | "open"

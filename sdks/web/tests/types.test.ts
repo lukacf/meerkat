@@ -42,6 +42,7 @@ import type {
   WireCredentialSourceKind,
   WireAuthStatusState,
   EventEnvelope,
+  ProviderImageMetadata,
 } from '../src/index.js';
 import { Auth } from '../src/index.js';
 
@@ -227,6 +228,21 @@ const typedEventEnvelope: EventEnvelope = {
 if (typedEventEnvelope.source.type === 'session') {
   typedEventEnvelope.source.session_id;
 }
+
+const generatedOpenAiImageMetadata: ProviderImageMetadata = {
+  provider: 'open_ai',
+  target_model: 'gpt-image-1',
+  response_id: 'resp_123',
+};
+const generatedGeminiImageMetadata: ProviderImageMetadata = {
+  provider: 'gemini',
+  target_model: 'gemini-2.5-flash-image',
+  response_id: 'gemini_resp_123',
+};
+// @ts-expect-error generated provider metadata variants keep provider discriminants.
+const rejectedProviderlessImageMetadata: ProviderImageMetadata = {
+  target_model: 'gpt-image-1',
+};
 // @ts-expect-error source_id alone is only an inert compatibility projection.
 const sourceIdOnlyEventEnvelope: EventEnvelope = {
   event_id: '00000000-0000-0000-0000-000000000001',
@@ -348,11 +364,15 @@ function handleEvent(event: AgentEvent): string {
     case 'run_completed':
       return event.result;
     case 'extraction_succeeded':
-      return `${event.session_id}:${event.schema_warnings?.length ?? 0}`;
+      return `${event.session_id}:${JSON.stringify(event.structured_output)}:${event.schema_warnings?.length ?? 0}`;
     case 'extraction_failed':
       return `${event.session_id}:${event.attempts}:${event.reason}`;
     case 'run_failed':
       return event.error;
+    case 'server_tool_content':
+      return `${event.name}:${String(event.content)}`;
+    case 'assistant_image_appended':
+      return event.image.meta.provider;
     case 'tool_execution_started':
       return `exec:${event.name}`;
     case 'tool_execution_completed':

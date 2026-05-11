@@ -940,6 +940,22 @@ fn render_composition_driver_emits_generated_route_facts() {
         rendered.contains("pub mod fields"),
         "rendered module must declare field facts module:\n{rendered}"
     );
+    assert!(
+        rendered.contains("pub mod adapters"),
+        "rendered module must declare generated production adapters:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub enum Input"),
+        "rendered module must expose generated input adapter variants:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub enum Signal"),
+        "rendered module must expose generated signal adapter variants:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub fn field(self, id: &FieldId) -> Option<Field>"),
+        "rendered module must expose generated producer field adapters:\n{rendered}"
+    );
 
     // route_to_input signature and a sample Input-route fact.
     assert!(

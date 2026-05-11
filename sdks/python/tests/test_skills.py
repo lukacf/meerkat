@@ -88,9 +88,9 @@ class _MockClient:
             usage=Usage(input_tokens=10, output_tokens=5),
         )
 
-    async def _send(self, session_id, **kwargs):
-        self._send_calls.append({"session_id": session_id, "kwargs": kwargs})
-        return {"queued": True, "echo": kwargs}
+    async def _send(self, session_id, command):
+        self._send_calls.append({"session_id": session_id, "command": command})
+        return {"queued": True, "echo": command}
 
     async def _peers(self, session_id):
         self._peers_calls.append(session_id)
@@ -154,37 +154,30 @@ async def test_invoke_skill_rejects_legacy_string():
 @pytest.mark.asyncio
 async def test_session_send_routes_to_client_send():
     session, client = _make_session()
-    result = await session.send(kind="peer_message", to="agent-b", body="hello")
+    command = {"kind": "peer_message", "to": "agent-b", "body": "hello"}
+    result = await session.send(command)
 
     assert result["queued"] is True
     assert len(client._send_calls) == 1
     assert client._send_calls[0]["session_id"] == "s-1"
-    assert client._send_calls[0]["kwargs"] == {
-        "kind": "peer_message",
-        "to": "agent-b",
-        "body": "hello",
-    }
+    assert client._send_calls[0]["command"] == command
 
 
 @pytest.mark.asyncio
 async def test_session_send_routes_peer_lifecycle_command():
     session, client = _make_session()
-    result = await session.send(
-        kind="peer_lifecycle",
-        to="agent-b",
-        lifecycle_kind="mob.peer_retired",
-        params={"reason": "done"},
-    )
-
-    assert result["queued"] is True
-    assert len(client._send_calls) == 1
-    assert client._send_calls[0]["session_id"] == "s-1"
-    assert client._send_calls[0]["kwargs"] == {
+    command = {
         "kind": "peer_lifecycle",
         "to": "agent-b",
         "lifecycle_kind": "mob.peer_retired",
         "params": {"reason": "done"},
     }
+    result = await session.send(command)
+
+    assert result["queued"] is True
+    assert len(client._send_calls) == 1
+    assert client._send_calls[0]["session_id"] == "s-1"
+    assert client._send_calls[0]["command"] == command
 
 
 @pytest.mark.asyncio

@@ -1,4 +1,5 @@
 import { EventSubscription } from './events.js';
+import { STREAM_LAGGED_EVENT_TYPE } from './generated/events.js';
 import type {
   ContentBlock,
   TurnResult,
@@ -29,7 +30,7 @@ function normalizeSessionLaggedEvent(record: Record<string, unknown>): Subscript
     throw new Error('Invalid session event: lagged event missing skipped count');
   }
   return {
-    type: 'lagged',
+    type: STREAM_LAGGED_EVENT_TYPE,
     skipped,
   };
 }
@@ -38,7 +39,7 @@ function normalizeSessionEvent(raw: unknown): SessionEvent {
   if (!isRecord(raw)) {
     throw new Error('Invalid session event: expected object');
   }
-  if (raw.type === 'lagged') {
+  if (raw.type === STREAM_LAGGED_EVENT_TYPE) {
     return normalizeSessionLaggedEvent(raw);
   }
   if (typeof raw.type !== 'string' || raw.type.length === 0) {

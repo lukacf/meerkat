@@ -7,9 +7,62 @@
 use serde::{Deserialize, Serialize};
 
 use meerkat_core::{
-    HookRunOverrides, OutputSchema, PeerMeta, Provider, SurfaceMetadata, SurfaceMetadataError,
+    Config, HookRunOverrides, OutputSchema, PeerMeta, Provider, SurfaceMetadata,
+    SurfaceMetadataError,
     skills::{SkillKey, SkillRef},
 };
+
+/// Request payload for `config/set`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum ConfigSetParams {
+    Wrapped {
+        config: Config,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_generation: Option<u64>,
+    },
+    Direct(Config),
+}
+
+impl ConfigSetParams {
+    #[must_use]
+    pub fn into_parts(self) -> (Config, Option<u64>) {
+        match self {
+            Self::Wrapped {
+                config,
+                expected_generation,
+            } => (config, expected_generation),
+            Self::Direct(config) => (config, None),
+        }
+    }
+}
+
+/// Request payload for `config/patch`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(untagged)]
+pub enum ConfigPatchParams {
+    Wrapped {
+        patch: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_generation: Option<u64>,
+    },
+    Direct(serde_json::Value),
+}
+
+impl ConfigPatchParams {
+    #[must_use]
+    pub fn into_parts(self) -> (serde_json::Value, Option<u64>) {
+        match self {
+            Self::Wrapped {
+                patch,
+                expected_generation,
+            } => (patch, expected_generation),
+            Self::Direct(patch) => (patch, None),
+        }
+    }
+}
 
 /// Core session creation parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]

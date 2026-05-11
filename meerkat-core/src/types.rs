@@ -1867,6 +1867,7 @@ pub enum StopReason {
 }
 
 /// Security mode for tool execution (e.g. shell)
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityMode {

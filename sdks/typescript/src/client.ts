@@ -43,8 +43,16 @@ import { Buffer } from "node:buffer";
 import { MeerkatError, CapabilityUnavailableError } from "./generated/errors.js";
 import {
   CONTRACT_VERSION,
+  type BindingIdParams,
+  type CreateProfileParams,
+  type DeviceCompleteParams,
+  type DeviceStartParams,
   type LiveChannelParams,
   type LiveCommitInputParams,
+  type LoginCompleteParams,
+  type LoginStartParams,
+  type ProvisionApiKeyParams,
+  type RealmIdParams,
   type LiveOpenParams,
   type LiveOpenResult,
   type LiveRefreshResult,
@@ -53,15 +61,30 @@ import {
   type LiveTruncateParams,
   type LiveWebrtcAnswerParams,
   type LiveWebrtcAnswerResult,
+  WIRE_LIVE_ADAPTER_OBSERVATION_TAGS,
   type WireLiveAdapterObservation,
   type MobTurnStartParams,
   type MobRotateSupervisorResult,
+  type WireMobEvent,
+  type WireMobRun,
   type McpAddParams,
   type McpLiveOpResponse,
   type McpReloadParams,
   type McpRemoveParams,
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
+  type WireAuthProfileCleared,
+  type WireAuthProfileCreated,
+  type WireAuthProfileDetail,
+  type WireAuthProfilesList,
+  type WireAuthStatusDetail,
+  type WireDeviceCompleteResult,
+  type WireDeviceStart,
+  type WireLoginReady,
+  type WireLoginStart,
+  type WireProvisionApiKeyResult,
+  type WireRealmConnectionSet,
+  type WireRealmList,
 } from "./generated/types.js";
 import { DeferredSession, Session } from "./session.js";
 import {
@@ -83,6 +106,7 @@ import type {
   BlobPayload,
   Capability,
   CommsCommand,
+  CommsPeersResult,
   CommsSendReceipt,
   ConfigEnvelope,
   ContentInput,
@@ -115,6 +139,7 @@ import type {
   ScheduleOccurrencesOptions,
   ScheduleOccurrencesResult,
   ScheduleToolCallRequest,
+  ScheduleToolCallResult,
   ScheduleToolsResult,
   SchemaWarning,
   SessionAssistantBlock,
@@ -156,6 +181,10 @@ import type {
   WorkItem,
   WorkItemListResult,
 } from "./types.js";
+
+const GENERATED_LIVE_OBSERVATION_TAGS = new Set<string>(
+  WIRE_LIVE_ADAPTER_OBSERVATION_TAGS,
+);
 
 const MEERKAT_REPO = "lukacf/meerkat";
 const MEERKAT_RELEASE_BINARY = "rkat-rpc";
@@ -1053,17 +1082,15 @@ export class MeerkatClient {
 
   async listScheduleTools(): Promise<ScheduleToolsResult> {
     const result = await this.request("schedule/tools", {});
-    const tools = Array.isArray(result.tools)
-      ? (result.tools as Array<Record<string, unknown>>)
-      : [];
-    return { tools };
+    return result as unknown as ScheduleToolsResult;
   }
 
-  async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string, unknown>> {
-    return this.request("schedule/call", {
-      name: request.name,
-      arguments: request.arguments ?? {},
-    });
+  async callScheduleTool(request: ScheduleToolCallRequest): Promise<ScheduleToolCallResult> {
+    const result = await this.request(
+      "schedule/call",
+      request as unknown as Record<string, unknown>,
+    );
+    return result as unknown as ScheduleToolCallResult;
   }
 
   async getWorkGraphItem(
@@ -1957,7 +1984,7 @@ export class MeerkatClient {
     }
     const result = await this.request("mob/events", params);
     const events = Array.isArray(result.events)
-      ? (result.events as Array<Record<string, unknown>>)
+      ? (result.events as WireMobEvent[])
       : [];
     return { events };
   }
@@ -2028,7 +2055,7 @@ export class MeerkatClient {
 
   async getMobFlowStatus(mobId: string, runId: string): Promise<MobFlowStatus | null> {
     const result = await this.request("mob/flow_status", { mob_id: mobId, run_id: runId });
-    return result.run == null ? null : { run: result.run as Record<string, unknown> };
+    return result.run == null ? null : { run: result.run as WireMobRun };
   }
 
   async cancelMobFlow(mobId: string, runId: string): Promise<void> {
@@ -2327,7 +2354,7 @@ export class MeerkatClient {
   /** @internal */
   async _peers(
     sessionId: string,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<CommsPeersResult> {
     return this.peers(sessionId);
   }
 
@@ -2338,13 +2365,14 @@ export class MeerkatClient {
    */
   async send(sessionId: string, command: CommsCommand): Promise<CommsSendReceipt> {
     const result = await this.request("comms/send", { session_id: sessionId, ...command });
-    return MeerkatClient.parseCommsSendReceipt(result);
+    return result as unknown as CommsSendReceipt;
   }
 
   async peers(
     sessionId: string,
-  ): Promise<Record<string, unknown>> {
-    return this.request("comms/peers", { session_id: sessionId });
+  ): Promise<CommsPeersResult> {
+    const result = await this.request("comms/peers", { session_id: sessionId });
+    return result as unknown as CommsPeersResult;
   }
 
   /** Idempotent spawn: spawns or returns the existing member entry. */
@@ -2545,10 +2573,17 @@ export class MeerkatClient {
         "live observation must be a JSON object",
       );
     }
-    if (!("observation" in raw)) {
+    const observation = (raw as Record<string, unknown>).observation;
+    if (typeof observation !== "string") {
       throw new MeerkatError(
         "INVALID_RESPONSE",
         "live observation missing `observation` discriminator",
+      );
+    }
+    if (!GENERATED_LIVE_OBSERVATION_TAGS.has(observation)) {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        `live observation discriminator ${JSON.stringify(observation)} is not in the generated WireLiveAdapterObservation contract`,
       );
     }
     return raw as WireLiveAdapterObservation;
@@ -2562,98 +2597,117 @@ export class MeerkatClient {
   // with typed INVALID_REQUEST pointing to the CLI; the wrappers surface
   // whatever the server returns so they stay honest about the state.
 
-  async realmList(): Promise<unknown> {
-    return this.request("realm/list", {});
+  async realmList(): Promise<WireRealmList> {
+    const raw = await this.request("realm/list", {});
+    return raw as unknown as WireRealmList;
   }
 
-  async realmGet(realmId: string): Promise<unknown> {
-    return this.request("realm/get", { realm_id: realmId });
+  async realmGet(realmId: string): Promise<WireRealmConnectionSet> {
+    const params: RealmIdParams = { realm_id: realmId };
+    const raw = await this.request("realm/get", params);
+    return raw as unknown as WireRealmConnectionSet;
   }
 
-  async authProfileList(realmId: string): Promise<unknown> {
-    return this.request("auth/profile/list", { realm_id: realmId });
+  async authProfileList(realmId: string): Promise<WireAuthProfilesList> {
+    const params: RealmIdParams = { realm_id: realmId };
+    const raw = await this.request("auth/profile/list", params);
+    return raw as unknown as WireAuthProfilesList;
   }
 
   async authProfileGet(
     realmId: string,
     bindingId: string,
     profileId?: string,
-  ): Promise<unknown> {
-    const params: Record<string, unknown> = {
+  ): Promise<WireAuthProfileDetail> {
+    const params: BindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
-    return this.request("auth/profile/get", params);
+    if (profileId !== undefined) params.profile_id = profileId;
+    const raw = await this.request("auth/profile/get", params);
+    return raw as unknown as WireAuthProfileDetail;
   }
 
-  async authProfileCreate(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("auth/profile/create", params);
+  async authProfileCreate(
+    params: CreateProfileParams,
+  ): Promise<WireAuthProfileCreated> {
+    const raw = await this.request("auth/profile/create", params);
+    return raw as unknown as WireAuthProfileCreated;
   }
 
   async authProfileDelete(
     realmId: string,
     bindingId: string,
     profileId?: string,
-  ): Promise<unknown> {
-    const params: Record<string, unknown> = {
+  ): Promise<WireAuthProfileCleared> {
+    const params: BindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
-    if (profileId) params.profile_id = profileId;
-    return this.request("auth/profile/delete", params);
+    if (profileId !== undefined) params.profile_id = profileId;
+    const raw = await this.request("auth/profile/delete", params);
+    return raw as unknown as WireAuthProfileCleared;
   }
 
-  async authLoginStart(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("auth/login/start", params);
+  async authLoginStart(params: LoginStartParams): Promise<WireLoginStart> {
+    const raw = await this.request("auth/login/start", params);
+    return raw as unknown as WireLoginStart;
   }
 
-  async authLoginComplete(params: Record<string, unknown>): Promise<unknown> {
-    return this.request("auth/login/complete", params);
+  async authLoginComplete(
+    params: LoginCompleteParams,
+  ): Promise<WireLoginReady> {
+    const raw = await this.request("auth/login/complete", params);
+    return raw as unknown as WireLoginReady;
   }
 
   async authLoginDeviceStart(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    return this.request("auth/login/device_start", params);
+    params: DeviceStartParams,
+  ): Promise<WireDeviceStart> {
+    const raw = await this.request("auth/login/device_start", params);
+    return raw as unknown as WireDeviceStart;
   }
 
   async authLoginDeviceComplete(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    return this.request("auth/login/device_complete", params);
+    params: DeviceCompleteParams,
+  ): Promise<WireDeviceCompleteResult> {
+    const raw = await this.request("auth/login/device_complete", params);
+    return raw as unknown as WireDeviceCompleteResult;
   }
 
   async authLoginProvisionApiKey(
-    params: Record<string, unknown>,
-  ): Promise<unknown> {
-    return this.request("auth/login/provision_api_key", params);
+    params: ProvisionApiKeyParams,
+  ): Promise<WireProvisionApiKeyResult> {
+    const raw = await this.request("auth/login/provision_api_key", params);
+    return raw as unknown as WireProvisionApiKeyResult;
   }
 
   async authStatusGet(
     realmId: string,
     bindingId: string,
     profileId?: string,
-  ): Promise<unknown> {
-    const params: Record<string, unknown> = {
+  ): Promise<WireAuthStatusDetail> {
+    const params: BindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
     if (profileId !== undefined) params.profile_id = profileId;
-    return this.request("auth/status/get", params);
+    const raw = await this.request("auth/status/get", params);
+    return raw as unknown as WireAuthStatusDetail;
   }
 
   async authLogout(
     realmId: string,
     bindingId: string,
     profileId?: string,
-  ): Promise<unknown> {
-    const params: Record<string, unknown> = {
+  ): Promise<WireAuthProfileCleared> {
+    const params: BindingIdParams = {
       realm_id: realmId,
       binding_id: bindingId,
     };
     if (profileId !== undefined) params.profile_id = profileId;
-    return this.request("auth/logout", params);
+    const raw = await this.request("auth/logout", params);
+    return raw as unknown as WireAuthProfileCleared;
   }
 
   // -- Transport ----------------------------------------------------------
@@ -3063,15 +3117,6 @@ export class MeerkatClient {
       instanceId: data.instance_id != null ? String(data.instance_id) : undefined,
       backend: data.backend != null ? String(data.backend) : undefined,
       resolvedPaths,
-    };
-  }
-
-  static parseCommsSendReceipt(data: Record<string, unknown>): CommsSendReceipt {
-    return {
-      ...data,
-      requestId: data.request_id != null ? String(data.request_id) : undefined,
-      interactionId: data.interaction_id != null ? String(data.interaction_id) : undefined,
-      inputId: data.input_id != null ? String(data.input_id) : undefined,
     };
   }
 
@@ -3618,36 +3663,8 @@ export class MeerkatClient {
 
   static serializeTranscriptReplacement(
     replacement: TranscriptReplacement,
-  ): Record<string, unknown> {
-    switch (replacement.type) {
-      case "message":
-        return {
-          type: "message",
-          message: replacement.message,
-        };
-      case "user_content_block":
-        return {
-          type: "user_content_block",
-          block_index: replacement.blockIndex,
-          block: replacement.block,
-        };
-      case "assistant_block":
-        return {
-          type: "assistant_block",
-          block_index: replacement.blockIndex,
-          block: replacement.block,
-        };
-      case "tool_result_content_block":
-        return {
-          type: "tool_result_content_block",
-          result_index: replacement.resultIndex,
-          block_index: replacement.blockIndex,
-          block: replacement.block,
-        };
-    }
-    throw new Error(
-      `Unsupported transcript replacement type: ${(replacement as { type: string }).type}`,
-    );
+  ): TranscriptReplacement {
+    return replacement;
   }
 
   static parseSessionMessage(data: Record<string, unknown>): SessionMessage {

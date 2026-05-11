@@ -2,9 +2,9 @@
 
 use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
-    MobCreateParams, MobLifecycleParams, MobLifecycleResult, MobMemberSendParams, WireContentInput,
-    WireMemberRef, WireMobBackendKind, WireMobRuntimeMode, WireRuntimeBinding,
-    WireTrustedPeerIdentity,
+    MobCreateParams, MobEventsResult, MobFlowStatusResult, MobLifecycleParams, MobLifecycleResult,
+    MobMemberSendParams, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobEvent,
+    WireMobRun, WireMobRuntimeMode, WireRuntimeBinding, WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -694,7 +694,16 @@ pub async fn handle_public_tools_call(
                 .mob_events(&mob_id, input.after_cursor, input.limit)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "events": events }))
+            let events = events
+                .iter()
+                .map(WireMobEvent::from_serializable)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| {
+                    McpToolError::invalid_params(format!(
+                        "mob/events runtime projection failed generated contract: {err}"
+                    ))
+                })?;
+            Ok(json!(MobEventsResult { events }))
         }
         "meerkat_mob_flows" => {
             let input: MeerkatMobIdInput = parse_args(arguments)?;
@@ -726,7 +735,16 @@ pub async fn handle_public_tools_call(
                 .mob_flow_status(&mob_id, run_id)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "run": run }))
+            let run = run
+                .as_ref()
+                .map(WireMobRun::from_serializable)
+                .transpose()
+                .map_err(|err| {
+                    McpToolError::invalid_params(format!(
+                        "mob/flow_status runtime projection failed generated contract: {err}"
+                    ))
+                })?;
+            Ok(json!(MobFlowStatusResult { run }))
         }
         "meerkat_mob_flow_cancel" => {
             let input: MeerkatMobRunIdInput = parse_args(arguments)?;

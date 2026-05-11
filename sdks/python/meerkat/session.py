@@ -27,6 +27,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .types import (
+    CommsCommandRequest,
+    CommsPeersResult,
+    CommsSendResult,
     ContentBlock,
     PeerCorrelationId,
     PeerId,
@@ -329,15 +332,14 @@ class Session:
 
     # -- Comms convenience -------------------------------------------------
 
-    async def send(self, **kwargs: Any) -> dict[str, Any]:
+    async def send(self, command: CommsCommandRequest) -> CommsSendResult:
         """Send a comms command scoped to this session."""
-        kwargs.pop("session_id", None)
-        return await self._client._send(self._id, **kwargs)  # noqa: SLF001
+        return await self._client._send(self._id, command)  # noqa: SLF001
 
-    async def peers(self) -> list[dict[str, Any]]:
+    async def peers(self) -> CommsPeersResult["peers"]:
         """List peers visible to this session's comms runtime."""
         result = await self._client._peers(self._id)  # noqa: SLF001
-        return result.get("peers", [])
+        return result["peers"]
 
     # -- Dunder ------------------------------------------------------------
 

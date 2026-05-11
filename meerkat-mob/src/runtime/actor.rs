@@ -23,7 +23,6 @@ use meerkat_core::comms::{
     PeerAddress, PeerLifecycleKind, PeerName, PeerRoute, TrustedPeerDescriptor,
 };
 use meerkat_core::time_compat::SystemTime;
-use serde::de::DeserializeOwned;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 /// Lightweight handle for a spawned autonomous initial turn.
@@ -922,6 +921,22 @@ impl MobActor {
         MobError::from(rejection)
     }
 
+    fn bridge_typed_rejection_error(
+        cause: super::bridge_protocol::BridgeRejectionCause,
+        reason: String,
+    ) -> MobError {
+        MobError::BridgeCommandRejected { cause, reason }
+    }
+
+    fn unexpected_bridge_reply(
+        reply: super::bridge_protocol::BridgeReply,
+        context: &str,
+    ) -> MobError {
+        MobError::Internal(format!(
+            "unexpected supervisor bridge reply for {context}: {reply:?}"
+        ))
+    }
+
     fn bridge_rejection_error_with_reason(
         rejection: &super::bridge_protocol::BridgeRejectionReply,
         reason: String,
@@ -994,56 +1009,57 @@ impl MobActor {
         binding: Option<&crate::RuntimeBinding>,
     ) -> Result<TrustedPeerDescriptor, MobError> {
         let payload = self.bridge_supervisor_payload().await?;
-        let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
         self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let reply = self
             .supervisor_bridge
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
             .await?;
-        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            if let Some(cause) = rejection.typed_cause()
-                && super::bridge_fallback::should_fall_back_to_bind(cause)
-                && let Some(binding) = binding
-            {
-                let bind = self
-                    .bind_peer_only_member_for_binding(peer, binding)
+        match reply {
+            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+                if super::bridge_fallback::should_fall_back_to_bind(cause)
+                    && let Some(binding) = binding
+                {
+                    let bind = self
+                        .bind_peer_only_member_for_binding(peer, binding)
+                        .await?;
+                    let effective_bootstrap_token =
+                        Self::bridge_bootstrap_token_from_binding(binding)?;
+                    let crate::RuntimeBinding::External { pubkey, .. } = binding else {
+                        return Err(MobError::Internal(
+                            "bind fallback returned for non-external runtime binding".to_string(),
+                        ));
+                    };
+                    self.persist_rebound_binding(binding, &bind).await?;
+                    let prior_peer_id = match binding {
+                        crate::RuntimeBinding::External { peer_id, .. } => peer_id.clone(),
+                        crate::RuntimeBinding::Session => String::new(),
+                    };
+                    self.clear_pending_supervisor_acceptance_for_peer_ids(&[
+                        prior_peer_id,
+                        bind.peer_id.clone(),
+                    ])
                     .await?;
-                let effective_bootstrap_token = Self::bridge_bootstrap_token_from_binding(binding)?;
-                let crate::RuntimeBinding::External { pubkey, .. } = binding else {
-                    return Err(MobError::Internal(
-                        "bind fallback returned for non-external runtime binding".to_string(),
-                    ));
-                };
-                self.persist_rebound_binding(binding, &bind).await?;
-                let prior_peer_id = match binding {
-                    crate::RuntimeBinding::External { peer_id, .. } => peer_id.clone(),
-                    crate::RuntimeBinding::Session => String::new(),
-                };
-                self.clear_pending_supervisor_acceptance_for_peer_ids(&[
-                    prior_peer_id,
-                    bind.peer_id.clone(),
-                ])
-                .await?;
-                return Self::peer_only_spec_for_binding(
-                    &crate::RuntimeBinding::External {
-                        peer_id: bind.peer_id,
-                        address: super::bridge_protocol::canonicalize_bridge_address(&bind.address),
-                        bootstrap_token: Some(effective_bootstrap_token),
-                        pubkey: *pubkey,
-                    },
-                    "ensure_supervisor_authorized rebound peer",
-                );
+                    return Self::peer_only_spec_for_binding(
+                        &crate::RuntimeBinding::External {
+                            peer_id: bind.peer_id,
+                            address: super::bridge_protocol::canonicalize_bridge_address(
+                                &bind.address,
+                            ),
+                            bootstrap_token: Some(effective_bootstrap_token),
+                            pubkey: *pubkey,
+                        },
+                        "ensure_supervisor_authorized rebound peer",
+                    );
+                }
+                Err(Self::bridge_typed_rejection_error(cause, reason))
             }
-            return Err(Self::bridge_rejection_error(rejection));
+            super::bridge_protocol::BridgeReply::Ack(_) => Ok(peer.clone()),
+            other => Err(Self::unexpected_bridge_reply(
+                other,
+                "authorize supervisor response",
+            )),
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to decode authorize supervisor response: {error}"
-                ))
-            })?;
-        Ok(peer.clone())
     }
 
     async fn load_supervisor_authority_snapshot_with_process_local_pending(
@@ -1130,38 +1146,40 @@ impl MobActor {
         }
     }
 
-    async fn send_bridge_command_typed<R: DeserializeOwned>(
+    async fn send_bridge_command_typed<R: super::bridge_protocol::BridgeReplyPayload>(
         &self,
         peer: &TrustedPeerDescriptor,
         command: &super::bridge_protocol::BridgeCommand,
         timeout: std::time::Duration,
     ) -> Result<R, MobError> {
         self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let reply = self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
             .await?;
-        if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+        match R::from_bridge_reply(reply) {
+            Ok(value) => Ok(value),
+            Err(super::bridge_protocol::BridgeReply::Rejected { cause, reason }) => {
+                Err(Self::bridge_typed_rejection_error(cause, reason))
+            }
+            Err(other) => Err(Self::unexpected_bridge_reply(
+                other,
+                "bridge command response",
+            )),
         }
-        serde_json::from_value(value).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
     }
 
-    fn bridge_ack_from_value(
-        protocol_version: super::bridge_protocol::BridgeProtocolVersion,
-        value: serde_json::Value,
+    fn bridge_ack_from_reply(
+        reply: super::bridge_protocol::BridgeReply,
         context: &str,
     ) -> Result<(), MobError> {
-        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+        match reply {
+            super::bridge_protocol::BridgeReply::Ack(_) => Ok(()),
+            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+                Err(Self::bridge_typed_rejection_error(cause, reason))
+            }
+            other => Err(Self::unexpected_bridge_reply(other, context)),
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!("failed to decode {context} response: {error}"))
-            })?;
-        Ok(())
     }
 
     async fn observe_peer_only_binding(
@@ -2366,6 +2384,13 @@ impl MobActor {
             "run_flow_command_admission",
         )
         .map(|_| ())
+    }
+
+    fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
+        // This is only the command-admission barrier; the real spawn payload is
+        // previewed again after profile resolution and before provisioning.
+        let placeholder_bridge_session_id = SessionId::new();
+        self.preview_spawn_admission(agent_identity, false, &placeholder_bridge_session_id)
     }
 
     fn submit_work_rejection_for_machine_state(
@@ -3698,18 +3723,20 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::SetSpawnPolicy { policy, reply_tx } => {
-                    let result = self.apply_dsl_input(
-                        mob_dsl::MobMachineInput::SetSpawnPolicy,
-                        "set_spawn_policy",
-                    )
-                    .map_err(|error| {
-                        MobError::Internal(format!(
-                            "SetSpawnPolicy rejected by MobMachine guards before shell policy write: {error}"
-                        ))
-                    });
-                    if result.is_ok() {
+                    let result = async {
+                        self.apply_dsl_input(
+                            mob_dsl::MobMachineInput::SetSpawnPolicy,
+                            "set_spawn_policy",
+                        )
+                        .map_err(|error| {
+                            MobError::Internal(format!(
+                                "SetSpawnPolicy rejected by MobMachine guards before shell policy write: {error}"
+                            ))
+                        })?;
                         self.spawn_policy.set(policy).await;
+                        Ok(())
                     }
+                    .await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::QueryPhase { reply_tx } => {
@@ -9068,125 +9095,96 @@ impl MobActor {
                     .send_bridge_command(&peer, &next_command, std::time::Duration::from_secs(5))
                     .await;
                 let authorize_error = match authorize_result {
-                    Ok(value) => {
-                        if let Some(rejection) =
-                            Self::bridge_rejection_reply(next_payload.protocol_version, &value)
-                        {
-                            if let Some(cause) = rejection.typed_cause()
-                                && super::bridge_fallback::should_fall_back_to_bind(cause)
-                            {
-                                let bind = self
-                                    .bind_peer_only_member_for_binding_with_payload(
-                                        &peer,
-                                        &binding,
-                                        &current_payload,
-                                    )
-                                    .await;
-                                match bind {
-                                    Ok(bind_response) => {
-                                        let effective_bootstrap_token =
-                                            match Self::bridge_bootstrap_token_from_binding(
-                                                &binding,
-                                            ) {
-                                                Ok(token) => token,
-                                                Err(error) => {
-                                                    return Err(MobError::WiringError(format!(
-                                                        "bind fallback restored current supervisor but failed to prepare rebound binding metadata: {error}"
-                                                    )));
-                                                }
-                                            };
-                                        let rebound_binding = crate::RuntimeBinding::External {
-                                            peer_id: bind_response.peer_id.clone(),
-                                            address:
-                                                super::bridge_protocol::canonicalize_bridge_address(
-                                                    &bind_response.address,
-                                                ),
-                                            bootstrap_token: Some(effective_bootstrap_token),
-                                            pubkey: match &binding {
-                                                crate::RuntimeBinding::External {
-                                                    pubkey, ..
-                                                } => *pubkey,
-                                                crate::RuntimeBinding::Session => None,
-                                            },
-                                        };
-                                        effective_peer = Self::peer_only_spec_for_binding(
-                                            &rebound_binding,
-                                            "handle_rotate_supervisor rebound peer",
-                                        )?;
-                                        if let Err(error) = self
-                                            .persist_rebound_binding(&binding, &bind_response)
-                                            .await
-                                        {
-                                            return Err(MobError::WiringError(format!(
-                                                "bind fallback restored current supervisor but failed to persist rebound binding metadata: {error}"
-                                            )));
-                                        }
-                                        effective_binding = rebound_binding;
-                                        self.supervisor_bridge
-                                            .trust_recipient(&effective_peer)
-                                            .await?;
-                                        let retry = self
-                                            .supervisor_bridge
-                                            .send_bridge_command(
-                                                &effective_peer,
-                                                &next_command,
-                                                std::time::Duration::from_secs(5),
-                                            )
-                                            .await;
-                                        match retry {
-                                            Ok(value) => {
-                                                if let Some(retry_rejection) =
-                                                    Self::bridge_rejection_reply(
-                                                        next_payload.protocol_version,
-                                                        &value,
-                                                    )
-                                                {
-                                                    Some(Self::bridge_rejection_error_with_reason(
-                                                        &retry_rejection,
-                                                        format!(
-                                                            "{}; bind fallback restored current supervisor but authorize retry failed: {}",
-                                                            rejection.reason(),
-                                                            retry_rejection.reason()
-                                                        ),
-                                                    ))
-                                                } else if let Err(error) = serde_json::from_value::<
-                                                    super::bridge_protocol::BridgeAck,
-                                                >(
-                                                    value
-                                                ) {
-                                                    Some(MobError::Internal(format!(
-                                                        "failed to decode rotate supervisor response after bind fallback: {error}"
-                                                    )))
-                                                } else {
-                                                    None
-                                                }
+                    Ok(super::bridge_protocol::BridgeReply::Rejected { cause, reason }) => {
+                        if super::bridge_fallback::should_fall_back_to_bind(cause) {
+                            let bind = self
+                                .bind_peer_only_member_for_binding_with_payload(
+                                    &peer,
+                                    &binding,
+                                    &current_payload,
+                                )
+                                .await;
+                            match bind {
+                                Ok(bind_response) => {
+                                    let effective_bootstrap_token =
+                                        match Self::bridge_bootstrap_token_from_binding(&binding) {
+                                            Ok(token) => token,
+                                            Err(error) => {
+                                                return Err(MobError::WiringError(format!(
+                                                    "bind fallback restored current supervisor but failed to prepare rebound binding metadata: {error}"
+                                                )));
                                             }
-                                            Err(error) => Some(error),
-                                        }
+                                        };
+                                    let rebound_binding = crate::RuntimeBinding::External {
+                                        peer_id: bind_response.peer_id.clone(),
+                                        address:
+                                            super::bridge_protocol::canonicalize_bridge_address(
+                                                &bind_response.address,
+                                            ),
+                                        bootstrap_token: Some(effective_bootstrap_token),
+                                        pubkey: match &binding {
+                                            crate::RuntimeBinding::External { pubkey, .. } => {
+                                                *pubkey
+                                            }
+                                            crate::RuntimeBinding::Session => None,
+                                        },
+                                    };
+                                    effective_peer = Self::peer_only_spec_for_binding(
+                                        &rebound_binding,
+                                        "handle_rotate_supervisor rebound peer",
+                                    )?;
+                                    if let Err(error) =
+                                        self.persist_rebound_binding(&binding, &bind_response).await
+                                    {
+                                        return Err(MobError::WiringError(format!(
+                                            "bind fallback restored current supervisor but failed to persist rebound binding metadata: {error}"
+                                        )));
                                     }
-                                    Err(bind_error) => {
-                                        let reason = format!(
-                                            "{}; bind fallback failed: {bind_error}",
-                                            rejection.reason()
-                                        );
-                                        Some(Self::bridge_rejection_error_with_reason(
-                                            &rejection, reason,
-                                        ))
+                                    effective_binding = rebound_binding;
+                                    self.supervisor_bridge
+                                        .trust_recipient(&effective_peer)
+                                        .await?;
+                                    let retry = self
+                                        .supervisor_bridge
+                                        .send_bridge_command(
+                                            &effective_peer,
+                                            &next_command,
+                                            std::time::Duration::from_secs(5),
+                                        )
+                                        .await;
+                                    match retry {
+                                        Ok(super::bridge_protocol::BridgeReply::Rejected {
+                                            cause: retry_cause,
+                                            reason: retry_reason,
+                                        }) => Some(Self::bridge_typed_rejection_error(
+                                            retry_cause,
+                                            format!(
+                                                "{reason}; bind fallback restored current supervisor but authorize retry failed: {retry_reason}"
+                                            ),
+                                        )),
+                                        Ok(super::bridge_protocol::BridgeReply::Ack(_)) => None,
+                                        Ok(other) => Some(Self::unexpected_bridge_reply(
+                                            other,
+                                            "rotate supervisor response after bind fallback",
+                                        )),
+                                        Err(error) => Some(error),
                                     }
                                 }
-                            } else {
-                                Some(Self::bridge_rejection_error(rejection))
+                                Err(bind_error) => {
+                                    let reason =
+                                        format!("{reason}; bind fallback failed: {bind_error}");
+                                    Some(Self::bridge_typed_rejection_error(cause, reason))
+                                }
                             }
-                        } else if let Err(error) =
-                            serde_json::from_value::<super::bridge_protocol::BridgeAck>(value)
-                        {
-                            Some(MobError::Internal(format!(
-                                "failed to decode rotate supervisor response: {error}"
-                            )))
                         } else {
-                            None
+                            Some(Self::bridge_typed_rejection_error(cause, reason))
                         }
                     }
+                    Ok(super::bridge_protocol::BridgeReply::Ack(_)) => None,
+                    Ok(other) => Some(Self::unexpected_bridge_reply(
+                        other,
+                        "rotate supervisor response",
+                    )),
                     Err(error) => Some(error),
                 };
                 if let Some(error) = authorize_error {
@@ -9430,9 +9428,9 @@ impl MobActor {
         peer: &TrustedPeerDescriptor,
         pending: &crate::store::SupervisorAuthorityRecord,
         command: &super::bridge_protocol::BridgeCommand,
-        protocol_version: super::bridge_protocol::BridgeProtocolVersion,
+        _protocol_version: super::bridge_protocol::BridgeProtocolVersion,
     ) -> Result<bool, MobError> {
-        let value = self
+        let reply = self
             .supervisor_bridge
             .send_bridge_command_as_authority(
                 pending,
@@ -9441,32 +9439,32 @@ impl MobActor {
                 std::time::Duration::from_secs(5),
             )
             .await?;
-        if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
-            return match rejection.typed_cause() {
-                Some(
+        match reply {
+            super::bridge_protocol::BridgeReply::Rejected {
+                cause:
                     super::bridge_protocol::BridgeRejectionCause::NotBound
                     | super::bridge_protocol::BridgeRejectionCause::SenderMismatch,
-                ) => Ok(false),
-                Some(super::bridge_protocol::BridgeRejectionCause::StaleSupervisor) => {
-                    Err(Self::bridge_rejection_error_with_reason(
-                        &rejection,
-                        format!(
-                            "pending authority is stale for peer '{}': {}",
-                            peer.peer_id,
-                            rejection.reason()
-                        ),
-                    ))
-                }
-                Some(_) | None => Err(Self::bridge_rejection_error(rejection)),
-            };
+                ..
+            } => Ok(false),
+            super::bridge_protocol::BridgeReply::Rejected {
+                cause: super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                reason,
+            } => Err(Self::bridge_typed_rejection_error(
+                super::bridge_protocol::BridgeRejectionCause::StaleSupervisor,
+                format!(
+                    "pending authority is stale for peer '{}': {reason}",
+                    peer.peer_id
+                ),
+            )),
+            super::bridge_protocol::BridgeReply::Rejected { cause, reason } => {
+                Err(Self::bridge_typed_rejection_error(cause, reason))
+            }
+            super::bridge_protocol::BridgeReply::Ack(_) => Ok(true),
+            other => Err(Self::unexpected_bridge_reply(
+                other,
+                "pending supervisor verification response",
+            )),
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to decode pending supervisor verification response: {error}"
-                ))
-            })?;
-        Ok(true)
     }
 
     async fn rotate_supervisor_bridge_to(
@@ -9635,12 +9633,8 @@ impl MobActor {
                     std::time::Duration::from_secs(5),
                 )
                 .await
-                .and_then(|value| {
-                    Self::bridge_ack_from_value(
-                        target_command.protocol_version(),
-                        value,
-                        "supervisor reconciliation authorize",
-                    )
+                .and_then(|reply| {
+                    Self::bridge_ack_from_reply(reply, "supervisor reconciliation authorize")
                 });
             if authorize_result.is_ok() {
                 continue;
@@ -9654,12 +9648,8 @@ impl MobActor {
                     std::time::Duration::from_secs(5),
                 )
                 .await
-                .and_then(|value| {
-                    Self::bridge_ack_from_value(
-                        revoke_attempted_command.protocol_version(),
-                        value,
-                        "supervisor reconciliation revoke",
-                    )
+                .and_then(|reply| {
+                    Self::bridge_ack_from_reply(reply, "supervisor reconciliation revoke")
                 })?;
             self.rotate_supervisor_bridge_to(target).await?;
             let bind = self
@@ -10310,7 +10300,26 @@ impl MobActor {
         self.ensure_flow_tracker_alignment("handle_run_flow preflight")
             .await?;
         let run_id = RunId::new();
-        self.preview_run_flow_command_admission(&run_id)?;
+        let _preview_admission = self.prepare_command_admission(
+            mob_dsl::MobMachineInput::RunFlow {
+                run_id: mob_dsl::RunId::from(run_id.to_string()),
+                step_ids: Default::default(),
+                ordered_steps: Vec::new(),
+                step_has_conditions: Default::default(),
+                step_dependencies: Default::default(),
+                step_dependency_modes: Default::default(),
+                step_branches: Default::default(),
+                step_collection_policies: Default::default(),
+                step_quorum_thresholds: Default::default(),
+                escalation_threshold: 0,
+                max_step_retries: 0,
+                max_active_nodes: 0,
+                max_active_frames: 0,
+                max_frame_depth: 0,
+            },
+            MobState::Running,
+            "run_flow_command_admission",
+        )?;
         let config = FlowRunConfig::from_definition(flow_id, &self.definition)?;
         let run_flow = MobRun::run_flow_input(&run_id, &config)?;
         debug_assert!(matches!(run_flow, mob_dsl::MobMachineInput::RunFlow { .. }));

@@ -26,9 +26,11 @@ pub const DEFAULT_MAX_SESSIONS: usize = 100_000;
 
 /// Complete configuration for Meerkat
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default)]
 pub struct Config {
     pub agent: AgentConfig,
+    #[cfg_attr(feature = "schema", schemars(transform = remove_schema_default))]
     pub storage: StorageConfig,
     pub budget: BudgetConfig,
     pub retry: RetryConfig,
@@ -732,6 +734,7 @@ fn default_structured_output_retries() -> u32 {
 
 /// Agent behavior configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct AgentConfig {
     /// System prompt to prepend
@@ -817,6 +820,7 @@ impl Default for AgentConfig {
 
 /// Presentation defaults for surface-owned renderings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct PresentationConfig {
     pub html: HtmlPresentationConfig,
@@ -827,6 +831,7 @@ pub struct PresentationConfig {
 /// This config controls template selection only. It does not enable HTML output
 /// for ordinary runs; surfaces must request the HTML presentation explicitly.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct HtmlPresentationConfig {
     pub default_template: String,
@@ -844,6 +849,7 @@ impl Default for HtmlPresentationConfig {
 
 /// User-defined HTML output template.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct HtmlTemplateConfig {
     pub path: Option<PathBuf>,
@@ -852,6 +858,7 @@ pub struct HtmlTemplateConfig {
 
 /// Model defaults by provider.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct ModelDefaults {
     pub anthropic: String,
@@ -884,6 +891,7 @@ pub const DEFAULT_SHELL_SECURITY_MODE: SecurityMode = SecurityMode::Unrestricted
 
 /// Shell defaults configured at the config layer.
 #[derive(Debug, Clone, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct ShellDefaults {
     pub program: String,
@@ -1003,6 +1011,7 @@ fn template_defaults() -> &'static TemplateDefaults {
 
 /// Paths for session and task persistence.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct StoreConfig {
     pub sessions_path: Option<PathBuf>,
@@ -1121,6 +1130,7 @@ pub struct SelfHostedConfig {
 /// here control whether the factory injects tool config for models whose
 /// `ModelProfile.supports_web_search` is `true`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct ProviderToolsConfig {
     pub anthropic: AnthropicProviderToolsConfig,
@@ -1130,6 +1140,7 @@ pub struct ProviderToolsConfig {
 
 /// Anthropic provider-native tool defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct AnthropicProviderToolsConfig {
     /// Enable web search for Anthropic models that support it.
@@ -1144,6 +1155,7 @@ impl Default for AnthropicProviderToolsConfig {
 
 /// OpenAI provider-native tool defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct OpenAiProviderToolsConfig {
     /// Enable web search for OpenAI models that support it.
@@ -1158,6 +1170,7 @@ impl Default for OpenAiProviderToolsConfig {
 
 /// Gemini provider-native tool defaults.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct GeminiProviderToolsConfig {
     /// Enable Google Search for Gemini models that support it.
@@ -1174,6 +1187,7 @@ impl Default for GeminiProviderToolsConfig {
 
 /// Runtime limits configured at the config layer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct LimitsConfig {
     pub budget: Option<u64>,
@@ -1181,6 +1195,7 @@ pub struct LimitsConfig {
     /// this limit. RPC observes runtime config updates dynamically; REST/MCP
     /// process-local services apply changes on service restart.
     pub max_sessions: Option<usize>,
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     #[serde(with = "optional_duration_serde")]
     pub max_duration: Option<Duration>,
 }
@@ -1197,6 +1212,7 @@ impl LimitsConfig {
 
 /// REST server configuration sourced from config.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct RestServerConfig {
     pub host: String,
@@ -1222,6 +1238,7 @@ impl Default for RestServerConfig {
 /// `Ed25519` requires signed CBOR envelopes and a trusted peers list. Use for
 /// multi-machine or untrusted network communication.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CommsAuthMode {
     #[default]
@@ -1258,6 +1275,7 @@ impl std::fmt::Display for PlainEventSource {
 
 /// Runtime comms configuration (portable across interfaces).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct CommsRuntimeConfig {
     pub mode: CommsRuntimeMode,
@@ -1292,6 +1310,7 @@ impl Default for CommsRuntimeConfig {
 /// This config is serialized/deserialized in realm config and mapped to
 /// `meerkat_core::CompactionConfig` when wiring the session compactor.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct CompactionRuntimeConfig {
     /// Trigger compaction when input tokens for a turn reach this threshold.
@@ -1328,6 +1347,7 @@ impl From<CompactionRuntimeConfig> for crate::CompactionConfig {
 
 /// Transport mode for comms runtime.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum CommsRuntimeMode {
     #[default]
@@ -1350,9 +1370,11 @@ pub enum CommsRuntimeMode {
 
 /// Storage configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct StorageConfig {
     /// Directory for file-based storage
+    #[cfg_attr(feature = "schema", schemars(transform = remove_schema_default))]
     pub directory: Option<PathBuf>,
 }
 
@@ -1364,13 +1386,20 @@ impl Default for StorageConfig {
     }
 }
 
+#[cfg(feature = "schema")]
+fn remove_schema_default(schema: &mut schemars::Schema) {
+    let _ = schema.remove("default");
+}
+
 /// Budget configuration
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct BudgetConfig {
     /// Maximum tokens to consume
     pub max_tokens: Option<u64>,
     /// Maximum duration
+    #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
     #[serde(with = "optional_duration_serde")]
     pub max_duration: Option<Duration>,
     /// Maximum tool calls
@@ -1389,6 +1418,7 @@ pub struct BudgetConfig {
 /// - `call_timeout = "disabled"` => `Disabled`
 /// - `call_timeout = "45s"` => `Value(45s)`
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[non_exhaustive]
 pub enum CallTimeoutOverride {
     /// Inherit the lower-layer or profile-derived default.
@@ -1397,7 +1427,7 @@ pub enum CallTimeoutOverride {
     /// Explicitly disable call timeout (no timeout applied regardless of profile).
     Disabled,
     /// Explicitly set the call timeout to this duration.
-    Value(Duration),
+    Value(#[cfg_attr(feature = "schema", schemars(with = "String"))] Duration),
 }
 
 impl Serialize for CallTimeoutOverride {
@@ -1437,14 +1467,17 @@ impl CallTimeoutOverride {
 
 /// Retry configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct RetryConfig {
     /// Maximum number of retry attempts
     pub max_retries: u32,
     /// Initial delay before first retry (supports humantime format: "500ms", "1s")
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     #[serde(with = "humantime_serde")]
     pub initial_delay: Duration,
     /// Maximum delay between retries (supports humantime format: "30s", "1m")
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     #[serde(with = "humantime_serde")]
     pub max_delay: Duration,
     /// Multiplier for exponential backoff
@@ -1496,15 +1529,21 @@ impl From<RetryConfig> for RetryPolicy {
 
 /// Tools configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[serde(default)]
 pub struct ToolsConfig {
     /// MCP server configurations
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
     /// Default timeout for tool execution (supports humantime format: "30s", "1m")
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     #[serde(with = "humantime_serde")]
     pub default_timeout: Duration,
     /// Per-tool timeout overrides (supports humantime format: "30s", "1m")
+    #[cfg_attr(
+        feature = "schema",
+        schemars(with = "std::collections::HashMap<String, String>")
+    )]
     #[serde(default)]
     pub tool_timeouts: HashMap<String, Duration>,
     /// Maximum concurrent tool executions
@@ -1907,6 +1946,7 @@ pub enum ConfigScope {
 
 /// Config patch payload (merge-patch semantics applied by ConfigStore).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct ConfigDelta(pub serde_json::Value);
 

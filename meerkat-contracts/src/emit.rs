@@ -5,6 +5,7 @@
 
 #[cfg(feature = "schema")]
 pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::RestOperationContract;
     use schemars::schema_for;
     use serde_json::{Map, Value};
     use std::fs;
@@ -44,6 +45,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let wire_types = serde_json::json!({
         "WireUsage": schema_for!(crate::wire::WireUsage),
         "ContractVersion": schema_for!(crate::version::ContractVersion),
+        "ConfigEnvelope": schema_for!(meerkat_core::ConfigEnvelope),
         "WireRunResult": schema_for!(crate::wire::WireRunResult),
         "HelpExecutionMode": schema_for!(crate::wire::HelpExecutionMode),
         "HelpRequest": schema_for!(crate::wire::HelpRequest),
@@ -74,6 +76,11 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobRespawnResult": schema_for!(crate::wire::MobRespawnResult),
         "MobMembersResult": schema_for!(crate::wire::MobMembersResult),
         "MobEventsResult": schema_for!(crate::wire::MobEventsResult),
+        "WireMobAgentRuntimeId": schema_for!(crate::wire::WireMobAgentRuntimeId),
+        "WireMobEvent": schema_for!(crate::wire::WireMobEvent),
+        "WireMobEventKind": schema_for!(crate::wire::WireMobEventKind),
+        "WireMobMemberSpawnedEvent": schema_for!(crate::wire::WireMobMemberSpawnedEvent),
+        "WireMobTaskStatus": schema_for!(crate::wire::WireMobTaskStatus),
         "MobMemberSendParams": schema_for!(crate::wire::MobMemberSendParams),
         "MobMemberSendResult": schema_for!(crate::wire::MobMemberSendResult),
         "MobIngressInteractionParams": schema_for!(crate::wire::MobIngressInteractionParams),
@@ -82,6 +89,12 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "MobFlowsResult": schema_for!(crate::wire::MobFlowsResult),
         "MobFlowRunResult": schema_for!(crate::wire::MobFlowRunResult),
         "MobFlowStatusResult": schema_for!(crate::wire::MobFlowStatusResult),
+        "WireMobRun": schema_for!(crate::wire::WireMobRun),
+        "WireMobRunStatus": schema_for!(crate::wire::WireMobRunStatus),
+        "WireMobStepLedgerEntry": schema_for!(crate::wire::WireMobStepLedgerEntry),
+        "WireMobStepRunStatus": schema_for!(crate::wire::WireMobStepRunStatus),
+        "WireMobFailureLedgerEntry": schema_for!(crate::wire::WireMobFailureLedgerEntry),
+        "WireMobLoopIterationLedgerEntry": schema_for!(crate::wire::WireMobLoopIterationLedgerEntry),
         "MobFlowCancelResult": schema_for!(crate::wire::MobFlowCancelResult),
         "MobHelperResult": schema_for!(crate::wire::MobHelperResult),
         "MobForceCancelResult": schema_for!(crate::wire::MobForceCancelResult),
@@ -112,6 +125,14 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "RuntimeStateResult": schema_for!(crate::wire::RuntimeStateResult),
         "PeerResponseTerminalStatusWire": schema_for!(crate::wire::PeerResponseTerminalStatusWire),
         "SessionExternalEventEnvelope": schema_for!(crate::wire::SessionExternalEventEnvelope),
+        "RestCreateSessionRequest": schema_for!(crate::wire::RestCreateSessionRequest),
+        "RestContinueSessionRequest": schema_for!(crate::wire::RestContinueSessionRequest),
+        "RestAppendSystemContextRequest": schema_for!(crate::wire::RestAppendSystemContextRequest),
+        "RestSessionExternalEventEnvelope": schema_for!(crate::wire::RestSessionExternalEventEnvelope),
+        "RestPeerResponseTerminalRequest": schema_for!(crate::wire::RestPeerResponseTerminalRequest),
+        "RestMobHelperRequest": schema_for!(crate::wire::RestMobHelperRequest),
+        "RestMobForkHelperRequest": schema_for!(crate::wire::RestMobForkHelperRequest),
+        "RestMobWaitRequest": schema_for!(crate::wire::RestMobWaitRequest),
         "RealtimeTurningMode": schema_for!(crate::wire::RealtimeTurningMode),
         "RealtimeInputKind": schema_for!(crate::wire::RealtimeInputKind),
         "RealtimeOutputKind": schema_for!(crate::wire::RealtimeOutputKind),
@@ -168,6 +189,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireInputStateHistoryEntry": schema_for!(crate::wire::WireInputStateHistoryEntry),
         "WireInputState": schema_for!(crate::wire::WireInputState),
         "RuntimeAcceptResult": schema_for!(crate::wire::RuntimeAcceptResult),
+        "Schedule": schema_for!(meerkat_schedule::Schedule),
+        "Occurrence": schema_for!(meerkat_schedule::Occurrence),
         "WireContentBlock": schema_for!(crate::wire::WireContentBlock),
         "WireContentInput": schema_for!(crate::wire::WireContentInput),
         "WireToolResultContent": schema_for!(crate::wire::WireToolResultContent),
@@ -188,6 +211,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "WireSessionHistory": schema_for!(crate::wire::WireSessionHistory),
         "SessionForkResult": schema_for!(meerkat_core::SessionForkResult),
         "TranscriptEditRunningBehavior": schema_for!(meerkat_core::TranscriptEditRunningBehavior),
+        "WireTranscriptReplacement": schema_for!(crate::wire::WireTranscriptReplacement),
         "WireSessionInfo": schema_for!(crate::wire::WireSessionInfo),
         "WireSessionMessage": schema_for!(crate::wire::WireSessionMessage),
         "WireSessionSummary": schema_for!(crate::wire::WireSessionSummary),
@@ -270,6 +294,10 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "PeerDirectoryListing": schema_for!(crate::wire::PeerDirectoryListing),
         "CommsPeersResult": schema_for!(crate::wire::CommsPeersResult),
         "AgentEventEnvelope": schema_for!(meerkat_core::EventEnvelope<meerkat_core::AgentEvent>),
+        "StreamLaggedEvent": schema_for!(crate::wire::StreamLaggedEvent),
+        "ScheduleToolDescriptor": schema_for!(crate::wire::ScheduleToolDescriptor),
+        "ScheduleToolsResult": schema_for!(crate::wire::ScheduleToolsResult),
+        "ScheduleToolCallResult": schema_for!(crate::wire::ScheduleToolCallResult),
         "SessionStreamOpenResult": schema_for!(crate::wire::SessionStreamOpenResult),
         "SessionStreamCloseResult": schema_for!(crate::wire::SessionStreamCloseResult),
     });
@@ -324,6 +352,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "DeviceStartParams": schema_for!(crate::wire::DeviceStartParams),
         "DeviceCompleteParams": schema_for!(crate::wire::DeviceCompleteParams),
         "ProvisionApiKeyParams": schema_for!(crate::wire::ProvisionApiKeyParams),
+        "ConfigSetParams": schema_for!(crate::wire::ConfigSetParams),
+        "ConfigPatchParams": schema_for!(crate::wire::ConfigPatchParams),
         "SessionPeerResponseTerminalParams": schema_for!(crate::wire::SessionPeerResponseTerminalParams),
         "SessionStreamOpenParams": schema_for!(crate::wire::SessionStreamOpenParams),
         "SessionStreamCloseParams": schema_for!(crate::wire::SessionStreamCloseParams),
@@ -331,10 +361,13 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         "ForkSessionReplaceParams": schema_for!(crate::wire::ForkSessionReplaceParams),
         "CommsSendParams": schema_for!(crate::wire::CommsSendParams),
         "CommsPeersParams": schema_for!(crate::wire::CommsPeersParams),
+        "CreateScheduleRequest": schema_for!(meerkat_schedule::CreateScheduleRequest),
+        "ScheduleUpdateRequest": schema_for!(meerkat_schedule::UpdateScheduleRequest),
         "ScheduleIdParams": schema_for!(crate::wire::ScheduleIdParams),
         "ListSchedulesParams": schema_for!(crate::wire::ListSchedulesParams),
         "ScheduleOccurrencesParams": schema_for!(crate::wire::ScheduleOccurrencesParams),
         "UpdateScheduleParams": schema_for!(crate::wire::UpdateScheduleParams),
+        "ScheduleToolCallParams": schema_for!(crate::wire::ScheduleToolCallParams),
     });
     write_pretty_json(output_dir.join("params.json"), &params)?;
 
@@ -385,6 +418,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
     let events = serde_json::json!({
         "AgentEvent": schema_for!(meerkat_core::AgentEvent),
         "ScopedAgentEvent": schema_for!(meerkat_core::ScopedAgentEvent),
+        "StreamLaggedEvent": schema_for!(crate::wire::StreamLaggedEvent),
         "WireEvent": {
             "description": "Event envelope: session_id, sequence, event (AgentEvent), contract_version",
             "known_event_types": crate::KNOWN_AGENT_EVENT_TYPES,
@@ -630,20 +664,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         })
     }
 
-    fn closed_object_schema(properties: Vec<(&str, Value)>, required: Vec<&str>) -> Value {
-        let mut schema = object_schema(properties, required);
-        if let Value::Object(object) = &mut schema {
-            object.insert("additionalProperties".to_string(), Value::Bool(false));
-        }
-        schema
-    }
-
     fn string_schema() -> Value {
         serde_json::json!({ "type": "string" })
-    }
-
-    fn bool_schema() -> Value {
-        serde_json::json!({ "type": "boolean" })
     }
 
     fn integer_schema() -> Value {
@@ -656,26 +678,11 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         })
     }
 
-    fn nullable(schema: Value) -> Value {
-        serde_json::json!({ "anyOf": [schema, { "type": "null" }] })
-    }
-
     fn rest_manual_components() -> Map<String, Value> {
         let mut components = Map::new();
-        let json_value = schema_ref("JsonValue");
-        let content_input = serde_json::json!({
-            "oneOf": [
-                { "type": "string" },
-                schema_ref("WireContentInput")
-            ]
-        });
         let labels = serde_json::json!({
             "type": "object",
             "additionalProperties": { "type": "string" }
-        });
-        let string_array = serde_json::json!({
-            "type": "array",
-            "items": { "type": "string" }
         });
 
         components.insert("JsonValue".to_string(), json_value_schema());
@@ -720,7 +727,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     ("updated_at", string_schema()),
                     ("message_count", integer_schema()),
                     ("total_tokens", integer_schema()),
-                    ("labels", labels.clone()),
+                    ("labels", labels),
                 ],
                 vec![
                     "session_id",
@@ -732,445 +739,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 ],
             ),
         );
-        components.insert(
-            "ConfigEnvelope".to_string(),
-            object_schema(
-                vec![
-                    ("config", json_value.clone()),
-                    ("generation", integer_schema()),
-                    ("realm_id", string_schema()),
-                    ("instance_id", string_schema()),
-                    ("backend", string_schema()),
-                    (
-                        "resolved_paths",
-                        serde_json::json!({
-                            "type": "object",
-                            "additionalProperties": { "type": "string" }
-                        }),
-                    ),
-                ],
-                vec!["config", "generation"],
-            ),
-        );
-        components.insert(
-            "RestCreateSessionRequest".to_string(),
-            object_schema(
-                vec![
-                    ("prompt", content_input.clone()),
-                    ("system_prompt", string_schema()),
-                    ("model", string_schema()),
-                    ("provider", string_schema()),
-                    ("max_tokens", integer_schema()),
-                    ("output_schema", json_value.clone()),
-                    ("structured_output_retries", integer_schema()),
-                    ("verbose", bool_schema()),
-                    ("keep_alive", nullable(bool_schema())),
-                    ("comms_name", string_schema()),
-                    ("peer_meta", json_value.clone()),
-                    ("hooks_override", json_value.clone()),
-                    ("enable_builtins", bool_schema()),
-                    ("enable_shell", bool_schema()),
-                    ("enable_memory", bool_schema()),
-                    ("enable_schedule", bool_schema()),
-                    ("enable_workgraph", bool_schema()),
-                    ("enable_mob", bool_schema()),
-                    ("budget_limits", json_value.clone()),
-                    ("provider_params", json_value.clone()),
-                    (
-                        "preload_skills",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": json_value
-                        }),
-                    ),
-                    (
-                        "skill_refs",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": json_value
-                        }),
-                    ),
-                    ("labels", labels),
-                    ("additional_instructions", string_array.clone()),
-                    ("app_context", json_value.clone()),
-                    (
-                        "shell_env",
-                        serde_json::json!({
-                            "type": "object",
-                            "additionalProperties": { "type": "string" }
-                        }),
-                    ),
-                ],
-                vec!["prompt"],
-            ),
-        );
-        components.insert(
-            "RestContinueSessionRequest".to_string(),
-            object_schema(
-                vec![
-                    ("session_id", string_schema()),
-                    ("prompt", content_input),
-                    ("system_prompt", string_schema()),
-                    ("output_schema", json_value.clone()),
-                    ("structured_output_retries", integer_schema()),
-                    ("keep_alive", nullable(bool_schema())),
-                    ("comms_name", string_schema()),
-                    ("peer_meta", json_value.clone()),
-                    ("verbose", bool_schema()),
-                    ("model", string_schema()),
-                    ("provider", string_schema()),
-                    ("max_tokens", integer_schema()),
-                    ("hooks_override", json_value.clone()),
-                    (
-                        "skill_refs",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": json_value
-                        }),
-                    ),
-                    ("flow_tool_overlay", json_value.clone()),
-                    ("additional_instructions", string_array),
-                ],
-                vec!["session_id", "prompt"],
-            ),
-        );
-        components.insert(
-            "RestAppendSystemContextRequest".to_string(),
-            object_schema(
-                vec![
-                    ("text", string_schema()),
-                    ("source", string_schema()),
-                    ("idempotency_key", string_schema()),
-                ],
-                vec!["text"],
-            ),
-        );
-        components.insert(
-            "RestPeerResponseTerminalRequest".to_string(),
-            closed_object_schema(
-                vec![
-                    ("peer_id", schema_ref("PeerId")),
-                    ("display_name", schema_ref("PeerName")),
-                    ("request_id", schema_ref("PeerCorrelationId")),
-                    ("status", schema_ref("PeerResponseTerminalStatusWire")),
-                    ("result", json_value.clone()),
-                ],
-                vec!["peer_id", "request_id", "status", "result"],
-            ),
-        );
-        components.insert(
-            "RestSetConfigRequest".to_string(),
-            serde_json::json!({
-                "oneOf": [
-                    schema_ref("JsonValue"),
-                    object_schema(
-                        vec![
-                            ("config", schema_ref("JsonValue")),
-                            ("expected_generation", integer_schema()),
-                        ],
-                        vec!["config"],
-                    )
-                ]
-            }),
-        );
-        components.insert(
-            "RestPatchConfigRequest".to_string(),
-            serde_json::json!({
-                "oneOf": [
-                    schema_ref("JsonValue"),
-                    object_schema(
-                        vec![
-                            ("patch", schema_ref("JsonValue")),
-                            ("expected_generation", integer_schema()),
-                        ],
-                        vec!["patch"],
-                    )
-                ]
-            }),
-        );
-        components.insert(
-            "RestScheduleToolCallRequest".to_string(),
-            object_schema(
-                vec![("name", string_schema()), ("arguments", json_value.clone())],
-                vec!["name"],
-            ),
-        );
-        components.insert(
-            "RestAuthBindingRequest".to_string(),
-            object_schema(
-                vec![
-                    ("realm_id", string_schema()),
-                    ("binding_id", string_schema()),
-                    ("profile_id", string_schema()),
-                ],
-                vec!["realm_id", "binding_id"],
-            ),
-        );
-        components.insert(
-            "RestAuthProfileCreateRequest".to_string(),
-            serde_json::json!({
-                "type": "object",
-                "additionalProperties": true,
-                "required": ["realm_id", "binding_id", "auth_method"],
-            }),
-        );
-        components.insert(
-            "RestAuthLoginStartRequest".to_string(),
-            object_schema(
-                vec![
-                    ("provider", string_schema()),
-                    ("redirect_uri", string_schema()),
-                    ("realm_id", string_schema()),
-                    ("binding_id", string_schema()),
-                    ("profile_id", string_schema()),
-                ],
-                vec!["provider", "redirect_uri", "realm_id", "binding_id"],
-            ),
-        );
-        components.insert(
-            "RestMobHelperRequest".to_string(),
-            object_schema(
-                vec![
-                    ("prompt", string_schema()),
-                    ("agent_identity", string_schema()),
-                    ("role_name", string_schema()),
-                    ("runtime_mode", string_schema()),
-                    ("backend", string_schema()),
-                ],
-                vec!["prompt"],
-            ),
-        );
-        components.insert(
-            "RestMobForkHelperRequest".to_string(),
-            object_schema(
-                vec![
-                    ("source_member_id", string_schema()),
-                    ("prompt", string_schema()),
-                    ("agent_identity", string_schema()),
-                    ("role_name", string_schema()),
-                    ("fork_context", json_value),
-                    ("runtime_mode", string_schema()),
-                    ("backend", string_schema()),
-                ],
-                vec!["source_member_id", "prompt"],
-            ),
-        );
-        components.insert(
-            "RestMobWaitRequest".to_string(),
-            object_schema(
-                vec![
-                    (
-                        "member_ids",
-                        serde_json::json!({
-                            "type": "array",
-                            "items": { "type": "string" }
-                        }),
-                    ),
-                    ("timeout_ms", integer_schema()),
-                ],
-                vec![],
-            ),
-        );
         components
-    }
-
-    #[derive(Clone, Copy)]
-    struct RestOperationContract {
-        request_schema: Option<&'static str>,
-        request_required: bool,
-        response_schema: &'static str,
-        response_content_type: &'static str,
-    }
-
-    impl RestOperationContract {
-        const fn json(response_schema: &'static str) -> Self {
-            Self {
-                request_schema: None,
-                request_required: false,
-                response_schema,
-                response_content_type: "application/json",
-            }
-        }
-
-        const fn with_json_request(
-            request_schema: &'static str,
-            response_schema: &'static str,
-        ) -> Self {
-            Self {
-                request_schema: Some(request_schema),
-                request_required: true,
-                response_schema,
-                response_content_type: "application/json",
-            }
-        }
-
-        const fn with_optional_json_request(
-            request_schema: &'static str,
-            response_schema: &'static str,
-        ) -> Self {
-            Self {
-                request_schema: Some(request_schema),
-                request_required: false,
-                response_schema,
-                response_content_type: "application/json",
-            }
-        }
-
-        const fn text(response_schema: &'static str) -> Self {
-            Self {
-                request_schema: None,
-                request_required: false,
-                response_schema,
-                response_content_type: "text/plain",
-            }
-        }
-
-        const fn event_stream(response_schema: &'static str) -> Self {
-            Self {
-                request_schema: None,
-                request_required: false,
-                response_schema,
-                response_content_type: "text/event-stream",
-            }
-        }
-    }
-
-    fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
-        if let Some(response_schema) =
-            meerkat_workgraph::workgraph_rest_response_schema(path, method)
-        {
-            return RestOperationContract::json(response_schema);
-        }
-
-        match (path, method) {
-            ("/help", "post") => {
-                RestOperationContract::with_json_request("HelpRequest", "HelpResponse")
-            }
-            ("/sessions", "get") => RestOperationContract::json("ListSessionsResponse"),
-            ("/sessions", "post") => RestOperationContract::with_json_request(
-                "RestCreateSessionRequest",
-                "WireRunResult",
-            ),
-            ("/sessions/{id}", "get") => RestOperationContract::json("SessionDetailsResponse"),
-            ("/sessions/{id}", "delete") => RestOperationContract::json("StatusResponse"),
-            ("/sessions/{id}/history", "get") => RestOperationContract::json("WireSessionHistory"),
-            ("/sessions/{id}/interrupt", "post") => RestOperationContract::json("StatusResponse"),
-            ("/sessions/{id}/system_context", "post") => RestOperationContract::with_json_request(
-                "RestAppendSystemContextRequest",
-                "StatusResponse",
-            ),
-            ("/sessions/{id}/messages", "post") => RestOperationContract::with_json_request(
-                "RestContinueSessionRequest",
-                "WireRunResult",
-            ),
-            ("/sessions/{id}/external-events", "post") => {
-                RestOperationContract::with_json_request("JsonValue", "StatusResponse")
-            }
-            ("/sessions/{id}/peer-response-terminal", "post") => {
-                RestOperationContract::with_json_request(
-                    "RestPeerResponseTerminalRequest",
-                    "StatusResponse",
-                )
-            }
-            ("/sessions/{id}/mcp/add", "post") => {
-                RestOperationContract::with_json_request("McpAddParams", "McpLiveOpResponse")
-            }
-            ("/sessions/{id}/mcp/remove", "post") => {
-                RestOperationContract::with_json_request("McpRemoveParams", "McpLiveOpResponse")
-            }
-            ("/sessions/{id}/mcp/reload", "post") => {
-                RestOperationContract::with_json_request("McpReloadParams", "McpLiveOpResponse")
-            }
-            ("/sessions/{id}/events" | "/mob/{id}/events", "get") => {
-                RestOperationContract::event_stream("SseEventStream")
-            }
-            ("/sessions/{id}/status", "get") => RestOperationContract::json("RuntimeStateResult"),
-            ("/schedule/call", "post") => {
-                RestOperationContract::with_json_request("RestScheduleToolCallRequest", "JsonValue")
-            }
-            ("/schedules", "get") => RestOperationContract::json("ScheduleListResult"),
-            ("/schedules", "post") => {
-                RestOperationContract::with_json_request("JsonValue", "JsonValue")
-            }
-            ("/schedules/{id}", "get" | "delete")
-            | ("/schedules/{id}/pause" | "/schedules/{id}/resume", "post") => {
-                RestOperationContract::json("JsonValue")
-            }
-            ("/schedules/{id}", "patch") => {
-                RestOperationContract::with_json_request("JsonValue", "JsonValue")
-            }
-            ("/schedules/{id}/occurrences", "get") => {
-                RestOperationContract::json("ScheduleOccurrencesResult")
-            }
-            ("/comms/send", "post") => {
-                RestOperationContract::with_json_request("CommsSendParams", "CommsSendResult")
-            }
-            ("/comms/peers", "get") => RestOperationContract::json("CommsPeersResult"),
-            ("/config", "get") => RestOperationContract::json("ConfigEnvelope"),
-            ("/config", "put") => {
-                RestOperationContract::with_json_request("RestSetConfigRequest", "ConfigEnvelope")
-            }
-            ("/config", "patch") => {
-                RestOperationContract::with_json_request("RestPatchConfigRequest", "ConfigEnvelope")
-            }
-            ("/skills", "get") => RestOperationContract::json("SkillListResponse"),
-            ("/capabilities", "get") => RestOperationContract::json("CapabilitiesResponse"),
-            ("/runtime/host_info", "get") => RestOperationContract::json("RuntimeHostInfo"),
-            ("/runtime/capabilities", "get") => {
-                RestOperationContract::json("RuntimeHostCapabilities")
-            }
-            ("/runtime/health", "get") => RestOperationContract::json("RuntimeHostHealth"),
-            ("/models/catalog", "get") => RestOperationContract::json("ModelsCatalogResponse"),
-            ("/mob/{id}/spawn-helper", "post") => {
-                RestOperationContract::with_json_request("RestMobHelperRequest", "JsonValue")
-            }
-            ("/mob/{id}/fork-helper", "post") => {
-                RestOperationContract::with_json_request("RestMobForkHelperRequest", "JsonValue")
-            }
-            ("/mob/{id}/wait-kickoff", "post") => {
-                RestOperationContract::with_optional_json_request("RestMobWaitRequest", "JsonValue")
-            }
-            ("/mob/{id}/members/{agent_identity}/status", "get")
-            | (
-                "/mob/{id}/members/{agent_identity}/cancel"
-                | "/mob/{id}/members/{agent_identity}/respawn",
-                "post",
-            ) => RestOperationContract::json("JsonValue"),
-            ("/health", "get") => RestOperationContract::text("PlainTextResponse"),
-            ("/auth/profiles", "get") => RestOperationContract::json("WireAuthProfilesList"),
-            ("/auth/profiles", "post") => RestOperationContract::with_json_request(
-                "RestAuthProfileCreateRequest",
-                "WireAuthProfileCreated",
-            ),
-            ("/auth/bindings/{binding_id}", "get") => {
-                RestOperationContract::json("WireAuthProfileDetail")
-            }
-            ("/auth/bindings/{binding_id}", "delete")
-            | ("/auth/bindings/{binding_id}/logout", "post") => {
-                RestOperationContract::json("WireAuthProfileCleared")
-            }
-            ("/auth/bindings/{binding_id}/test", "post")
-            | ("/auth/bindings/{binding_id}/status", "get") => {
-                RestOperationContract::json("WireAuthStatusDetail")
-            }
-            ("/auth/login/start", "post") => RestOperationContract::with_json_request(
-                "RestAuthLoginStartRequest",
-                "WireLoginStart",
-            ),
-            ("/auth/login/complete", "post") => {
-                RestOperationContract::with_json_request("LoginCompleteParams", "WireLoginReady")
-            }
-            ("/auth/login/device/start", "post") => {
-                RestOperationContract::with_json_request("DeviceStartParams", "WireDeviceStart")
-            }
-            ("/auth/login/device/complete", "post") => RestOperationContract::with_json_request(
-                "DeviceCompleteParams",
-                "WireDeviceCompleteResult",
-            ),
-            ("/realms", "get") => RestOperationContract::json("WireRealmList"),
-            ("/realms/{id}", "get") => RestOperationContract::json("WireRealmConnectionSet"),
-            _ => RestOperationContract::json("JsonValue"),
-        }
     }
 
     fn rest_operation_id(method: &str, path: &str) -> String {
@@ -1243,7 +812,7 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                 .operations
                 .into_iter()
                 .map(|operation| {
-                    let contract = rest_operation_contract(path.path, operation.method);
+                    let contract = crate::rest_operation_contract(path.path, operation.method);
                     let mut operation_map = Map::new();
                     operation_map.insert(
                         "operationId".to_string(),
@@ -1337,6 +906,27 @@ mod tests {
             !validator.is_valid(instance),
             "schema should reject invalid shape {instance}"
         );
+    }
+
+    #[test]
+    fn emitted_schemas_do_not_embed_machine_local_storage_paths() {
+        let output_dir = temp_output_dir("schema-path-hermeticity");
+        emit_all_schemas(&output_dir).expect("emit schemas");
+
+        let storage_directory = meerkat_core::StorageConfig::default()
+            .directory
+            .expect("storage default path resolves");
+        let storage_directory = storage_directory.display().to_string();
+
+        for file in ["params.json", "rest-openapi.json", "wire-types.json"] {
+            let body = fs::read_to_string(output_dir.join(file)).unwrap();
+            assert!(
+                !body.contains(&storage_directory),
+                "{file} must not embed machine-local storage default {storage_directory}"
+            );
+        }
+
+        fs::remove_dir_all(&output_dir).unwrap();
     }
 
     #[test]
@@ -1510,6 +1100,11 @@ mod tests {
             ),
             ("comms/send", "CommsSendParams", "CommsSendResult"),
             ("comms/peers", "CommsPeersParams", "CommsPeersResult"),
+            (
+                "schedule/call",
+                "ScheduleToolCallParams",
+                "ScheduleToolCallResult",
+            ),
         ] {
             let method = methods
                 .iter()
@@ -1808,7 +1403,13 @@ mod tests {
             .expect("rest OpenAPI should publish schema components");
         for expected in [
             "RestCreateSessionRequest",
+            "RestContinueSessionRequest",
+            "RestAppendSystemContextRequest",
+            "RestSessionExternalEventEnvelope",
             "RestPeerResponseTerminalRequest",
+            "RestMobHelperRequest",
+            "RestMobForkHelperRequest",
+            "RestMobWaitRequest",
             "WireRunResult",
             "WireError",
             "ConfigEnvelope",
@@ -1854,7 +1455,11 @@ mod tests {
         assert_eq!(
             terminal_properties
                 .get("display_name")
-                .and_then(|schema| schema.pointer("/$ref"))
+                .and_then(|schema| {
+                    schema
+                        .pointer("/$ref")
+                        .or_else(|| schema.pointer("/anyOf/0/$ref"))
+                })
                 .and_then(serde_json::Value::as_str),
             Some("#/components/schemas/PeerName")
         );
@@ -1893,6 +1498,15 @@ mod tests {
             Some("#/components/schemas/WireError")
         );
 
+        let external_events = &rest_openapi["paths"]["/sessions/{id}/external-events"]["post"];
+        assert_eq!(
+            external_events
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/RestSessionExternalEventEnvelope"),
+            "external event ingress must use the generated REST event envelope"
+        );
+
         let get_session = &rest_openapi["paths"]["/sessions/{id}"]["get"];
         assert_eq!(
             get_session
@@ -1923,6 +1537,123 @@ mod tests {
                 );
             }
         }
+
+        for (method, expected_request) in
+            [("put", "ConfigSetParams"), ("patch", "ConfigPatchParams")]
+        {
+            let operation = &rest_openapi["paths"]["/config"][method];
+            let expected_ref = format!("#/components/schemas/{expected_request}");
+            assert_eq!(
+                operation
+                    .pointer("/requestBody/content/application~1json/schema/$ref")
+                    .and_then(serde_json::Value::as_str),
+                Some(expected_ref.as_str()),
+                "/config {method} must use the generated config params contract"
+            );
+            assert_eq!(
+                operation
+                    .pointer("/responses/200/content/application~1json/schema/$ref")
+                    .and_then(serde_json::Value::as_str),
+                Some("#/components/schemas/ConfigEnvelope"),
+                "/config {method} must use the generated config envelope response"
+            );
+        }
+        assert!(
+            components.get("RestSetConfigRequest").is_none(),
+            "REST OpenAPI must not carry manual config set shadow schema"
+        );
+        assert!(
+            components.get("RestPatchConfigRequest").is_none(),
+            "REST OpenAPI must not carry manual config patch shadow schema"
+        );
+
+        let schedule_tools = &rest_openapi["paths"]["/schedule/tools"]["get"];
+        assert_eq!(
+            schedule_tools
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/ScheduleToolsResult"),
+            "/schedule/tools must expose the generated schedule tools result"
+        );
+
+        let schedule_call = &rest_openapi["paths"]["/schedule/call"]["post"];
+        assert_eq!(
+            schedule_call
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/ScheduleToolCallParams"),
+            "/schedule/call must use the generated schedule tool params contract"
+        );
+        assert_eq!(
+            schedule_call
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/ScheduleToolCallResult"),
+            "/schedule/call must use the generated schedule tool result contract"
+        );
+        assert!(
+            components.get("RestScheduleToolCallRequest").is_none(),
+            "REST OpenAPI must not carry a manual schedule tool call shadow schema"
+        );
+        for retired_schema in [
+            "RestAuthBindingRequest",
+            "RestAuthProfileCreateRequest",
+            "RestAuthLoginStartRequest",
+        ] {
+            assert!(
+                components.get(retired_schema).is_none(),
+                "REST OpenAPI must not carry manual auth shadow schema {retired_schema}"
+            );
+        }
+
+        let auth_profile_create = &rest_openapi["paths"]["/auth/profiles"]["post"];
+        assert_eq!(
+            auth_profile_create
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/CreateProfileParams"),
+            "/auth/profiles POST must use the generated auth profile contract"
+        );
+        let auth_login_start = &rest_openapi["paths"]["/auth/login/start"]["post"];
+        assert_eq!(
+            auth_login_start
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/LoginStartParams"),
+            "/auth/login/start must use the generated auth login contract"
+        );
+
+        let create_schedule = &rest_openapi["paths"]["/schedules"]["post"];
+        assert_eq!(
+            create_schedule
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/CreateScheduleRequest"),
+            "/schedules POST must use the generated schedule create contract"
+        );
+        assert_eq!(
+            create_schedule
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/Schedule"),
+            "/schedules POST must use the generated schedule response contract"
+        );
+
+        let update_schedule = &rest_openapi["paths"]["/schedules/{id}"]["patch"];
+        assert_eq!(
+            update_schedule
+                .pointer("/requestBody/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/ScheduleUpdateRequest"),
+            "/schedules/{{id}} PATCH must use the generated schedule update contract"
+        );
+        assert_eq!(
+            update_schedule
+                .pointer("/responses/200/content/application~1json/schema/$ref")
+                .and_then(serde_json::Value::as_str),
+            Some("#/components/schemas/Schedule"),
+            "/schedules/{{id}} PATCH must use the generated schedule response contract"
+        );
 
         for retired in [
             "/sessions/{id}/submit",

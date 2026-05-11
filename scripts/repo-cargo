@@ -131,11 +131,17 @@ if [[ "${toolchain_wrappers_supported}" == "true" ]] && [[ -n "${toolchain_spec}
   mkdir -p "${toolchain_bin}"
   for tool in cargo rustc rustdoc rustfmt; do
     tool_path="${toolchain_bin}/${tool}"
+    tmp_tool_path="$(mktemp "${tool_path}.tmp.XXXXXX")"
     {
       printf '#!/usr/bin/env bash\n'
       printf 'exec rustup run %q %q "$@"\n' "${toolchain_spec}" "${tool}"
-    } >"${tool_path}"
-    chmod +x "${tool_path}"
+    } >"${tmp_tool_path}"
+    chmod +x "${tmp_tool_path}"
+    if [[ -f "${tool_path}" ]] && cmp -s "${tmp_tool_path}" "${tool_path}"; then
+      rm -f "${tmp_tool_path}"
+    else
+      mv -f "${tmp_tool_path}" "${tool_path}"
+    fi
   done
   toolchain_cargo="${toolchain_bin}/cargo"
   toolchain_rustc="${toolchain_bin}/rustc"

@@ -3221,7 +3221,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: &[("MEERKAT_WEB_WASM_PROFILE", "dev")],
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -3253,7 +3253,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
             required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
             required_bins: &["node", "npm"],
             cwd: "tests/live_smoke/browser",
-            env: &[],
+            env: &[("MEERKAT_WEB_WASM_PROFILE", "dev")],
             cargo_bin_env: &[],
             pre_commands: &[
                 &["/bin/sh", "-c", "test -d node_modules || npm ci"],
@@ -5076,6 +5076,17 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn browser_smoke_scenarios_use_dev_wasm_profile() {
+        for id in [47, 48] {
+            let spec = scenario_spec(id).unwrap();
+            assert!(
+                spec.env.contains(&("MEERKAT_WEB_WASM_PROFILE", "dev")),
+                "scenario {id} should reuse the browser smoke WASM profile"
+            );
         }
     }
 

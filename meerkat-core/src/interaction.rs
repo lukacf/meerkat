@@ -643,14 +643,13 @@ pub struct PeerIngressAdmission {
     pub rendered_text: String,
 }
 
-/// Standalone compatibility adapter for peer ingress classification.
+/// Policy implementation for peer ingress compatibility classification.
 ///
-/// Runtime-backed comms must use the MeerkatMachine
-/// `PeerIngressClassified` effect as authority. This adapter exists only for
-/// standalone comms runtimes without a session DSL and for tests that need a
-/// wire-compatible projection of machine behavior. Raw inbox ingress and
-/// runtime-required classified ingress must not use it as a second authority
-/// for auth exemptions, lifecycle intent, or response terminality.
+/// Runtime-backed comms must use the MeerkatMachine `PeerIngressClassified`
+/// effect as authority. Production standalone comms should access this policy
+/// through `PeerIngressCompatibilityAuthority`, which is the named owner for
+/// auth exemptions, lifecycle intent, and response terminality when no session
+/// DSL exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerIngressMachinePolicy {
     silent_request_intents: BTreeSet<String>,
@@ -803,6 +802,47 @@ impl PeerIngressMachinePolicy {
             request_id: None,
             rendered_text: format_external_event_projection(&facts.source_name, Some(&facts.body)),
         }
+    }
+}
+
+/// Named owner for standalone peer-ingress compatibility admission.
+///
+/// Runtime-backed ingress must use `PeerCommsHandle`/MeerkatMachine. This
+/// authority is the explicit compatibility seam for in-process or test
+/// runtimes that have no session DSL handle; callers hand it parsed transport
+/// facts and receive the complete admission payload instead of independently
+/// deciding auth exemptions, lifecycle routing, or response terminality.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerIngressCompatibilityAuthority {
+    policy: PeerIngressMachinePolicy,
+}
+
+impl Default for PeerIngressCompatibilityAuthority {
+    fn default() -> Self {
+        Self::from_silent_intents(std::iter::empty::<String>())
+    }
+}
+
+impl PeerIngressCompatibilityAuthority {
+    pub fn from_silent_intents<I, S>(silent_intents: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self {
+            policy: PeerIngressMachinePolicy::from_silent_intents(silent_intents),
+        }
+    }
+
+    pub fn admit_external_envelope(
+        &self,
+        facts: &PeerIngressEnvelopeFacts,
+    ) -> PeerIngressAdmission {
+        self.policy.classify_external_envelope(facts)
+    }
+
+    pub fn admit_plain_event(&self, facts: &PeerIngressPlainEventFacts) -> PeerIngressAdmission {
+        self.policy.classify_plain_event_facts(facts)
     }
 }
 
@@ -1200,6 +1240,53 @@ mod tests {
         let silent = policy.classify_request_intent("probe.silent");
         assert_eq!(silent.class, PeerInputClass::SilentRequest);
         assert_eq!(silent.auth, PeerIngressAuthDecision::Required);
+    }
+
+    #[test]
+    fn peer_ingress_compatibility_authority_owns_standalone_admission() {
+        let authority = PeerIngressCompatibilityAuthority::from_silent_intents(["probe.silent"]);
+        let request_facts = PeerIngressEnvelopeFacts {
+            item_id: "request-1".to_string(),
+            from_peer: "worker".to_string(),
+            from_peer_id: PeerId::from_uuid(Uuid::new_v4()),
+            kind: PeerIngressEnvelopeKind::Request {
+                intent: "probe.silent".to_string(),
+                params: serde_json::json!({ "peer": "worker" }),
+            },
+        };
+
+        let request = authority.admit_external_envelope(&request_facts);
+        assert_eq!(request.classification.class, PeerInputClass::SilentRequest);
+        assert_eq!(
+            request.classification.auth,
+            PeerIngressAuthDecision::Required
+        );
+        assert_eq!(request.request_id.as_deref(), Some("request-1"));
+
+        let response_facts = PeerIngressEnvelopeFacts {
+            item_id: "response-1".to_string(),
+            from_peer: "worker".to_string(),
+            from_peer_id: PeerId::from_uuid(Uuid::new_v4()),
+            kind: PeerIngressEnvelopeKind::Response {
+                in_reply_to: "request-1".to_string(),
+                status: ResponseStatus::Completed,
+                result: serde_json::json!({ "ok": true }),
+            },
+        };
+        let response = authority.admit_external_envelope(&response_facts);
+        assert_eq!(
+            response.classification.response_terminality,
+            Some(TerminalityClass::Terminal {
+                disposition: TerminalDisposition::Completed,
+            })
+        );
+
+        let plain = authority.admit_plain_event(&PeerIngressPlainEventFacts {
+            source_name: "tcp".to_string(),
+            body: "payload".to_string(),
+        });
+        assert_eq!(plain.classification.class, PeerInputClass::PlainEvent);
+        assert_eq!(plain.rendered_text, "[EVENT via tcp] payload");
     }
 
     #[test]

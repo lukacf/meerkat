@@ -824,7 +824,7 @@ async fn openai_managed_chatgpt_oauth_rejects_wrong_source_even_with_matching_mo
         "chatgpt_backend",
         "managed_chatgpt_oauth",
         CredentialSourceSpec::ExternalResolver {
-            handle: "external-chatgpt".into(),
+            handle: meerkat_core::ExternalAuthResolverId::parse("external-chatgpt").unwrap(),
         },
     );
     let env = ResolverEnvironment::testing()

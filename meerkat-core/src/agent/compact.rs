@@ -316,13 +316,11 @@ fn annotate_compaction_discards(
     discarded
         .into_iter()
         .map(|message| {
-            let source = serde_json::to_vec(&message)
-                .ok()
-                .and_then(|discard_key| {
-                    message_keys.iter().enumerate().find_map(|(index, key)| {
-                        (!consumed[index] && key.as_ref() == Some(&discard_key)).then_some(index)
-                    })
-                });
+            let source = serde_json::to_vec(&message).ok().and_then(|discard_key| {
+                message_keys.iter().enumerate().find_map(|(index, key)| {
+                    (!consumed[index] && key.as_ref() == Some(&discard_key)).then_some(index)
+                })
+            });
             let (source_message_index, source_turn) = source
                 .map(|index| {
                     consumed[index] = true;

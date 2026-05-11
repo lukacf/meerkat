@@ -19,7 +19,8 @@ use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 use crate::provider_matrix::{
     AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
-    OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
+    OpenAiAuthMethod, OpenAiBackendKind, OtherAuthMethod, SelfHostedAuthMethod,
+    SelfHostedBackendKind,
 };
 
 // ---------------------------------------------------------------------
@@ -206,7 +207,11 @@ pub fn persisted_auth_mode_for_provider_auth_method(
             SelfHostedAuthMethod::StaticBearer => Some(PersistedAuthMode::StaticBearer),
             SelfHostedAuthMethod::None => None,
         },
-        Provider::Other => None,
+        Provider::Other => match OtherAuthMethod::parse(auth_method)? {
+            OtherAuthMethod::ApiKey => Some(PersistedAuthMode::ApiKey),
+            OtherAuthMethod::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            OtherAuthMethod::None => None,
+        },
     }
 }
 
@@ -1534,6 +1539,28 @@ auth_profile = "default_profile"
             ..chatgpt
         };
         assert_eq!(same_string_wrong_provider.persisted_auth_mode(), None);
+
+        let custom_provider_api_key = AuthProfile {
+            id: "custom_api_key".into(),
+            provider: Provider::Other,
+            auth_method: OtherAuthMethod::ApiKey.as_str().into(),
+            source: CredentialSourceSpec::ManagedStore,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        };
+        assert_eq!(
+            custom_provider_api_key.persisted_auth_mode(),
+            Some(crate::auth::PersistedAuthMode::ApiKey),
+        );
+
+        let custom_provider_static_bearer = AuthProfile {
+            auth_method: OtherAuthMethod::StaticBearer.as_str().into(),
+            ..custom_provider_api_key
+        };
+        assert_eq!(
+            custom_provider_static_bearer.persisted_auth_mode(),
+            Some(crate::auth::PersistedAuthMode::StaticBearer),
+        );
     }
 
     #[test]

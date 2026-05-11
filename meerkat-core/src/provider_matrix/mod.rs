@@ -16,6 +16,7 @@ pub mod google_auth;
 pub mod google_backend;
 pub mod openai_auth;
 pub mod openai_backend;
+pub mod other_auth;
 pub mod self_hosted_auth;
 pub mod self_hosted_backend;
 
@@ -34,6 +35,10 @@ pub mod openai {
     pub use super::openai_backend::OpenAiBackendKind;
 }
 
+pub mod other {
+    pub use super::other_auth::OtherAuthMethod;
+}
+
 pub mod self_hosted {
     pub use super::self_hosted_auth::SelfHostedAuthMethod;
     pub use super::self_hosted_backend::SelfHostedBackendKind;
@@ -42,4 +47,5 @@ pub mod self_hosted {
 pub use anthropic::{AnthropicAuthMethod, AnthropicBackendKind};
 pub use google::{GoogleAuthMethod, GoogleBackendKind};
 pub use openai::{OpenAiAuthMethod, OpenAiBackendKind};
+pub use other::OtherAuthMethod;
 pub use self_hosted::{SelfHostedAuthMethod, SelfHostedBackendKind};

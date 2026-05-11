@@ -669,18 +669,6 @@ impl EphemeralRuntimeDriver {
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
-        let persisted_input =
-            recovered_state.persisted_input.as_ref().ok_or_else(|| {
-                RuntimeDriverError::Internal(format!(
-                    "store corruption: recovered input '{work_id}' has no persisted input; cannot validate recovered runtime semantics"
-                ))
-            })?;
-        let expected = RuntimeInputSemantics::from_policy_and_kind(&policy, persisted_input.kind());
-        if runtime_semantics != expected {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered input '{work_id}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind"
-            )));
-        }
         self.recover_input_lifecycle(
             &work_id,
             &content_shape,

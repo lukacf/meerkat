@@ -2546,21 +2546,21 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             ) {
                 return Err(SessionError::NotRunning { id: id.clone() });
             }
-            if phase == TurnAdmissionPhase::Running
-                && let Some(turn_state_handle) = handle.turn_state_handle.as_ref()
-            {
-                match turn_state_handle.request_cancel_after_boundary() {
-                    Ok(()) => {
-                        wake_interrupt_notify(&handle.interrupt_notify);
-                        return Ok(());
-                    }
-                    Err(err) => {
+            if let Some(turn_state_handle) = handle.turn_state_handle.as_ref() {
+                if phase != TurnAdmissionPhase::Running {
+                    return Err(SessionError::NotRunning { id: id.clone() });
+                }
+                turn_state_handle
+                    .request_cancel_after_boundary()
+                    .map_err(|err| {
                         tracing::debug!(
                             error = %err,
-                            "turn-state cancel-after-boundary request rejected; falling back to pending live flag"
+                            "turn-state cancel-after-boundary request rejected"
                         );
-                    }
-                }
+                        SessionError::NotRunning { id: id.clone() }
+                    })?;
+                wake_interrupt_notify(&handle.interrupt_notify);
+                return Ok(());
             }
             if let Some(cancel_after_boundary_handle) = handle.cancel_after_boundary_handle.as_ref()
             {
@@ -4696,6 +4696,32 @@ mod admission_window_tests {
         assert_eq!(result.text, "boundary requested");
         assert_eq!(run_calls.load(Ordering::SeqCst), 1);
         assert!(!cancel_after_boundary.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn boundary_cancel_during_runtime_backed_admission_does_not_set_legacy_flag() {
+        let run_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_after_boundary = Arc::new(AtomicBool::new(false));
+        let turn_state =
+            Arc::new(meerkat_core::agent::test_turn_state_handle::TestTurnStateHandle::new());
+        let mut builder = probe_builder(
+            Arc::clone(&run_calls),
+            Arc::new(AtomicUsize::new(0)),
+            Arc::clone(&cancel_after_boundary),
+        );
+        builder.turn_state_handle =
+            Some(Arc::clone(&turn_state) as Arc<dyn meerkat_core::TurnStateHandle>);
+        let service = EphemeralSessionService::new(builder, 1);
+        let (session_id, _command_tx) = create_admitted_session(&service).await;
+
+        let result = service.cancel_after_boundary(&session_id).await;
+
+        assert!(matches!(result, Err(SessionError::NotRunning { .. })));
+        assert!(!turn_state.snapshot().cancel_after_boundary);
+        assert!(
+            !cancel_after_boundary.load(Ordering::SeqCst),
+            "runtime-backed admitted turn must not use the standalone legacy flag"
+        );
     }
 
     #[tokio::test]

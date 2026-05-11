@@ -3550,6 +3550,7 @@ fn auth_dim(s: &str) -> String {
         s.to_string()
     }
 }
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn auth_green(s: &str) -> String {
     if auth_supports_ansi() {
         format!("\x1b[32m{s}\x1b[0m")

@@ -19,9 +19,10 @@ pub struct ServerInfo {
     pub version: String,
 }
 
-/// Handle the `initialize` method.
-pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
-    let options = meerkat_contracts::RpcMethodCatalogOptions {
+pub(crate) fn rpc_method_catalog_options(
+    runtime_available: bool,
+) -> meerkat_contracts::RpcMethodCatalogOptions {
+    meerkat_contracts::RpcMethodCatalogOptions {
         runtime_available,
         mob_enabled: cfg!(feature = "mob"),
         mcp_enabled: cfg!(feature = "mcp"),
@@ -32,7 +33,12 @@ pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcRespo
         schedule_enabled: cfg!(feature = "schedule"),
         workgraph_enabled: true,
         skills_enabled: true,
-    };
+    }
+}
+
+/// Handle the `initialize` method.
+pub fn handle_initialize(id: Option<RpcId>, runtime_available: bool) -> RpcResponse {
+    let options = rpc_method_catalog_options(runtime_available);
     let caps = ServerCapabilities {
         server_info: ServerInfo {
             name: "meerkat-rpc".to_string(),

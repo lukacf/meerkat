@@ -12,33 +12,22 @@ fn host_surface_options(
     event_replay: bool,
     approvals_available: bool,
 ) -> meerkat::surface::RuntimeHostSurfaceOptions {
-    let catalog_options = meerkat_contracts::RpcMethodCatalogOptions {
-        runtime_available,
-        mob_enabled: cfg!(feature = "mob"),
-        mcp_enabled: cfg!(feature = "mcp"),
-        comms_enabled: cfg!(feature = "comms"),
-        blob_enabled: true,
-        session_events_enabled: true,
-        session_streams_enabled: true,
-        schedule_enabled: cfg!(feature = "schedule"),
-        workgraph_enabled: true,
-        skills_enabled: true,
-    };
+    let catalog_options = super::initialize::rpc_method_catalog_options(runtime_available);
     let mut options = meerkat::surface::RuntimeHostSurfaceOptions::process(
         "meerkat-rpc",
         env!("CARGO_PKG_VERSION"),
     );
-    options.runtime_backed_sessions = runtime_available;
-    options.mobs = cfg!(feature = "mob");
-    options.mcp_live = cfg!(feature = "mcp");
-    options.comms = cfg!(feature = "comms");
-    options.blobs = true;
-    options.artifacts = true;
-    options.session_events = true;
-    options.event_replay = event_replay;
-    options.session_streams = true;
-    options.schedules = cfg!(feature = "schedule");
-    options.skills = true;
+    options.runtime_backed_sessions = catalog_options.runtime_available;
+    options.mobs = catalog_options.mob_enabled;
+    options.mcp_live = catalog_options.mcp_enabled;
+    options.comms = catalog_options.comms_enabled;
+    options.blobs = catalog_options.blob_enabled;
+    options.artifacts = catalog_options.blob_enabled;
+    options.session_events = catalog_options.session_events_enabled;
+    options.event_replay = catalog_options.session_events_enabled && event_replay;
+    options.session_streams = catalog_options.session_streams_enabled;
+    options.schedules = catalog_options.schedule_enabled;
+    options.skills = catalog_options.skills_enabled;
     options.approvals = approvals_available;
     options.rpc_transport = Some("json_rpc".to_string());
     options.rpc_methods = meerkat_contracts::rpc_method_names(catalog_options);
@@ -82,4 +71,47 @@ pub fn handle_capabilities(
 pub fn handle_health(id: Option<RpcId>) -> RpcResponse {
     let health = meerkat::surface::build_runtime_host_health();
     RpcResponse::success(id, &health)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_surface_capabilities_are_catalog_projection() {
+        let runtime_available = true;
+        let event_replay = true;
+        let approvals_available = true;
+        let catalog_options =
+            super::super::initialize::rpc_method_catalog_options(runtime_available);
+        let options = host_surface_options(runtime_available, event_replay, approvals_available);
+
+        assert_eq!(
+            options.runtime_backed_sessions,
+            catalog_options.runtime_available
+        );
+        assert_eq!(options.mobs, catalog_options.mob_enabled);
+        assert_eq!(options.mcp_live, catalog_options.mcp_enabled);
+        assert_eq!(options.comms, catalog_options.comms_enabled);
+        assert_eq!(options.blobs, catalog_options.blob_enabled);
+        assert_eq!(options.artifacts, catalog_options.blob_enabled);
+        assert_eq!(
+            options.session_events,
+            catalog_options.session_events_enabled
+        );
+        assert_eq!(
+            options.event_replay,
+            catalog_options.session_events_enabled && event_replay
+        );
+        assert_eq!(
+            options.session_streams,
+            catalog_options.session_streams_enabled
+        );
+        assert_eq!(options.schedules, catalog_options.schedule_enabled);
+        assert_eq!(options.skills, catalog_options.skills_enabled);
+        assert_eq!(
+            options.rpc_methods,
+            meerkat_contracts::rpc_method_names(catalog_options)
+        );
+    }
 }

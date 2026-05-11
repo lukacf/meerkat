@@ -419,23 +419,17 @@ fn render_event(
             );
         }
 
-        AgentEvent::Retrying {
-            attempt,
-            max_attempts,
-            error,
-            delay_ms,
-            ..
-        } => {
+        AgentEvent::Retrying { retry } => {
             chrome_line(
                 mux,
                 scope_id,
                 &format!(
                     "{}⟳ Retry {}/{}: {} ({}ms){}",
                     style(ansi, YELLOW),
-                    attempt,
-                    max_attempts,
-                    error,
-                    delay_ms,
+                    retry.attempt(),
+                    retry.max_attempts(),
+                    retry.error(),
+                    retry.delay_ms(),
                     reset(ansi)
                 ),
             );

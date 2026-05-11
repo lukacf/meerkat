@@ -268,35 +268,16 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
             format!("TokenStore load failed: {e}"),
         )
     })?;
-    token_store.save(&key, tokens).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("TokenStore save failed: {e}"),
-        )
-    })?;
-    let transition = match meerkat_core::publish_token_lifecycle_acquired(
-        auth_lease,
-        auth_binding,
-        tokens,
-    ) {
-        Ok(transition) => transition,
-        Err(e) => {
-            if let Err(rollback_error) =
-                restore_tokens_after_lifecycle_failure(token_store, &key, previous.as_ref()).await
-            {
+    let transition =
+        match meerkat_core::publish_token_lifecycle_acquired(auth_lease, auth_binding, tokens) {
+            Ok(transition) => transition,
+            Err(e) => {
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!(
-                        "AuthMachine lifecycle acquire failed: {e}; TokenStore rollback failed: {rollback_error}"
-                    ),
+                    format!("AuthMachine lifecycle acquire failed: {e}"),
                 ));
             }
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("AuthMachine lifecycle acquire failed: {e}"),
-            ));
-        }
-    };
+        };
     let commit = TokenCommitSnapshot {
         key,
         lease_key,
@@ -304,42 +285,33 @@ async fn save_tokens_and_publish_lifecycle_commit_unlocked(
         previous_lifecycle,
         lifecycle_transition: transition,
     };
-    if mark_for_rehydration {
-        mark_token_commit_lifecycle_published_unlocked(token_store, auth_lease, &commit, tokens)
-            .await?;
-    }
-    Ok(commit)
-}
-
-async fn mark_token_commit_lifecycle_published_unlocked(
-    token_store: &dyn TokenStore,
-    auth_lease: &dyn meerkat_core::handles::AuthLeaseHandle,
-    commit: &TokenCommitSnapshot,
-    tokens: &PersistedTokens,
-) -> Result<(), (StatusCode, String)> {
-    let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
-    let committed_tokens = if current_lifecycle.credential_present {
-        meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+    let tokens_to_save = if mark_for_rehydration {
+        let current_lifecycle = auth_lease.snapshot(&commit.lease_key);
+        if current_lifecycle.credential_present {
+            meerkat_core::mark_tokens_lifecycle_published_for_snapshot(tokens, &current_lifecycle)
+        } else {
+            meerkat_core::mark_tokens_lifecycle_published_for_transition(
+                tokens,
+                commit.lifecycle_transition,
+            )
+        }
     } else {
-        meerkat_core::mark_tokens_lifecycle_published_for_transition(
-            tokens,
-            commit.lifecycle_transition,
-        )
+        tokens.clone()
     };
-    if let Err(e) = token_store.save(&commit.key, &committed_tokens).await {
-        let message = match rollback_token_commit(token_store, auth_lease, commit).await {
+    if let Err(e) = token_store.save(&commit.key, &tokens_to_save).await {
+        let message = match rollback_token_commit(token_store, auth_lease, &commit).await {
             Ok(()) => {
-                format!("TokenStore lifecycle marker save failed: {e}; token commit rolled back")
+                format!("TokenStore save failed: {e}; AuthMachine lifecycle rolled back")
             }
             Err(rollback_error) => {
                 format!(
-                    "TokenStore lifecycle marker save failed: {e}; token commit rollback failed: {rollback_error}"
+                    "TokenStore save failed: {e}; AuthMachine lifecycle rollback failed: {rollback_error}"
                 )
             }
         };
         return Err((StatusCode::INTERNAL_SERVER_ERROR, message));
     }
-    Ok(())
+    Ok(commit)
 }
 
 fn publish_resolved_auth_lease(
@@ -594,17 +566,6 @@ async fn save_tokens_and_consume_browser_flow(
         flow,
     )
     .await
-}
-
-async fn restore_tokens_after_lifecycle_failure(
-    token_store: &dyn TokenStore,
-    key: &TokenKey,
-    previous: Option<&PersistedTokens>,
-) -> Result<(), meerkat_providers::auth_store::TokenStoreError> {
-    match previous {
-        Some(tokens) => token_store.save(key, tokens).await,
-        None => token_store.clear(key).await,
-    }
 }
 
 async fn clear_tokens_and_publish_lifecycle(

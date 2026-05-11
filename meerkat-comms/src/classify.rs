@@ -177,8 +177,12 @@ impl IngressClassificationContext {
                     from_peer: from_name.clone(),
                     from_peer_id,
                     kind: match &envelope.kind {
-                        MessageKind::Message { body, .. } => {
-                            PeerIngressEnvelopeKind::Message { body: body.clone() }
+                        MessageKind::Message { body, blocks, .. } => {
+                            let body = meerkat_core::comms::CommsContentAuthority::text_projection(
+                                body,
+                                blocks.as_deref(),
+                            );
+                            PeerIngressEnvelopeKind::Message { body }
                         }
                         MessageKind::Request { intent, params, .. } => {
                             PeerIngressEnvelopeKind::Request {
@@ -293,6 +297,10 @@ impl IngressClassificationContext {
                 render_metadata,
             } => {
                 let interaction_id = interaction_id.unwrap_or_else(Uuid::new_v4);
+                let (body, blocks) =
+                    meerkat_core::comms::CommsContentAuthority::canonical_text_and_blocks(
+                        body, blocks,
+                    );
                 let facts = PeerIngressPlainEventFacts {
                     source_name: source.to_string(),
                     body: body.clone(),
@@ -586,8 +594,12 @@ mod tests {
             from_peer: from_peer.to_string(),
             from_peer_id: envelope.from.to_peer_id(),
             kind: match &envelope.kind {
-                MessageKind::Message { body, .. } => {
-                    PeerIngressEnvelopeKind::Message { body: body.clone() }
+                MessageKind::Message { body, blocks, .. } => {
+                    let body = meerkat_core::comms::CommsContentAuthority::text_projection(
+                        body,
+                        blocks.as_deref(),
+                    );
+                    PeerIngressEnvelopeKind::Message { body }
                 }
                 MessageKind::Request { intent, params, .. } => PeerIngressEnvelopeKind::Request {
                     intent: intent.clone(),

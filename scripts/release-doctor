@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+workspace_root="$(git rev-parse --show-toplevel)"
+cd "${workspace_root}"
+
+ok=0
+warn=0
+fail=0
+
+pass() {
+  ok=$((ok + 1))
+  printf 'PASS %s\n' "$1"
+}
+
+note() {
+  warn=$((warn + 1))
+  printf 'WARN %s\n' "$1"
+}
+
+bad() {
+  fail=$((fail + 1))
+  printf 'FAIL %s\n' "$1"
+}
+
+bool_enabled() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON|buildbuddy)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if command -v gh >/dev/null 2>&1; then
+  pass "GitHub CLI is installed"
+  if gh auth status >/dev/null 2>&1; then
+    pass "GitHub CLI is authenticated"
+  else
+    bad "GitHub CLI is not authenticated; run gh auth login before release dispatch"
+  fi
+else
+  bad "GitHub CLI is not installed; release workflow dispatch needs gh"
+fi
+
+if command -v npm >/dev/null 2>&1; then
+  pass "npm is installed"
+  if npm whoami >/dev/null 2>&1; then
+    pass "local npm authentication is available"
+  else
+    note "local npm authentication is not available; GitHub Actions publishes with NPM_TOKEN"
+  fi
+else
+  bad "npm is not installed; SDK publish checks need npm"
+fi
+
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  gh_user="$(gh api user --jq '.login' 2>/dev/null || true)"
+  owner_release_account=false
+  if [[ "${gh_user}" == "lukacf" ]]; then
+    owner_release_account=true
+    pass "GitHub account can use owner BuildBuddy release paths"
+  else
+    note "GitHub account '${gh_user:-unknown}' will default release auto-dispatch to GitHub-hosted"
+  fi
+
+  release_bb="$(
+    gh api repos/lukacf/meerkat/actions/variables/MEERKAT_RELEASE_BUILDBUDDY \
+      --jq '.value' 2>/dev/null || true
+  )"
+  if [[ "${owner_release_account}" == "true" ]]; then
+    if bool_enabled "${release_bb}"; then
+      pass "MEERKAT_RELEASE_BUILDBUDDY repo variable is enabled"
+    else
+      bad "MEERKAT_RELEASE_BUILDBUDDY repo variable is '${release_bb:-missing}'; set it to true before owner release"
+    fi
+  elif bool_enabled "${release_bb}"; then
+    note "MEERKAT_RELEASE_BUILDBUDDY is enabled, but only lukacf auto-dispatch uses it"
+  else
+    pass "GitHub-hosted release default is available for non-owner account"
+  fi
+
+  runner_value="$(
+    gh api repos/lukacf/meerkat/actions/variables/MEERKAT_CI_RUNNER \
+      --jq '.value' 2>/dev/null || true
+  )"
+  if [[ -n "${runner_value}" ]]; then
+    pass "MEERKAT_CI_RUNNER repo variable is set"
+  else
+    note "MEERKAT_CI_RUNNER repo variable is not set; release gates will use GitHub-hosted defaults"
+  fi
+
+  for secret_name in CARGO_REGISTRY_TOKEN PYPI_API_TOKEN NPM_TOKEN HOMEBREW_TAP_TOKEN; do
+    if gh api "repos/lukacf/meerkat/actions/secrets/${secret_name}" --jq '.name' >/dev/null 2>&1; then
+      pass "GitHub Actions secret ${secret_name} exists"
+    elif [[ "${owner_release_account}" == "true" ]]; then
+      bad "GitHub Actions secret ${secret_name} is missing"
+    else
+      note "GitHub Actions secret ${secret_name} metadata is not visible to this account"
+    fi
+  done
+fi
+
+if grep -Fq 'github.com/wasm-bindgen/wasm-pack/releases/download' .github/workflows/release.yml; then
+  pass "Release workflow installs wasm-pack from maintained wasm-bindgen releases"
+else
+  bad "Release workflow does not use the maintained wasm-bindgen wasm-pack release URL"
+fi
+
+web_timeout="$(
+  awk '
+    /^  publish_web_sdk_recovery:/ { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
+    in_job && /timeout-minutes:/ {
+      gsub(/[^0-9]/, "", $0)
+      print $0
+      exit
+    }
+  ' .github/workflows/release.yml
+)"
+if [[ "${web_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_timeout >= 120)); then
+  pass "Web SDK recovery job has a long timeout (${web_timeout} minutes)"
+else
+  bad "Web SDK recovery job timeout is '${web_timeout:-missing}'; expected at least 120 minutes"
+fi
+
+if grep -Fq 'Too Many Requests' scripts/release-publish-rust-crates.sh &&
+  grep -Fq 'MEERKAT_CRATE_PUBLISH_ATTEMPTS' scripts/release-publish-rust-crates.sh; then
+  pass "Rust crate publishing retries crates.io rate limits"
+else
+  bad "Rust crate publish script is missing crates.io rate-limit retry handling"
+fi
+
+if [[ -n "${VERSION:-${RELEASE_TAG:-}}" ]]; then
+  tag="${VERSION:-${RELEASE_TAG:-}}"
+  case "${tag}" in
+    v*) ;;
+    *) tag="v${tag}" ;;
+  esac
+  if npm view "@rkat/sdk@${tag#v}" version >/dev/null 2>&1; then
+    note "@rkat/sdk@${tag#v} is already published"
+  else
+    pass "@rkat/sdk@${tag#v} is not published yet"
+  fi
+  if npm view "@rkat/web@${tag#v}" version >/dev/null 2>&1; then
+    note "@rkat/web@${tag#v} is already published"
+  else
+    pass "@rkat/web@${tag#v} is not published yet"
+  fi
+else
+  note "VERSION/RELEASE_TAG not set; skipping package already-published checks"
+fi
+
+printf '\nrelease doctor: %d pass, %d warn, %d fail\n' "${ok}" "${warn}" "${fail}"
+if ((fail > 0)); then
+  exit 1
+fi

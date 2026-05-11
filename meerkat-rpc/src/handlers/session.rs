@@ -259,6 +259,7 @@ pub async fn handle_create(
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
 
+    let model_was_explicit = params.model.is_some();
     let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
         config_runtime
             .get()
@@ -277,6 +278,7 @@ pub async fn handle_create(
                 .unwrap_or("claude-sonnet-4-5")
                 .to_string()
         });
+    let provider_was_explicit = params.provider.is_some();
     let provider = match params
         .provider
         .as_deref()
@@ -303,7 +305,13 @@ pub async fn handle_create(
     };
 
     let mut build_config = AgentBuildConfig::new(model_name);
-    build_config.provider = provider;
+    build_config.provider = if provider_was_explicit || model_was_explicit {
+        provider
+    } else {
+        None
+    };
+    build_config.resume_override_mask.model = model_was_explicit;
+    build_config.resume_override_mask.provider = provider_was_explicit;
     build_config.max_tokens = params.max_tokens;
     build_config.system_prompt = params.system_prompt;
     build_config.output_schema = output_schema;
@@ -323,6 +331,7 @@ pub async fn handle_create(
     // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
+    build_config.resume_override_mask.auth_binding = params.auth_binding.is_some();
     build_config.auth_binding = params.auth_binding;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;

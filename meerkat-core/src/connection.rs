@@ -8,7 +8,7 @@
 //! `auth_method` as strings until they are normalized at the provider-runtime
 //! catalog boundary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -455,6 +455,166 @@ pub fn resolve_auth_binding_or_default_for_provider(
         preferred_realm,
         allow_env_default,
     )
+}
+
+fn selected_binding_id_for_provider(
+    realm: &RealmConnectionSet,
+    provider: Provider,
+) -> Result<Option<BindingId>, ConnectionTargetError> {
+    let mut provider_bindings = Vec::new();
+    for (binding_id, binding) in &realm.bindings {
+        let backend = realm
+            .backends
+            .get(&binding.backend_profile)
+            .ok_or_else(|| ConnectionTargetError::BindingInvalid {
+                realm: realm.realm_id.clone(),
+                binding: binding_id.clone(),
+                source: ProviderBindingError::UnknownBackend(binding.backend_profile.clone()),
+            })?;
+        let auth = realm
+            .auth_profiles
+            .get(&binding.auth_profile)
+            .ok_or_else(|| ConnectionTargetError::BindingInvalid {
+                realm: realm.realm_id.clone(),
+                binding: binding_id.clone(),
+                source: ProviderBindingError::UnknownAuth(binding.auth_profile.clone()),
+            })?;
+        if backend.provider == provider && auth.provider == provider {
+            provider_bindings.push(binding_id.as_str());
+        }
+    }
+
+    if let Some(default_binding) = realm.default_binding.as_deref()
+        && provider_bindings.contains(&default_binding)
+    {
+        return BindingId::parse(default_binding.to_string())
+            .map(Some)
+            .map_err(|source| ConnectionTargetError::InvalidBindingId {
+                binding: default_binding.to_string(),
+                source,
+            });
+    }
+
+    let provider_default_binding = format!("default_{}", provider.as_str());
+    if provider_bindings
+        .iter()
+        .any(|binding_id| *binding_id == provider_default_binding)
+    {
+        return BindingId::parse(provider_default_binding.clone())
+            .map(Some)
+            .map_err(|source| ConnectionTargetError::InvalidBindingId {
+                binding: provider_default_binding,
+                source,
+            });
+    }
+
+    match provider_bindings.as_slice() {
+        [binding_id] => BindingId::parse((*binding_id).to_string())
+            .map(Some)
+            .map_err(|source| ConnectionTargetError::InvalidBindingId {
+                binding: (*binding_id).to_string(),
+                source,
+            }),
+        _ => Ok(None),
+    }
+}
+
+fn push_candidate_realm_ids<'a>(
+    ids: &mut Vec<&'a str>,
+    seen: &mut BTreeSet<&'a str>,
+    id: Option<&'a str>,
+) {
+    if let Some(id) = id
+        && seen.insert(id)
+    {
+        ids.push(id);
+    }
+}
+
+/// Resolve ordered connection candidates for an omitted `auth_binding`.
+///
+/// The returned order is the shared "best available" policy used by all
+/// factory-backed surfaces:
+/// 1. configured provider binding in the preferred realm
+/// 2. configured provider binding in the `default` realm
+/// 3. configured provider binding in any remaining realm
+/// 4. synthetic env-var fallback when allowed
+///
+/// Within a realm, `default_binding` wins when it resolves to the requested
+/// provider, then `default_<provider>`, then a single unambiguous provider
+/// binding. Explicit `auth_binding` still resolves to one strict target.
+pub fn resolve_auth_binding_candidates_for_provider(
+    config: &Config,
+    provider: Provider,
+    auth_binding: Option<&AuthBindingRef>,
+    preferred_realm: Option<&RealmId>,
+    allow_env_default: bool,
+) -> Result<Vec<ResolvedConnectionTarget>, ConnectionTargetError> {
+    if auth_binding.is_some() {
+        return resolve_auth_binding_or_default_for_provider(
+            config,
+            provider,
+            auth_binding,
+            preferred_realm,
+            allow_env_default,
+        )
+        .map(|target| vec![target]);
+    }
+
+    let mut realm_ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    push_candidate_realm_ids(
+        &mut realm_ids,
+        &mut seen,
+        preferred_realm.map(RealmId::as_str),
+    );
+    push_candidate_realm_ids(&mut realm_ids, &mut seen, Some("default"));
+    for realm_id in config.realm.keys() {
+        push_candidate_realm_ids(&mut realm_ids, &mut seen, Some(realm_id.as_str()));
+    }
+
+    let mut candidates = Vec::new();
+    let mut missing_default: Option<String> = None;
+    for realm_id in realm_ids {
+        let Some(section) = config.realm.get(realm_id) else {
+            if preferred_realm.is_some_and(|preferred| preferred.as_str() == realm_id) {
+                missing_default.get_or_insert_with(|| realm_id.to_string());
+            }
+            continue;
+        };
+        let realm = RealmConnectionSet::from_config(realm_id, section).map_err(|source| {
+            ConnectionTargetError::RealmConfigInvalid {
+                realm: realm_id.to_string(),
+                source,
+            }
+        })?;
+        if let Some(binding_id) = selected_binding_id_for_provider(&realm, provider)? {
+            candidates.push(materialize_connection_target(
+                realm, provider, binding_id, None,
+            )?);
+        }
+    }
+
+    if allow_env_default {
+        let realm = RealmConnectionSet::synthesize_env_default(provider);
+        let binding = BindingId::parse("default").map_err(|source| {
+            ConnectionTargetError::InvalidBindingId {
+                binding: "default".to_string(),
+                source,
+            }
+        })?;
+        candidates.push(materialize_connection_target(
+            realm, provider, binding, None,
+        )?);
+    }
+
+    if !candidates.is_empty() {
+        return Ok(candidates);
+    }
+    if let Some(realm) = missing_default {
+        return Err(ConnectionTargetError::MissingDefaultBinding { realm });
+    }
+    Err(ConnectionTargetError::MissingRealm)
 }
 
 fn materialize_connection_target(
@@ -1121,6 +1281,83 @@ auth_profile = "default_profile"
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn auth_binding_candidates_prefer_provider_binding_in_preferred_realm() {
+        let config = config_with_realms(
+            r#"
+[dev]
+default_binding = "openai_oauth"
+
+[dev.backend.openai_chatgpt]
+provider = "openai"
+backend_kind = "openai_chatgpt"
+
+[dev.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "managed_store" }
+
+[dev.binding.openai_oauth]
+backend_profile = "openai_chatgpt"
+auth_profile = "openai_oauth"
+default_model = "gpt-5.4"
+"#,
+        );
+        let preferred_realm = RealmId::parse("dev").unwrap();
+
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            Some(&preferred_realm),
+            true,
+        )
+        .expect("candidates resolve");
+
+        assert_eq!(candidates[0].auth_binding.realm.as_str(), "dev");
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "openai_oauth");
+        assert!(!candidates[0].auth_binding.is_env_default());
+    }
+
+    #[test]
+    fn auth_binding_candidates_scan_configured_realms_before_env_default() {
+        let config = config_with_realms(
+            r#"
+[dev]
+
+[dev.backend.openai_chatgpt]
+provider = "openai"
+backend_kind = "openai_chatgpt"
+
+[dev.auth.openai_oauth]
+provider = "openai"
+auth_method = "chatgpt_oauth"
+source = { kind = "managed_store" }
+
+[dev.binding.openai_oauth]
+backend_profile = "openai_chatgpt"
+auth_profile = "openai_oauth"
+"#,
+        );
+        let preferred_realm = RealmId::parse("missing").unwrap();
+
+        let candidates = resolve_auth_binding_candidates_for_provider(
+            &config,
+            Provider::OpenAI,
+            None,
+            Some(&preferred_realm),
+            true,
+        )
+        .expect("candidates resolve");
+
+        assert_eq!(candidates[0].auth_binding.realm.as_str(), "dev");
+        assert_eq!(candidates[0].auth_binding.binding.as_str(), "openai_oauth");
+        assert_eq!(
+            candidates.last().unwrap().auth_binding.realm.as_str(),
+            "env_default"
+        );
     }
 
     #[test]

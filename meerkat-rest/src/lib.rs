@@ -3760,6 +3760,8 @@ async fn create_session_inner(
     };
     // Create: no persisted session to inherit from, so None → false.
     let keep_alive = keep_alive_override.unwrap_or(false);
+    let model_was_explicit = req.model.is_some();
+    let provider_was_explicit = req.provider.is_some();
     let model = req.model.unwrap_or_else(|| state.default_model.clone());
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
@@ -3916,7 +3918,8 @@ async fn create_session_inner(
             }
         };
     let mut build = SessionBuildOptions {
-        provider: req.provider,
+        provider: (provider_was_explicit || model_was_explicit)
+            .then_some(initial_identity.provider),
         self_hosted_server_id: initial_identity.self_hosted_server_id.clone(),
         output_schema: req.output_schema,
         structured_output_retries: req
@@ -3957,6 +3960,7 @@ async fn create_session_inner(
         additional_instructions: req.additional_instructions,
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
+            model: model_was_explicit,
             provider: req.provider.is_some(),
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),

@@ -2073,6 +2073,8 @@ async fn handle_run_command(
     let (config, config_base_dir) = load_config(scope).await?;
     let (config, runtime_preload_skills) = resolve_runtime_skills(config, skills).await?;
 
+    let model_was_explicit = model.is_some();
+    let provider_was_explicit = provider.is_some();
     let auth_binding_selection = auth_binding
         .as_ref()
         .map(|binding| resolve_cli_auth_binding_selection(&config, binding))
@@ -2090,6 +2092,9 @@ async fn handle_run_command(
         provider,
         auth_binding_selection.as_ref(),
     )?;
+    let build_provider_override =
+        (provider.is_some() || auth_binding.is_some() || model_was_explicit)
+            .then_some(resolved_provider);
 
     let duration = max_duration.map(|s| parse_duration(&s)).transpose();
     let provider_params = parse_provider_params(&params);
@@ -2131,6 +2136,9 @@ async fn handle_run_command(
                 system_prompt,
                 &model,
                 resolved_provider,
+                build_provider_override,
+                model_was_explicit,
+                provider_was_explicit,
                 max_tokens,
                 limits,
                 &output,
@@ -6387,6 +6395,9 @@ async fn run_agent(
     system_prompt: Option<String>,
     model: &str,
     provider: Provider,
+    build_provider_override: Option<Provider>,
+    model_was_explicit: bool,
+    provider_was_explicit: bool,
     max_tokens: u32,
     limits: BudgetLimits,
     output: &str,
@@ -6424,6 +6435,9 @@ async fn run_agent(
             system_prompt,
             model,
             provider,
+            build_provider_override,
+            model_was_explicit,
+            provider_was_explicit,
             max_tokens,
             limits,
             output,
@@ -6620,7 +6634,7 @@ async fn run_agent(
             CliOutputPipeline::new(stream, verbose, stream_policy.clone(), primary_scope_path)?;
 
         let mut build = SessionBuildOptions {
-            provider: Some(provider.as_core()),
+            provider: build_provider_override.map(Provider::as_core),
             self_hosted_server_id: None,
             output_schema,
             structured_output_retries,
@@ -6660,7 +6674,12 @@ async fn run_agent(
             shell_env: None,
             runtime_build_mode: meerkat_core::RuntimeBuildMode::SessionOwned(bindings),
             initial_turn_metadata: None,
-            resume_override_mask: Default::default(),
+            resume_override_mask: meerkat_core::service::ResumeOverrideMask {
+                model: model_was_explicit,
+                provider: provider_was_explicit,
+                auth_binding: auth_binding.is_some(),
+                ..Default::default()
+            },
             call_timeout_override: Default::default(),
             blob_store_override: None,
             mob_tools: mob_tools_factory,

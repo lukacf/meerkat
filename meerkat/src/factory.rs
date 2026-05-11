@@ -1233,6 +1233,26 @@ impl AgentFactory {
         ))
     }
 
+    fn resolve_realm_binding_candidates_for_provider(
+        config: &Config,
+        provider: Provider,
+        auth_binding: Option<&AuthBindingRef>,
+        preferred_realm: Option<&str>,
+    ) -> Result<Vec<meerkat_core::ResolvedConnectionTarget>, String> {
+        let preferred_realm = preferred_realm
+            .map(RealmId::parse)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        meerkat_core::resolve_auth_binding_candidates_for_provider(
+            config,
+            provider,
+            auth_binding,
+            preferred_realm.as_ref(),
+            true,
+        )
+        .map_err(|e| e.to_string())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn selected_image_binding_id_for_provider(
         realm: &RealmConnectionSet,
@@ -2867,28 +2887,6 @@ impl AgentFactory {
                         build_config.auth_binding = resolved.durable_auth_binding;
                         resolved.client
                     } else {
-                        let (realm, _binding_id, resolved_auth_binding) =
-                            Self::resolve_realm_binding_for_provider(
-                                config,
-                                provider,
-                                build_config.auth_binding.as_ref(),
-                                build_config.realm_id.as_deref(),
-                            )
-                            .map_err(BuildAgentError::ConnectionResolution)?;
-                        let lease_auth_binding = if resolved_auth_binding.is_env_default()
-                            && build_config
-                                .auth_binding
-                                .as_ref()
-                                .map(AuthBindingRef::is_env_default)
-                                .unwrap_or(true)
-                        {
-                            build_config.auth_binding = None;
-                            None
-                        } else {
-                            build_config.auth_binding = Some(resolved_auth_binding.clone());
-                            Some(resolved_auth_binding.clone())
-                        };
-
                         // Provider-runtime registry needs the OAuth-backed
                         // TokenStore attached so persisted tokens (written by
                         // `rkat auth login`, server-side OAuth completion, etc.)
@@ -2904,20 +2902,105 @@ impl AgentFactory {
                                 env = env.with_refresh_coordinator(coord);
                             }
                         }
-                        if let RuntimeBuildMode::SessionOwned(bindings) =
-                            &build_config.runtime_build_mode
-                            && lease_auth_binding.is_some()
-                        {
-                            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
-                        }
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
                         }
+                        let explicit_auth_binding = build_config.auth_binding.is_some();
+                        let mut provider_attempts = vec![(provider, build_config.model.clone())];
+                        if build_config.provider.is_none() && !explicit_auth_binding {
+                            for fallback_provider in
+                                [Provider::Anthropic, Provider::Gemini, Provider::OpenAI]
+                            {
+                                if provider_attempts
+                                    .iter()
+                                    .any(|(attempt, _)| *attempt == fallback_provider)
+                                {
+                                    continue;
+                                }
+                                if let Some(default_model) =
+                                    registry.default_model(fallback_provider)
+                                {
+                                    provider_attempts
+                                        .push((fallback_provider, default_model.to_string()));
+                                }
+                            }
+                        }
                         let provider_registry = Arc::clone(&self.provider_registry);
-                        let connection = provider_registry
-                            .resolve(&realm, &resolved_auth_binding, &env)
-                            .await
-                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+                        let mut first_resolution_error: Option<String> = None;
+                        let mut resolved = None;
+                        for (attempt_provider, attempt_model) in provider_attempts {
+                            let candidates = Self::resolve_realm_binding_candidates_for_provider(
+                                config,
+                                attempt_provider,
+                                build_config.auth_binding.as_ref(),
+                                build_config.realm_id.as_deref(),
+                            )
+                            .map_err(BuildAgentError::ConnectionResolution)?;
+                            for target in candidates {
+                                let resolved_auth_binding = target.auth_binding.clone();
+                                let lease_auth_binding = if resolved_auth_binding.is_env_default()
+                                    && !explicit_auth_binding
+                                {
+                                    None
+                                } else {
+                                    Some(resolved_auth_binding.clone())
+                                };
+                                let mut candidate_env = env.clone();
+                                if let RuntimeBuildMode::SessionOwned(bindings) =
+                                    &build_config.runtime_build_mode
+                                    && lease_auth_binding.is_some()
+                                {
+                                    candidate_env = candidate_env
+                                        .with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                                }
+                                match provider_registry
+                                    .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
+                                    .await
+                                {
+                                    Ok(connection) => {
+                                        let resolved_model =
+                                            if build_config.resume_override_mask.model {
+                                                attempt_model.clone()
+                                            } else {
+                                                target
+                                                    .binding
+                                                    .default_model
+                                                    .clone()
+                                                    .unwrap_or_else(|| attempt_model.clone())
+                                            };
+                                        resolved = Some((
+                                            connection,
+                                            resolved_auth_binding,
+                                            lease_auth_binding,
+                                            resolved_model,
+                                        ));
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        first_resolution_error
+                                            .get_or_insert_with(|| err.to_string());
+                                        if explicit_auth_binding {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if resolved.is_some() || explicit_auth_binding {
+                                break;
+                            }
+                        }
+                        let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
+                            resolved.ok_or_else(|| {
+                                BuildAgentError::ConnectionResolution(
+                                    first_resolution_error.unwrap_or_else(|| {
+                                        format!(
+                                            "no auth binding candidates resolved for provider '{}'",
+                                            provider.as_str()
+                                        )
+                                    }),
+                                )
+                            })?;
+                        build_config.model = resolved_model;
                         provider = connection.provider;
 
                         // Publish immediately after resolve. Provider resolution can refresh and
@@ -2955,6 +3038,12 @@ impl AgentFactory {
                                     "skipping image executor reuse for LLM connection outside selected realm"
                                 );
                             }
+                        }
+
+                        if lease_auth_binding.is_some() {
+                            build_config.auth_binding = Some(resolved_auth_binding);
+                        } else {
+                            build_config.auth_binding = None;
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
@@ -5097,6 +5186,277 @@ mod tests {
         assert_eq!(binding_id, "default_anthropic");
         assert_eq!(auth_binding.realm.as_str(), "dev");
         assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn build_agent_without_auth_binding_scans_configured_realms_before_env_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_oauth".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                default_model: Some("gpt-5.4".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.realm_id = Some("missing".to_string());
+        assert!(build.auth_binding.is_none());
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("configured realm binding should beat env fallback");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+
+        assert_eq!(metadata.provider, Provider::OpenAI);
+        assert_eq!(
+            metadata.auth_binding.as_ref().map(|auth_binding| {
+                (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string(),
+                )
+            }),
+            Some(("dev".to_string(), "openai_oauth".to_string()))
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn explicit_model_beats_binding_default_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_oauth".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                default_model: Some("gpt-5.4".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.auth_binding = Some(AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("openai_oauth").unwrap(),
+            profile: None,
+        });
+        build.resume_override_mask.model = true;
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("explicit model should resolve through explicit binding");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+
+        assert_eq!(metadata.provider, Provider::OpenAI);
+        assert_eq!(metadata.model, "gpt-5.5");
+        assert_eq!(
+            metadata.auth_binding.as_ref().map(|auth_binding| {
+                (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string(),
+                )
+            }),
+            Some(("dev".to_string(), "openai_oauth".to_string()))
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn build_agent_without_provider_or_auth_binding_uses_first_resolvable_provider() {
+        use async_trait::async_trait;
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct FailingOpenAiRuntime;
+
+        #[async_trait]
+        impl ProviderRuntime for FailingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                _binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Err(ProviderAuthError::Auth(
+                    meerkat_core::AuthError::MissingSecret,
+                ))
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("failing runtime never resolves")
+            }
+        }
+
+        struct SucceedingAnthropicRuntime;
+
+        #[async_trait]
+        impl ProviderRuntime for SucceedingAnthropicRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::Anthropic
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Ok(ResolvedConnection {
+                    provider: Provider::Anthropic,
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "sk-ant-test".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "anthropic:test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions"));
+        factory.provider_registry = Arc::new(
+            ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(FailingOpenAiRuntime))
+                .with_runtime(Arc::new(SucceedingAnthropicRuntime)),
+        );
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "anthropic_api".to_string(),
+            BackendProfileConfig {
+                provider: "anthropic".to_string(),
+                backend_kind: "anthropic_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "anthropic_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "anthropic".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-ant-test".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "default_anthropic".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "anthropic_api".to_string(),
+                auth_profile: "anthropic_key".to_string(),
+                default_model: Some("claude-sonnet-4-6".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.realm_id = Some("missing".to_string());
+        assert!(build.provider.is_none());
+        assert!(build.auth_binding.is_none());
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("implicit provider selection should skip missing OpenAI env and use Anthropic");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+
+        assert_eq!(metadata.provider, Provider::Anthropic);
+        assert_eq!(metadata.model, "claude-sonnet-4-6");
+        assert_eq!(
+            metadata.auth_binding.as_ref().map(|auth_binding| {
+                (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string(),
+                )
+            }),
+            Some(("dev".to_string(), "default_anthropic".to_string()))
+        );
     }
 
     #[test]

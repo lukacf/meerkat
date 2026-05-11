@@ -659,11 +659,20 @@ impl TurnExecutionEffectAuthority {
                 }
             }
             TurnExecutionInput::FatalFailure { .. }
-            | TurnExecutionInput::TurnLimitReached { .. }
-            | TurnExecutionInput::BudgetExhausted { .. }
+            | TurnExecutionInput::TurnLimitReached { .. } => {
+                if projection.next_phase == TurnPhase::Failed {
+                    effects.push(TurnExecutionEffect::RunFailed {
+                        run_id,
+                        reason: failure_reason_for_projection(&projection)?,
+                    });
+                }
+            }
+            TurnExecutionInput::BudgetExhausted { .. }
             | TurnExecutionInput::TimeBudgetExceeded { .. }
             | TurnExecutionInput::BudgetLimitExceeded { .. } => {
-                if projection.next_phase == TurnPhase::Failed {
+                if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                } else if projection.next_phase == TurnPhase::Failed {
                     effects.push(TurnExecutionEffect::RunFailed {
                         run_id,
                         reason: failure_reason_for_projection(&projection)?,

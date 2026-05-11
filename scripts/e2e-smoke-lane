@@ -78,6 +78,28 @@ buildbuddy_e2e_artifacts_bin() {
   return 1
 }
 
+host_can_execute_binary() {
+  local candidate="$1" kind host
+  if [[ ! -x "${candidate}" ]]; then
+    return 1
+  fi
+  if ! command -v file >/dev/null 2>&1; then
+    return 0
+  fi
+  kind="$(file -b "${candidate}" 2>/dev/null || true)"
+  host="$(uname -s):$(uname -m)"
+  case "${host}:${kind}" in
+    Linux:x86_64:*ELF*64-bit*LSB*x86-64*) return 0 ;;
+    Linux:amd64:*ELF*64-bit*LSB*x86-64*) return 0 ;;
+    Linux:aarch64:*ELF*64-bit*LSB*aarch64*) return 0 ;;
+    Linux:arm64:*ELF*64-bit*LSB*aarch64*) return 0 ;;
+    Darwin:arm64:*Mach-O*arm64*) return 0 ;;
+    Darwin:aarch64:*Mach-O*arm64*) return 0 ;;
+    Darwin:x86_64:*Mach-O*64-bit*x86_64*) return 0 ;;
+  esac
+  return 1
+}
+
 host_wasm_pack_repo() {
   case "$(uname -s)-$(uname -m)" in
     Darwin-arm64|Darwin-aarch64)
@@ -93,58 +115,34 @@ host_wasm_pack_repo() {
 }
 
 buildbuddy_wasm_pack_bin() {
-  local output_base host_archive candidate
+  local output_base repo candidate
   output_base="$(buildbuddy_output_base)"
-  host_archive="$(host_wasm_pack_repo || true)"
-  if [[ -n "${host_archive}" ]]; then
-    for candidate in \
-      "${output_base}/external/+http_archive+${host_archive}/wasm-pack" \
-      "${output_base}/external/${host_archive}/wasm-pack" \
-      "${output_base}/execroot/_main/external/+http_archive+${host_archive}/wasm-pack" \
-      "${output_base}/execroot/_main/external/${host_archive}/wasm-pack"; do
-      if [[ -x "${candidate}" ]]; then
-        printf '%s\n' "${candidate}"
-        return 0
-      fi
-    done
-    candidate="$(
-      find -L "${output_base}" \
-        -type f \
-        -name wasm-pack \
-        -path "*/${host_archive}/*" \
-        -perm -111 \
-        2>/dev/null |
-        head -n 1
-    )"
-    if [[ -n "${candidate}" ]]; then
-      printf '%s\n' "${candidate}"
-      return 0
-    fi
-    return 1
-  fi
+  repo="$(host_wasm_pack_repo)" || return 1
 
   for candidate in \
-    "${output_base}/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/external/wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/external/wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/execroot/_main/external/wasm_pack_darwin_arm64/wasm-pack" \
-    "${output_base}/execroot/_main/external/+http_archive+wasm_pack_linux_x86_64/wasm-pack" \
-    "${output_base}/execroot/_main/external/wasm_pack_linux_x86_64/wasm-pack"; do
-    if [[ -x "${candidate}" ]]; then
+    "${output_base}/external/+http_archive+${repo}/wasm-pack" \
+    "${output_base}/external/${repo}/wasm-pack" \
+    "${output_base}/execroot/_main/external/+http_archive+${repo}/wasm-pack" \
+    "${output_base}/execroot/_main/external/${repo}/wasm-pack"; do
+    if host_can_execute_binary "${candidate}"; then
       printf '%s\n' "${candidate}"
       return 0
     fi
   done
+
   candidate="$(
     find -L "${output_base}" \
       -type f \
       -name wasm-pack \
-      \( -path '*/wasm_pack_darwin_arm64/*' -o -path '*/wasm_pack_linux_x86_64/*' \) \
+      -path "*/${repo}/*" \
       -perm -111 \
       2>/dev/null |
-      head -n 1
+      while IFS= read -r path; do
+        if host_can_execute_binary "${path}"; then
+          printf '%s\n' "${path}"
+          break
+        fi
+      done
   )"
   if [[ -n "${candidate}" ]]; then
     printf '%s\n' "${candidate}"
@@ -155,18 +153,17 @@ buildbuddy_wasm_pack_bin() {
 
 e2e_artifacts_cmd=("${root}/scripts/repo-cargo" run -p meerkat-integration-tests --bin e2e_artifacts --)
 if buildbuddy_enabled; then
-  if artifact_bin="$(buildbuddy_e2e_artifacts_bin)"; then
+  if [[ -z "${RKAT_WASM_PACK_BIN:-}" && -z "${WASM_PACK:-}" ]] &&
+    wasm_pack_bin="$(buildbuddy_wasm_pack_bin)"; then
+    export RKAT_WASM_PACK_BIN="${wasm_pack_bin}"
+    export WASM_PACK="${wasm_pack_bin}"
+  fi
+  if artifact_bin="$(buildbuddy_e2e_artifacts_bin)" &&
+    host_can_execute_binary "${artifact_bin}"; then
     e2e_artifacts_cmd=("${artifact_bin}")
     export MEERKAT_E2E_BAZEL_BIN_DIR="$(cd "$(dirname "${artifact_bin}")/../.." && pwd)"
-    if [[ -z "${RKAT_WASM_PACK_BIN:-}" && -z "${WASM_PACK:-}" ]] &&
-      wasm_pack_bin="$(buildbuddy_wasm_pack_bin)"; then
-      export RKAT_WASM_PACK_BIN="${wasm_pack_bin}"
-      export WASM_PACK="${wasm_pack_bin}"
-    fi
-  else
-    echo "error: BuildBuddy e2e-smoke foundation did not produce e2e_artifacts_bin" >&2
-    echo "Run MEERKAT_BUILDBUDDY=1 make e2e-smoke so scripts/buildbuddy-dev builds //tests/integration:e2e_artifacts_bin first." >&2
-    exit 1
+  elif [[ -n "${artifact_bin:-}" ]]; then
+    echo "warning: ignoring non-host-compatible BuildBuddy e2e_artifacts_bin: ${artifact_bin}" >&2
   fi
 fi
 

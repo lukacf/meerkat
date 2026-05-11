@@ -2716,6 +2716,43 @@ async def test_mob_status_rejects_missing_status():
 
 
 @pytest.mark.asyncio
+async def test_append_mob_system_context_rejects_missing_or_unknown_status():
+    client = MeerkatClient()
+
+    async def missing_status(_method, _params):
+        return {"mob_id": "mob-1", "agent_identity": "agent-a"}
+
+    client._request = missing_status  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="missing status"):
+        await client.append_mob_system_context("mob-1", "agent-a", "context")
+
+    async def unknown_status(_method, _params):
+        return {"mob_id": "mob-1", "agent_identity": "agent-a", "status": "queued"}
+
+    client._request = unknown_status  # type: ignore[method-assign]
+    with pytest.raises(MeerkatError, match="unknown status"):
+        await client.append_mob_system_context("mob-1", "agent-a", "context")
+
+
+def test_parse_session_fork_result_rejects_missing_handles_and_counts():
+    with pytest.raises(MeerkatError, match="missing source_session_id"):
+        MeerkatClient._parse_session_fork_result({
+            "session_id": "fork",
+            "message_count": 1,
+        })
+    with pytest.raises(MeerkatError, match="missing session_id"):
+        MeerkatClient._parse_session_fork_result({
+            "source_session_id": "source",
+            "message_count": 1,
+        })
+    with pytest.raises(MeerkatError, match="message_count must be number"):
+        MeerkatClient._parse_session_fork_result({
+            "source_session_id": "source",
+            "session_id": "fork",
+        })
+
+
+@pytest.mark.asyncio
 async def test_wait_mob_ready_rejects_malformed_member_snapshot():
     client = MeerkatClient()
 

@@ -2154,14 +2154,20 @@ class MeerkatClient:
                 "INVALID_RESPONSE",
                 "Invalid mob/append_system_context response: missing agent_identity",
             )
+        status = self._require_string_field(
+            result,
+            "status",
+            "Invalid mob/append_system_context response",
+        )
+        if status not in {"staged", "duplicate"}:
+            raise MeerkatError(
+                "INVALID_RESPONSE",
+                "Invalid mob/append_system_context response: unknown status",
+            )
         return {
             "mob_id": str(result.get("mob_id", mob_id)),
             "agent_identity": resolved_identity,
-            "status": (
-                "duplicate"
-                if result.get("status") == "duplicate"
-                else "staged"
-            ),
+            "status": status,
         }
 
     async def list_mob_flows(self, mob_id: str) -> list[str]:
@@ -3331,10 +3337,22 @@ class MeerkatClient:
     @staticmethod
     def _parse_session_fork_result(data: dict[str, Any]) -> SessionForkResult:
         return SessionForkResult(
-            source_session_id=str(data.get("source_session_id", "")),
-            session_id=str(data.get("session_id", "")),
+            source_session_id=MeerkatClient._require_string_field(
+                data,
+                "source_session_id",
+                "Invalid session fork response",
+            ),
+            session_id=MeerkatClient._require_string_field(
+                data,
+                "session_id",
+                "Invalid session fork response",
+            ),
             session_ref=data.get("session_ref"),
-            message_count=MeerkatClient._parse_int(data.get("message_count"), 0),
+            message_count=int(MeerkatClient._require_number_field(
+                data,
+                "message_count",
+                "Invalid session fork response",
+            )),
         )
 
     @staticmethod

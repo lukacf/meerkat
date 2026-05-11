@@ -6640,6 +6640,7 @@ async fn run_agent(
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
+            override_web_search: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
@@ -12652,6 +12653,7 @@ default_model = "gemma"
             mob: meerkat_core::ToolCategoryOverride::Disable,
             memory: meerkat_core::ToolCategoryOverride::Disable,
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
+            web_search: meerkat_core::ToolCategoryOverride::Disable,
             active_skills: None,
         };
 

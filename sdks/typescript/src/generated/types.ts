@@ -1670,6 +1670,7 @@ export interface RealtimeVideoChunk {
 
 export interface LiveOpenParams {
   session_id: string;
+  transport?: "websocket" | "webrtc";
   turning_mode?: RealtimeTurningMode;
 }
 
@@ -1715,18 +1716,35 @@ export interface WireLiveTransportBootstrapWebsocket {
   url: string;
 }
 
+export interface WireLiveTransportBootstrapWebrtc {
+  answer_method: string;
+  http_url?: string;
+  token: string;
+  transport: "webrtc";
+}
+
 export interface WireLiveTransportBootstrapUnknown {
   debug: string;
   transport: "unknown";
 }
 
-export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapUnknown;
+export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapWebrtc | WireLiveTransportBootstrapUnknown;
 
 export interface LiveOpenResult {
   capabilities: WireLiveChannelCapabilities;
   channel_id: string;
   continuity: WireLiveContinuityMode;
   transport: WireLiveTransportBootstrap;
+}
+
+export interface LiveWebrtcAnswerParams {
+  channel_id: string;
+  offer_sdp: string;
+  token: string;
+}
+
+export interface LiveWebrtcAnswerResult {
+  answer_sdp: string;
 }
 
 export interface LiveChannelParams {

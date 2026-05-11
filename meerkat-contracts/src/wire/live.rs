@@ -124,6 +124,22 @@ pub struct LiveOpenParams {
     pub session_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turning_mode: Option<RealtimeTurningMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<LiveOpenTransport>,
+}
+
+/// Transport requested by `live/open`.
+///
+/// Missing means "server default": prefer WebSocket when configured, otherwise
+/// WebRTC when that is the only configured live transport. This preserves the
+/// pre-WebRTC `live/open` shape while keeping the new branch typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LiveOpenTransport {
+    Websocket,
+    Webrtc,
 }
 
 /// Response payload for `live/open`.
@@ -162,6 +178,15 @@ pub enum WireLiveTransportBootstrap {
     /// authenticates with `token`. Mirrors
     /// [`meerkat_core::live_adapter::LiveTransportBootstrap::Websocket`].
     Websocket { url: String, token: String },
+    /// WebRTC bootstrap: client calls `answer_method` with
+    /// [`LiveWebrtcAnswerParams`] using this single-use token. `http_url`
+    /// is optional convenience signaling; JSON-RPC is canonical.
+    Webrtc {
+        token: String,
+        answer_method: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_url: Option<String>,
+    },
     /// R3-6 (P2): explicit fail-loud variant for unknown core variants.
     ///
     /// The core [`LiveTransportBootstrap`] enum is `#[non_exhaustive]`. When
@@ -184,6 +209,15 @@ impl From<LiveTransportBootstrap> for WireLiveTransportBootstrap {
     fn from(value: LiveTransportBootstrap) -> Self {
         match value {
             LiveTransportBootstrap::Websocket { url, token } => Self::Websocket { url, token },
+            LiveTransportBootstrap::Webrtc {
+                token,
+                answer_method,
+                http_url,
+            } => Self::Webrtc {
+                token,
+                answer_method,
+                http_url,
+            },
             // Core enum is `#[non_exhaustive]`. R3-6 (P2): surface unknown
             // variants explicitly via `Unknown { debug }` rather than
             // silently coercing to a bogus `Websocket { url: "", token: "" }`.
@@ -223,11 +257,36 @@ impl TryFrom<WireLiveTransportBootstrap> for LiveTransportBootstrap {
             WireLiveTransportBootstrap::Websocket { url, token } => {
                 Ok(Self::Websocket { url, token })
             }
+            WireLiveTransportBootstrap::Webrtc {
+                token,
+                answer_method,
+                http_url,
+            } => Ok(Self::Webrtc {
+                token,
+                answer_method,
+                http_url,
+            }),
             WireLiveTransportBootstrap::Unknown { debug } => {
                 Err(WireConversionError::Transport { debug })
             }
         }
     }
+}
+
+/// Request payload for `live/webrtc/answer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveWebrtcAnswerParams {
+    pub channel_id: String,
+    pub token: String,
+    pub offer_sdp: String,
+}
+
+/// Response payload for `live/webrtc/answer`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct LiveWebrtcAnswerResult {
+    pub answer_sdp: String,
 }
 
 /// Wire projection of [`meerkat_core::live_adapter::LiveChannelCapabilities`].
@@ -1500,6 +1559,7 @@ mod tests {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
             turning_mode: None,
+            transport: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         // R3-1: omitted `turning_mode` elides on the wire (back-compat).
@@ -1518,6 +1578,7 @@ mod tests {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
+            transport: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["turning_mode"], "explicit_commit");
@@ -1530,9 +1591,23 @@ mod tests {
         let v = LiveOpenParams {
             session_id: "session-1".into(),
             turning_mode: Some(RealtimeTurningMode::ProviderManaged),
+            transport: None,
         };
         let j = serde_json::to_value(&v).expect("round-trip should succeed");
         assert_eq!(j["turning_mode"], "provider_managed");
+        let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_open_params_webrtc_transport_round_trip() {
+        let v = LiveOpenParams {
+            session_id: "session-1".into(),
+            turning_mode: None,
+            transport: Some(LiveOpenTransport::Webrtc),
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["transport"], "webrtc");
         let back: LiveOpenParams = serde_json::from_value(j).expect("round-trip should succeed");
         assert_eq!(v, back);
     }
@@ -2073,6 +2148,26 @@ mod tests {
     }
 
     #[test]
+    fn wire_live_transport_bootstrap_webrtc_round_trip() {
+        let v = WireLiveTransportBootstrap::Webrtc {
+            token: "tok_webrtc".into(),
+            answer_method: "live/webrtc/answer".into(),
+            http_url: None,
+        };
+        let j = serde_json::to_value(&v).expect("round-trip should succeed");
+        assert_eq!(j["transport"], "webrtc");
+        assert_eq!(j["token"], "tok_webrtc");
+        assert_eq!(j["answer_method"], "live/webrtc/answer");
+        assert!(
+            j.get("http_url").is_none(),
+            "missing optional HTTP signaling must elide"
+        );
+        let back: WireLiveTransportBootstrap =
+            serde_json::from_value(j).expect("round-trip should succeed");
+        assert_eq!(v, back);
+    }
+
+    #[test]
     fn wire_live_transport_bootstrap_byte_compatible_with_core() {
         // Wire mirror serializes byte-identical to the core enum. Catches
         // drift the moment a field is added to one and forgotten on the
@@ -2080,6 +2175,19 @@ mod tests {
         let core = LiveTransportBootstrap::Websocket {
             url: "wss://example/live".into(),
             token: "tok_xyz".into(),
+        };
+        let wire: WireLiveTransportBootstrap = core.clone().into();
+        let core_json = serde_json::to_value(&core).expect("round-trip should succeed");
+        let wire_json = serde_json::to_value(&wire).expect("round-trip should succeed");
+        assert_eq!(core_json, wire_json);
+    }
+
+    #[test]
+    fn wire_live_transport_bootstrap_webrtc_byte_compatible_with_core() {
+        let core = LiveTransportBootstrap::Webrtc {
+            token: "tok_xyz".into(),
+            answer_method: "live/webrtc/answer".into(),
+            http_url: Some("https://example/live/webrtc/answer".into()),
         };
         let wire: WireLiveTransportBootstrap = core.clone().into();
         let core_json = serde_json::to_value(&core).expect("round-trip should succeed");
@@ -2098,6 +2206,43 @@ mod tests {
             LiveTransportBootstrap::try_from(v.clone()).expect("known wire variant should convert");
         let back: WireLiveTransportBootstrap = core.into();
         assert_eq!(v, back);
+    }
+
+    #[test]
+    fn wire_live_transport_bootstrap_webrtc_round_trips_through_core() {
+        let v = WireLiveTransportBootstrap::Webrtc {
+            token: "tok_back".into(),
+            answer_method: "live/webrtc/answer".into(),
+            http_url: None,
+        };
+        let core: LiveTransportBootstrap =
+            LiveTransportBootstrap::try_from(v.clone()).expect("known wire variant should convert");
+        let back: WireLiveTransportBootstrap = core.into();
+        assert_eq!(v, back);
+    }
+
+    #[test]
+    fn live_webrtc_answer_params_and_result_round_trip() {
+        let params = LiveWebrtcAnswerParams {
+            channel_id: "ch_1".into(),
+            token: "tok".into(),
+            offer_sdp: "v=0\r\n".into(),
+        };
+        let params_json = serde_json::to_value(&params).expect("round-trip should succeed");
+        assert_eq!(params_json["channel_id"], "ch_1");
+        assert_eq!(params_json["offer_sdp"], "v=0\r\n");
+        let params_back: LiveWebrtcAnswerParams =
+            serde_json::from_value(params_json).expect("round-trip should succeed");
+        assert_eq!(params, params_back);
+
+        let result = LiveWebrtcAnswerResult {
+            answer_sdp: "v=0\r\n".into(),
+        };
+        let result_json = serde_json::to_value(&result).expect("round-trip should succeed");
+        assert_eq!(result_json["answer_sdp"], "v=0\r\n");
+        let result_back: LiveWebrtcAnswerResult =
+            serde_json::from_value(result_json).expect("round-trip should succeed");
+        assert_eq!(result, result_back);
     }
 
     #[test]

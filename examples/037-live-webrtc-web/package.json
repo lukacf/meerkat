@@ -1,0 +1,17 @@
+{
+  "name": "meerkat-live-webrtc-web-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@rkat/sdk": "file:../../sdks/typescript"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.2"
+  }
+}

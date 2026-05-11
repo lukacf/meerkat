@@ -324,6 +324,7 @@ class MeerkatClient:
         context_root: str | None = None,
         user_config_root: str | None = None,
         live_ws: bool = False,
+        live_webrtc: bool = False,
     ) -> MeerkatClient:
         """Start the rkat-rpc subprocess and perform handshake."""
         if realm_id and isolated:
@@ -335,7 +336,7 @@ class MeerkatClient:
 
         has_advanced_opts = any([
             isolated, realm_id, instance_id, realm_backend,
-            state_root, context_root, user_config_root, live_ws,
+            state_root, context_root, user_config_root, live_ws, live_webrtc,
         ])
         if self._legacy_rpc_subcommand and has_advanced_opts:
             raise MeerkatError(
@@ -349,6 +350,7 @@ class MeerkatClient:
             instance_id=instance_id, realm_backend=realm_backend,
             state_root=state_root, context_root=context_root,
             user_config_root=user_config_root, live_ws=live_ws,
+            live_webrtc=live_webrtc,
         )
 
         self._process = await asyncio.create_subprocess_exec(
@@ -583,7 +585,9 @@ class MeerkatClient:
         enable_builtins: bool | None = None,
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
+        enable_schedule: bool | None = None,
         enable_mob: bool | None = None,
+        enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -614,7 +618,9 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_mob=enable_mob,
+            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_mob=enable_mob,
+            enable_web_search=enable_web_search,
             keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
@@ -645,7 +651,9 @@ class MeerkatClient:
         enable_builtins: bool | None = None,
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
+        enable_schedule: bool | None = None,
         enable_mob: bool | None = None,
+        enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -680,7 +688,9 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_mob=enable_mob,
+            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_mob=enable_mob,
+            enable_web_search=enable_web_search,
             keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
@@ -722,7 +732,9 @@ class MeerkatClient:
         enable_builtins: bool | None = None,
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
+        enable_schedule: bool | None = None,
         enable_mob: bool | None = None,
+        enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -757,7 +769,9 @@ class MeerkatClient:
             structured_output_retries=structured_output_retries,
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
-            enable_memory=enable_memory, enable_mob=enable_mob,
+            enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_mob=enable_mob,
+            enable_web_search=enable_web_search,
             keep_alive=keep_alive,
             comms_name=comms_name, peer_meta=peer_meta,
             budget_limits=budget_limits, provider_params=provider_params,
@@ -2457,6 +2471,7 @@ class MeerkatClient:
         self,
         session_id: str,
         turning_mode: Literal["provider_managed", "explicit_commit"] | None = None,
+        transport: Literal["websocket", "webrtc"] | None = None,
     ) -> dict[str, Any]:
         """Open a live audio/text channel for a session. Wraps `live/open`.
 
@@ -2484,7 +2499,25 @@ class MeerkatClient:
         params: dict[str, Any] = {"session_id": session_id}
         if turning_mode is not None:
             params["turning_mode"] = turning_mode
+        if transport is not None:
+            params["transport"] = transport
         return await self._request("live/open", params)
+
+    async def live_webrtc_answer(
+        self,
+        channel_id: str,
+        token: str,
+        offer_sdp: str,
+    ) -> dict[str, Any]:
+        """Answer a browser-created WebRTC SDP offer for a live channel."""
+        return await self._request(
+            "live/webrtc/answer",
+            {
+                "channel_id": channel_id,
+                "token": token,
+                "offer_sdp": offer_sdp,
+            },
+        )
 
     async def live_status(self, channel_id: str) -> dict[str, Any]:
         """Get the status of a live channel. Wraps `live/status`.
@@ -2914,12 +2947,15 @@ class MeerkatClient:
         context_root: str | None,
         user_config_root: str | None,
         live_ws: bool,
+        live_webrtc: bool,
     ) -> list[str]:
         if legacy:
             return ["rpc"]
         args: list[str] = []
         if live_ws:
             args.extend(["--live-ws", "127.0.0.1:0"])
+        if live_webrtc:
+            args.append("--live-webrtc")
         if isolated:
             args.append("--isolated")
         if realm_id:
@@ -2951,7 +2987,9 @@ class MeerkatClient:
         enable_builtins: bool | None = None,
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
+        enable_schedule: bool | None = None,
         enable_mob: bool | None = None,
+        enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
         comms_name: str | None = None,
         peer_meta: dict[str, Any] | None = None,
@@ -2988,8 +3026,12 @@ class MeerkatClient:
             params["enable_shell"] = enable_shell
         if enable_memory is not None:
             params["enable_memory"] = enable_memory
+        if enable_schedule is not None:
+            params["enable_schedule"] = enable_schedule
         if enable_mob is not None:
             params["enable_mob"] = enable_mob
+        if enable_web_search is not None:
+            params["enable_web_search"] = enable_web_search
         if keep_alive is not None:
             params["keep_alive"] = keep_alive
         if comms_name:

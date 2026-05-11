@@ -1137,6 +1137,9 @@ impl SessionService for MockSessionService {
                     image_generation: build
                         .map(|b| b.override_image_generation)
                         .unwrap_or(ToolCategoryOverride::from_effective(false)),
+                    web_search: build
+                        .map(|b| b.override_web_search)
+                        .unwrap_or(ToolCategoryOverride::Inherit),
                     active_skills: build.and_then(|b| b.preload_skills.clone()),
                 },
                 keep_alive: build.map(|b| b.keep_alive).unwrap_or(false),
@@ -12728,6 +12731,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("mob-communication")
                         .expect("valid skill name"),

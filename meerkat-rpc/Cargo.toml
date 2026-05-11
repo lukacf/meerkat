@@ -58,6 +58,7 @@ comms = ["meerkat/comms"]
 mcp = ["meerkat/mcp"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 schedule = ["meerkat/schedule"]
+live-webrtc = ["meerkat-live/webrtc"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }

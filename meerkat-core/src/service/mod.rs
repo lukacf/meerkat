@@ -244,6 +244,11 @@ pub struct SessionBuildOptions {
     /// `Inherit` means "visible when the session-owned image-generation
     /// substrate is available"; `Disable` hides the tool even when wired.
     pub override_image_generation: ToolCategoryOverride,
+    /// Per-build override for Meerkat-owned fallback web search visibility.
+    ///
+    /// `Inherit` keeps the fallback hidden. `Enable` explicitly exposes the
+    /// fallback when the active model lacks native provider web search.
+    pub override_web_search: ToolCategoryOverride,
     /// Agent-facing scheduler tools supplied by the embedding surface.
     ///
     /// Scheduler remains surface-owned. This dispatcher only controls
@@ -283,6 +288,11 @@ pub struct SessionBuildOptions {
     /// Additional instruction sections appended to the system prompt after skill
     /// assembly, before tool instructions. Order preserved.
     pub additional_instructions: Option<Vec<String>>,
+    /// Initial canonical session metadata entries applied before agent build.
+    ///
+    /// Used for surface-supplied runtime state such as session-local tool
+    /// visibility. The factory validates special keys before applying them.
+    pub initial_metadata_entries: BTreeMap<String, serde_json::Value>,
     /// Environment variables injected into shell tool subprocesses for this agent.
     /// Set by the application's `SessionAgentBuilder` — never by the LLM.
     /// Values are not included in the agent's context window.
@@ -620,6 +630,7 @@ pub struct ResumeOverrideMask {
     pub override_memory: bool,
     pub override_mob: bool,
     pub override_image_generation: bool,
+    pub override_web_search: bool,
     pub preload_skills: bool,
     pub keep_alive: bool,
     pub comms_name: bool,
@@ -683,6 +694,7 @@ impl Default for SessionBuildOptions {
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
+            override_web_search: ToolCategoryOverride::Inherit,
             schedule_tools: None,
             preload_skills: None,
             realm_id: None,
@@ -696,6 +708,7 @@ impl Default for SessionBuildOptions {
             max_inline_peer_notifications: None,
             app_context: None,
             additional_instructions: None,
+            initial_metadata_entries: BTreeMap::new(),
             shell_env: None,
             call_timeout_override: crate::CallTimeoutOverride::Inherit,
             resume_override_mask: ResumeOverrideMask::default(),
@@ -747,6 +760,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("app_context", &self.app_context.is_some())
             .field("additional_instructions", &self.additional_instructions)
+            .field("initial_metadata_entries", &self.initial_metadata_entries)
             .field("call_timeout_override", &self.call_timeout_override)
             .field("resume_override_mask", &self.resume_override_mask)
             .field("mob_tools", &self.mob_tools.is_some())

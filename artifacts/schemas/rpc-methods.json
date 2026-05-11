@@ -343,6 +343,12 @@
       "result_type": "LiveOpenResult"
     },
     {
+      "description": "Answer a browser WebRTC offer for an already-open live channel",
+      "name": "live/webrtc/answer",
+      "params_type": "LiveWebrtcAnswerParams",
+      "result_type": "LiveWebrtcAnswerResult"
+    },
+    {
       "description": "Get the status of a live channel",
       "name": "live/status",
       "params_type": "LiveChannelParams",

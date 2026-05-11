@@ -11,6 +11,7 @@ use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{
     BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider, ToolCategoryOverride,
+    ToolFilter,
 };
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
@@ -104,9 +105,18 @@ pub struct CreateSessionParams {
     /// Enable semantic memory. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
+    /// Enable schedule tools. Omit to use runtime defaults.
+    #[serde(default)]
+    pub enable_schedule: Option<bool>,
     /// Enable mob tools. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
+    /// Optional session-local tool visibility filter.
+    #[serde(default)]
+    pub tool_filter: Option<ToolFilter>,
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
@@ -315,9 +325,21 @@ pub async fn handle_create(
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
     build_config.override_memory = ToolCategoryOverride::from_override(params.enable_memory);
+    build_config.override_schedule = ToolCategoryOverride::from_override(params.enable_schedule);
     build_config.apply_generated_create_only_mob_operator_access(
         ToolCategoryOverride::from_override(params.enable_mob),
     );
+    build_config.override_web_search =
+        ToolCategoryOverride::from_override(params.enable_web_search);
+    if let Some(tool_filter) = params.tool_filter {
+        if let Err(err) = build_config.set_initial_tool_filter(tool_filter) {
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                format!("Invalid tool_filter: {err}"),
+            );
+        }
+    }
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.

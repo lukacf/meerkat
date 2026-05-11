@@ -34,6 +34,18 @@ export type {
 } from "./mob.js";
 export { LiveChannel } from "./live.js";
 export type { LiveChannelOptions } from "./live.js";
+export {
+  answerLiveWebrtcOffer,
+  isLiveWebrtcBootstrap,
+  liveWebrtcAudioConstraints,
+  liveWebrtcMediaConstraints,
+} from "./live_webrtc.js";
+export type {
+  LiveWebrtcAnswerClient,
+  LiveWebrtcAudioConstraintOptions,
+  LiveWebrtcOfferDescription,
+  LiveWebrtcPeerConnectionLike,
+} from "./live_webrtc.js";
 export { EventStream } from "./streaming.js";
 export { EventSubscription } from "./subscription.js";
 export type {
@@ -210,6 +222,8 @@ export type {
   LiveInputChunkWireVideoFrame,
   LiveOpenParams,
   LiveOpenResult,
+  LiveWebrtcAnswerParams,
+  LiveWebrtcAnswerResult,
   LiveSendInputParams,
   LiveStatusResult,
   LiveTruncateParams,
@@ -247,6 +261,11 @@ export type {
   WireLiveAdapterErrorCode,
   WireLiveConfigRejectionReason,
   WireLiveDegradationReason,
+  WireLiveResponseModality,
+  WireLiveTransportBootstrap,
+  WireLiveTransportBootstrapWebsocket,
+  WireLiveTransportBootstrapWebrtc,
+  WireLiveTransportBootstrapUnknown,
   // R7-1 (P2): typed `WireAssistantBlock` discriminated union — variants
   // (Transcript, Text, Reasoning, ...) now emit typed inline `data` shapes
   // rather than `Record<string, unknown>`, so SDK consumers can read

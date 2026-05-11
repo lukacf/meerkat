@@ -1,0 +1,82 @@
+{
+  "startedAt": "2026-05-11T09:33:32.462Z",
+  "endedAt": "2026-05-11T09:33:36.805Z",
+  "session_id": "019e1662-789a-7e30-803a-be869d52b1b2",
+  "channel_id": "855dbbef-c7e4-46e3-b682-9794a5bda982",
+  "capabilities": {
+    "audio_in": true,
+    "audio_out": true,
+    "barge_in_supported": true,
+    "image_in": false,
+    "provider_native_resume": false,
+    "text_in": true,
+    "text_out": true,
+    "transcript_supported": true,
+    "video_in": false
+  },
+  "continuity": {
+    "mode": "transcript_only"
+  },
+  "tool_count": 11,
+  "offer_sdp_len": 1630,
+  "answer_sdp_len": 1257,
+  "final": {
+    "pc": "connected",
+    "ice": "connected",
+    "signaling": "stable",
+    "dc": "open"
+  },
+  "states": [
+    {
+      "t": "2026-05-11T09:33:32.684Z",
+      "kind": "mic",
+      "value": "audio:live"
+    },
+    {
+      "t": "2026-05-11T09:33:32.686Z",
+      "kind": "signaling",
+      "value": "have-local-offer"
+    },
+    {
+      "t": "2026-05-11T09:33:34.702Z",
+      "kind": "ice",
+      "value": "checking"
+    },
+    {
+      "t": "2026-05-11T09:33:34.702Z",
+      "kind": "signaling",
+      "value": "stable"
+    },
+    {
+      "t": "2026-05-11T09:33:34.702Z",
+      "kind": "remote-track",
+      "value": "audio:live"
+    },
+    {
+      "t": "2026-05-11T09:33:34.702Z",
+      "kind": "pc",
+      "value": "connecting"
+    },
+    {
+      "t": "2026-05-11T09:33:34.755Z",
+      "kind": "ice",
+      "value": "connected"
+    },
+    {
+      "t": "2026-05-11T09:33:34.759Z",
+      "kind": "pc",
+      "value": "connected"
+    },
+    {
+      "t": "2026-05-11T09:33:34.760Z",
+      "kind": "data",
+      "value": "open"
+    }
+  ],
+  "observations": [
+    {
+      "observation": "ready"
+    }
+  ],
+  "observation_count": 1
+}

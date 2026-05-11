@@ -22,12 +22,14 @@ use meerkat_comms::{CommsRuntime, ResolvedCommsConfig, TrustedPeer, identity::Ke
 use meerkat_core::AssistantBlock;
 use meerkat_core::lifecycle::run_primitive::ProviderParamsOverride;
 use meerkat_core::service::{MobToolAuthorityContext, OpaquePrincipalToken};
+use meerkat_core::web_search::{WEB_SEARCH_TOOL_NAME, WebSearchRequest, WebSearchResult};
 use meerkat_core::{
     AgentToolDispatcher, Config, Provider, SelfHostedApiStyle, SelfHostedModelConfig,
     SelfHostedServerConfig, SelfHostedTransport, Session, SessionId, SessionLlmIdentity,
     SessionMetadata, SessionTooling, ToolCallView, ToolCategoryOverride, ToolDef,
     ToolDispatchOutcome, ToolError, UserMessage,
 };
+use meerkat_llm_core::WebSearchExecutor;
 use meerkat_schedule::{MemoryScheduleStore, ScheduleService, ScheduleToolDispatcher};
 use meerkat_store::{SessionFilter, SessionStore, SessionStoreError};
 use serde_json::json;
@@ -216,6 +218,18 @@ impl LlmClient for CaptureClient {
     }
 }
 
+struct NoopWebSearchExecutor;
+
+#[async_trait]
+impl WebSearchExecutor for NoopWebSearchExecutor {
+    async fn execute_web_search(
+        &self,
+        request: WebSearchRequest,
+    ) -> Result<WebSearchResult, meerkat_llm_core::LlmError> {
+        Ok(WebSearchResult::unavailable(request.query, "test executor"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helper: create a factory pointing at a temp directory
 // ---------------------------------------------------------------------------
@@ -331,6 +345,82 @@ async fn run_and_capture_tool_defs(
         .unwrap();
     agent.run("inspect tools".to_string().into()).await.unwrap();
     capture.tool_defs()
+}
+
+async fn build_and_capture_visible_tool_names(
+    factory: AgentFactory,
+    mut build_config: AgentBuildConfig,
+) -> Vec<String> {
+    build_config.llm_client_override = Some(Arc::new(MockLlmClient));
+    let agent = factory
+        .build_agent(build_config, &Config::default())
+        .await
+        .unwrap();
+    agent
+        .tool_scope()
+        .visible_tools()
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn explicit_web_search_fallback_is_visible_for_realtime_model() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let tool_names = build_and_capture_visible_tool_names(
+        factory,
+        AgentBuildConfig {
+            web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+            override_web_search: ToolCategoryOverride::Enable,
+            ..AgentBuildConfig::new("gpt-realtime-2")
+        },
+    )
+    .await;
+
+    assert!(
+        tool_names.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "explicit fallback should be exposed for realtime models without native search; saw {tool_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_fallback_stays_hidden_on_inherit() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let tool_names = build_and_capture_visible_tool_names(
+        factory,
+        AgentBuildConfig {
+            web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+            ..AgentBuildConfig::new("gpt-realtime-2")
+        },
+    )
+    .await;
+
+    assert!(
+        !tool_names.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "fallback must be explicit, not inherited by default; saw {tool_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn web_search_fallback_is_not_added_to_native_search_models() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp).builtins(true);
+    let tool_names = build_and_capture_visible_tool_names(
+        factory,
+        AgentBuildConfig {
+            web_search_executor_override: Some(Arc::new(NoopWebSearchExecutor)),
+            override_web_search: ToolCategoryOverride::Enable,
+            ..AgentBuildConfig::new("gpt-5.4")
+        },
+    )
+    .await;
+
+    assert!(
+        !tool_names.iter().any(|name| name == WEB_SEARCH_TOOL_NAME),
+        "models with native search capability must not receive the fallback; saw {tool_names:?}"
+    );
 }
 
 fn create_test_authority() -> MobToolAuthorityContext {
@@ -938,6 +1028,7 @@ async fn build_agent_with_resume_uses_stored_metadata() {
             mob: ToolCategoryOverride::Disable,
             memory: ToolCategoryOverride::Disable,
             image_generation: ToolCategoryOverride::Inherit,
+            web_search: ToolCategoryOverride::Inherit,
             active_skills: None,
         },
         keep_alive: false,
@@ -1021,6 +1112,7 @@ async fn build_agent_with_resume_preserves_explicit_override_masked_fields() {
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: true,
@@ -1108,6 +1200,7 @@ async fn build_agent_with_resume_preserves_persisted_system_prompt() {
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1163,6 +1256,7 @@ async fn build_agent_with_resume_preserves_explicit_inherit_tool_override() {
                 mob: ToolCategoryOverride::Inherit,
                 memory: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1218,6 +1312,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id() {
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1298,6 +1393,7 @@ async fn build_agent_with_resume_preserves_session_scoped_inproc_peer_id_across_
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1632,6 +1728,7 @@ async fn test_resume_does_not_mutate_persisted_active_skills_when_current_surfac
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(
                     meerkat_core::skills::SkillName::parse("nonexistent-legacy-skill")
                         .expect("valid skill name"),
@@ -1778,6 +1875,7 @@ async fn resume_with_inherit_mob_allows_factory_default() {
                 mob: ToolCategoryOverride::Inherit, // <-- key: no opinion
                 memory: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1832,6 +1930,7 @@ async fn resume_with_disable_mob_stays_disabled() {
                 mob: ToolCategoryOverride::Disable, // <-- explicitly off
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1884,6 +1983,7 @@ async fn resume_with_enable_mob_stays_enabled() {
                 mob: ToolCategoryOverride::Enable, // <-- explicitly on
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -1958,6 +2058,7 @@ async fn resumed_enable_mob_metadata_does_not_imply_operator_capabilities() {
                 mob: ToolCategoryOverride::Enable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2035,6 +2136,7 @@ async fn resumed_explicit_mob_override_generates_create_only_operator_capabiliti
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,
@@ -2130,6 +2232,7 @@ async fn resumed_persisted_mob_authority_is_forwarded_to_mob_tools_factory() {
                 mob: ToolCategoryOverride::Inherit,
                 memory: ToolCategoryOverride::Disable,
                 image_generation: ToolCategoryOverride::Inherit,
+                web_search: ToolCategoryOverride::Inherit,
                 active_skills: None,
             },
             keep_alive: false,

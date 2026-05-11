@@ -1877,7 +1877,7 @@ impl SessionRuntime {
     /// Writes through the shared slot to the `FactoryAgentBuilder` inside the
     /// session service — the builder that actually creates agents. The runtime's
     /// own `factory` clone is NOT used for session creation.
-    pub fn set_mob_tools(&mut self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
+    pub fn set_mob_tools(&self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
         *self
             .builder_mob_tools_slot
             .write()
@@ -2874,17 +2874,6 @@ impl SessionRuntime {
                 vec![],
             )) as Arc<dyn meerkat_core::AgentToolDispatcher>,
         )
-    }
-
-    /// Build a callback-backed tool dispatcher for the live-adapter host.
-    ///
-    /// Returns `None` until `set_callback_channel` has been called (which the
-    /// `RpcServer` constructor does). Callers (`MethodRouter::with_live_ws`)
-    /// invoke this after server construction and pass the dispatcher to
-    /// `LiveAdapterHost::set_tool_dispatcher` so live provider tool calls
-    /// route through Meerkat's callback-tool authority (A4/A5).
-    pub fn live_tool_dispatcher(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        self.recovery_external_tools()
     }
 
     /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
@@ -12434,7 +12423,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .builtins(true)
             .mob(true);
-        let mut runtime = make_runtime(factory, 10);
+        let runtime = make_runtime(factory, 10);
 
         // Create a MobMcpState and set it via set_mob_tools.
         let mob_svc = runtime.session_service();

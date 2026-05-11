@@ -77,6 +77,7 @@ pub mod tool_scope;
 pub mod turn_boundary;
 pub mod turn_execution_authority;
 pub mod types;
+pub mod web_search;
 
 // Re-export main types at crate root
 pub use agent::{
@@ -302,6 +303,7 @@ pub use types::{
     TranscriptSource, Usage, UserMessage, VideoData, has_images, has_non_text_content, has_video,
     is_supported_video_media_type, validate_inline_video_blocks,
 };
+pub use web_search::*;
 
 // === Provider auth v2 (landed ahead of wiring — see
 // /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md) ===

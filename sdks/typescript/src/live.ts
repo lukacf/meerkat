@@ -47,6 +47,8 @@ import type {
 } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
+export type LiveOpenTransport = NonNullable<LiveOpenParams["transport"]>;
+
 /** Options controlling how the live channel is opened. */
 export interface LiveChannelOptions {
   /**
@@ -60,12 +62,15 @@ export interface LiveChannelOptions {
    * explicit-commit semantics.
    */
   readonly turningMode?: RealtimeTurningMode;
+  /** Transport to request from `live/open`. Missing uses the server default. */
+  readonly transport?: LiveOpenTransport;
 }
 
 export class LiveChannel {
   readonly client: MeerkatClient;
   readonly sessionId: string;
   readonly turningMode?: RealtimeTurningMode;
+  readonly transport?: LiveOpenTransport;
 
   /** The channel id assigned by the server after `open()`. */
   private _channelId: string | undefined;
@@ -78,6 +83,7 @@ export class LiveChannel {
     this.client = client;
     this.sessionId = sessionId;
     this.turningMode = options?.turningMode;
+    this.transport = options?.transport;
   }
 
   /**
@@ -107,6 +113,9 @@ export class LiveChannel {
     const params: LiveOpenParams = { session_id: this.sessionId };
     if (this.turningMode != null) {
       params.turning_mode = this.turningMode;
+    }
+    if (this.transport != null) {
+      params.transport = this.transport;
     }
     const result = await this.client.liveOpen(params);
     this._channelId = result.channel_id;

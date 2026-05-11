@@ -1750,6 +1750,9 @@ pub struct CreateSessionRequest {
     /// Enable mob tools. Omit to use factory defaults.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Explicit budget limits for this run.
     #[serde(default)]
     pub budget_limits: Option<meerkat_core::BudgetLimits>,
@@ -1855,6 +1858,9 @@ pub struct ContinueSessionRequest {
     /// Optional run-scoped hook overrides.
     #[serde(default)]
     pub hooks_override: Option<HookRunOverrides>,
+    /// Enable Meerkat-owned fallback web search. Omit to inherit.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
     /// Structured refs for per-turn skill injection.
     #[serde(default)]
     pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
@@ -3714,6 +3720,7 @@ fn help_request_to_create_session(
         enable_shell: Some(false),
         enable_memory: Some(false),
         enable_mob: Some(false),
+        enable_web_search: Some(false),
         budget_limits: None,
         provider_params: None,
         preload_skills: Some(meerkat::help::platform_preload_skills()),
@@ -3941,6 +3948,7 @@ async fn create_session_inner(
         override_memory: ToolCategoryOverride::from_override(req.enable_memory),
         override_mob: ToolCategoryOverride::Inherit,
         override_image_generation: ToolCategoryOverride::Inherit,
+        override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
         schedule_tools: None,
         mob_tool_authority_context: None,
         preload_skills: req.preload_skills.clone(),
@@ -3965,6 +3973,7 @@ async fn create_session_inner(
             keep_alive: keep_alive_override.is_some(),
             comms_name: req.comms_name.is_some(),
             peer_meta: req.peer_meta.is_some(),
+            override_web_search: req.enable_web_search.is_some(),
             ..Default::default()
         },
         call_timeout_override: Default::default(),
@@ -4771,6 +4780,7 @@ async fn continue_session_inner(
             override_schedule: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
+            override_web_search: ToolCategoryOverride::from_override(req.enable_web_search),
             schedule_tools: None,
             mob_tool_authority_context: None,
             preload_skills: None,
@@ -4794,6 +4804,7 @@ async fn continue_session_inner(
                 keep_alive: keep_alive_override.is_some(),
                 comms_name: req.comms_name.is_some(),
                 peer_meta: req.peer_meta.is_some(),
+                override_web_search: req.enable_web_search.is_some(),
                 ..Default::default()
             },
             call_timeout_override: Default::default(),

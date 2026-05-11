@@ -23,6 +23,7 @@ import {
   Mob,
   Session,
   DeferredSession,
+  liveWebrtcMediaConstraints,
 } from "../dist/index.js";
 
 /**
@@ -70,6 +71,18 @@ describe("Contract Version", () => {
     );
 
     assert.match(generated, /export interface RuntimeStateResult \{\n  state: WireRuntimeState;\n\}/);
+  });
+
+  it("live WebRTC browser helper requests AEC noise suppression and AGC", () => {
+    const constraints = liveWebrtcMediaConstraints();
+    assert.deepEqual(constraints, {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
   });
 });
 
@@ -1182,6 +1195,8 @@ describe("Session wrappers", () => {
       additionalInstructions: ["be terse"],
       appContext: { tenant: "acme" },
       shellEnv: { FOO: "bar" },
+      enableSchedule: true,
+      enableWebSearch: true,
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
     });
 
@@ -1193,6 +1208,8 @@ describe("Session wrappers", () => {
         additional_instructions: ["be terse"],
         app_context: { tenant: "acme" },
         shell_env: { FOO: "bar" },
+        enable_schedule: true,
+        enable_web_search: true,
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
       },
     });

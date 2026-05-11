@@ -719,26 +719,26 @@ pub enum LiveInputChunk {
 /// `#[non_exhaustive]` so additional transports can be added without
 /// breaking downstream consumers.
 ///
-/// **WebRTC reintroduction (deferred to follow-up PR):** an earlier
-/// `Webrtc { offer_sdp, ice_servers }` variant was removed because it
-/// modeled the wrong shape — Meerkat would pre-compute an SDP offer and
-/// hand it to the browser, but in the production WebRTC flow the browser
-/// owns the local `RTCPeerConnection`, calls `getUserMedia`, generates the
-/// offer SDP itself, then sends it to a Meerkat terminator which
-/// negotiates with the upstream provider. The follow-up PR will reintroduce
-/// WebRTC via a real signaling shape (likely a dedicated
-/// `live/webrtc/open` RPC, or an extended `live/open` returning a
-/// signaling endpoint + token; the browser POSTs its offer to that
-/// endpoint, the terminator returns the answer SDP and ICE candidates,
-/// and the resulting media/data channel binds to the existing live
-/// channel identity). See `LIVE_ADAPTER_ROUND4_TODO.md` Phase 1 / T4 and
-/// the PR #650 design notes.
+/// WebRTC uses browser-offer signaling: the browser creates its
+/// `RTCPeerConnection`, captures local audio with AEC-capable constraints,
+/// creates an SDP offer, then calls the returned JSON-RPC answer method
+/// with `{ channel_id, token, offer_sdp }`. Meerkat answers and binds the
+/// resulting media/data channels to the already-open live channel.
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "transport", rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum LiveTransportBootstrap {
-    Websocket { url: String, token: String },
+    Websocket {
+        url: String,
+        token: String,
+    },
+    Webrtc {
+        token: String,
+        answer_method: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        http_url: Option<String>,
+    },
 }
 
 /// Capabilities advertised when a live channel opens.
@@ -1694,11 +1694,21 @@ mod tests {
         assert!(json.contains("\"transport\":\"websocket\""));
     }
 
-    // NOTE: WebRTC bootstrap variants (and the `LiveIceServer` type) were
-    // removed from this PR — the previous shape modeled the wrong flow
-    // (Meerkat-generated offer SDP). A future PR will reintroduce a real
-    // signaling-based shape; see the doc-comment on
-    // `LiveTransportBootstrap` for the planned design.
+    #[test]
+    fn webrtc_bootstrap_is_browser_offer_signaling_not_meerkat_offer() {
+        let webrtc = LiveTransportBootstrap::Webrtc {
+            token: "tok_webrtc".into(),
+            answer_method: "live/webrtc/answer".into(),
+            http_url: None,
+        };
+        let json = serde_json::to_value(&webrtc).unwrap();
+        assert_eq!(json["transport"], "webrtc");
+        assert_eq!(json["answer_method"], "live/webrtc/answer");
+        assert!(
+            json.get("offer_sdp").is_none(),
+            "Meerkat must not pre-compute browser-offer SDP"
+        );
+    }
 
     // -- Continuity mode invariants --
 

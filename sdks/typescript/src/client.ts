@@ -51,6 +51,8 @@ import {
   type LiveSendInputParams,
   type LiveStatusResult,
   type LiveTruncateParams,
+  type LiveWebrtcAnswerParams,
+  type LiveWebrtcAnswerResult,
   type WireLiveAdapterObservation,
   type MobTurnStartParams,
   type MobRotateSupervisorResult,
@@ -208,6 +210,8 @@ export interface ConnectOptions {
   contextRoot?: string;
   userConfigRoot?: string;
   liveWs?: boolean;
+  liveWebrtc?: boolean;
+  liveToolTimeoutMs?: number;
 }
 
 interface WireSkillKey {
@@ -410,7 +414,8 @@ export class MeerkatClient {
         || options?.stateRoot
         || options?.contextRoot
         || options?.userConfigRoot
-        || options?.liveWs,
+        || options?.liveWs
+        || options?.liveWebrtc,
     );
     if (resolved.useLegacySubcommand && hasAdvancedOptions) {
       throw new MeerkatError(
@@ -2291,6 +2296,16 @@ export class MeerkatClient {
     return result as unknown as LiveOpenResult;
   }
 
+  async liveWebrtcAnswer(
+    params: LiveWebrtcAnswerParams,
+  ): Promise<LiveWebrtcAnswerResult> {
+    const result = await this.request(
+      "live/webrtc/answer",
+      params as unknown as Record<string, unknown>,
+    );
+    return result as unknown as LiveWebrtcAnswerResult;
+  }
+
   async liveStatus(params: LiveChannelParams): Promise<LiveStatusResult> {
     const result = await this.request(
       "live/status",
@@ -3449,7 +3464,10 @@ export class MeerkatClient {
     if (options.enableBuiltins != null) params.enable_builtins = options.enableBuiltins;
     if (options.enableShell != null) params.enable_shell = options.enableShell;
     if (options.enableMemory != null) params.enable_memory = options.enableMemory;
+    if (options.enableSchedule != null) params.enable_schedule = options.enableSchedule;
     if (options.enableMob != null) params.enable_mob = options.enableMob;
+    if (options.enableWebSearch != null) params.enable_web_search = options.enableWebSearch;
+    if (options.toolFilter != null) params.tool_filter = options.toolFilter;
     if (options.keepAlive != null) params.keep_alive = options.keepAlive;
     if (options.commsName) params.comms_name = options.commsName;
     if (options.peerMeta != null) params.peer_meta = options.peerMeta;
@@ -3624,6 +3642,10 @@ export class MeerkatClient {
     const args: string[] = [];
     if (!options) return args;
     if (options.liveWs) args.push("--live-ws", "127.0.0.1:0");
+    if (options.liveWebrtc) args.push("--live-webrtc");
+    if (options.liveToolTimeoutMs != null) {
+      args.push("--live-tool-timeout-ms", String(options.liveToolTimeoutMs));
+    }
     if (options.isolated) args.push("--isolated");
     if (options.realmId) args.push("--realm", options.realmId);
     if (options.instanceId) args.push("--instance", options.instanceId);

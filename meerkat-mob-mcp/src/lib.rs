@@ -6172,7 +6172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_implicit_mob_has_auto_wire_orchestrator() {
+    async fn test_implicit_mob_uses_external_owner_wiring() {
         let state = MobMcpState::new_in_memory();
         let sid = SessionId::new().to_string();
 
@@ -6182,8 +6182,12 @@ mod tests {
             .unwrap();
         let handle = state.handle_for(&mob_id).await.unwrap();
         assert!(
-            handle.definition().wiring.auto_wire_orchestrator,
-            "implicit mob must have auto_wire_orchestrator set"
+            !handle.definition().wiring.auto_wire_orchestrator,
+            "implicit delegate mobs wire the owner as an external peer, not as a local orchestrator"
+        );
+        assert!(
+            handle.definition().orchestrator.is_none(),
+            "implicit delegate mobs must not invent a local orchestrator member"
         );
         assert_eq!(
             handle.definition().owner_bridge_session_index(),

@@ -455,6 +455,12 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "LiveOpenResult",
             ),
             RpcMethodDescriptor::typed(
+                "live/webrtc/answer",
+                "Answer a browser WebRTC offer for an already-open live channel",
+                "LiveWebrtcAnswerParams",
+                "LiveWebrtcAnswerResult",
+            ),
+            RpcMethodDescriptor::typed(
                 "live/status",
                 "Get the status of a live channel",
                 "LiveChannelParams",

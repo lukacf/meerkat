@@ -1124,38 +1124,180 @@ fn openai_response_cancel_no_active_response_message(message: &str) -> bool {
     message.contains("cancellation failed") && message.contains("no active response found")
 }
 
-fn should_suppress_openai_active_response_error(
-    message: &str,
-    provider_response_nudge_inflight: bool,
-    response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-) -> bool {
-    // R3-5 (P2): `response_output_active` is the OR of the audio + text
-    // bits — the OpenAI realtime "active response in progress" guard is
-    // about a server-side response of *any* modality being active, so the
-    // suppression decision composes both bits at the call site.
-    openai_response_already_active_message(message)
-        && (provider_response_nudge_inflight
-            || response_output_active
-            || awaiting_provider_response_after_commit
-            || provider_response_acknowledged_without_progress)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenAiResponseNudgeSnapshot {
+    awaiting_after_commit: bool,
+    acknowledged_without_progress: bool,
+    nudge_attempts: u8,
+    nudge_inflight: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiResponseNudgeTimeoutAction {
+    WaitAgain { attempt: u8 },
+    SendNudge,
+    Exhausted { attempts: u8, duration_ms: u64 },
+}
+
+/// Provider-owned compatibility authority for OpenAI response-start recovery.
+///
+/// OpenAI can acknowledge a committed input turn without promptly surfacing
+/// response progress on reconstructed realtime sessions. This authority owns
+/// the adapter's bounded recovery lifecycle: waiting, recovery nudges,
+/// acknowledgement-only states, active-response suppression, and timeout
+/// terminalization. The session loop only performs transport mechanics.
+#[derive(Debug, Clone, Default)]
+struct OpenAiResponseNudgeAuthority {
+    awaiting_after_commit: bool,
+    acknowledged_without_progress: bool,
+    nudge_attempts: u8,
+    nudge_inflight: bool,
+    timeout_ms: Option<u64>,
+    max_attempts: Option<u8>,
+}
+
+impl OpenAiResponseNudgeAuthority {
+    fn set_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
+        self.timeout_ms = timeout_ms;
+        self.max_attempts = max_attempts;
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
+    }
+
+    fn max_attempts(&self) -> u8 {
+        self.max_attempts
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS)
+    }
+
+    fn snapshot(&self) -> OpenAiResponseNudgeSnapshot {
+        OpenAiResponseNudgeSnapshot {
+            awaiting_after_commit: self.awaiting_after_commit,
+            acknowledged_without_progress: self.acknowledged_without_progress,
+            nudge_attempts: self.nudge_attempts,
+            nudge_inflight: self.nudge_inflight,
+        }
+    }
+
+    fn awaiting_after_commit(&self) -> bool {
+        self.awaiting_after_commit
+    }
+
+    fn waiting_for_progress(&self) -> bool {
+        self.awaiting_after_commit || self.acknowledged_without_progress
+    }
+
+    fn begin_wait_after_commit(&mut self, should_wait: bool) {
+        self.awaiting_after_commit = should_wait;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn note_provider_response_acknowledged(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = true;
+        self.nudge_inflight = false;
+    }
+
+    fn note_provider_response_progressed(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn reset(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn should_suppress_active_response_error(
+        &self,
+        message: &str,
+        response_output_active: bool,
+    ) -> bool {
+        // R3-5 (P2): `response_output_active` is the OR of the audio + text
+        // bits — the OpenAI realtime "active response in progress" guard is
+        // about a server-side response of any modality being active, so the
+        // suppression decision composes both bits at the call site.
+        openai_response_already_active_message(message)
+            && (self.nudge_inflight
+                || response_output_active
+                || self.awaiting_after_commit
+                || self.acknowledged_without_progress)
+    }
+
+    fn on_wait_timeout(&mut self) -> OpenAiResponseNudgeTimeoutAction {
+        let max_attempts = self.max_attempts();
+        if self.acknowledged_without_progress {
+            if self.nudge_attempts >= max_attempts {
+                return OpenAiResponseNudgeTimeoutAction::Exhausted {
+                    attempts: self.nudge_attempts,
+                    duration_ms: self.timeout_error_duration_ms(),
+                };
+            }
+            self.nudge_attempts += 1;
+            return OpenAiResponseNudgeTimeoutAction::WaitAgain {
+                attempt: self.nudge_attempts,
+            };
+        }
+        if self.nudge_attempts >= max_attempts {
+            return OpenAiResponseNudgeTimeoutAction::Exhausted {
+                attempts: self.nudge_attempts,
+                duration_ms: self.timeout_error_duration_ms(),
+            };
+        }
+        OpenAiResponseNudgeTimeoutAction::SendNudge
+    }
+
+    fn note_nudge_sent(&mut self) -> u8 {
+        self.nudge_attempts += 1;
+        self.nudge_inflight = true;
+        self.nudge_attempts
+    }
+
+    fn timeout_error_duration_ms(&self) -> u64 {
+        self.timeout_ms() * u64::from(self.max_attempts())
+    }
+
+    #[cfg(test)]
+    fn force_state_for_test(
+        &mut self,
+        awaiting_after_commit: bool,
+        acknowledged_without_progress: bool,
+        nudge_attempts: u8,
+        nudge_inflight: bool,
+    ) {
+        self.awaiting_after_commit = awaiting_after_commit;
+        self.acknowledged_without_progress = acknowledged_without_progress;
+        self.nudge_attempts = nudge_attempts;
+        self.nudge_inflight = nudge_inflight;
+    }
 }
 
 fn trace_openai_active_response_error(
     source: &str,
     message: &str,
-    provider_response_nudge_inflight: bool,
+    snapshot: OpenAiResponseNudgeSnapshot,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
     suppressed: bool,
 ) {
     if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE").is_none() {
         return;
     }
+    let OpenAiResponseNudgeSnapshot {
+        awaiting_after_commit,
+        acknowledged_without_progress,
+        nudge_attempts,
+        nudge_inflight,
+    } = snapshot;
     eprintln!(
-        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={provider_response_nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_provider_response_after_commit} ack_without_progress={provider_response_acknowledged_without_progress} message={message}",
+        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_after_commit} ack_without_progress={acknowledged_without_progress} attempts={nudge_attempts} message={message}",
     );
 }
 
@@ -1239,16 +1381,7 @@ pub struct OpenAiRealtimeSession {
     text_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-    provider_response_nudge_attempts: u8,
-    provider_response_nudge_inflight: bool,
-    /// Per-session override for the provider-nudge timeout (milliseconds).
-    /// None falls back to `OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS`.
-    response_nudge_timeout_ms: Option<u64>,
-    /// Per-session override for the provider-nudge max attempts. None falls
-    /// back to `OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS`.
-    response_nudge_max_attempts: Option<u8>,
+    response_nudge: OpenAiResponseNudgeAuthority,
     /// item_id → audio_played_ms captured when the client called
     /// [`truncate_assistant_output`]. Used to correlate the server's
     /// `conversation.item.truncated` with the playback cursor when emitting
@@ -1301,12 +1434,7 @@ impl OpenAiRealtimeSession {
             text_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
-            awaiting_provider_response_after_commit: false,
-            provider_response_acknowledged_without_progress: false,
-            provider_response_nudge_attempts: 0,
-            provider_response_nudge_inflight: false,
-            response_nudge_timeout_ms: None,
-            response_nudge_max_attempts: None,
+            response_nudge: OpenAiResponseNudgeAuthority::default(),
             pending_truncations: BTreeMap::new(),
             current_model_id: None,
             current_provider_id: None,
@@ -1316,8 +1444,7 @@ impl OpenAiRealtimeSession {
     /// Apply per-session overrides for the provider nudge timings. `None`
     /// values inherit the adapter's compile-time defaults.
     pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
-        self.response_nudge_timeout_ms = timeout_ms;
-        self.response_nudge_max_attempts = max_attempts;
+        self.response_nudge.set_config(timeout_ms, max_attempts);
     }
 
     /// R1: stamp the model + provider identity this session was opened
@@ -1334,16 +1461,6 @@ impl OpenAiRealtimeSession {
     ) {
         self.current_model_id = Some(model_id.into());
         self.current_provider_id = Some(provider_id.into());
-    }
-
-    fn effective_nudge_timeout_ms(&self) -> u64 {
-        self.response_nudge_timeout_ms
-            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
-    }
-
-    fn effective_nudge_max_attempts(&self) -> u8 {
-        self.response_nudge_max_attempts
-            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS)
     }
 
     fn raw_mut(&mut self) -> Result<&mut (dyn OpenAiLiveSession + '_), LlmError> {
@@ -1486,6 +1603,21 @@ impl OpenAiRealtimeSession {
         }
         self.pending_response_cancel_event_ids.remove(event_id);
         true
+    }
+
+    fn should_suppress_active_response_error(&self, source: &str, message: &str) -> bool {
+        let response_output_active = self.any_response_output_active();
+        let suppress = self
+            .response_nudge
+            .should_suppress_active_response_error(message, response_output_active);
+        trace_openai_active_response_error(
+            source,
+            message,
+            self.response_nudge.snapshot(),
+            response_output_active,
+            suppress,
+        );
+        suppress
     }
 
     fn response_id_for_item(&self, item_id: &str) -> Option<String> {
@@ -1642,21 +1774,15 @@ impl OpenAiRealtimeSession {
     }
 
     fn waiting_for_provider_progress(&self) -> bool {
-        self.awaiting_provider_response_after_commit
-            || self.provider_response_acknowledged_without_progress
+        self.response_nudge.waiting_for_progress()
     }
 
     fn note_provider_response_acknowledged(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = true;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.note_provider_response_acknowledged();
     }
 
     fn note_provider_response_progressed(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.note_provider_response_progressed();
     }
 
     fn note_output_audio_transcript_done(
@@ -1789,14 +1915,12 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_previous_for_item(&item_id, previous_item_id);
-                self.awaiting_provider_response_after_commit =
-                    self.turning_mode == RealtimeTurningMode::ProviderManaged;
-                self.provider_response_acknowledged_without_progress = false;
-                self.provider_response_nudge_attempts = 0;
-                self.provider_response_nudge_inflight = false;
+                self.response_nudge.begin_wait_after_commit(
+                    self.turning_mode == RealtimeTurningMode::ProviderManaged,
+                );
                 trace_openai_realtime_lifecycle(format!(
                     "input_audio_buffer.committed awaiting_after_commit={}",
-                    self.awaiting_provider_response_after_commit
+                    self.response_nudge.awaiting_after_commit()
                 ));
                 if self.audio_output_active && !self.response_interrupt_emitted {
                     let response_id = self.active_response_id.clone();
@@ -1836,7 +1960,7 @@ impl OpenAiRealtimeSession {
                 None
             }
             ServerEvent::ResponseDone { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_nudge.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle(format!(
                         "response.done suppressed_while_awaiting status={:?}",
                         response.status
@@ -1895,7 +2019,7 @@ impl OpenAiRealtimeSession {
                 }
             }
             ServerEvent::ResponseCancelled { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_nudge.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
                     self.clear_response_output_active();
                     self.response_tool_call_observed = false;
@@ -2157,23 +2281,7 @@ impl OpenAiRealtimeSession {
                     ));
                     return Ok(None);
                 }
-                let suppress = should_suppress_openai_active_response_error(
-                    &error.message,
-                    self.provider_response_nudge_inflight,
-                    self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
-                );
-                trace_openai_active_response_error(
-                    "server_event",
-                    &error.message,
-                    self.provider_response_nudge_inflight,
-                    self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
-                    suppress,
-                );
-                if suppress {
+                if self.should_suppress_active_response_error("server_event", &error.message) {
                     // Provider-specific compatibility path:
                     // the one-shot `response.create` recovery nudge can race
                     // with an OpenAI-managed response that already exists even
@@ -2437,7 +2545,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             })
                             .await?;
                         self.has_staged_input = false;
-                        self.awaiting_provider_response_after_commit = true;
+                        self.response_nudge.begin_wait_after_commit(true);
                     }
                     RealtimeTurningMode::ExplicitCommit => {
                         // R4-1 (P1): defer canonical-history synthesis until
@@ -2552,8 +2660,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // owns this one-shot recovery nudge rather than exposing a new
                 // product semantic. Keep this narrow and easy to delete once
                 // the upstream/provider session behavior is fully understood.
-                let nudge_timeout_ms = self.effective_nudge_timeout_ms();
-                let nudge_max_attempts = self.effective_nudge_max_attempts();
+                let nudge_timeout_ms = self.response_nudge.timeout_ms();
                 match tokio::time::timeout(
                     Duration::from_millis(nudge_timeout_ms),
                     self.raw_mut()?.next_event(),
@@ -2563,132 +2670,77 @@ impl RealtimeSession for OpenAiRealtimeSession {
                     Ok(result) => match result {
                         Ok(event) => event,
                         Err(LlmError::InvalidRequest { message })
-                            if {
-                                let suppress = should_suppress_openai_active_response_error(
-                                    &message,
-                                    self.provider_response_nudge_inflight,
-                                    self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
-                                );
-                                trace_openai_active_response_error(
-                                    "raw_timeout_branch",
-                                    &message,
-                                    self.provider_response_nudge_inflight,
-                                    self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
-                                    suppress,
-                                );
-                                suppress
-                            } =>
+                            if self.should_suppress_active_response_error(
+                                "raw_timeout_branch",
+                                &message,
+                            ) =>
                         {
                             self.note_provider_response_acknowledged();
                             continue;
                         }
                         Err(error) => return Err(error),
                     },
-                    Err(_) => {
-                        if self.provider_response_acknowledged_without_progress {
-                            if self.provider_response_nudge_attempts >= nudge_max_attempts {
-                                trace_openai_realtime_lifecycle(format!(
-                                    "provider response acknowledged but stalled after {} wait windows",
-                                    self.provider_response_nudge_attempts
-                                ));
-                                return Err(LlmError::NetworkTimeout {
-                                    duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
-                                });
-                            }
-                            self.provider_response_nudge_attempts += 1;
+                    Err(_) => match self.response_nudge.on_wait_timeout() {
+                        OpenAiResponseNudgeTimeoutAction::WaitAgain { attempt } => {
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response acknowledged without progress; waiting again attempt={}",
-                                self.provider_response_nudge_attempts
+                                attempt
                             ));
                             continue;
                         }
-                        if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        OpenAiResponseNudgeTimeoutAction::Exhausted {
+                            attempts,
+                            duration_ms,
+                        } => {
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response nudge budget exhausted after {} attempts",
-                                self.provider_response_nudge_attempts
+                                attempts
                             ));
-                            return Err(LlmError::NetworkTimeout {
-                                duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
-                            });
+                            return Err(LlmError::NetworkTimeout { duration_ms });
                         }
-                        trace_openai_realtime_lifecycle(
-                            "provider response nudge timeout expired; sending response.create",
-                        );
-                        match self
-                            .raw_mut()?
-                            .send_raw(ClientEvent::ResponseCreate {
-                                event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
-                            })
-                            .await
-                        {
-                            Ok(()) => {
-                                self.provider_response_nudge_attempts += 1;
-                                self.provider_response_nudge_inflight = true;
-                                trace_openai_realtime_lifecycle(format!(
-                                    "response.create nudge accepted by transport attempt={}",
-                                    self.provider_response_nudge_attempts
-                                ));
-                            }
-                            Err(LlmError::InvalidRequest { message })
-                                if {
-                                    let suppress = should_suppress_openai_active_response_error(
-                                        &message,
-                                        self.provider_response_nudge_inflight,
-                                        self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
-                                    );
-                                    trace_openai_active_response_error(
+                        OpenAiResponseNudgeTimeoutAction::SendNudge => {
+                            trace_openai_realtime_lifecycle(
+                                "provider response nudge timeout expired; sending response.create",
+                            );
+                            match self
+                                .raw_mut()?
+                                .send_raw(ClientEvent::ResponseCreate {
+                                    event_id: None,
+                                    response: Some(Box::new(openai_audio_response_config())),
+                                })
+                                .await
+                            {
+                                Ok(()) => {
+                                    let attempt = self.response_nudge.note_nudge_sent();
+                                    trace_openai_realtime_lifecycle(format!(
+                                        "response.create nudge accepted by transport attempt={}",
+                                        attempt
+                                    ));
+                                }
+                                Err(LlmError::InvalidRequest { message })
+                                    if self.should_suppress_active_response_error(
                                         "response_create",
                                         &message,
-                                        self.provider_response_nudge_inflight,
-                                        self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
-                                        suppress,
-                                    );
-                                    suppress
-                                } =>
-                            {
-                                // Same reasoning as the server-error branch
-                                // above: keep the nudge guard open until a
-                                // real provider lifecycle event proves the
-                                // active response has advanced or terminated.
-                                self.note_provider_response_acknowledged();
+                                    ) =>
+                                {
+                                    // Same reasoning as the server-error branch
+                                    // above: keep the nudge guard open until a
+                                    // real provider lifecycle event proves the
+                                    // active response has advanced or terminated.
+                                    self.note_provider_response_acknowledged();
+                                }
+                                Err(error) => return Err(error),
                             }
-                            Err(error) => return Err(error),
+                            continue;
                         }
-                        continue;
-                    }
+                    },
                 }
             } else {
                 match self.raw_mut()?.next_event().await {
                     Ok(event) => event,
                     Err(LlmError::InvalidRequest { message })
-                        if {
-                            let suppress = should_suppress_openai_active_response_error(
-                                &message,
-                                self.provider_response_nudge_inflight,
-                                self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
-                            );
-                            trace_openai_active_response_error(
-                                "raw_next_event",
-                                &message,
-                                self.provider_response_nudge_inflight,
-                                self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
-                                suppress,
-                            );
-                            suppress
-                        } =>
+                        if self
+                            .should_suppress_active_response_error("raw_next_event", &message) =>
                     {
                         self.note_provider_response_acknowledged();
                         continue;
@@ -2722,10 +2774,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.clear_response_output_active();
         self.response_interrupt_emitted = false;
         self.response_tool_call_observed = false;
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.reset();
         Ok(())
     }
 }
@@ -5830,6 +5879,45 @@ mod tests {
     }
 
     #[test]
+    fn response_nudge_authority_owns_suppression_budget_and_timeout_terminalization() {
+        let mut authority = OpenAiResponseNudgeAuthority::default();
+        authority.set_config(Some(5), Some(2));
+
+        authority.begin_wait_after_commit(true);
+        assert!(authority.waiting_for_progress());
+        assert!(authority.should_suppress_active_response_error(
+            "Conversation already has an active response in progress",
+            false,
+        ));
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::SendNudge
+        );
+        assert_eq!(authority.note_nudge_sent(), 1);
+        assert!(authority.snapshot().nudge_inflight);
+
+        authority.note_provider_response_acknowledged();
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::WaitAgain { attempt: 2 }
+        );
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::Exhausted {
+                attempts: 2,
+                duration_ms: 10,
+            }
+        );
+
+        authority.note_provider_response_progressed();
+        assert!(!authority.waiting_for_progress());
+        assert!(!authority.should_suppress_active_response_error(
+            "Conversation already has an active response in progress",
+            false,
+        ));
+    }
+
+    #[test]
     fn response_created_keeps_provider_in_bounded_wait_state_until_real_progress() {
         let mut session = OpenAiRealtimeSession::new(
             Box::new(FakeOpenAiLiveSession {
@@ -5850,8 +5938,9 @@ mod tests {
             committed,
             Some(RealtimeSessionEvent::TurnCommitted)
         ));
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.awaiting_provider_response_after_commit,
+            snapshot.awaiting_after_commit,
             "provider-managed commit should wait for provider response start"
         );
 
@@ -5865,16 +5954,17 @@ mod tests {
             created.is_none(),
             "response.created is an internal lifecycle acknowledgement, not a public event"
         );
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            !session.awaiting_provider_response_after_commit,
+            !snapshot.awaiting_after_commit,
             "response.created proves a response exists, so the pre-ack wait window should close"
         );
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "response.created should keep the adapter waiting for real provider progress"
         );
         assert!(
-            session.provider_response_nudge_attempts == 0,
+            snapshot.nudge_attempts == 0,
             "response.created should preserve the existing recovery budget when no nudge has fired yet"
         );
     }
@@ -5888,9 +5978,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let mapped = session
             .map_server_event(ServerEvent::Error {
@@ -5910,19 +6000,20 @@ mod tests {
             "provider acknowledgement errors should stay internal to the adapter"
         );
         assert!(
-            !session.awaiting_provider_response_after_commit,
+            !session.response_nudge.snapshot().awaiting_after_commit,
             "the adapter should treat the provider error as proof that a response already exists"
         );
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "active-response acknowledgements should keep the adapter waiting for actual provider progress"
         );
         assert!(
-            session.provider_response_nudge_attempts == 1,
+            snapshot.nudge_attempts == 1,
             "the recovery budget should stay consumed until real provider progress arrives"
         );
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "once the provider acknowledges the active response, the outstanding nudge itself is no longer inflight"
         );
     }
@@ -5936,9 +6027,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -5976,9 +6067,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 0;
-        session.provider_response_nudge_inflight = false;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 0, false);
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6016,9 +6107,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let first = session
             .map_server_event(ServerEvent::Error {
@@ -6054,12 +6145,13 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::InProgress),
             })
             .expect("response.created should map");
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "response.created should leave the adapter waiting for actual provider progress"
         );
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "response.created should close the outstanding nudge transport guard once the provider has acknowledged the response"
         );
 
@@ -6069,12 +6161,13 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::Completed),
             })
             .expect("response.done should map");
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "the terminal provider boundary should close the nudge guard"
         );
         assert!(
-            !session.provider_response_acknowledged_without_progress,
+            !snapshot.acknowledged_without_progress,
             "terminal provider progress should clear the acknowledgement-only waiting state"
         );
     }

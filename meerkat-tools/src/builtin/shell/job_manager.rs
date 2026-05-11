@@ -5,7 +5,7 @@
 
 use meerkat_core::ops_lifecycle::{
     OperationId, OperationKind, OperationLifecycleSnapshot, OperationResult, OperationSpec,
-    OperationStatus, OpsLifecycleRegistry,
+    OperationStatus, OperationTerminalOutcome, OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
 use meerkat_runtime::RuntimeOpsLifecycleRegistry;
@@ -149,6 +149,111 @@ struct BackgroundJobRecord {
     completion_notified: bool,
 }
 
+/// Canonical projection authority for app-facing shell job lifecycle status.
+///
+/// `OpsLifecycleRegistry` owns lifecycle. `BackgroundJob.status` still carries
+/// shell display details such as stdout/stderr, but service-visible lifecycle
+/// status is projected here from the registry snapshot first.
+struct ShellJobLifecycleAuthority;
+
+impl ShellJobLifecycleAuthority {
+    fn duration_secs(view: &BackgroundJob, snapshot: Option<&OperationLifecycleSnapshot>) -> f64 {
+        snapshot
+            .and_then(|snapshot| snapshot.elapsed_ms)
+            .map(|elapsed_ms| elapsed_ms as f64 / 1000.0)
+            .unwrap_or_else(|| JobManager::lifecycle_duration_secs(view.started_at_unix))
+    }
+
+    fn completed_from_snapshot(
+        view: &BackgroundJob,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> JobStatus {
+        if let JobStatus::Completed { .. } = &view.status {
+            return view.status.clone();
+        }
+        let (stdout, duration_secs) =
+            match snapshot.and_then(|snapshot| snapshot.terminal_outcome.as_ref()) {
+                Some(OperationTerminalOutcome::Completed(result)) => {
+                    (result.content.clone(), result.duration_ms as f64 / 1000.0)
+                }
+                _ => (String::new(), Self::duration_secs(view, snapshot)),
+            };
+        JobStatus::Completed {
+            exit_code: None,
+            stdout,
+            stderr: String::new(),
+            duration_secs,
+        }
+    }
+
+    fn failed_from_snapshot(
+        view: &BackgroundJob,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> JobStatus {
+        match &view.status {
+            JobStatus::Failed { .. } | JobStatus::TimedOut { .. } => return view.status.clone(),
+            _ => {}
+        }
+        let error = match snapshot.and_then(|snapshot| snapshot.terminal_outcome.as_ref()) {
+            Some(OperationTerminalOutcome::Failed { error }) => error.clone(),
+            Some(OperationTerminalOutcome::Terminated { reason }) => reason.clone(),
+            _ => "background job failed".to_string(),
+        };
+        JobStatus::Failed {
+            error,
+            duration_secs: Self::duration_secs(view, snapshot),
+        }
+    }
+
+    fn cancelled_from_snapshot(
+        view: &BackgroundJob,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> JobStatus {
+        if let JobStatus::Cancelled { .. } = &view.status {
+            return view.status.clone();
+        }
+        JobStatus::Cancelled {
+            duration_secs: Self::duration_secs(view, snapshot),
+        }
+    }
+
+    fn project_status(
+        view: &BackgroundJob,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> JobStatus {
+        match snapshot.map(|value| value.status) {
+            Some(OperationStatus::Provisioning | OperationStatus::Running) => JobStatus::Running {
+                started_at_unix: view.started_at_unix,
+            },
+            Some(OperationStatus::Completed) => Self::completed_from_snapshot(view, snapshot),
+            Some(OperationStatus::Failed | OperationStatus::Terminated) => {
+                Self::failed_from_snapshot(view, snapshot)
+            }
+            Some(
+                OperationStatus::Aborted
+                | OperationStatus::Cancelled
+                | OperationStatus::Retiring
+                | OperationStatus::Retired,
+            ) => Self::cancelled_from_snapshot(view, snapshot),
+            Some(OperationStatus::Absent) | None => view.status.clone(),
+        }
+    }
+
+    fn summary_status(
+        view: &BackgroundJob,
+        snapshot: Option<&OperationLifecycleSnapshot>,
+    ) -> JobSummaryStatus {
+        JobSummaryStatus::from(&Self::project_status(view, snapshot))
+    }
+
+    fn is_running(view: &BackgroundJob, snapshot: Option<&OperationLifecycleSnapshot>) -> bool {
+        matches!(
+            Self::project_status(view, snapshot),
+            JobStatus::Running { .. }
+        )
+    }
+}
+
 /// Manager for background shell jobs
 ///
 /// Handles spawning, tracking, and managing background shell command execution.
@@ -277,24 +382,7 @@ impl JobManager {
         job: &BackgroundJobRecord,
         snapshot: Option<&OperationLifecycleSnapshot>,
     ) -> JobSummaryStatus {
-        if matches!(job.view.status, JobStatus::TimedOut { .. }) {
-            return JobSummaryStatus::TimedOut;
-        }
-
-        match snapshot.map(|value| value.status) {
-            Some(OperationStatus::Provisioning | OperationStatus::Running) => {
-                JobSummaryStatus::Running
-            }
-            Some(OperationStatus::Completed) => JobSummaryStatus::Completed,
-            Some(OperationStatus::Failed | OperationStatus::Terminated) => JobSummaryStatus::Failed,
-            Some(
-                OperationStatus::Aborted
-                | OperationStatus::Cancelled
-                | OperationStatus::Retiring
-                | OperationStatus::Retired,
-            ) => JobSummaryStatus::Cancelled,
-            Some(OperationStatus::Absent) | None => JobSummaryStatus::from(&job.view.status),
-        }
+        ShellJobLifecycleAuthority::summary_status(&job.view, snapshot)
     }
 
     fn reconcile_job_status(
@@ -302,28 +390,7 @@ impl JobManager {
         job: &BackgroundJobRecord,
         snapshot: Option<&OperationLifecycleSnapshot>,
     ) -> JobStatus {
-        match snapshot.map(|value| value.status) {
-            Some(OperationStatus::Provisioning | OperationStatus::Running) => JobStatus::Running {
-                started_at_unix: job.view.started_at_unix,
-            },
-            Some(OperationStatus::Completed) => job.view.status.clone(),
-            Some(OperationStatus::Failed | OperationStatus::Terminated) => match &job.view.status {
-                JobStatus::Failed { .. } | JobStatus::TimedOut { .. } => job.view.status.clone(),
-                _ => JobStatus::Failed {
-                    error: "background job failed".to_string(),
-                    duration_secs: Self::lifecycle_duration_secs(job.view.started_at_unix),
-                },
-            },
-            Some(
-                OperationStatus::Aborted
-                | OperationStatus::Cancelled
-                | OperationStatus::Retiring
-                | OperationStatus::Retired,
-            ) => JobStatus::Cancelled {
-                duration_secs: Self::lifecycle_duration_secs(job.view.started_at_unix),
-            },
-            Some(OperationStatus::Absent) | None => job.view.status.clone(),
-        }
+        ShellJobLifecycleAuthority::project_status(&job.view, snapshot)
     }
 
     pub async fn ops_lifecycle_snapshot(
@@ -814,9 +881,8 @@ impl JobManager {
     pub async fn cancel_job(&self, job_id: &JobId) -> Result<(), ShellError> {
         info!("Cancelling job");
 
-        // Atomically check if job exists, is running, and update status in a single lock scope.
-        // This prevents race conditions where another operation could change the status
-        // between checking and modifying.
+        // Atomically check authority-projected lifecycle and request
+        // cancellation from the canonical registry in one lock scope.
         {
             let mut jobs_guard = self.jobs.lock().await;
             let job = jobs_guard.get_mut(job_id).ok_or_else(|| {
@@ -824,19 +890,21 @@ impl JobManager {
                 ShellError::JobNotFound(job_id.to_string())
             })?;
 
-            // Check and update atomically
-            let duration_secs = if let JobStatus::Running { started_at_unix } = &job.view.status {
-                Self::lifecycle_duration_secs(*started_at_unix)
-            } else {
+            let snapshot = self.snapshot_for_job(job);
+            if !ShellJobLifecycleAuthority::is_running(&job.view, snapshot.as_ref()) {
                 warn!("Job is not running");
                 return Err(ShellError::JobNotRunning);
-            };
+            }
 
-            // Update status while still holding the lock
-            job.view.status = JobStatus::Cancelled { duration_secs };
-            let _ = self
-                .ops_registry
-                .cancel_operation(&job.operation_id, Some("cancelled by caller".into()));
+            self.ops_registry
+                .cancel_operation(&job.operation_id, Some("cancelled by caller".into()))
+                .map_err(|error| {
+                    warn!(%error, "Ops lifecycle rejected job cancellation");
+                    ShellError::JobNotRunning
+                })?;
+            let snapshot = self.snapshot_for_job(job);
+            job.view.status =
+                ShellJobLifecycleAuthority::project_status(&job.view, snapshot.as_ref());
         };
 
         // Signal the background task to terminate the process.
@@ -2942,6 +3010,93 @@ mod tests {
         assert!(
             second.is_empty(),
             "second drain_completed must return empty — jobs already notified"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_job_lifecycle_authority_projects_registry_terminal_status() {
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(ShellConfig::default())
+            .with_owner_bridge_session_id(SessionId::new())
+            .with_ops_registry(Arc::clone(&registry));
+
+        let job_id = manager
+            .register_synthetic_running_job("shell:authority-status", None, 30)
+            .await
+            .expect("synthetic job should register");
+        let op_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("synthetic job must have a canonical operation");
+
+        registry
+            .complete_operation(
+                &op_id,
+                OperationResult {
+                    id: op_id.clone(),
+                    content: "registry-owned completion".to_string(),
+                    is_error: false,
+                    duration_ms: 125,
+                    tokens_used: 0,
+                },
+            )
+            .expect("complete_operation should succeed");
+
+        let job = manager
+            .get_status(&job_id)
+            .await
+            .expect("job should still be tracked");
+        match job.status {
+            JobStatus::Completed {
+                exit_code,
+                stdout,
+                duration_secs,
+                ..
+            } => {
+                assert_eq!(exit_code, None);
+                assert_eq!(stdout, "registry-owned completion");
+                assert_eq!(duration_secs, 0.125);
+            }
+            other => panic!("registry terminal status must own projection, got {other:?}"),
+        }
+
+        let summaries = manager.list_jobs().await;
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].status, JobSummaryStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn shell_job_cancel_terminalizes_through_lifecycle_authority() {
+        let registry: Arc<dyn OpsLifecycleRegistry> = Arc::new(RuntimeOpsLifecycleRegistry::new());
+        let manager = JobManager::new(ShellConfig::default())
+            .with_owner_bridge_session_id(SessionId::new())
+            .with_ops_registry(Arc::clone(&registry));
+
+        let job_id = manager
+            .register_synthetic_running_job("shell:authority-cancel", None, 30)
+            .await
+            .expect("synthetic job should register");
+        let op_id = manager
+            .canonical_operation_for_job(&job_id)
+            .expect("synthetic job must have a canonical operation");
+
+        manager
+            .cancel_job(&job_id)
+            .await
+            .expect("running synthetic job should cancel");
+
+        let snapshot = registry
+            .snapshot(&op_id)
+            .expect("cancelled operation should remain in registry");
+        assert_eq!(snapshot.status, OperationStatus::Cancelled);
+
+        let job = manager
+            .get_status(&job_id)
+            .await
+            .expect("job should remain queryable after cancel");
+        assert!(
+            matches!(job.status, JobStatus::Cancelled { .. }),
+            "cancelled service status must be projected from lifecycle authority, got {:?}",
+            job.status
         );
     }
 

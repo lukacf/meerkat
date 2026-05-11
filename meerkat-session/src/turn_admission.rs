@@ -1,17 +1,17 @@
-//! Turn admission concurrency slot for `EphemeralSessionService`.
+//! Turn admission concurrency gate for `EphemeralSessionService`.
 //!
-//! This is a **shell concurrency guard**, not a state machine. It serializes
-//! `start_turn` / interrupt / shutdown access on a single session across the
-//! service API surface so that (a) at most one turn is admitted or running at
-//! any time and (b) shutdown drains cleanly through any in-flight or claimed
-//! turn. It lives entirely inside `EphemeralSessionService`; it is not driven
-//! by, and does not participate in, the MeerkatMachine DSL.
-//!
-//! Plain struct with named mutators — no `apply(Input) -> Transition` shape,
-//! no authority trait, no transition table. Analogous in spirit to a
-//! specialized `Semaphore`.
+//! `TurnAdmissionSlot` is a **shell concurrency gate**, not service lifecycle
+//! authority. It serializes `start_turn` / interrupt / shutdown access on a
+//! single session so at most one command is queued or running at a time and
+//! shutdown drains cleanly through any in-flight command. Runtime-backed
+//! service-visible lifecycle is projected by [`TurnServiceLifecycleAuthority`]
+//! from the machine-owned [`meerkat_core::TurnStateSnapshot`]; the slot is only
+//! a standalone compatibility fallback when no turn-state handle exists.
 
 use std::fmt;
+
+use meerkat_core::turn_execution_authority::TurnPhase;
+use meerkat_core::{TurnStateSnapshot, TurnTerminalOutcome};
 
 /// Admission phase tracked by the slot.
 ///
@@ -56,6 +56,13 @@ pub(crate) struct FinalizeOutcome {
     pub(crate) next_phase: TurnAdmissionPhase,
 }
 
+/// Copyable view of the shell gate. Callers pass snapshots into the lifecycle
+/// projection authority instead of letting the slot drive service state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TurnAdmissionSnapshot {
+    pub(crate) phase: TurnAdmissionPhase,
+}
+
 /// Serialized turn-admission state for a single session.
 #[derive(Debug, Clone)]
 pub(crate) struct TurnAdmissionSlot {
@@ -79,6 +86,10 @@ impl TurnAdmissionSlot {
 
     pub(crate) fn interrupt_pending(&self) -> bool {
         self.interrupt_pending
+    }
+
+    pub(crate) fn snapshot(&self) -> TurnAdmissionSnapshot {
+        TurnAdmissionSnapshot { phase: self.phase }
     }
 
     #[cfg(test)]
@@ -202,6 +213,69 @@ impl TurnAdmissionSlot {
             }
             TurnAdmissionPhase::ShuttingDown => Ok(self.phase),
         }
+    }
+}
+
+/// Service-facing activity projection for a live session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TurnServiceLifecycleProjection {
+    pub(crate) is_active: bool,
+}
+
+/// Owner for `EphemeralSessionService`'s public turn lifecycle projection.
+///
+/// Runtime-backed sessions derive activity from the turn-state handle snapshot
+/// owned by MeerkatMachine. The shell admission slot participates only when no
+/// machine handle exists, preserving standalone in-memory compatibility without
+/// letting the slot become semantic authority for runtime sessions.
+#[derive(Debug, Default)]
+pub(crate) struct TurnServiceLifecycleAuthority;
+
+impl TurnServiceLifecycleAuthority {
+    pub(crate) fn project(
+        admission: TurnAdmissionSnapshot,
+        turn_state: Option<&TurnStateSnapshot>,
+    ) -> TurnServiceLifecycleProjection {
+        let is_active = match turn_state {
+            Some(snapshot) => Self::machine_snapshot_is_active(snapshot),
+            None => matches!(
+                admission.phase,
+                TurnAdmissionPhase::Admitted
+                    | TurnAdmissionPhase::Running
+                    | TurnAdmissionPhase::Completing
+            ),
+        };
+        TurnServiceLifecycleProjection { is_active }
+    }
+
+    fn machine_snapshot_is_active(snapshot: &TurnStateSnapshot) -> bool {
+        match snapshot.turn_phase {
+            TurnPhase::Ready | TurnPhase::Completed | TurnPhase::Failed | TurnPhase::Cancelled => {
+                false
+            }
+            TurnPhase::ApplyingPrimitive
+            | TurnPhase::CallingLlm
+            | TurnPhase::WaitingForOps
+            | TurnPhase::DrainingBoundary
+            | TurnPhase::Extracting
+            | TurnPhase::ErrorRecovery
+            | TurnPhase::Cancelling => true,
+        }
+    }
+
+    pub(crate) fn runtime_boundary_cancel_is_active(snapshot: &TurnStateSnapshot) -> bool {
+        Self::machine_snapshot_is_active(snapshot)
+            && !matches!(
+                snapshot.terminal_outcome,
+                Some(
+                    TurnTerminalOutcome::Completed
+                        | TurnTerminalOutcome::Failed
+                        | TurnTerminalOutcome::Cancelled
+                        | TurnTerminalOutcome::BudgetExhausted
+                        | TurnTerminalOutcome::TimeBudgetExceeded
+                        | TurnTerminalOutcome::StructuredOutputValidationFailed
+                )
+            )
     }
 }
 

@@ -1286,7 +1286,7 @@ mod tests {
             body: "payload".to_string(),
         });
         assert_eq!(plain.classification.class, PeerInputClass::PlainEvent);
-        assert_eq!(plain.rendered_text, "[EVENT via tcp] payload");
+        assert_eq!(plain.rendered_text, "External event via tcp: payload");
     }
 
     #[test]

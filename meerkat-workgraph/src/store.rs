@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
 use crate::WorkGraphError;
+use crate::WorkGraphMachine;
 use crate::types::{
     WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
     WorkNamespace,
@@ -208,6 +209,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         item: WorkItem,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
         if guard.items.contains_key(&key) {
@@ -227,6 +229,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         expected_previous_revision: u64,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
         let Some(current) = guard.items.get(&key) else {
@@ -468,6 +471,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         item: WorkItem,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
@@ -486,6 +490,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         expected_previous_revision: u64,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()

@@ -1128,6 +1128,110 @@ describe("Typed Events", () => {
   });
 });
 
+describe("WorkGraph parsers", () => {
+  const timestamp = "2026-05-12T12:00:00Z";
+  const claimedItem = {
+    id: "prep-dentist-ride",
+    realm_id: "homecore",
+    namespace: "family/appointments",
+    title: "Prep A for non-preferred dentist car",
+    status: "in_progress",
+    priority: "high",
+    labels: ["autism-support", "dentist"],
+    owner: {
+      key: { kind: "agent", id: "homecore-kapellmeister" },
+      display_name: "Homecore Kapellmeister",
+    },
+    claim: {
+      owner: { key: { kind: "agent", id: "homecore-kapellmeister" } },
+      claimed_at: timestamp,
+    },
+    revision: 4,
+    created_at: timestamp,
+    updated_at: timestamp,
+    external_refs: [{ kind: "calendar_event", id: "dentist-visit" }],
+    evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
+  };
+
+  it("parses typed owners, claims, and read-only snapshots", () => {
+    const snapshot = MeerkatClient.parseWorkGraphSnapshot({
+      realm_id: "homecore",
+      namespace: "family/appointments",
+      all_namespaces: false,
+      captured_at: timestamp,
+      event_high_water_mark: 42,
+      items: [claimedItem],
+      edges: [
+        {
+          realm_id: "homecore",
+          namespace: "family/appointments",
+          kind: "blocks",
+          from_id: "notice-car-change",
+          to_id: "prep-dentist-ride",
+          created_at: timestamp,
+        },
+      ],
+      ready_item_ids: ["prep-dentist-ride"],
+    });
+
+    assert.equal(snapshot.realmId, "homecore");
+    assert.equal(snapshot.items[0].owner?.key.kind, "agent");
+    assert.equal(snapshot.items[0].claim?.owner.key.id, "homecore-kapellmeister");
+    assert.equal(snapshot.edges[0].kind, "blocks");
+    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+  });
+
+  it("rejects malformed WorkGraph lifecycle truth", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkGraphSnapshot({
+          realm_id: "homecore",
+          namespace: "family/appointments",
+          all_namespaces: false,
+          captured_at: timestamp,
+          items: [{ ...claimedItem, status: undefined }],
+          edges: [],
+          ready_item_ids: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("Invalid workgraph item"),
+    );
+  });
+
+  it("requires typed WorkGraph claim owners", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkItem({
+          ...claimedItem,
+          claim: { claimed_at: timestamp },
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("missing owner"),
+    );
+  });
+
+  it("requires WorkGraph snapshot arrays instead of fabricating empty projections", () => {
+    assert.throws(
+      () =>
+        MeerkatClient.parseWorkGraphSnapshot({
+          realm_id: "homecore",
+          all_namespaces: false,
+          captured_at: timestamp,
+          items: [claimedItem],
+          edges: [],
+        }),
+      (error) =>
+        error instanceof MeerkatError &&
+        error.code === "INVALID_RESPONSE" &&
+        String(error.message).includes("ready item ids"),
+    );
+  });
+});
+
 describe("Session wrappers", () => {
   it("createSession returns a runtime-backed Session wrapper", async () => {
     const client = new MeerkatClient();

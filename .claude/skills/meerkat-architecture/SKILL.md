@@ -115,15 +115,16 @@ lives in `meerkat-live`. For a deeper internal reference,
 `meerkat-contracts/src/wire/live.rs` are the authoritative surface;
 `docs/guides/realtime.mdx` is the user-facing Live Channels companion.
 
-## The 5-machine target
+## The 6-machine target
 
-Exactly five canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
+Exactly six canonical machines, each with a DSL source in `meerkat-machine-schema/src/catalog/dsl/`:
 
 - **MeerkatMachine** — session-scoped execution kernel. Owns session lifecycle, input admission, ops lifecycle, turn execution, tool surface state, drain lifecycle, peer comms classification.
 - **MobMachine** — mob-scoped orchestration. Owns mob lifecycle, member lifecycle, kickoff, wiring, roster, flow/frame/loop execution. (Per-member realtime intent and the realtime-binding plane were removed — live channels are caller-initiated via `live/*`, gated on each member's session-level `ModelCapabilities.realtime`.)
 - **ScheduleLifecycleMachine** — scheduler triggers and schedule lifecycle.
 - **OccurrenceLifecycleMachine** — occurrence dispatch and delivery.
 - **AuthMachine** — auth/session authorization state that must remain machine-owned.
+- **WorkGraphLifecycleMachine** — realm-scoped durable commitment graph authority. Owns work item lifecycle, revision/CAS legality, dependency readiness, claim leases, terminal state, topology legality, and evidence revision handling.
 
 Plus five composition protocols at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
 
@@ -203,7 +204,7 @@ Load these as needed. SKILL.md alone is intentionally minimal — everything els
 
 For comprehensive file lists, see the matching reference. This is a minimal pointer index for the most common landmarks.
 
-- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 5 canonical machines)
+- `meerkat-machine-schema/src/catalog/dsl/` — DSL sources (truth for all 6 canonical machines)
 - `meerkat-machine-schema/src/catalog/mod.rs` — `canonical_machine_schemas()` registry
 - `meerkat-machine-kernels/src/runtime.rs` — `GeneratedMachineKernel` interpreter
 - `meerkat-runtime/src/meerkat_machine/` — `MeerkatMachine`, session management, dispatch paths, DSL adapter

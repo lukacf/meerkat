@@ -264,10 +264,9 @@ async fn seed_workgraph_commitments(
             realm_id: None,
             namespace: None,
             expected_revision: blocker.revision,
-            owner: meerkat::WorkOwner {
-                principal: Some("system-workgraph-e2e".to_string()),
-                ..meerkat::WorkOwner::default()
-            },
+            owner: meerkat::WorkOwner::new(meerkat::WorkOwnerKey::principal(
+                "system-workgraph-e2e",
+            )?),
             lease_seconds: Some(300),
             lease_expires_at: None,
         })

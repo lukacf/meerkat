@@ -3,7 +3,11 @@ EXTENDS TLC, Naturals, Sequences, FiniteSets
 
 \* Generated semantic machine model for WorkGraphLifecycleMachine.
 
-CONSTANTS BooleanValues, NatValues, WorkOwnerKeyValues
+CONSTANTS NatValues, SetOfWorkDependencyPathKeyValues, SetOfWorkEdgeKeyValues, SetOfWorkItemKeyValues, WorkDependencyPathKeyValues, WorkEdgeKeyValues, WorkEdgeKindValues, WorkItemKeyValues, WorkOwnerKeyValues
+
+WorkOwnerKeyValuesCi == {}
+
+WorkOwnerKeyValuesDeep == {[kind |-> "Principal", id |-> "alpha"], [kind |-> "Agent", id |-> "beta"]}
 
 None == [tag |-> "none", value |-> "none"]
 Some(v) == [tag |-> "some", value |-> v]
@@ -23,15 +27,19 @@ SeqRemove(seq, value) == IF Len(seq) = 0 THEN <<>> ELSE IF Head(seq) = value THE
 RECURSIVE SeqRemoveAll(_, _)
 SeqRemoveAll(seq, values) == IF Len(values) = 0 THEN seq ELSE SeqRemoveAll(SeqRemove(seq, Head(values)), Tail(values))
 
-VARIABLES phase, model_step_count, revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count
+VARIABLES phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count
 
-vars == << phase, model_step_count, revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+vars == << phase, model_step_count, revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 Init ==
     /\ phase = "Absent"
     /\ model_step_count = 0
     /\ revision = 0
     /\ unresolved_blocker_count = 0
+    /\ topology_item_keys = {}
+    /\ topology_edge_keys = {}
+    /\ blocks_reachability = {}
+    /\ parent_reachability = {}
     /\ claim_owner_key = None
     /\ claimed_at_utc_ms = None
     /\ lease_expires_at_utc_ms = None
@@ -54,7 +62,7 @@ CreateOpen(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, a
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
@@ -66,7 +74,7 @@ CreateBlocked(arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
@@ -79,7 +87,7 @@ UpdateOpen(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoo
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
@@ -92,7 +100,7 @@ UpdateInProgress(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, ar
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_snoozed_until_utc_ms, arg_unresolved_blocker_count) ==
@@ -105,7 +113,7 @@ UpdateBlocked(expected_revision, arg_due_at_utc_ms, arg_not_before_utc_ms, arg_s
     /\ due_at_utc_ms' = arg_due_at_utc_ms
     /\ not_before_utc_ms' = arg_not_before_utc_ms
     /\ snoozed_until_utc_ms' = arg_snoozed_until_utc_ms
-    /\ UNCHANGED << claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -121,7 +129,7 @@ ClaimOpen(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms)
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expires_at_utc_ms) ==
@@ -140,7 +148,7 @@ ClaimExpiredInProgress(expected_revision, owner_key, now_utc_ms, arg_lease_expir
     /\ claim_owner_key' = Some(owner_key)
     /\ claimed_at_utc_ms' = Some(now_utc_ms)
     /\ lease_expires_at_utc_ms' = arg_lease_expires_at_utc_ms
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 ReleaseInProgress(expected_revision) ==
@@ -152,7 +160,7 @@ ReleaseInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockOpen(expected_revision) ==
@@ -164,7 +172,7 @@ BlockOpen(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockInProgress(expected_revision) ==
@@ -176,7 +184,7 @@ BlockInProgress(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 BlockBlocked(expected_revision) ==
@@ -188,7 +196,7 @@ BlockBlocked(expected_revision) ==
     /\ claim_owner_key' = None
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
@@ -196,7 +204,7 @@ RefreshEligibilityOpen(arg_unresolved_blocker_count) ==
     /\ phase' = "Open"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
@@ -204,7 +212,7 @@ RefreshEligibilityInProgress(arg_unresolved_blocker_count) ==
     /\ phase' = "InProgress"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
@@ -212,18 +220,20 @@ RefreshEligibilityBlocked(arg_unresolved_blocker_count) ==
     /\ phase' = "Blocked"
     /\ model_step_count' = model_step_count + 1
     /\ unresolved_blocker_count' = arg_unresolved_blocker_count
-    /\ UNCHANGED << revision, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
-ValidateLink(endpoints_exist, self_edge, duplicate_edge, would_create_cycle) ==
+ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key) ==
     /\ phase = "Absent"
-    /\ (endpoints_exist = TRUE)
-    /\ (self_edge = FALSE)
-    /\ (duplicate_edge = FALSE)
-    /\ (would_create_cycle = FALSE)
+    /\ (from_item_key \in topology_item_keys)
+    /\ (to_item_key \in topology_item_keys)
+    /\ (from_item_key # to_item_key)
+    /\ ((edge_key \in topology_edge_keys) = FALSE)
+    /\ ((kind # "Blocks") \/ ((reverse_path_key \in blocks_reachability) = FALSE))
+    /\ ((kind # "Parent") \/ ((reverse_path_key \in parent_reachability) = FALSE))
     /\ phase' = "Absent"
     /\ model_step_count' = model_step_count + 1
-    /\ UNCHANGED << revision, unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
+    /\ UNCHANGED << revision, unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms, evidence_count >>
 
 
 CloseOpenCompleted(expected_revision, at_utc_ms) ==
@@ -236,7 +246,7 @@ CloseOpenCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressCompleted(expected_revision, at_utc_ms) ==
@@ -249,7 +259,7 @@ CloseInProgressCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedCompleted(expected_revision, at_utc_ms) ==
@@ -262,7 +272,7 @@ CloseBlockedCompleted(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenCancelled(expected_revision, at_utc_ms) ==
@@ -275,7 +285,7 @@ CloseOpenCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressCancelled(expected_revision, at_utc_ms) ==
@@ -288,7 +298,7 @@ CloseInProgressCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedCancelled(expected_revision, at_utc_ms) ==
@@ -301,7 +311,7 @@ CloseBlockedCancelled(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseOpenFailed(expected_revision, at_utc_ms) ==
@@ -314,7 +324,7 @@ CloseOpenFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseInProgressFailed(expected_revision, at_utc_ms) ==
@@ -327,7 +337,7 @@ CloseInProgressFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 CloseBlockedFailed(expected_revision, at_utc_ms) ==
@@ -340,7 +350,7 @@ CloseBlockedFailed(expected_revision, at_utc_ms) ==
     /\ claimed_at_utc_ms' = None
     /\ lease_expires_at_utc_ms' = None
     /\ terminal_at_utc_ms' = Some(at_utc_ms)
-    /\ UNCHANGED << unresolved_blocker_count, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, evidence_count >>
 
 
 AddEvidenceOpen(expected_revision) ==
@@ -350,7 +360,7 @@ AddEvidenceOpen(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 AddEvidenceInProgress(expected_revision) ==
@@ -360,7 +370,7 @@ AddEvidenceInProgress(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 AddEvidenceBlocked(expected_revision) ==
@@ -370,7 +380,7 @@ AddEvidenceBlocked(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 AddEvidenceCompleted(expected_revision) ==
@@ -380,7 +390,7 @@ AddEvidenceCompleted(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 AddEvidenceCancelled(expected_revision) ==
@@ -390,7 +400,7 @@ AddEvidenceCancelled(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 AddEvidenceFailed(expected_revision) ==
@@ -400,7 +410,7 @@ AddEvidenceFailed(expected_revision) ==
     /\ model_step_count' = model_step_count + 1
     /\ revision' = (revision) + 1
     /\ evidence_count' = (evidence_count) + 1
-    /\ UNCHANGED << unresolved_blocker_count, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
+    /\ UNCHANGED << unresolved_blocker_count, topology_item_keys, topology_edge_keys, blocks_reachability, parent_reachability, claim_owner_key, claimed_at_utc_ms, lease_expires_at_utc_ms, due_at_utc_ms, not_before_utc_ms, snoozed_until_utc_ms, terminal_at_utc_ms >>
 
 
 Next ==
@@ -418,7 +428,7 @@ Next ==
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityOpen(arg_unresolved_blocker_count)
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityInProgress(arg_unresolved_blocker_count)
     \/ \E arg_unresolved_blocker_count \in 0..2 : RefreshEligibilityBlocked(arg_unresolved_blocker_count)
-    \/ \E endpoints_exist \in BOOLEAN : \E self_edge \in BOOLEAN : \E duplicate_edge \in BOOLEAN : \E would_create_cycle \in BOOLEAN : ValidateLink(endpoints_exist, self_edge, duplicate_edge, would_create_cycle)
+    \/ \E kind \in WorkEdgeKindValues : \E from_item_key \in WorkItemKeyValues : \E to_item_key \in WorkItemKeyValues : \E edge_key \in WorkEdgeKeyValues : \E reverse_path_key \in WorkDependencyPathKeyValues : ValidateLink(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseOpenCompleted(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseInProgressCompleted(expected_revision, at_utc_ms)
     \/ \E expected_revision \in 0..2 : \E at_utc_ms \in 0..2 : CloseBlockedCompleted(expected_revision, at_utc_ms)
@@ -438,18 +448,20 @@ Next ==
 
 absent_has_zero_revision == ((phase # "Absent") \/ (revision = 0))
 live_has_positive_revision == ((phase = "Absent") \/ (revision > 0))
+topology_snapshot_is_stateless == ((topology_item_keys = {}) \/ (topology_edge_keys = {}) \/ (phase = "Absent"))
 terminal_has_terminal_time == (((phase # "Completed") /\ (phase # "Cancelled") /\ (phase # "Failed")) \/ (terminal_at_utc_ms # None))
 claim_only_in_progress == ((claim_owner_key = None) \/ (phase = "InProgress"))
 blocked_has_no_claim == ((phase # "Blocked") \/ (claim_owner_key = None))
 terminal_has_no_claim == (((phase # "Completed") /\ (phase # "Cancelled") /\ (phase # "Failed")) \/ (claim_owner_key = None))
 
-CiStateConstraint == /\ model_step_count <= 6
-DeepStateConstraint == /\ model_step_count <= 8
+CiStateConstraint == /\ model_step_count <= 6 /\ Cardinality(topology_item_keys) <= 1 /\ Cardinality(topology_edge_keys) <= 1 /\ Cardinality(blocks_reachability) <= 1 /\ Cardinality(parent_reachability) <= 1
+DeepStateConstraint == /\ model_step_count <= 8 /\ Cardinality(topology_item_keys) <= 2 /\ Cardinality(topology_edge_keys) <= 2 /\ Cardinality(blocks_reachability) <= 2 /\ Cardinality(parent_reachability) <= 2
 
 Spec == Init /\ [][Next]_vars
 
 THEOREM Spec => []absent_has_zero_revision
 THEOREM Spec => []live_has_positive_revision
+THEOREM Spec => []topology_snapshot_is_stateless
 THEOREM Spec => []terminal_has_terminal_time
 THEOREM Spec => []claim_only_in_progress
 THEOREM Spec => []blocked_has_no_claim

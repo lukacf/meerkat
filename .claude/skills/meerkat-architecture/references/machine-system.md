@@ -2,19 +2,20 @@
 
 Load this reference when working on DSL definitions, schema catalog, generated kernels, TLC verification, production bridge modules, command classification, schema/alphabet parity, or authority cutover.
 
-## The 5-machine target
+## The 6-machine target
 
-The final system has exactly five canonical machines:
+The final system has exactly six canonical machines:
 
 - **MeerkatMachine** — session-scoped execution kernel (absorbs input lifecycle, runtime ingress, ops lifecycle, turn execution, comms drain, peer comms, external tool surface, session turn admission)
 - **MobMachine** — mob-scoped orchestration (absorbs mob lifecycle, member bootstrap, member lifecycle, wiring, roster, orchestrator, flow, loop iteration)
 - **ScheduleLifecycleMachine** — perimeter scheduler
 - **OccurrenceLifecycleMachine** — perimeter occurrence lifecycle
 - **AuthMachine** — auth/session authorization lifecycle
+- **WorkGraphLifecycleMachine** — realm-scoped durable work graph lifecycle, revision/CAS legality, dependency readiness, claim leases, terminal state, topology legality, and evidence revision handling
 
 Plus five canonical composition schemas at the seams: `meerkat_mob_seam`, `schedule_bundle`, `schedule_runtime_bundle`, `schedule_mob_bundle`, `auth_lease_bundle`.
 
-Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these five machine DSLs.
+Catalog authoritative directory: `meerkat-machine-schema/src/catalog/dsl/` — contains exactly these six machine DSLs.
 
 Previously-standalone machines absorbed into MeerkatMachine/MobMachine state become fields, inputs, and transitions inside the host machine. Post-absorption, remaining helper modules are projection/reducer support or shell mechanics; shell code routes semantic decisions through the host machine's DSL via handle traits or in-crate MobMachine authority access (see "Cross-crate DSL access" below).
 
@@ -24,12 +25,13 @@ The DSL is a single source that produces two artifacts:
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│  DSL SOURCE (single source of truth, 5 files)                      │
+│  DSL SOURCE (single source of truth, 6 files)                      │
 │  meerkat-machine-schema/src/catalog/dsl/meerkat_machine.rs         │
 │  meerkat-machine-schema/src/catalog/dsl/mob_machine.rs             │
 │  meerkat-machine-schema/src/catalog/dsl/schedule_lifecycle.rs      │
 │  meerkat-machine-schema/src/catalog/dsl/occurrence_lifecycle.rs    │
 │  meerkat-machine-schema/src/catalog/dsl/auth_machine.rs            │
+│  meerkat-machine-schema/src/catalog/dsl/workgraph_lifecycle.rs     │
 │                                                                    │
 │  machine_dsl! {                                                    │
 │    state { <fields> }                                              │
@@ -217,7 +219,7 @@ and archived historically at `docs-internal/archive/public-docs-removed-2026-05-
 
 ## What the workspace looks like in the target state
 
-- Exactly 5 canonical machine DSL files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
+- Exactly 6 canonical machine DSL files in `meerkat-machine-schema/src/catalog/dsl/` — one per machine. Shared catalog helpers in that directory are allowed; no production crate authors a competing machine body.
 - Exactly 5 canonical compositions in `meerkat-machine-schema/src/catalog/compositions.rs`, registered by `canonical_composition_schemas()`.
 - Zero `*_authority.rs` files containing handwritten match-table state machines. Files named `dsl_authority.rs` are runtime adapter plumbing (not state machines); other authority-named helpers must be projections, planners, or sealed mutators with no semantic transition table.
 - Runtime shell holds only: per-session `Arc<Mutex<MeerkatMachineAuthority>>` + `Arc<Mutex<MobMachineAuthority>>`, handle trait impls that route through the shared authorities, IO mechanics (channels, handles, wall-clock timestamps), and observability projections (history logs, diagnostic snapshots).

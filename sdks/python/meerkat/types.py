@@ -448,20 +448,23 @@ WorkGraphEventKind = Literal[
     "linked",
     "evidence_added",
 ]
+WorkGraphOwnerKind = Literal["principal", "agent", "session", "mob", "label"]
 
 
-class WorkGraphOwner(TypedDict, total=False):
-    principal: str
-    agent: str
-    session_id: str
-    mob_id: str
-    label: str
+class WorkGraphOwnerKey(TypedDict):
+    kind: WorkGraphOwnerKind
+    id: str
 
 
-class WorkGraphClaim(TypedDict, total=False):
+class WorkGraphOwner(TypedDict):
+    key: WorkGraphOwnerKey
+    display_name: NotRequired[str]
+
+
+class WorkGraphClaim(TypedDict):
     owner: WorkGraphOwner
     claimed_at: str
-    lease_expires_at: str
+    lease_expires_at: NotRequired[str]
 
 
 class ExternalWorkRef(TypedDict, total=False):
@@ -526,12 +529,12 @@ class WorkGraphEventsResult(TypedDict):
     events: list[WorkGraphEvent]
 
 
-class WorkGraphSnapshot(TypedDict, total=False):
+class WorkGraphSnapshot(TypedDict):
     realm_id: str
-    namespace: str
+    namespace: NotRequired[str]
     all_namespaces: bool
     captured_at: str
-    event_high_water_mark: int
+    event_high_water_mark: NotRequired[int]
     items: list[WorkItem]
     edges: list[WorkGraphEdge]
     ready_item_ids: list[str]

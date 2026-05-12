@@ -9,6 +9,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Phase enum: `Absent | Open | InProgress | Blocked | Completed | Cancelled | Failed`
 - `revision`: `u64`
 - `unresolved_blocker_count`: `u64`
+- `topology_item_keys`: `Set<WorkItemKey>`
+- `topology_edge_keys`: `Set<WorkEdgeKey>`
+- `blocks_reachability`: `Set<WorkDependencyPathKey>`
+- `parent_reachability`: `Set<WorkDependencyPathKey>`
 - `claim_owner_key`: `Option<WorkOwnerKey>`
 - `claimed_at_utc_ms`: `Option<u64>`
 - `lease_expires_at_utc_ms`: `Option<u64>`
@@ -26,7 +30,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Release`(expected_revision: u64)
 - `Block`(expected_revision: u64)
 - `RefreshEligibility`(unresolved_blocker_count: u64)
-- `ValidateLink`(endpoints_exist: Bool, self_edge: Bool, duplicate_edge: Bool, would_create_cycle: Bool)
+- `ValidateLink`(kind: WorkEdgeKind, from_item_key: WorkItemKey, to_item_key: WorkItemKey, edge_key: WorkEdgeKey, reverse_path_key: WorkDependencyPathKey)
 - `CloseCompleted`(expected_revision: u64, at_utc_ms: u64)
 - `CloseCancelled`(expected_revision: u64, at_utc_ms: u64)
 - `CloseFailed`(expected_revision: u64, at_utc_ms: u64)
@@ -47,6 +51,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Invariants
 - `absent_has_zero_revision`
 - `live_has_positive_revision`
+- `topology_snapshot_is_stateless`
 - `terminal_has_terminal_time`
 - `claim_only_in_progress`
 - `blocked_has_no_claim`
@@ -165,12 +170,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `ValidateLink`
 - From: `Absent`
-- On: `ValidateLink`(endpoints_exist, self_edge, duplicate_edge, would_create_cycle)
+- On: `ValidateLink`(kind, from_item_key, to_item_key, edge_key, reverse_path_key)
 - Guards:
-  - `endpoints_exist`
+  - `from_endpoint_exists`
+  - `to_endpoint_exists`
   - `not_self_edge`
   - `not_duplicate_edge`
-  - `acyclic`
+  - `blocks_acyclic`
+  - `parent_acyclic`
 - Emits: `LinkValidated`
 - To: `Absent`
 

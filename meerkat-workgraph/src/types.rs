@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::WorkGraphError;
+pub use crate::machines::workgraph_lifecycle::WorkGraphLifecycleMachineState as WorkGraphMachineState;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -135,18 +136,81 @@ pub enum WorkEdgeKind {
     DerivedFrom,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOwnerKind {
+    Principal,
+    Agent,
+    Session,
+    Mob,
+    Label,
+}
+
+impl WorkOwnerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Principal => "principal",
+            Self::Agent => "agent",
+            Self::Session => "session",
+            Self::Mob => "mob",
+            Self::Label => "label",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct WorkOwnerKey {
+    pub kind: WorkOwnerKind,
+    pub id: String,
+}
+
+impl WorkOwnerKey {
+    pub fn new(kind: WorkOwnerKind, id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Ok(Self {
+            kind,
+            id: validate_token("work owner id", id.into())?,
+        })
+    }
+
+    pub fn principal(id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Self::new(WorkOwnerKind::Principal, id)
+    }
+
+    pub fn agent(id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Self::new(WorkOwnerKind::Agent, id)
+    }
+
+    pub fn session(id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Self::new(WorkOwnerKind::Session, id)
+    }
+
+    pub fn mob(id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Self::new(WorkOwnerKind::Mob, id)
+    }
+
+    pub fn label(id: impl Into<String>) -> Result<Self, WorkGraphError> {
+        Self::new(WorkOwnerKind::Label, id)
+    }
+
+    pub fn canonical(&self) -> String {
+        format!("{}:{}", self.kind.as_str(), self.id)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkOwner {
+    pub key: WorkOwnerKey,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub principal: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mob_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub display_name: Option<String>,
+}
+
+impl WorkOwner {
+    pub fn new(key: WorkOwnerKey) -> Self {
+        Self {
+            key,
+            display_name: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +262,8 @@ pub struct WorkItem {
     pub owner: Option<WorkOwner>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<WorkClaim>,
+    #[serde(default = "default_workgraph_machine_state")]
+    pub machine_state: WorkGraphMachineState,
     pub revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<DateTime<Utc>>,
@@ -213,6 +279,10 @@ pub struct WorkItem {
     pub external_refs: Vec<ExternalWorkRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_refs: Vec<WorkEvidenceRef>,
+}
+
+fn default_workgraph_machine_state() -> WorkGraphMachineState {
+    WorkGraphMachineState::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -352,7 +422,6 @@ pub struct ClaimWorkItemRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<WorkNamespace>,
     pub expected_revision: u64,
-    #[serde(default)]
     pub owner: WorkOwner,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_seconds: Option<u64>,

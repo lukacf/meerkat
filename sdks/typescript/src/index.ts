@@ -154,6 +154,8 @@ export type {
   WorkGraphItemFilter,
   WorkGraphItemLookupOptions,
   WorkGraphOwner,
+  WorkGraphOwnerKey,
+  WorkGraphOwnerKind,
   WorkGraphPriority,
   WorkGraphReadyFilter,
   WorkGraphSnapshot,

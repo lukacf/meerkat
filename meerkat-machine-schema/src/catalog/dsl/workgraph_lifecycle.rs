@@ -13,12 +13,115 @@ use meerkat_machine_dsl::machine;
     serde::Serialize,
     serde::Deserialize,
 )]
-pub struct WorkOwnerKey(pub String);
+pub struct WorkItemKey(pub String);
 
-impl<T: Into<String>> From<T> for WorkOwnerKey {
+impl<T: Into<String>> From<T> for WorkItemKey {
     fn from(value: T) -> Self {
         Self(value.into())
     }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkEdgeKey(pub String);
+
+impl<T: Into<String>> From<T> for WorkEdgeKey {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkDependencyPathKey(pub String);
+
+impl<T: Into<String>> From<T> for WorkDependencyPathKey {
+    fn from(value: T) -> Self {
+        Self(value.into())
+    }
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkOwnerKind {
+    Principal,
+    Agent,
+    Session,
+    Mob,
+    #[default]
+    Label,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkOwnerKey {
+    pub kind: WorkOwnerKind,
+    pub id: String,
+}
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkEdgeKind {
+    #[default]
+    Blocks,
+    Parent,
+    Related,
+    Supersedes,
+    DerivedFrom,
 }
 
 machine! {
@@ -30,6 +133,10 @@ machine! {
             lifecycle_phase: WorkLifecycleState,
             revision: u64,
             unresolved_blocker_count: u64,
+            topology_item_keys: Set<WorkItemKey>,
+            topology_edge_keys: Set<WorkEdgeKey>,
+            blocks_reachability: Set<WorkDependencyPathKey>,
+            parent_reachability: Set<WorkDependencyPathKey>,
             claim_owner_key: Option<WorkOwnerKey>,
             claimed_at_utc_ms: Option<u64>,
             lease_expires_at_utc_ms: Option<u64>,
@@ -43,6 +150,10 @@ machine! {
         init(Absent) {
             revision = 0,
             unresolved_blocker_count = 0,
+            topology_item_keys = EmptySet,
+            topology_edge_keys = EmptySet,
+            blocks_reachability = EmptySet,
+            parent_reachability = EmptySet,
             claim_owner_key = None,
             claimed_at_utc_ms = None,
             lease_expires_at_utc_ms = None,
@@ -95,10 +206,11 @@ machine! {
             Block { expected_revision: u64 },
             RefreshEligibility { unresolved_blocker_count: u64 },
             ValidateLink {
-                endpoints_exist: bool,
-                self_edge: bool,
-                duplicate_edge: bool,
-                would_create_cycle: bool,
+                kind: WorkEdgeKind,
+                from_item_key: WorkItemKey,
+                to_item_key: WorkItemKey,
+                edge_key: WorkEdgeKey,
+                reverse_path_key: WorkDependencyPathKey,
             },
             CloseCompleted { expected_revision: u64, at_utc_ms: u64 },
             CloseCancelled { expected_revision: u64, at_utc_ms: u64 },
@@ -123,6 +235,12 @@ machine! {
 
         invariant live_has_positive_revision {
             self.lifecycle_phase == Phase::Absent || self.revision > 0
+        }
+
+        invariant topology_snapshot_is_stateless {
+            self.topology_item_keys == EmptySet
+                || self.topology_edge_keys == EmptySet
+                || self.lifecycle_phase == Phase::Absent
         }
 
         invariant terminal_has_terminal_time {
@@ -339,12 +457,18 @@ machine! {
         }
 
         transition ValidateLink {
-            on input ValidateLink { endpoints_exist, self_edge, duplicate_edge, would_create_cycle }
+            on input ValidateLink { kind, from_item_key, to_item_key, edge_key, reverse_path_key }
             guard "stateless_checker" { self.lifecycle_phase == Phase::Absent }
-            guard "endpoints_exist" { endpoints_exist == true }
-            guard "not_self_edge" { self_edge == false }
-            guard "not_duplicate_edge" { duplicate_edge == false }
-            guard "acyclic" { would_create_cycle == false }
+            guard "from_endpoint_exists" { self.topology_item_keys.contains(from_item_key) }
+            guard "to_endpoint_exists" { self.topology_item_keys.contains(to_item_key) }
+            guard "not_self_edge" { from_item_key != to_item_key }
+            guard "not_duplicate_edge" { self.topology_edge_keys.contains(edge_key) == false }
+            guard "blocks_acyclic" {
+                kind != WorkEdgeKind::Blocks || self.blocks_reachability.contains(reverse_path_key) == false
+            }
+            guard "parent_acyclic" {
+                kind != WorkEdgeKind::Parent || self.parent_reachability.contains(reverse_path_key) == false
+            }
             to Absent
             emit LinkValidated
         }
@@ -540,5 +664,128 @@ machine! {
             to Failed
             emit EvidenceAdded
         }
+    }
+}
+
+impl serde::Serialize for WorkLifecycleState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(match self {
+            Self::Absent => "absent",
+            Self::Open => "open",
+            Self::InProgress => "in_progress",
+            Self::Blocked => "blocked",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WorkLifecycleState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+        match value.as_str() {
+            "absent" | "Absent" => Ok(Self::Absent),
+            "open" | "Open" => Ok(Self::Open),
+            "in_progress" | "InProgress" => Ok(Self::InProgress),
+            "blocked" | "Blocked" => Ok(Self::Blocked),
+            "completed" | "Completed" => Ok(Self::Completed),
+            "cancelled" | "Cancelled" => Ok(Self::Cancelled),
+            "failed" | "Failed" => Ok(Self::Failed),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid WorkLifecycleState `{other}`"
+            ))),
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct WorkGraphLifecycleMachineStateWire {
+    lifecycle_phase: WorkLifecycleState,
+    revision: u64,
+    unresolved_blocker_count: u64,
+    #[serde(default)]
+    topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
+    #[serde(default)]
+    topology_edge_keys: std::collections::BTreeSet<WorkEdgeKey>,
+    #[serde(default)]
+    blocks_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
+    #[serde(default)]
+    parent_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
+    claim_owner_key: Option<WorkOwnerKey>,
+    claimed_at_utc_ms: Option<u64>,
+    lease_expires_at_utc_ms: Option<u64>,
+    due_at_utc_ms: Option<u64>,
+    not_before_utc_ms: Option<u64>,
+    snoozed_until_utc_ms: Option<u64>,
+    terminal_at_utc_ms: Option<u64>,
+    evidence_count: u64,
+}
+
+impl From<&WorkGraphLifecycleMachineState> for WorkGraphLifecycleMachineStateWire {
+    fn from(state: &WorkGraphLifecycleMachineState) -> Self {
+        Self {
+            lifecycle_phase: state.lifecycle_phase,
+            revision: state.revision,
+            unresolved_blocker_count: state.unresolved_blocker_count,
+            topology_item_keys: state.topology_item_keys.clone(),
+            topology_edge_keys: state.topology_edge_keys.clone(),
+            blocks_reachability: state.blocks_reachability.clone(),
+            parent_reachability: state.parent_reachability.clone(),
+            claim_owner_key: state.claim_owner_key.clone(),
+            claimed_at_utc_ms: state.claimed_at_utc_ms,
+            lease_expires_at_utc_ms: state.lease_expires_at_utc_ms,
+            due_at_utc_ms: state.due_at_utc_ms,
+            not_before_utc_ms: state.not_before_utc_ms,
+            snoozed_until_utc_ms: state.snoozed_until_utc_ms,
+            terminal_at_utc_ms: state.terminal_at_utc_ms,
+            evidence_count: state.evidence_count,
+        }
+    }
+}
+
+impl From<WorkGraphLifecycleMachineStateWire> for WorkGraphLifecycleMachineState {
+    fn from(wire: WorkGraphLifecycleMachineStateWire) -> Self {
+        Self {
+            lifecycle_phase: wire.lifecycle_phase,
+            revision: wire.revision,
+            unresolved_blocker_count: wire.unresolved_blocker_count,
+            topology_item_keys: wire.topology_item_keys,
+            topology_edge_keys: wire.topology_edge_keys,
+            blocks_reachability: wire.blocks_reachability,
+            parent_reachability: wire.parent_reachability,
+            claim_owner_key: wire.claim_owner_key,
+            claimed_at_utc_ms: wire.claimed_at_utc_ms,
+            lease_expires_at_utc_ms: wire.lease_expires_at_utc_ms,
+            due_at_utc_ms: wire.due_at_utc_ms,
+            not_before_utc_ms: wire.not_before_utc_ms,
+            snoozed_until_utc_ms: wire.snoozed_until_utc_ms,
+            terminal_at_utc_ms: wire.terminal_at_utc_ms,
+            evidence_count: wire.evidence_count,
+        }
+    }
+}
+
+impl serde::Serialize for WorkGraphLifecycleMachineState {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        WorkGraphLifecycleMachineStateWire::from(self).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WorkGraphLifecycleMachineState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        WorkGraphLifecycleMachineStateWire::deserialize(deserializer).map(Self::from)
     }
 }

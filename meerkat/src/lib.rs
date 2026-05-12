@@ -197,7 +197,8 @@ pub use meerkat_workgraph::{
     WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphMachine, WorkGraphService,
     WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkGraphStore, WorkGraphStoreKind,
     WorkGraphToolError, WorkGraphToolSurface, WorkItem, WorkItemFilter, WorkItemId, WorkNamespace,
-    WorkOwner, WorkPriority, WorkStatus, handle_workgraph_tools_call, workgraph_tools_list,
+    WorkOwner, WorkOwnerKey, WorkOwnerKind, WorkPriority, WorkStatus, handle_workgraph_tools_call,
+    workgraph_tools_list,
 };
 
 // AgentFactory and build_agent types

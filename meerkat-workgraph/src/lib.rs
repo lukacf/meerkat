@@ -38,8 +38,9 @@ pub use types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ExternalWorkRef, LinkWorkItemsRequest, ReadyWorkFilter, ReleaseWorkItemRequest,
     UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind, WorkEvidenceRef, WorkGraphEvent,
-    WorkGraphEventKind, WorkGraphSnapshot, WorkGraphSnapshotFilter, WorkItem, WorkItemFilter,
-    WorkItemId, WorkNamespace, WorkOwner, WorkPriority, WorkStatus,
+    WorkGraphEventKind, WorkGraphMachineState, WorkGraphSnapshot, WorkGraphSnapshotFilter,
+    WorkItem, WorkItemFilter, WorkItemId, WorkNamespace, WorkOwner, WorkOwnerKey, WorkOwnerKind,
+    WorkPriority, WorkStatus,
 };
 
 #[doc(hidden)]

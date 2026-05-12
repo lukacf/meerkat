@@ -487,7 +487,7 @@ export interface RetryingEvent {
   delay_ms: number;
   error: string;
   max_attempts: number;
-  retry?: LlmRetrySchedule | null;
+  retry: LlmRetrySchedule;
   type: "retrying";
 }
 

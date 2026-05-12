@@ -1064,6 +1064,7 @@ where
         if self.turn_phase()?.is_terminal() {
             return Ok(());
         }
+        self.terminal_error_detail = Some(error.to_string());
         let transition = self.apply_turn_input(TurnExecutionInput::FatalFailure {
             run_id: run_id.clone(),
             reason: TurnFailureReason::from_agent_error(error),
@@ -2719,7 +2720,12 @@ where
                 Err(AgentError::TerminalFailure {
                     outcome,
                     cause_kind,
-                    message: cause_kind.default_message(outcome).to_string(),
+                    message: match &self.terminal_error_detail {
+                        Some(detail) => {
+                            format!("{}: {detail}", cause_kind.default_message(outcome))
+                        }
+                        None => cause_kind.default_message(outcome).to_string(),
+                    },
                 })
             }
             SurfaceResultClass::Cancelled => Err(AgentError::Cancelled),

@@ -1938,6 +1938,51 @@ impl LlmClient for OpenAiClient {
                                 }
                             }
                         }
+                        else if event.event_type == "response.failed" {
+                            let error_msg = event.response
+                                .as_ref()
+                                .and_then(|r| r.get("error"))
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .or_else(|| event.response
+                                    .as_ref()
+                                    .and_then(|r| r.get("status_details"))
+                                    .and_then(|d| d.get("error"))
+                                    .and_then(|e| e.get("message"))
+                                    .and_then(|m| m.as_str()))
+                                .unwrap_or("response failed");
+                            let error_code = event.response
+                                .as_ref()
+                                .and_then(|r| r.get("error"))
+                                .and_then(|e| e.get("code"))
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("server_error");
+
+                            tracing::error!(
+                                code = error_code,
+                                message = error_msg,
+                                "OpenAI response failed"
+                            );
+
+                            let error = match error_code {
+                                "rate_limit_exceeded" => LlmError::RateLimited { retry_after_ms: None },
+                                "server_error" => LlmError::ServerError {
+                                    status: 500,
+                                    message: error_msg.to_string(),
+                                },
+                                "invalid_request_error" => LlmError::InvalidRequest {
+                                    message: error_msg.to_string(),
+                                },
+                                _ => LlmError::Unknown {
+                                    message: format!("{error_code}: {error_msg}"),
+                                },
+                            };
+
+                            done_emitted = true;
+                            yield LlmEvent::Done {
+                                outcome: LlmDoneOutcome::Error { error },
+                            };
+                        }
                         else if event.event_type == "error" {
                             // Streaming error event from OpenAI
                             let error_msg = event.error
@@ -4732,6 +4777,48 @@ mod tests {
         server.abort();
 
         assert!(saw_error_done, "Expected Done with error outcome");
+    }
+
+    #[tokio::test]
+    async fn test_stream_response_failed_yields_done_with_error() {
+        let payload = [
+            r#"data: {"type":"response.failed","response":{"id":"resp_fail","status":"failed","error":{"code":"server_error","message":"reasoning decryption failed"}}}"#,
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut saw_error_done = false;
+        while let Some(event) = stream.next().await {
+            if let LlmEvent::Done {
+                outcome: LlmDoneOutcome::Error { error },
+            } = event.expect("stream event")
+            {
+                assert!(
+                    matches!(error, LlmError::ServerError { status: 500, .. }),
+                    "expected ServerError, got: {error:?}"
+                );
+                let msg = error.to_string();
+                assert!(
+                    msg.contains("reasoning decryption failed"),
+                    "error should contain message: {msg}"
+                );
+                saw_error_done = true;
+                break;
+            }
+        }
+        server.abort();
+
+        assert!(
+            saw_error_done,
+            "Expected Done with error outcome from response.failed"
+        );
     }
 
     // =========================================================================

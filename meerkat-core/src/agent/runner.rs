@@ -1005,6 +1005,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
+        self.terminal_error_detail = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
@@ -1122,6 +1123,7 @@ where
 
         // Reset state for new run (allows multi-turn on same agent).
         self.extraction_state.reset();
+        self.terminal_error_detail = None;
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 

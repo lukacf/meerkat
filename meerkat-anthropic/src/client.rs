@@ -872,8 +872,10 @@ impl LlmClient for AnthropicClient {
             let request = &projected_request;
             let body = self.build_request_body(request)?;
 
-            // Collect beta headers based on request features
-            let mut betas = Vec::new();
+            // Collect beta headers based on request features.
+            // Uses String (not &str) because authorizer-injected betas
+            // are split from a temporary String and need owned storage.
+            let mut betas: Vec<String> = Vec::new();
 
             // Legacy thinking (type: "enabled") requires interleaved-thinking header
             // Adaptive thinking (Opus 4.6) does NOT need this header
@@ -883,14 +885,14 @@ impl LlmClient for AnthropicClient {
             if thinking_type == Some("enabled")
                 && let Some(beta) = catalog_beta_value(request, "interleaved_thinking")
             {
-                betas.push(beta);
+                betas.push(beta.to_string());
             }
 
             // Structured output format requires beta header
             if body.get("output_config").and_then(|c| c.get("format")).is_some()
                 && let Some(beta) = catalog_beta_value(request, "structured_output")
             {
-                betas.push(beta);
+                betas.push(beta.to_string());
             }
 
             // 1M context window (opt-in via typed AnthropicProviderTag.context)
@@ -898,14 +900,14 @@ impl LlmClient for AnthropicClient {
                 == Some(AnthropicContextWindow::OneMegabyte)
                 && let Some(beta) = catalog_context_beta_value(request)
             {
-                betas.push(beta);
+                betas.push(beta.to_string());
             }
 
             // Compaction API (beta)
             if body.get("context_management").is_some()
                 && let Some(beta) = catalog_beta_value(request, "compaction")
             {
-                betas.push(beta);
+                betas.push(beta.to_string());
             }
 
             let url = format!("{}/v1/messages", self.base_url);
@@ -915,6 +917,8 @@ impl LlmClient for AnthropicClient {
                 .header("Content-Type", "application/json");
 
             // Auth: dynamic authorizer takes precedence over x-api-key.
+            // Authorizer headers that match `anthropic-beta` are merged into
+            // the betas list so only a single `anthropic-beta` header is sent.
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(authorizer) = &self.authorizer {
                 let mut extra: Vec<(String, String)> = Vec::new();
@@ -929,7 +933,16 @@ impl LlmClient for AnthropicClient {
                     }
                 })?;
                 for (k, v) in extra {
-                    req = req.header(k, v);
+                    if k.eq_ignore_ascii_case("anthropic-beta") {
+                        for beta in v.split(',') {
+                            let beta = beta.trim();
+                            if !beta.is_empty() && !betas.iter().any(|b| b == beta) {
+                                betas.push(beta.to_string());
+                            }
+                        }
+                    } else {
+                        req = req.header(k, v);
+                    }
                 }
             } else {
                 req = req.header("x-api-key", &self.api_key);

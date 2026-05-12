@@ -495,6 +495,7 @@ impl AgentBuilder {
             memory_store: self.memory_store,
             skill_engine: self.skill_engine,
             pending_skill_references: None,
+            terminal_error_detail: None,
             run_completed_hooks_applied: false,
             run_completed_event_emitted: false,
             silent_comms_intents: self.silent_comms_intents,

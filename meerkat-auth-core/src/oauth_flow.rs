@@ -29,8 +29,7 @@ const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const ANTHROPIC_CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
-const ANTHROPIC_ALL_OAUTH_SCOPES: &[&str] = &[
-    "org:create_api_key",
+const ANTHROPIC_CLAUDE_AI_SCOPES: &[&str] = &[
     "user:profile",
     "user:inference",
     "user:sessions:claude_code",
@@ -137,11 +136,11 @@ impl OAuthProviderIdentity {
                 token_url: ANTHROPIC_TOKEN_URL.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
+                scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
                 extra_authorize_params: vec![("code".into(), "true".into())],
                 token_request_format: OAuthTokenRequestFormat::Json,
                 include_state_in_token_exchange: true,
-                refresh_scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
+                refresh_scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
                 extra_headers: Vec::new(),
             },
             Self::AnthropicConsoleApiKey => OAuthEndpoints {
@@ -2482,7 +2481,7 @@ mod tests {
         assert!(resolved.endpoints.include_state_in_token_exchange);
         assert_eq!(
             resolved.endpoints.refresh_scopes,
-            strings(ANTHROPIC_ALL_OAUTH_SCOPES)
+            strings(ANTHROPIC_CLAUDE_AI_SCOPES)
         );
         assert!(
             resolved

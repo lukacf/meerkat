@@ -80,6 +80,7 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
             oauth::OAUTH_BETA_HEADER_NAME.to_string(),
             oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
         ));
+        req.headers.push(("x-app".to_string(), "cli".to_string()));
         Ok(())
     }
 
@@ -724,6 +725,7 @@ mod tests {
             oauth::OAUTH_BETA_HEADER_NAME.to_string(),
             oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
         )));
+        assert!(headers.contains(&("x-app".to_string(), "cli".to_string())));
     }
 
     #[cfg(all(not(target_arch = "wasm32"), feature = "bedrock"))]

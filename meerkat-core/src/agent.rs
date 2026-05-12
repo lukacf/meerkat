@@ -1045,6 +1045,10 @@ where
     pub(crate) checkpointer: Option<Arc<dyn crate::checkpoint::SessionCheckpointer>>,
     /// Optional blob store used to hydrate image refs at execution seams.
     pub(crate) blob_store: Option<Arc<dyn crate::BlobStore>>,
+    /// Original error detail preserved from `terminalize_fatal_error` so
+    /// `build_result` can include the actual failure message (e.g. the API
+    /// error body) instead of only the generic terminal-cause description.
+    pub(crate) terminal_error_detail: Option<String>,
     /// True once the current run has accepted `RunCompleted` hooks.
     pub(crate) run_completed_hooks_applied: bool,
     /// True once the current run's public `RunCompleted` event has been

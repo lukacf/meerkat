@@ -1360,6 +1360,58 @@ mod tests {
     }
 
     #[test]
+    fn external_event_blocks_project_to_typed_notice_without_flattening() {
+        let mut header = make_header();
+        header.source = InputOrigin::External {
+            source_name: "webhook".into(),
+        };
+        let original_blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: meerkat_core::types::ImageData::Inline {
+                    data: "abc123".into(),
+                },
+            },
+        ];
+        let input = Input::ExternalEvent(ExternalEventInput {
+            header,
+            event_type: "webhook.received".into(),
+            payload: serde_json::json!({"body": "caption"}),
+            blocks: Some(original_blocks.clone()),
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        let append = projection.append.expect("conversation append");
+        assert_eq!(append.role, ConversationAppendRole::SystemNotice);
+        let CoreRenderable::SystemNotice { blocks, .. } = append.content else {
+            panic!("expected typed system notice");
+        };
+        let Some(meerkat_core::types::SystemNoticeBlock::ExternalEvent {
+            source,
+            body,
+            content,
+            ..
+        }) = blocks.first()
+        else {
+            panic!("expected external event block");
+        };
+        assert_eq!(source, "webhook");
+        assert_eq!(
+            body, &None,
+            "body text represented by typed content blocks must not be duplicated as prose"
+        );
+        assert_eq!(
+            content, &original_blocks,
+            "external events must preserve canonical blocks instead of flattening them to text"
+        );
+    }
+
+    #[test]
     fn legacy_external_event_payload_blocks_migrate_to_canonical_blocks_owner() {
         let mut input = Input::ExternalEvent(ExternalEventInput {
             header: make_header(),

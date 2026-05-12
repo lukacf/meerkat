@@ -21,7 +21,7 @@ name = "live_mcp_matrix"
 path = "tests/live_mcp_matrix.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "openai", "openai-realtime", "gemini", "jsonl-store", "session-store", "memory-store", "skills", "schedule", "workgraph"] }
 meerkat-mcp = { workspace = true }
 meerkat-core = { workspace = true }
 meerkat-contracts = { workspace = true, features = ["schema"] }
@@ -44,10 +44,11 @@ dirs = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 
 [features]
-default = ["comms", "mob", "schedule"]
+default = ["comms", "mob", "schedule", "workgraph"]
 comms = ["meerkat/comms", "dep:meerkat-comms"]
 mob = ["dep:meerkat-mob", "dep:meerkat-mob-mcp"]
 schedule = ["meerkat/schedule"]
+workgraph = ["meerkat/workgraph"]
 
 [package.metadata.cargo-machete]
 ignored = ["dirs", "meerkat-client", "meerkat-comms", "meerkat-mcp", "meerkat-mob", "meerkat-mob-mcp", "meerkat-runtime", "rmcp"]  # feature-gated / optional

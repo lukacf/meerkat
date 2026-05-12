@@ -3555,7 +3555,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 "-p",
                 "meerkat-rpc",
                 "--features",
-                "comms,mcp,schedule,mob",
+                "comms,mcp,schedule,workgraph,mob",
             ]],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
@@ -3581,7 +3581,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 "-p",
                 "meerkat-rpc",
                 "--features",
-                "comms,mcp,schedule,mob",
+                "comms,mcp,schedule,workgraph,mob",
             ]],
             command: CommandSpec::CargoTest {
                 package: "meerkat-integration-tests",
@@ -3607,7 +3607,7 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 "-p",
                 "rkat",
                 "--features",
-                "session-store,openai,gemini,skills,comms,mcp,schedule,mob",
+                "session-store,openai,gemini,skills,comms,mcp,schedule,workgraph,mob",
             ]],
             command: CommandSpec::CargoTest {
                 package: "rkat",

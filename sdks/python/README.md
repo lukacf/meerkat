@@ -125,6 +125,17 @@ updated = await client.patch_config(
 - `await client.list_schedule_tools()`
 - `await client.call_schedule_tool({"name": "...", "arguments": {...}})`
 
+### WorkGraph
+
+WorkGraph is exposed as read-only observability from the SDK. Agents mutate
+work through their WorkGraph tools; SDK callers inspect the current graph.
+
+- `await client.get_workgraph_item(item_id, realm_id=None, namespace=None)`
+- `await client.list_workgraph_items(filter=None)`
+- `await client.list_ready_workgraph_items(filter=None)`
+- `await client.get_workgraph_snapshot(filter=None)`
+- `await client.list_workgraph_events(filter=None)`
+
 ### Mob runtime
 
 - `await client.read_mob_events(mob_id, after_cursor=0, limit=100)`

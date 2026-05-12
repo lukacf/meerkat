@@ -19,8 +19,8 @@ run_cargo check --no-default-features \
   -p meerkat-rpc \
   -p meerkat-rest \
   -p meerkat-mcp-server \
-  --features meerkat-rpc/comms,meerkat-rpc/mcp,meerkat-rest/comms,meerkat-mcp-server/comms
+  --features meerkat-rpc/comms,meerkat-rpc/mcp,meerkat-rpc/workgraph,meerkat-rest/comms,meerkat-rest/workgraph,meerkat-mcp-server/comms,meerkat-mcp-server/workgraph
 
 run_cargo check -p rkat --no-default-features --features session-store
 run_cargo check -p rkat --no-default-features --features session-store,mcp
-run_cargo check -p rkat --no-default-features --features session-store,comms,mcp
+run_cargo check -p rkat --no-default-features --features session-store,comms,mcp,workgraph

@@ -771,6 +771,8 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
                     ("enable_builtins", bool_schema()),
                     ("enable_shell", bool_schema()),
                     ("enable_memory", bool_schema()),
+                    ("enable_schedule", bool_schema()),
+                    ("enable_workgraph", bool_schema()),
                     ("enable_mob", bool_schema()),
                     ("budget_limits", json_value.clone()),
                     ("provider_params", json_value.clone()),

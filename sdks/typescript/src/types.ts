@@ -1007,6 +1007,7 @@ export interface SessionOptions {
   enableShell?: boolean;
   enableMemory?: boolean;
   enableSchedule?: boolean;
+  enableWorkGraph?: boolean;
   enableMob?: boolean;
   enableWebSearch?: boolean;
   toolFilter?: WireToolFilter;

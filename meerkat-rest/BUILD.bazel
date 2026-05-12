@@ -39,6 +39,7 @@ rust_library(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -90,6 +91,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -153,6 +155,7 @@ rust_binary(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -206,6 +209,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -276,6 +280,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -344,6 +349,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -418,6 +424,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -486,6 +493,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -553,6 +561,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -620,6 +629,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -687,6 +697,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -756,6 +767,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -824,6 +836,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -972,6 +985,7 @@ rust_library(
     crate_root = "src/lib.rs",
     crate_features = [
         "comms",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1015,6 +1029,7 @@ rust_binary(
     crate_root = "src/main.rs",
     crate_features = [
         "comms",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [

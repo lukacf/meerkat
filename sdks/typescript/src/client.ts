@@ -3804,6 +3804,7 @@ export class MeerkatClient {
     if (options.enableShell != null) params.enable_shell = options.enableShell;
     if (options.enableMemory != null) params.enable_memory = options.enableMemory;
     if (options.enableSchedule != null) params.enable_schedule = options.enableSchedule;
+    if (options.enableWorkGraph != null) params.enable_workgraph = options.enableWorkGraph;
     if (options.enableMob != null) params.enable_mob = options.enableMob;
     if (options.enableWebSearch != null) params.enable_web_search = options.enableWebSearch;
     if (options.toolFilter != null) params.tool_filter = options.toolFilter;

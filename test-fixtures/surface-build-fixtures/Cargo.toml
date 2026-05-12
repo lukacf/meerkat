@@ -15,7 +15,7 @@ name = "runtime_backed_min"
 path = "src/bin/runtime_backed_min.rs"
 
 [dependencies]
-meerkat = { workspace = true, features = ["anthropic", "session-store", "jsonl-store", "memory-store", "schedule"] }
+meerkat = { workspace = true, features = ["anthropic", "session-store", "jsonl-store", "memory-store", "schedule", "workgraph"] }
 serde_json.workspace = true
 tempfile.workspace = true
 tokio.workspace = true

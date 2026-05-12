@@ -594,6 +594,7 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_schedule: bool | None = None,
+        enable_workgraph: bool | None = None,
         enable_mob: bool | None = None,
         enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
@@ -627,6 +628,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
@@ -660,6 +662,7 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_schedule: bool | None = None,
+        enable_workgraph: bool | None = None,
         enable_mob: bool | None = None,
         enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
@@ -697,6 +700,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
@@ -741,6 +745,7 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_schedule: bool | None = None,
+        enable_workgraph: bool | None = None,
         enable_mob: bool | None = None,
         enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
@@ -778,6 +783,7 @@ class MeerkatClient:
             hooks_override=hooks_override, enable_builtins=enable_builtins,
             enable_shell=enable_shell,
             enable_memory=enable_memory, enable_schedule=enable_schedule,
+            enable_workgraph=enable_workgraph,
             enable_mob=enable_mob,
             enable_web_search=enable_web_search,
             keep_alive=keep_alive,
@@ -3040,6 +3046,7 @@ class MeerkatClient:
         enable_shell: bool | None = None,
         enable_memory: bool | None = None,
         enable_schedule: bool | None = None,
+        enable_workgraph: bool | None = None,
         enable_mob: bool | None = None,
         enable_web_search: bool | None = None,
         keep_alive: bool | None = None,
@@ -3080,6 +3087,8 @@ class MeerkatClient:
             params["enable_memory"] = enable_memory
         if enable_schedule is not None:
             params["enable_schedule"] = enable_schedule
+        if enable_workgraph is not None:
+            params["enable_workgraph"] = enable_workgraph
         if enable_mob is not None:
             params["enable_mob"] = enable_mob
         if enable_web_search is not None:

@@ -188,6 +188,13 @@ async listScheduleOccurrences(scheduleId: string, options?: ScheduleOccurrencesO
 async listScheduleTools(): Promise<ScheduleToolsResult>
 async callScheduleTool(request: ScheduleToolCallRequest): Promise<Record<string, unknown>>
 
+// WorkGraph is read-only from the SDK; agents mutate it through WorkGraph tools.
+async getWorkGraphItem(itemId: string, options?: WorkGraphItemLookupOptions): Promise<WorkItem>
+async listWorkGraphItems(filter?: WorkGraphItemFilter): Promise<WorkItemListResult>
+async listReadyWorkGraphItems(filter?: WorkGraphReadyFilter): Promise<WorkItemListResult>
+async getWorkGraphSnapshot(filter?: WorkGraphSnapshotFilter): Promise<WorkGraphSnapshot>
+async listWorkGraphEvents(filter?: WorkGraphEventFilter): Promise<WorkGraphEventsResult>
+
 async readMobEvents(mobId: string, options?: MobEventsOptions): Promise<MobEventsResult>
 async spawnMobMembers(mobId: string, specs: SpawnSpec[]): Promise<MobSpawnManyResultEntry[]>
 

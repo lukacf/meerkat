@@ -2052,6 +2052,109 @@ async def test_client_models_catalog_and_schedule_wrappers_use_expected_rpc_meth
     assert calls[4][1] == {"labels": {"env": "test"}, "limit": 5, "offset": 2}
 
 
+def test_create_session_params_forward_workgraph_override():
+    params = MeerkatClient._build_create_params(
+        "Hello",
+        enable_schedule=True,
+        enable_workgraph=True,
+        enable_web_search=True,
+    )
+
+    assert params["enable_schedule"] is True
+    assert params["enable_workgraph"] is True
+    assert params["enable_web_search"] is True
+
+
+@pytest.mark.asyncio
+async def test_client_workgraph_wrappers_use_expected_rpc_methods():
+    client = MeerkatClient()
+    calls = []
+    timestamp = "2026-05-12T12:00:00Z"
+    item = {
+        "id": "prep-dentist-ride",
+        "realm_id": "homecore",
+        "namespace": "family/appointments",
+        "title": "Prep A for non-preferred dentist car",
+        "status": "open",
+        "priority": "high",
+        "labels": ["autism-support", "dentist"],
+        "revision": 1,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+        "external_refs": [{"kind": "calendar_event", "id": "dentist-visit"}],
+        "evidence_refs": [{"kind": "message_draft", "id": "draft-1"}],
+    }
+
+    async def fake_request(method, params):
+        calls.append((method, params))
+        if method == "workgraph/get":
+            return item
+        if method in {"workgraph/list", "workgraph/ready"}:
+            return {"items": [item]}
+        if method == "workgraph/snapshot":
+            return {
+                "realm_id": "homecore",
+                "namespace": "family/appointments",
+                "all_namespaces": False,
+                "captured_at": timestamp,
+                "event_high_water_mark": 7,
+                "items": [item],
+                "edges": [],
+                "ready_item_ids": ["prep-dentist-ride"],
+            }
+        if method == "workgraph/events":
+            return {
+                "events": [
+                    {
+                        "seq": 7,
+                        "realm_id": "homecore",
+                        "namespace": "family/appointments",
+                        "item_id": "prep-dentist-ride",
+                        "kind": "created",
+                        "at": timestamp,
+                        "payload": {},
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected method {method}")
+
+    client._request = fake_request  # type: ignore[method-assign]
+
+    fetched = await client.get_workgraph_item(
+        "prep-dentist-ride",
+        realm_id="homecore",
+        namespace="family/appointments",
+    )
+    listed = await client.list_workgraph_items({"realm_id": "homecore", "limit": 5})
+    ready = await client.list_ready_workgraph_items(
+        {"namespace": "family/appointments", "limit": 3}
+    )
+    snapshot = await client.get_workgraph_snapshot(
+        {"realm_id": "homecore", "namespace": "family/appointments"}
+    )
+    events = await client.list_workgraph_events({"realm_id": "homecore", "limit": 10})
+
+    assert fetched["id"] == "prep-dentist-ride"
+    assert listed["items"][0]["priority"] == "high"
+    assert ready["items"][0]["status"] == "open"
+    assert snapshot["ready_item_ids"] == ["prep-dentist-ride"]
+    assert events["events"][0]["kind"] == "created"
+    assert [method for method, _ in calls] == [
+        "workgraph/get",
+        "workgraph/list",
+        "workgraph/ready",
+        "workgraph/snapshot",
+        "workgraph/events",
+    ]
+    assert calls[0][1] == {
+        "id": "prep-dentist-ride",
+        "realm_id": "homecore",
+        "namespace": "family/appointments",
+    }
+    assert calls[1][1] == {"realm_id": "homecore", "limit": 5}
+    assert calls[2][1] == {"namespace": "family/appointments", "limit": 3}
+
+
 @pytest.mark.asyncio
 async def test_session_turn_and_stream_support_full_turn_overrides():
     session_calls = []

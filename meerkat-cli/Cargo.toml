@@ -77,7 +77,7 @@ uuid = { workspace = true }
 url = { workspace = true }
 
 [features]
-default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "mob"]
+default = ["anthropic", "openai", "gemini", "jsonl-store", "session-store", "skills", "comms", "mcp", "schedule", "workgraph", "mob"]
 
 # LLM providers (forwarded to facade)
 anthropic = ["meerkat/anthropic"]
@@ -104,6 +104,7 @@ mob = [
 comms = ["dep:meerkat-comms", "meerkat/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat/mcp"]
 schedule = ["meerkat/schedule"]
+workgraph = ["meerkat/workgraph"]
 skills = ["meerkat/skills"]
 
 integration-real-tests = []

@@ -1290,6 +1290,7 @@ rust_library(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1369,6 +1370,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1460,6 +1462,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1585,6 +1588,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1676,6 +1680,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1767,6 +1772,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1862,6 +1868,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1953,6 +1960,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2046,6 +2054,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2140,6 +2149,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2232,6 +2242,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2324,6 +2335,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2420,6 +2432,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2511,6 +2524,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2604,6 +2618,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2699,6 +2714,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2790,6 +2806,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2882,6 +2899,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -2973,6 +2991,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3064,6 +3083,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3156,6 +3176,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3247,6 +3268,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3338,6 +3360,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3429,6 +3452,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -3520,6 +3544,7 @@ rust_test(
         "session-compaction",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [

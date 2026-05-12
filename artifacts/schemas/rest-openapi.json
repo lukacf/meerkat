@@ -3698,7 +3698,13 @@
           "enable_mob": {
             "type": "boolean"
           },
+          "enable_schedule": {
+            "type": "boolean"
+          },
           "enable_shell": {
+            "type": "boolean"
+          },
+          "enable_workgraph": {
             "type": "boolean"
           },
           "hooks_override": {

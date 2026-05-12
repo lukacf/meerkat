@@ -45,6 +45,7 @@ rust_binary(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -110,6 +111,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -194,6 +196,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -278,6 +281,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -362,6 +366,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -455,6 +460,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -548,6 +554,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -641,6 +648,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -725,6 +733,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -818,6 +827,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -901,6 +911,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -984,6 +995,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1068,6 +1080,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1160,6 +1173,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1244,6 +1258,7 @@ rust_test(
         "schedule",
         "session-store",
         "skills",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -1422,6 +1437,7 @@ rust_binary(
         "session-store",
         "comms",
         "mcp",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [

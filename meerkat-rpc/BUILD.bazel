@@ -38,6 +38,7 @@ rust_library(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -88,6 +89,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -146,6 +148,7 @@ rust_binary(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -199,6 +202,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -270,6 +274,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -344,6 +349,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -420,6 +426,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -496,6 +503,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -568,6 +576,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -640,6 +649,7 @@ rust_test(
         "mcp",
         "mob",
         "schedule",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -791,6 +801,7 @@ rust_library(
     crate_features = [
         "comms",
         "mcp",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [
@@ -836,6 +847,7 @@ rust_binary(
     crate_features = [
         "comms",
         "mcp",
+        "workgraph",
     ],
     edition = "2024",
     compile_data = [

@@ -1300,6 +1300,7 @@ describe("Session wrappers", () => {
       appContext: { tenant: "acme" },
       shellEnv: { FOO: "bar" },
       enableSchedule: true,
+      enableWorkGraph: true,
       enableWebSearch: true,
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
     });
@@ -1313,6 +1314,7 @@ describe("Session wrappers", () => {
         app_context: { tenant: "acme" },
         shell_env: { FOO: "bar" },
         enable_schedule: true,
+        enable_workgraph: true,
         enable_web_search: true,
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
       },
@@ -2067,6 +2069,96 @@ describe("Parity wrappers", () => {
     ]);
     assert.deepEqual(calls[2].params, { labels: { env: "prod" }, limit: 5, offset: 2 });
     assert.deepEqual(calls[7].params, { schedule_id: "sch-1", include_terminal: false });
+  });
+
+  it("adds wrappers for WorkGraph read-only APIs", async () => {
+    const client = new MeerkatClient();
+    const calls = [];
+    const timestamp = "2026-05-12T12:00:00Z";
+    const item = {
+      id: "prep-dentist-ride",
+      realm_id: "homecore",
+      namespace: "family/appointments",
+      title: "Prep A for non-preferred dentist car",
+      status: "open",
+      priority: "high",
+      labels: ["autism-support", "dentist"],
+      revision: 1,
+      created_at: timestamp,
+      updated_at: timestamp,
+      external_refs: [{ kind: "calendar_event", id: "dentist-visit" }],
+      evidence_refs: [{ kind: "message_draft", id: "draft-1" }],
+    };
+    client.request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === "workgraph/get") {
+        return item;
+      }
+      if (method === "workgraph/list" || method === "workgraph/ready") {
+        return { items: [item] };
+      }
+      if (method === "workgraph/snapshot") {
+        return {
+          realm_id: "homecore",
+          namespace: "family/appointments",
+          all_namespaces: false,
+          captured_at: timestamp,
+          event_high_water_mark: 7,
+          items: [item],
+          edges: [],
+          ready_item_ids: ["prep-dentist-ride"],
+        };
+      }
+      if (method === "workgraph/events") {
+        return {
+          events: [{
+            seq: 7,
+            realm_id: "homecore",
+            namespace: "family/appointments",
+            item_id: "prep-dentist-ride",
+            kind: "created",
+            at: timestamp,
+            payload: {},
+          }],
+        };
+      }
+      throw new Error(`unexpected method ${method}`);
+    };
+
+    const fetched = await client.getWorkGraphItem("prep-dentist-ride", {
+      realmId: "homecore",
+      namespace: "family/appointments",
+    });
+    const listed = await client.listWorkGraphItems({ realmId: "homecore", limit: 5 });
+    const ready = await client.listReadyWorkGraphItems({
+      namespace: "family/appointments",
+      limit: 3,
+    });
+    const snapshot = await client.getWorkGraphSnapshot({
+      realmId: "homecore",
+      namespace: "family/appointments",
+    });
+    const events = await client.listWorkGraphEvents({ realmId: "homecore", limit: 10 });
+
+    assert.equal(fetched.id, "prep-dentist-ride");
+    assert.equal(listed.items[0].priority, "high");
+    assert.equal(ready.items[0].status, "open");
+    assert.deepEqual(snapshot.readyItemIds, ["prep-dentist-ride"]);
+    assert.equal(events.events[0].kind, "created");
+    assert.deepEqual(calls.map((c) => c.method), [
+      "workgraph/get",
+      "workgraph/list",
+      "workgraph/ready",
+      "workgraph/snapshot",
+      "workgraph/events",
+    ]);
+    assert.deepEqual(calls[0].params, {
+      id: "prep-dentist-ride",
+      realm_id: "homecore",
+      namespace: "family/appointments",
+    });
+    assert.deepEqual(calls[1].params, { realm_id: "homecore", limit: 5 });
+    assert.deepEqual(calls[2].params, { namespace: "family/appointments", limit: 3 });
   });
 
   it("adds wrappers for mob events, batch spawn, and profile CRUD", async () => {

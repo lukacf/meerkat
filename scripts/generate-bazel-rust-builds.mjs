@@ -920,14 +920,14 @@ function writeRootBuild(fastTestLabels, e2eSystemTestLabels, surfaceFeatureMatri
 
 const surfaceFeatureVariantSpecs = [
   { name: "surface_min", packageKey: "meerkat-rpc", features: [], targetNames: null },
-  { name: "surface_comms_mcp", packageKey: "meerkat-rpc", features: ["comms", "mcp"], targetNames: null },
+  { name: "surface_comms_mcp", packageKey: "meerkat-rpc", features: ["comms", "mcp", "workgraph"], targetNames: null },
   { name: "surface_min", packageKey: "meerkat-rest", features: [], targetNames: null },
-  { name: "surface_comms", packageKey: "meerkat-rest", features: ["comms"], targetNames: null },
+  { name: "surface_comms", packageKey: "meerkat-rest", features: ["comms", "workgraph"], targetNames: null },
   { name: "surface_min", packageKey: "meerkat-mcp-server", features: [], targetNames: null },
-  { name: "surface_comms", packageKey: "meerkat-mcp-server", features: ["comms"], targetNames: null },
+  { name: "surface_comms", packageKey: "meerkat-mcp-server", features: ["comms", "workgraph"], targetNames: null },
   { name: "surface_session_store", packageKey: "meerkat-cli", features: ["session-store"], targetNames: null },
   { name: "surface_session_store_mcp", packageKey: "meerkat-cli", features: ["session-store", "mcp"], targetNames: null },
-  { name: "surface_session_store_comms_mcp", packageKey: "meerkat-cli", features: ["session-store", "comms", "mcp"], targetNames: null },
+  { name: "surface_session_store_comms_mcp", packageKey: "meerkat-cli", features: ["session-store", "comms", "mcp", "workgraph"], targetNames: null },
 ];
 
 const fastTestLabels = [];

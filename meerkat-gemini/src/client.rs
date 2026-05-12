@@ -1017,9 +1017,86 @@ fn normalize_gemini_function_parameters_schema(schema: &Value) -> Result<Value, 
             ),
         });
     }
+    project_gemini_semantic_payload_slots(&mut normalized);
+    lower_gemini_boolean_schemas(&mut normalized);
     lower_gemini_function_parameters_schema(&mut normalized);
     strip_gemini_function_parameters_unsupported_keywords(&mut normalized);
     Ok(normalized)
+}
+
+fn project_gemini_semantic_payload_slots(value: &mut Value) {
+    match value {
+        Value::Object(obj) => {
+            for (key, child) in obj.iter_mut() {
+                if key == "properties" {
+                    if let Value::Object(properties) = child {
+                        for (property_name, property_schema) in properties.iter_mut() {
+                            if is_semantic_payload_slot(property_name)
+                                && schema_contains_composition(property_schema)
+                            {
+                                let description = property_schema
+                                    .get("description")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(
+                                        "Typed semantic payload; validated by the Meerkat dispatcher.",
+                                    )
+                                    .to_string();
+                                *property_schema = serde_json::json!({
+                                    "type": "object",
+                                    "description": description
+                                });
+                            } else {
+                                project_gemini_semantic_payload_slots(property_schema);
+                            }
+                        }
+                    }
+                } else {
+                    project_gemini_semantic_payload_slots(child);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                project_gemini_semantic_payload_slots(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_semantic_payload_slot(property_name: &str) -> bool {
+    matches!(property_name, "params" | "result")
+}
+
+fn schema_contains_composition(value: &Value) -> bool {
+    match value {
+        Value::Object(obj) => {
+            obj.contains_key("anyOf")
+                || obj.contains_key("oneOf")
+                || obj.values().any(schema_contains_composition)
+        }
+        Value::Array(items) => items.iter().any(schema_contains_composition),
+        _ => false,
+    }
+}
+
+fn lower_gemini_boolean_schemas(value: &mut Value) {
+    match value {
+        Value::Bool(_) => {
+            *value = serde_json::json!({ "type": "object" });
+        }
+        Value::Object(obj) => {
+            for child in obj.values_mut() {
+                lower_gemini_boolean_schemas(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                lower_gemini_boolean_schemas(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn lower_gemini_function_parameters_schema(value: &mut Value) {
@@ -3458,6 +3535,120 @@ mod tests {
             "additionalProperties should be stripped from inlined branch"
         );
         assert_eq!(object_branch["properties"]["ticket"]["type"], "string");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tool_schema_parameters_projects_semantic_payload_slots()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use meerkat_core::ToolDef;
+        use std::sync::Arc;
+
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "peer_id": { "type": "string" },
+                "intent": {
+                    "type": "string",
+                    "enum": ["supervisor.bridge", "checksum_token"]
+                },
+                "handling_mode": {
+                    "type": "string",
+                    "enum": ["steer", "queue"]
+                },
+                "params": {
+                    "description": "Request parameters",
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "command": {
+                                    "type": "string",
+                                    "enum": ["deliver_member_input"]
+                                },
+                                "content": {
+                                    "anyOf": [
+                                        { "type": "string" },
+                                        {
+                                            "type": "array",
+                                            "items": {
+                                                "oneOf": [
+                                                    {
+                                                        "type": "object",
+                                                        "properties": {
+                                                            "type": {
+                                                                "const": "json",
+                                                                "type": "string"
+                                                            },
+                                                            "value": true
+                                                        },
+                                                        "required": ["type", "value"]
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    ]
+                                }
+                            },
+                            "required": ["command", "content"]
+                        }
+                    ]
+                },
+                "blocks": {
+                    "type": "array",
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "const": "json",
+                                        "type": "string"
+                                    },
+                                    "value": true
+                                },
+                                "required": ["type", "value"]
+                            }
+                        ]
+                    }
+                }
+            },
+            "required": ["peer_id", "intent", "handling_mode", "params"]
+        });
+
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3-pro-preview",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_tools(vec![Arc::new(ToolDef {
+            name: "send_request".into(),
+            description: "test".to_string(),
+            input_schema: schema,
+            provenance: None,
+        })]);
+
+        let body = client.build_request_body(&request)?;
+        let parameters = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let params_schema = &parameters["properties"]["params"];
+        assert_eq!(params_schema["type"], "object");
+        assert!(
+            params_schema.get("anyOf").is_none(),
+            "semantic params payload should not send composite schema to Gemini"
+        );
+        assert_eq!(
+            parameters["properties"]["blocks"]["items"]["oneOf"][0]["properties"]["value"]["type"],
+            "object",
+            "JSON Schema boolean true must be projected to a Gemini Schema object"
+        );
+        assert_eq!(
+            parameters["properties"]["intent"]["enum"][0],
+            "supervisor.bridge"
+        );
+        assert_eq!(
+            parameters["properties"]["handling_mode"]["enum"][0],
+            "steer"
+        );
         Ok(())
     }
 

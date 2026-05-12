@@ -366,6 +366,7 @@ fi
 
 if grep -Fq 'MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS' .github/workflows/buildbuddy.yml &&
   grep -Fq 'buildbuddy-gcp-executors' .github/workflows/buildbuddy.yml &&
+  grep -Fq 'queue: max' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_WAIT_ON_DOWN' .github/workflows/buildbuddy.yml &&
   grep -Fq 'scripts/gcp-buildbuddy-executor-pool down' .github/workflows/buildbuddy.yml &&
   grep -Fq 'MEERKAT_GCP_BUILDBUDDY_DOWN_MODE' .github/workflows/buildbuddy.yml &&

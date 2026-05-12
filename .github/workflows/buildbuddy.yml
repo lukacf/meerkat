@@ -54,6 +54,9 @@ permissions:
 
 concurrency:
   group: buildbuddy-gcp-executors
+  # Keep all pending BuildBuddy runs queued behind the shared GCP executor pool.
+  # GitHub's default single pending slot cancels older PR CI before any steps run.
+  queue: max
   cancel-in-progress: false
 
 env:

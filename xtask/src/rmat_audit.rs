@@ -1512,9 +1512,11 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !input_source.contains("SystemNoticeBlock::ExternalEvent")
-        || !input_source.contains("content: event.blocks.clone().unwrap_or_default()")
-    {
+    let preserves_external_event_blocks = input_source.contains("SystemNoticeBlock::ExternalEvent")
+        && (input_source.contains("content: event.blocks.clone().unwrap_or_default()")
+            || (input_source.contains("let content = event.blocks.clone().unwrap_or_default();")
+                && input_source.contains("content,")));
+    if !preserves_external_event_blocks {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             input_path,
@@ -1857,6 +1859,7 @@ mod tests {
         ";
         let loop_source = r"
             fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderable {
+                let content = event.blocks.clone().unwrap_or_default();
                 CoreRenderable::SystemNotice {
                     kind: SystemNoticeKind::ExternalEvent,
                     body: Some(String::new()),
@@ -1866,7 +1869,7 @@ mod tests {
                         summary: None,
                         body: None,
                         payload: Some(event.payload.clone()),
-                        content: event.blocks.clone().unwrap_or_default(),
+                        content,
                     }],
                 }
             }

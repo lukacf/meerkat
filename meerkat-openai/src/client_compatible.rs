@@ -199,7 +199,7 @@ impl OpenAiCompatibleClient {
                 Message::SystemNotice(notice) => {
                     out.push(serde_json::json!({
                         "role": "user",
-                        "content": notice.rendered_text()
+                        "content": notice.model_projection_text()
                     }));
                 }
                 Message::User(user) => {

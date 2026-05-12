@@ -948,6 +948,112 @@ impl meerkat_llm_core::ImageGenerationExecutor for RoutingImageGenerationExecuto
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod image_generation_executor_routing_tests {
+    use super::RoutingImageGenerationExecutor;
+    use async_trait::async_trait;
+    use meerkat_llm_core::{
+        ImageGenerationExecutor, LlmError, ProviderImageGenerationOutput,
+        ProviderImageGenerationRequest,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountingImageExecutor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ImageGenerationExecutor for CountingImageExecutor {
+        async fn execute_image_generation(
+            &self,
+            _request: ProviderImageGenerationRequest,
+        ) -> Result<ProviderImageGenerationOutput, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(LlmError::InvalidRequest {
+                message: "executor should not be called for another provider".to_string(),
+            })
+        }
+    }
+
+    fn hosted_openai_request() -> ProviderImageGenerationRequest {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "00000000-0000-0000-0000-000000000101",
+            "model": "gpt-5.4",
+            "generate_request": {
+                "intent": {
+                    "intent": "generate",
+                    "prompt": {"content": "draw a square"},
+                    "prompt_source": {
+                        "source": "user_provided",
+                        "message_id": "00000000-0000-0000-0000-000000000102"
+                    },
+                    "reference_images": []
+                },
+                "target": {"target": "auto"},
+                "size": {"size": "square1024"},
+                "quality": "low",
+                "format": "png",
+                "count": 1
+            },
+            "execution_plan": {
+                "provider": "openai",
+                "backend": "hosted_tool",
+                "max_count": 1,
+                "capabilities": {
+                    "hosted_image_generation_tool": true,
+                    "native_image_output": false,
+                    "custom_tools": false,
+                    "image_search_grounding": false,
+                    "image_continuity_tokens": "unsupported"
+                },
+                "requires_scoped_override": false,
+                "provider_plan": {
+                    "tool_name": "image_generation",
+                    "model": "gpt-image-2",
+                    "output": {
+                        "size": "square1024",
+                        "quality": "low",
+                        "output_format": "png"
+                    },
+                    "provider_params": {}
+                }
+            },
+            "projected_messages": []
+        }))
+        .expect("hosted OpenAI image request")
+    }
+
+    #[tokio::test]
+    async fn single_provider_router_does_not_dispatch_openai_plan_to_gemini_executor() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut executors: BTreeMap<String, Arc<dyn ImageGenerationExecutor>> = BTreeMap::new();
+        executors.insert(
+            "gemini".to_string(),
+            Arc::new(CountingImageExecutor {
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let router = RoutingImageGenerationExecutor::new(executors);
+
+        let err = router
+            .execute_image_generation(hosted_openai_request())
+            .await
+            .expect_err("OpenAI plan should not dispatch to a Gemini-only executor");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            err.to_string()
+                .contains("no image generation executor configured for provider openai"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 struct CompositeImageGenerationPlanner {
     profiles: Vec<Arc<dyn meerkat_core::ImageGenerationProviderProfile>>,
@@ -3181,24 +3287,11 @@ impl AgentFactory {
 
                         #[cfg(not(target_arch = "wasm32"))]
                         {
-                            let selected_realm = build_config.realm_id.as_deref();
-                            let connection_is_in_selected_realm = selected_realm
-                                .map(|realm| resolved_auth_binding.realm.as_str() == realm)
-                                .unwrap_or(true);
-                            if connection_is_in_selected_realm {
-                                auto_image_generation_executor = provider_registry
-                                    .build_image_generation_executor(connection.clone())
-                                    .map_err(|e| {
-                                        BuildAgentError::ConnectionResolution(e.to_string())
-                                    })?;
-                            } else {
-                                tracing::debug!(
-                                    provider = provider.as_str(),
-                                    ?selected_realm,
-                                    resolved_realm = resolved_auth_binding.realm.as_str(),
-                                    "skipping image executor reuse for LLM connection outside selected realm"
-                                );
-                            }
+                            auto_image_generation_executor = provider_registry
+                                .build_image_generation_executor(connection.clone())
+                                .map_err(|e| {
+                                    BuildAgentError::ConnectionResolution(e.to_string())
+                                })?;
                         }
 
                         if lease_auth_binding.is_some() {
@@ -3316,7 +3409,6 @@ impl AgentFactory {
             }
             auto_image_generation_executor = match executors.len() {
                 0 => None,
-                1 => executors.into_values().next(),
                 _ => Some(Arc::new(RoutingImageGenerationExecutor::new(executors))
                     as Arc<dyn meerkat_llm_core::ImageGenerationExecutor>),
             };
@@ -7186,7 +7278,7 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
-    async fn selected_realm_skips_env_default_same_provider_image_executor() {
+    async fn selected_realm_reuses_active_same_provider_image_executor() {
         use meerkat_llm_core::provider_runtime::{
             ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
             ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
@@ -7278,8 +7370,8 @@ mod tests {
 
         assert_eq!(
             image_executor_builds.load(std::sync::atomic::Ordering::SeqCst),
-            0,
-            "selected-realm image setup must not reuse the env_default LLM connection"
+            1,
+            "same-provider image setup should reuse the already-authorized active LLM connection"
         );
     }
 

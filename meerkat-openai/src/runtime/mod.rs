@@ -88,6 +88,33 @@ fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
     }
 }
 
+fn chatgpt_backend_extra_headers(connection: &ResolvedConnection) -> Vec<(String, String)> {
+    // Pull account identity + fedramp from the resolved lease's AuthMetadata
+    // so the ChatGPT backend can emit the wire headers Codex's
+    // bearer_auth_provider.rs:23-38 requires.
+    let (account_id, is_fedramp) = match connection.auth_lease.metadata().provider_metadata {
+        Some(meerkat_core::ProviderAuthMetadata::OpenAi(ref metadata)) => {
+            (metadata.account_id.clone(), metadata.is_fedramp)
+        }
+        _ => (connection.auth_lease.metadata().account_id.clone(), None),
+    };
+
+    let mut headers = Vec::new();
+    if let Some(account_id) = account_id {
+        headers.push((
+            meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER.to_string(),
+            account_id,
+        ));
+    }
+    if matches!(is_fedramp, Some(true)) {
+        headers.push((
+            meerkat_core::provider_matrix::openai_auth::FEDRAMP_HEADER.to_string(),
+            "true".to_string(),
+        ));
+    }
+    headers
+}
+
 pub struct OpenAiProviderRuntime;
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -357,16 +384,6 @@ impl ProviderRuntime for OpenAiProviderRuntime {
         let secret = connection
             .resolved_secret()
             .ok_or(ProviderClientError::NoCredentialMaterial)?;
-        // Pull account identity + fedramp from the resolved lease's
-        // AuthMetadata so the ChatGPT backend can emit the wire
-        // headers Codex's bearer_auth_provider.rs:23-38 requires.
-        let (account_id, is_fedramp) = match connection.auth_lease.metadata().provider_metadata {
-            Some(meerkat_core::ProviderAuthMetadata::OpenAi(ref m)) => {
-                (m.account_id.clone(), m.is_fedramp)
-            }
-            _ => (connection.auth_lease.metadata().account_id.clone(), None),
-        };
-
         match backend_kind {
             OpenAiBackendKind::OpenAiApi => {
                 // S1-verified: OpenAiClient::new returns Self (infallible).
@@ -381,22 +398,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 // headers per Codex bearer_auth_provider.rs:23-38.
                 let base_url =
                     chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
-                let mut extra_headers: Vec<(String, String)> = Vec::new();
-                if let Some(acct) = account_id {
-                    extra_headers.push((
-                        meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER
-                            .to_string(),
-                        acct,
-                    ));
-                }
-                if matches!(is_fedramp, Some(true)) {
-                    extra_headers.push((
-                        meerkat_core::provider_matrix::openai_auth::FEDRAMP_HEADER.to_string(),
-                        "true".to_string(),
-                    ));
-                }
                 let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
-                    .with_extra_headers(extra_headers)
+                    .with_extra_headers(chatgpt_backend_extra_headers(&connection))
                     .with_chatgpt_backend_wire();
                 Ok(Arc::new(client))
             }
@@ -452,7 +455,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
             OpenAiBackendKind::ChatGptBackend => {
                 let base_url =
                     chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref());
-                crate::OpenAiClient::new_with_base_url(secret, base_url).with_chatgpt_backend_wire()
+                crate::OpenAiClient::new_with_base_url(secret, base_url)
+                    .with_extra_headers(chatgpt_backend_extra_headers(&connection))
+                    .with_chatgpt_backend_wire()
             }
         };
         Ok(Some(Arc::new(client)))
@@ -469,8 +474,18 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use meerkat_core::{AuthProfile, BackendProfile, BindingPolicy};
-    use meerkat_llm_core::provider_runtime::ProviderRuntimeCatalog;
+    use axum::{
+        Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
+    };
+    use meerkat_core::{
+        AuthMetadata, AuthProfile, BackendProfile, BindingPolicy, ImageOperationTerminalClass,
+        OpenAiAuthMetadata, ProviderAuthMetadata,
+    };
+    use meerkat_llm_core::{
+        ProviderImageGenerationRequest, provider_runtime::ProviderRuntimeCatalog,
+    };
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
 
     #[test]
     fn typed_catalog_contains_expected_combinations() {
@@ -518,6 +533,114 @@ mod tests {
             binding: meerkat_core::connection::BindingId::parse("default").unwrap(),
             profile: None,
         }
+    }
+
+    fn resolved_chatgpt_connection(
+        metadata: AuthMetadata,
+        base_url: Option<String>,
+    ) -> ResolvedConnection {
+        let mut backend = backend("chatgpt_backend");
+        backend.base_url = base_url;
+        ResolvedConnection {
+            provider: Provider::OpenAI,
+            backend: NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
+            backend_profile: Arc::new(backend),
+            auth_lease: Arc::new(StaticLease::inline_secret(
+                "oauth-access-token".into(),
+                metadata,
+                None,
+                "openai:test",
+            )),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ImageHeaderState {
+        seen: Arc<Mutex<Vec<HeaderMap>>>,
+    }
+
+    async fn image_header_stub(
+        State(state): State<ImageHeaderState>,
+        headers: HeaderMap,
+        Json(_body): Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen headers").push(headers);
+        let payload = [
+            r#"data: {"type":"response.output_item.done","item":{"id":"ig_test","type":"image_generation_call","status":"completed","result":"data:image/png;base64,aGVsbG8="}}"#,
+            r#"data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        ([("content-type", "text/event-stream")], payload)
+    }
+
+    async fn spawn_image_header_stub() -> (
+        String,
+        Arc<Mutex<Vec<HeaderMap>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/responses", post(image_header_stub))
+            .with_state(ImageHeaderState {
+                seen: Arc::clone(&seen),
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), seen, handle)
+    }
+
+    fn hosted_image_request() -> ProviderImageGenerationRequest {
+        serde_json::from_value(serde_json::json!({
+            "operation_id": "00000000-0000-0000-0000-000000000101",
+            "model": "gpt-5.4",
+            "generate_request": {
+                "intent": {
+                    "intent": "generate",
+                    "prompt": {"content": "draw a small red square"},
+                    "prompt_source": {
+                        "source": "user_provided",
+                        "message_id": "00000000-0000-0000-0000-000000000102"
+                    },
+                    "reference_images": []
+                },
+                "target": {"target": "auto"},
+                "size": {"size": "square1024"},
+                "quality": "low",
+                "format": "png",
+                "count": 1
+            },
+            "execution_plan": {
+                "provider": "openai",
+                "backend": "hosted_tool",
+                "max_count": 1,
+                "capabilities": {
+                    "hosted_image_generation_tool": true,
+                    "native_image_output": false,
+                    "custom_tools": true,
+                    "image_search_grounding": false,
+                    "image_continuity_tokens": "unsupported"
+                },
+                "requires_scoped_override": false,
+                "provider_plan": {
+                    "tool_name": "image_generation",
+                    "model": "gpt-image-2",
+                    "output": {
+                        "size": "square1024",
+                        "quality": "low",
+                        "output_format": "png"
+                    }
+                }
+            },
+            "projected_messages": []
+        }))
+        .expect("hosted image request")
     }
 
     #[test]
@@ -591,5 +714,98 @@ mod tests {
         )
         .expect("allowed combination");
         assert_eq!(vb.policy(), &policy);
+    }
+
+    #[test]
+    fn chatgpt_backend_headers_use_openai_oauth_metadata() {
+        let connection = resolved_chatgpt_connection(
+            AuthMetadata {
+                provider_metadata: Some(ProviderAuthMetadata::OpenAi(OpenAiAuthMetadata {
+                    account_id: Some("acct_123".into()),
+                    is_fedramp: Some(true),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            None,
+        );
+
+        let headers = chatgpt_backend_extra_headers(&connection);
+
+        assert!(headers.contains(&(
+            meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER.to_string(),
+            "acct_123".to_string(),
+        )));
+        assert!(headers.contains(&(
+            meerkat_core::provider_matrix::openai_auth::FEDRAMP_HEADER.to_string(),
+            "true".to_string(),
+        )));
+    }
+
+    #[test]
+    fn chatgpt_backend_headers_fall_back_to_generic_account_metadata() {
+        let connection = resolved_chatgpt_connection(
+            AuthMetadata {
+                account_id: Some("acct_generic".into()),
+                ..Default::default()
+            },
+            None,
+        );
+
+        let headers = chatgpt_backend_extra_headers(&connection);
+
+        assert_eq!(
+            headers,
+            vec![(
+                meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER.to_string(),
+                "acct_generic".to_string(),
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_backend_image_executor_sends_oauth_account_headers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (base_url, seen, handle) = spawn_image_header_stub().await;
+        let connection = resolved_chatgpt_connection(
+            AuthMetadata {
+                provider_metadata: Some(ProviderAuthMetadata::OpenAi(OpenAiAuthMetadata {
+                    account_id: Some("acct_image".into()),
+                    is_fedramp: Some(true),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            Some(base_url),
+        );
+
+        let executor = OpenAiProviderRuntime
+            .build_image_generation_executor(connection)?
+            .expect("chatgpt backend should provide image executor");
+        let output = executor
+            .execute_image_generation(hosted_image_request())
+            .await?;
+
+        assert!(matches!(
+            output.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        let headers = seen.lock().expect("seen headers");
+        let first = headers.first().expect("captured image request headers");
+        assert_eq!(
+            first
+                .get(meerkat_core::provider_matrix::openai_auth::CHATGPT_ACCOUNT_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("acct_image")
+        );
+        assert_eq!(
+            first
+                .get(meerkat_core::provider_matrix::openai_auth::FEDRAMP_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("true")
+        );
+
+        handle.abort();
+        Ok(())
     }
 }

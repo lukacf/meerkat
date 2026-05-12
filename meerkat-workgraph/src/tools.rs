@@ -29,70 +29,109 @@ impl WorkGraphToolError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkGraphToolContract {
+    Create,
+    Get,
+    List,
+    Ready,
+    Snapshot,
+    Events,
+    Claim,
+    Release,
+    Update,
+    Block,
+    Close,
+    Link,
+    AddEvidence,
+}
+
+impl WorkGraphToolContract {
+    const ALL: &'static [Self] = &[
+        Self::Create,
+        Self::Get,
+        Self::List,
+        Self::Ready,
+        Self::Snapshot,
+        Self::Events,
+        Self::Claim,
+        Self::Release,
+        Self::Update,
+        Self::Block,
+        Self::Close,
+        Self::Link,
+        Self::AddEvidence,
+    ];
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Create => "workgraph_create",
+            Self::Get => "workgraph_get",
+            Self::List => "workgraph_list",
+            Self::Ready => "workgraph_ready",
+            Self::Snapshot => "workgraph_snapshot",
+            Self::Events => "workgraph_events",
+            Self::Claim => "workgraph_claim",
+            Self::Release => "workgraph_release",
+            Self::Update => "workgraph_update",
+            Self::Block => "workgraph_block",
+            Self::Close => "workgraph_close",
+            Self::Link => "workgraph_link",
+            Self::AddEvidence => "workgraph_add_evidence",
+        }
+    }
+
+    const fn description(self) -> &'static str {
+        match self {
+            Self::Create => "Create a durable WorkGraph item.",
+            Self::Get => "Read one WorkGraph item.",
+            Self::List => "List WorkGraph items.",
+            Self::Ready => "List ready, claimable WorkGraph items.",
+            Self::Snapshot => "Read a WorkGraph observability snapshot.",
+            Self::Events => "Read WorkGraph event history.",
+            Self::Claim => "Claim a ready WorkGraph item with CAS revision checking.",
+            Self::Release => "Release a claimed WorkGraph item.",
+            Self::Update => "Update non-terminal WorkGraph item fields.",
+            Self::Block => "Mark a WorkGraph item blocked.",
+            Self::Close => "Close a WorkGraph item with a terminal status.",
+            Self::Link => "Create a dependency or relationship edge.",
+            Self::AddEvidence => "Attach a typed evidence reference to a WorkGraph item.",
+        }
+    }
+
+    fn schema(self) -> Value {
+        match self {
+            Self::Create => create_schema(),
+            Self::Get => id_schema(false),
+            Self::List => list_schema(),
+            Self::Ready => ready_schema(),
+            Self::Snapshot => snapshot_schema(),
+            Self::Events => events_schema(),
+            Self::Claim => claim_schema(),
+            Self::Release | Self::Block => revision_id_schema(),
+            Self::Update => update_schema(),
+            Self::Close => close_schema(),
+            Self::Link => link_schema(),
+            Self::AddEvidence => evidence_schema(),
+        }
+    }
+
+    fn parse(name: &str) -> Result<Self, WorkGraphToolError> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|contract| contract.name() == name)
+            .ok_or_else(|| {
+                WorkGraphToolError::new(NOT_FOUND, format!("unknown WorkGraph tool '{name}'"))
+            })
+    }
+}
+
 pub fn workgraph_tools_list() -> Vec<Value> {
-    vec![
-        tool(
-            "workgraph_create",
-            "Create a durable WorkGraph item.",
-            create_schema(),
-        ),
-        tool(
-            "workgraph_get",
-            "Read one WorkGraph item.",
-            id_schema(false),
-        ),
-        tool("workgraph_list", "List WorkGraph items.", list_schema()),
-        tool(
-            "workgraph_ready",
-            "List ready, claimable WorkGraph items.",
-            ready_schema(),
-        ),
-        tool(
-            "workgraph_snapshot",
-            "Read a WorkGraph observability snapshot.",
-            snapshot_schema(),
-        ),
-        tool(
-            "workgraph_events",
-            "Read WorkGraph event history.",
-            events_schema(),
-        ),
-        tool(
-            "workgraph_claim",
-            "Claim a ready WorkGraph item with CAS revision checking.",
-            claim_schema(),
-        ),
-        tool(
-            "workgraph_release",
-            "Release a claimed WorkGraph item.",
-            revision_id_schema(),
-        ),
-        tool(
-            "workgraph_update",
-            "Update non-terminal WorkGraph item fields.",
-            update_schema(),
-        ),
-        tool(
-            "workgraph_block",
-            "Mark a WorkGraph item blocked.",
-            revision_id_schema(),
-        ),
-        tool(
-            "workgraph_close",
-            "Close a WorkGraph item with a terminal status.",
-            close_schema(),
-        ),
-        tool(
-            "workgraph_link",
-            "Create a dependency or relationship edge.",
-            link_schema(),
-        ),
-        tool(
-            "workgraph_add_evidence",
-            "Attach a typed evidence reference to a WorkGraph item.",
-            evidence_schema(),
-        ),
-    ]
+    WorkGraphToolContract::ALL
+        .iter()
+        .map(|contract| tool(contract.name(), contract.description(), contract.schema()))
+        .collect()
 }
 
 pub async fn handle_workgraph_tools_call(
@@ -100,8 +139,8 @@ pub async fn handle_workgraph_tools_call(
     name: &str,
     arguments: &Value,
 ) -> Result<Value, WorkGraphToolError> {
-    match name {
-        "workgraph_create" => {
+    match WorkGraphToolContract::parse(name)? {
+        WorkGraphToolContract::Create => {
             let request: CreateWorkItemRequest = parse(arguments)?;
             service
                 .create(request)
@@ -109,7 +148,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_get" => {
+        WorkGraphToolContract::Get => {
             let request: IdParams = parse(arguments)?;
             service
                 .get(request.realm_id, request.namespace, request.id)
@@ -117,7 +156,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_list" => {
+        WorkGraphToolContract::List => {
             let filter: WorkItemFilter = parse(arguments)?;
             service
                 .list(filter)
@@ -125,7 +164,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|items| json!({ "items": items }))
                 .map_err(map_error)
         }
-        "workgraph_ready" => {
+        WorkGraphToolContract::Ready => {
             let filter: ReadyWorkFilter = parse(arguments)?;
             service
                 .ready(filter)
@@ -133,7 +172,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|items| json!({ "items": items }))
                 .map_err(map_error)
         }
-        "workgraph_snapshot" => {
+        WorkGraphToolContract::Snapshot => {
             let filter: WorkGraphSnapshotFilter = parse(arguments)?;
             service
                 .snapshot(filter)
@@ -141,7 +180,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|snapshot| json!({ "snapshot": snapshot }))
                 .map_err(map_error)
         }
-        "workgraph_claim" => {
+        WorkGraphToolContract::Claim => {
             let request: ClaimWorkItemRequest = parse(arguments)?;
             service
                 .claim(request)
@@ -149,7 +188,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_release" => {
+        WorkGraphToolContract::Release => {
             let request: ReleaseWorkItemRequest = parse(arguments)?;
             service
                 .release(request)
@@ -157,7 +196,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_update" => {
+        WorkGraphToolContract::Update => {
             let request: UpdateWorkItemRequest = parse(arguments)?;
             service
                 .update(request)
@@ -165,7 +204,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_block" => {
+        WorkGraphToolContract::Block => {
             let request: RevisionIdParams = parse(arguments)?;
             service
                 .block(
@@ -178,7 +217,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_close" => {
+        WorkGraphToolContract::Close => {
             let request: CloseWorkItemRequest = parse(arguments)?;
             service
                 .close(request)
@@ -186,7 +225,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_link" => {
+        WorkGraphToolContract::Link => {
             let request: LinkWorkItemsRequest = parse(arguments)?;
             service
                 .link(request)
@@ -194,7 +233,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|edge| json!({ "edge": edge }))
                 .map_err(map_error)
         }
-        "workgraph_add_evidence" => {
+        WorkGraphToolContract::AddEvidence => {
             let request: AddEvidenceRequest = parse(arguments)?;
             service
                 .add_evidence(request)
@@ -202,7 +241,7 @@ pub async fn handle_workgraph_tools_call(
                 .map(|item| json!({ "item": item }))
                 .map_err(map_error)
         }
-        "workgraph_events" => {
+        WorkGraphToolContract::Events => {
             let filter: WorkGraphEventFilterParams = parse(arguments)?;
             service
                 .events(filter.into())
@@ -210,10 +249,6 @@ pub async fn handle_workgraph_tools_call(
                 .map(|events| json!({ "events": events }))
                 .map_err(map_error)
         }
-        _ => Err(WorkGraphToolError::new(
-            NOT_FOUND,
-            format!("unknown WorkGraph tool '{name}'"),
-        )),
     }
 }
 
@@ -424,7 +459,29 @@ fn claim_schema() -> Value {
             "expected_revision".to_string(),
             json!({ "type": "integer", "minimum": 0 }),
         ),
-        ("owner".to_string(), json!({ "type": "object" })),
+        (
+            "owner".to_string(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["principal", "agent", "session", "mob", "label"]
+                            },
+                            "id": { "type": "string" }
+                        },
+                        "required": ["kind", "id"],
+                        "additionalProperties": false
+                    },
+                    "display_name": { "type": "string" }
+                },
+                "required": ["key"],
+                "additionalProperties": false
+            }),
+        ),
         (
             "lease_seconds".to_string(),
             json!({ "type": "integer", "minimum": 1 }),
@@ -434,7 +491,7 @@ fn claim_schema() -> Value {
             json!({ "type": "string", "format": "date-time" }),
         ),
     ]);
-    object(properties, &["id", "expected_revision"])
+    object(properties, &["id", "expected_revision", "owner"])
 }
 
 fn update_schema() -> Value {

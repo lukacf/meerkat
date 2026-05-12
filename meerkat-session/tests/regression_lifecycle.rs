@@ -445,6 +445,7 @@ impl SessionAgent for RecordingTurnAgent {
         _prompt: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
+        _typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         _event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {

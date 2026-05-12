@@ -110,7 +110,7 @@ fn test_user_message_render_metadata_serialization() {
 }
 
 #[test]
-fn test_legacy_user_notice_deserializes_to_system_notice() {
+fn test_legacy_user_notice_deserializes_as_user_text() {
     let parsed: Message = serde_json::from_value(json!({
         "role": "user",
         "content": "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed.",
@@ -122,11 +122,13 @@ fn test_legacy_user_notice_deserializes_to_system_notice() {
     .unwrap();
 
     match parsed {
-        Message::SystemNotice(notice) => {
-            assert_eq!(notice.kind, SystemNoticeKind::ToolScope);
-            assert_eq!(notice.body, "Tool configuration changed.");
+        Message::User(user) => {
+            assert_eq!(
+                user.text_content(),
+                "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed."
+            );
         }
-        other => panic!("expected system notice, got {other:?}"),
+        other => panic!("expected user message, got {other:?}"),
     }
 }
 
@@ -147,6 +149,82 @@ fn test_reserved_prefix_user_text_stays_user_without_notice_metadata() {
         }
         other => panic!("expected user message, got {other:?}"),
     }
+}
+
+#[test]
+fn test_future_system_notice_block_deserializes_as_unknown_meta() {
+    let parsed: Message = serde_json::from_value(json!({
+        "role": "system_notice",
+        "kind": "generic",
+        "body": "Future runtime fact.",
+        "blocks": [
+            {
+                "type": "future_runtime_fact",
+                "summary": "Future fact",
+                "payload": {
+                    "alpha": 1
+                },
+                "extra": true
+            }
+        ]
+    }))
+    .unwrap();
+
+    match parsed {
+        Message::SystemNotice(notice) => {
+            assert_eq!(notice.kind, SystemNoticeKind::Generic);
+            assert_eq!(notice.body.as_deref(), Some("Future runtime fact."));
+            assert_eq!(notice.blocks.len(), 1);
+            match &notice.blocks[0] {
+                SystemNoticeBlock::Unknown { summary, payload } => {
+                    assert_eq!(summary.as_deref(), Some("Future fact"));
+                    let payload = payload.as_ref().expect("unknown block payload");
+                    assert_eq!(payload["type"], "future_runtime_fact");
+                    assert_eq!(payload["payload"]["alpha"], 1);
+                    assert_eq!(payload["extra"], true);
+                }
+                other => panic!("expected unknown block, got {other:?}"),
+            }
+        }
+        other => panic!("expected system notice, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_system_notice_block_without_type_is_invalid() {
+    let err = serde_json::from_value::<Message>(json!({
+        "role": "system_notice",
+        "kind": "generic",
+        "blocks": [
+            {
+                "summary": "Malformed block"
+            }
+        ]
+    }))
+    .expect_err("missing block type should remain invalid");
+
+    assert!(
+        err.to_string().contains("missing system notice block type"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn external_event_projection_without_body_uses_source_not_event_type_body() {
+    let block = SystemNoticeBlock::ExternalEvent {
+        source: "webhook".to_string(),
+        event_type: "webhook.received".to_string(),
+        summary: Some("External event via webhook".to_string()),
+        body: None,
+        payload: None,
+        content: vec![ContentBlock::Text {
+            text: "caption".to_string(),
+        }],
+    };
+
+    let projection = block.model_projection_text();
+    assert!(projection.starts_with("External event via webhook\ncaption"));
+    assert!(!projection.contains("External event via webhook: webhook.received"));
 }
 
 #[test]

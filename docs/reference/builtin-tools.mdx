@@ -99,7 +99,7 @@ Beyond static factory flags and per-build overrides, tool visibility can be chan
 
 **Staging:** External callers stage filter updates via `ToolScopeHandle::stage_external_filter(filter)`. The staged filter is NOT applied immediately — the current turn is unaffected.
 
-**Boundary apply:** At the start of each `CallingLlm` loop iteration, `tool_scope.apply_staged(dispatcher_tools)` atomically promotes the staged filter to active, prunes stale tool names, and returns the visible tool set. A `ToolConfigChanged` event is emitted and a `[SYSTEM NOTICE]` is injected into the conversation.
+**Boundary apply:** At the start of each `CallingLlm` loop iteration, `tool_scope.apply_staged(dispatcher_tools)` atomically promotes the staged filter to active, prunes stale tool names, and returns the visible tool set. A `ToolConfigChanged` event is emitted and a typed `tool_config` system notice is recorded in the conversation.
 
 **Filter types:**
 - `ToolFilter::All` — no restriction (default)

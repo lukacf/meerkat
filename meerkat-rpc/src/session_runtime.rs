@@ -3766,7 +3766,7 @@ impl SessionRuntime {
 
     fn live_text_from_runtime_primitive(primitive: &RunPrimitive) -> Option<String> {
         let mut parts = Vec::new();
-        let prompt = primitive.extract_content_input().text_content();
+        let prompt = primitive.model_projection_content_input().text_content();
         if !prompt.trim().is_empty() {
             parts.push(prompt);
         }
@@ -4937,7 +4937,8 @@ impl SessionRuntime {
                     flow_tool_overlay.clone(),
                     pre_turn_context_appends.clone(),
                     primitive.turn_metadata().cloned(),
-                ),
+                )
+                .with_typed_turn_appends(primitive.typed_turn_appends()),
             };
 
             let result_rx = self.spawn_service_apply_runtime_turn_with_recoverable_admission_guard(
@@ -5117,7 +5118,8 @@ impl SessionRuntime {
                         flow_tool_overlay,
                         pre_turn_context_appends.clone(),
                         primitive.turn_metadata().cloned(),
-                    ),
+                    )
+                    .with_typed_turn_appends(primitive.typed_turn_appends()),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -5168,7 +5170,8 @@ impl SessionRuntime {
                     flow_tool_overlay,
                     pre_turn_context_appends,
                     primitive.turn_metadata().cloned(),
-                ),
+                )
+                .with_typed_turn_appends(primitive.typed_turn_appends()),
             },
             match primitive {
                 RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -7563,22 +7566,22 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
 
     #[test]
-    fn extract_system_prompt_runtime_returns_rendered_text_for_first_system_notice() {
+    fn extract_system_prompt_runtime_returns_model_projection_for_first_system_notice() {
         // R10 (review-3 follow-up): the runtime-side extractor must accept a
         // leading `Message::SystemNotice` because
         // `realtime_projection_messages` (lines 435-444 in this file) only
         // rewrites `seed_messages[0]` when the root-system helper returns
         // `Some`; sessions whose only lead is a runtime-injected
         // `SystemNotice` (e.g. an idle pre-prompt session with an
-        // `[MCP_PENDING]` notice) would otherwise see refresh `session.update`
+        // typed MCP-pending notice) would otherwise see refresh `session.update`
         // wipe the provider's instructions to empty. We surface
-        // `rendered_text()` (prefix-tagged) to match what the agent loop
-        // would project at line 405.
+        // `model_projection_text()` to match the provider-visible projection
+        // without reviving prefix prose as transcript contract.
         use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage, UserMessage};
 
         let notice =
             SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
-        let expected = notice.rendered_text();
+        let expected = notice.model_projection_text();
         let messages = vec![
             Message::SystemNotice(notice),
             Message::User(UserMessage::text("hi".to_string())),

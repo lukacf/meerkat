@@ -200,6 +200,7 @@ mod tests {
             },
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert!(validate_peer_handling_mode(&input).is_ok());

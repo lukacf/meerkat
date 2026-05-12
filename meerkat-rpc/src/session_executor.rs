@@ -209,7 +209,53 @@ fn render_context_append_text(content: &CoreRenderable) -> String {
             Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
             _ => format!("[Reference] {uri}"),
         },
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *kind,
+                body.clone(),
+                blocks.clone(),
+            )
+            .model_projection_text()
+        }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod typed_context_append_tests {
+    use super::*;
+    use meerkat_core::types::{
+        SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    };
+
+    #[test]
+    fn context_system_notice_projects_only_via_notice_projection() {
+        let blocks = vec![SystemNoticeBlock::Comms {
+            kind: "response_terminal".to_string(),
+            direction: SystemNoticeDirection::Incoming,
+            peer: None,
+            request_id: Some("req-1".to_string()),
+            intent: Some("checksum_token".to_string()),
+            status: Some("completed".to_string()),
+            summary: Some("Peer terminal response".to_string()),
+            payload: None,
+            content: Vec::new(),
+        }];
+        let content = CoreRenderable::SystemNotice {
+            kind: SystemNoticeKind::Comms,
+            body: Some("Peer terminal response context".to_string()),
+            blocks: blocks.clone(),
+        };
+
+        assert_eq!(
+            render_context_append_text(&content),
+            SystemNoticeMessage::with_blocks(
+                SystemNoticeKind::Comms,
+                Some("Peer terminal response context".to_string()),
+                blocks,
+            )
+            .model_projection_text()
+        );
     }
 }
 
@@ -526,7 +572,8 @@ impl CoreExecutor for MobRpcRuntimeExecutor {
                         flow_tool_overlay,
                         pre_turn_context_appends,
                         turn_metadata,
-                    ),
+                    )
+                    .with_typed_turn_appends(primitive.typed_turn_appends()),
                 };
                 self.session_service
                     .apply_runtime_turn(

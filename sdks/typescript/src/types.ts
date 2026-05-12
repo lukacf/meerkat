@@ -877,12 +877,16 @@ export type WorkGraphEventKind =
   | "linked"
   | "evidence_added";
 
+export type WorkGraphOwnerKind = "principal" | "agent" | "session" | "mob" | "label";
+
+export interface WorkGraphOwnerKey {
+  readonly kind: WorkGraphOwnerKind;
+  readonly id: string;
+}
+
 export interface WorkGraphOwner {
-  readonly principal?: string;
-  readonly agent?: string;
-  readonly sessionId?: string;
-  readonly mobId?: string;
-  readonly label?: string;
+  readonly key: WorkGraphOwnerKey;
+  readonly displayName?: string;
 }
 
 export interface WorkGraphClaim {

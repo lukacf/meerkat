@@ -127,18 +127,18 @@ pub struct InboxInteraction {
 /// (`webhook`, `rpc`, `stdin`, etc.). Optional body text may follow, but
 /// structured payload remains typed metadata rather than prompt text.
 pub fn format_external_event_projection(source_name: &str, body: Option<&str>) -> String {
-    let label = format!("[EVENT via {source_name}]");
+    let label = format!("External event via {source_name}");
     let body = body.map(str::trim).filter(|body| !body.is_empty());
 
     match body {
-        Some(body) => format!("{label} {body}"),
+        Some(body) => format!("{label}: {body}"),
         None => label,
     }
 }
 
 /// Canonical model-facing text projection for a peer message.
 pub fn format_peer_message_projection(from_peer: &str, body: &str) -> String {
-    format!("[COMMS MESSAGE from {from_peer}]\n{body}")
+    format!("Peer message from {from_peer}:\n{body}")
 }
 
 /// Schema-shaped model-facing `send_response` call affordance.
@@ -240,8 +240,9 @@ pub fn format_peer_request_projection(
         SendResponseCallProjection::new(from_peer_id, display_name, request_id.clone());
 
     format!(
-        "[COMMS REQUEST from peer_id {from_peer_id}{display_suffix} (id: {request_id})]\n\
+        "Peer request from peer_id {from_peer_id}{display_suffix} (id: {request_id})\n\
          Intent: {intent}{params_str}\n\
+         Request ID: {request_id}\n\
          \n\
          This is a correlated peer request. {} \
          Do not answer this request with send_message.",
@@ -271,14 +272,14 @@ pub fn format_peer_response_projection(
     };
 
     format!(
-        "[COMMS RESPONSE from {from_peer} (to request: {in_reply_to})]\n\
+        "Peer response from {from_peer} (to request: {in_reply_to})\n\
          Status: {status_str}{result_str}"
     )
 }
 
 /// Canonical model-facing text projection for a peer ack.
 pub fn format_peer_ack_projection(from_peer: &str, in_reply_to: impl std::fmt::Display) -> String {
-    format!("[COMMS ACK from {from_peer} (to request: {in_reply_to})]")
+    format!("Peer ack from {from_peer} (to request: {in_reply_to})")
 }
 
 /// Classification result for incoming peer/event traffic.
@@ -1307,7 +1308,7 @@ mod tests {
             body: "payload".to_string(),
         });
         assert_eq!(plain.classification.class, PeerInputClass::PlainEvent);
-        assert_eq!(plain.rendered_text, "[EVENT via tcp] payload");
+        assert_eq!(plain.rendered_text, "External event via tcp: payload");
     }
 
     #[test]
@@ -1341,7 +1342,7 @@ mod tests {
                 body: "hello".into(),
                 blocks: None,
             },
-            rendered_text: "[EVENT via webhook] hello".into(),
+            rendered_text: "External event via webhook: hello".into(),
             handling_mode: HandlingMode::Steer,
             render_metadata: Some(RenderMetadata {
                 class: crate::types::RenderClass::SystemNotice,

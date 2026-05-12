@@ -27,6 +27,18 @@ repos:
         files: '(^Cargo\.toml$|^Cargo\.lock$|^[^/]+/Cargo\.toml$|^MODULE\.bazel$|^scripts/generate-bazel-rust-builds\.mjs$)'
         pass_filenames: false
 
+  # On commit: keep the bundled dogma docs inside the repo-local skill synced
+  # from the canonical architecture docs. The hook rewrites stale skill copies
+  # and fails so the refreshed files can be staged.
+  - repo: local
+    hooks:
+      - id: sync-meerkat-dogma-skill-docs
+        name: sync Meerkat dogma skill docs
+        entry: scripts/sync-meerkat-dogma-skill-docs.sh
+        language: script
+        files: '^(docs/architecture/meerkat-dogma(-commentary)?\.md|\.claude/skills/meerkat-dogma-inquisition/references/meerkat-dogma(-commentary)?\.md|scripts/sync-meerkat-dogma-skill-docs\.sh)$'
+        pass_filenames: false
+
   # Manual: changed-crate deterministic validation when you want a local preflight.
   - repo: local
     hooks:

@@ -69,6 +69,14 @@ pub fn render_context_append_text(content: &CoreRenderable) -> String {
             Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
             _ => format!("[Reference] {uri}"),
         },
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *kind,
+                body.clone(),
+                blocks.clone(),
+            )
+            .model_projection_text()
+        }
         _ => String::new(),
     }
 }

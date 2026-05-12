@@ -1,0 +1,4 @@
+interface:
+  display_name: "Meerkat Dogma Inquisition"
+  short_description: "Ruthless Meerkat dogma reviews"
+  default_prompt: "Use $meerkat-dogma-inquisition to run a ruthless dogma inquisition on this change and group findings by root rule."

@@ -453,7 +453,7 @@ fn convert_messages(messages: &[Message]) -> Result<(Option<String>, Vec<Item>),
                 }
             }
             Message::SystemNotice(notice) => {
-                let rendered = notice.rendered_text();
+                let rendered = notice.model_projection_text();
                 if !rendered.trim().is_empty() {
                     items.push(Item::Message {
                         id: None,

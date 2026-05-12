@@ -1076,6 +1076,10 @@ fn render_context_append_text(content: &CoreRenderable) -> String {
         CoreRenderable::Json { value } => {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            meerkat_core::SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
+                .model_projection_text()
+        }
         CoreRenderable::Reference { uri, label } => match label {
             Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
             _ => format!("[Reference] {uri}"),
@@ -1205,9 +1209,10 @@ async fn apply_runtime_turn(
         };
     }
 
-    let prompt = primitive.extract_content_input();
     let boundary = primitive.apply_boundary();
     let contributing_input_ids = primitive.contributing_input_ids().to_vec();
+    let typed_turn_appends = primitive.typed_turn_appends();
+    let prompt = primitive.extract_content_input();
     let pre_turn_context_appends = match primitive {
         RunPrimitive::StagedInput(staged)
             if primitive.is_peer_response_terminal_context_and_run() =>
@@ -1238,7 +1243,8 @@ async fn apply_runtime_turn(
                 .and_then(|meta| meta.flow_tool_overlay.clone()),
             pre_turn_context_appends.clone(),
             primitive.turn_metadata().cloned(),
-        ),
+        )
+        .with_typed_turn_appends(typed_turn_appends.clone()),
     };
 
     let mut pre_admission = context
@@ -1321,7 +1327,8 @@ async fn apply_runtime_turn(
                                 .and_then(|meta| meta.flow_tool_overlay.clone()),
                             pre_turn_context_appends,
                             primitive.turn_metadata().cloned(),
-                        ),
+                        )
+                        .with_typed_turn_appends(typed_turn_appends),
                     },
                     boundary,
                     contributing_input_ids,
@@ -1456,6 +1463,36 @@ mod tests {
         })
     }
 
+    #[test]
+    fn mcp_context_system_notice_projects_via_typed_notice() {
+        let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
+            kind: "response_terminal".to_string(),
+            direction: meerkat_core::types::SystemNoticeDirection::Incoming,
+            peer: None,
+            request_id: Some("req-1".to_string()),
+            intent: Some("checksum_token".to_string()),
+            status: Some("completed".to_string()),
+            summary: Some("Peer terminal response".to_string()),
+            payload: None,
+            content: Vec::new(),
+        }];
+        let content = CoreRenderable::SystemNotice {
+            kind: meerkat_core::types::SystemNoticeKind::Comms,
+            body: Some("Peer terminal response context".to_string()),
+            blocks: blocks.clone(),
+        };
+
+        assert_eq!(
+            render_context_append_text(&content),
+            meerkat_core::SystemNoticeMessage::with_blocks(
+                meerkat_core::types::SystemNoticeKind::Comms,
+                Some("Peer terminal response context".to_string()),
+                blocks,
+            )
+            .model_projection_text()
+        );
+    }
+
     fn create_request(
         prompt: &str,
         initial_turn: meerkat_core::service::InitialTurnPolicy,
@@ -1497,7 +1534,7 @@ mod tests {
                 key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-invalid"
                     .to_string(),
                 content: CoreRenderable::Text {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] invalid".to_string(),
+                    text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-invalid\nStatus: completed\ninvalid".to_string(),
                 },
             }],
             contributing_input_ids: vec![InputId::new()],

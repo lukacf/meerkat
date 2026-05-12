@@ -728,7 +728,7 @@ mod tests {
         };
 
         let text = msg.to_user_message_text();
-        assert!(text.contains("COMMS MESSAGE"));
+        assert!(text.contains("Peer message from review-agent"));
         assert!(text.contains("review-agent"));
         assert!(text.contains("Please review PR #42"));
     }
@@ -749,7 +749,7 @@ mod tests {
         };
 
         let text = msg.to_user_message_text();
-        assert!(text.contains("COMMS REQUEST"));
+        assert!(text.contains("Peer request from peer_id"));
         assert!(text.contains("coding-agent"));
         assert!(text.contains("review"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
@@ -780,7 +780,7 @@ mod tests {
         };
 
         let text = msg.to_user_message_text();
-        assert!(text.contains("COMMS RESPONSE"));
+        assert!(text.contains("Peer response from review-agent"));
         assert!(text.contains("review-agent"));
         assert!(text.contains("completed"));
         assert!(text.contains("550e8400-e29b-41d4-a716-446655440000"));
@@ -935,7 +935,7 @@ mod tests {
             render_metadata: None,
         };
         let text = msg.to_user_message_text();
-        assert_eq!(text, "[EVENT via webhook] CPU > 95% on prod-3");
+        assert_eq!(text, "External event via webhook: CPU > 95% on prod-3");
     }
 
     #[test]

@@ -12,6 +12,152 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_work_graph_lifecycle_machine()
 }
 
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkDependencyPathKey(pub String);
+impl From<String> for WorkDependencyPathKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkDependencyPathKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkDependencyPathKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkEdgeKey(pub String);
+impl From<String> for WorkEdgeKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkEdgeKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkEdgeKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum WorkEdgeKind {
+    #[default]
+    #[serde(rename = "Blocks")]
+    Blocks,
+    #[serde(rename = "Parent")]
+    Parent,
+    #[serde(rename = "Related")]
+    Related,
+    #[serde(rename = "Supersedes")]
+    Supersedes,
+    #[serde(rename = "DerivedFrom")]
+    DerivedFrom,
+}
+impl WorkEdgeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Blocks => "Blocks",
+            Self::Parent => "Parent",
+            Self::Related => "Related",
+            Self::Supersedes => "Supersedes",
+            Self::DerivedFrom => "DerivedFrom",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for WorkEdgeKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Blocks" => Ok(Self::Blocks),
+            "Parent" => Ok(Self::Parent),
+            "Related" => Ok(Self::Related),
+            "Supersedes" => Ok(Self::Supersedes),
+            "DerivedFrom" => Ok(Self::DerivedFrom),
+            other => Err(format!("invalid WorkEdgeKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for WorkEdgeKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for WorkEdgeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct WorkItemKey(pub String);
+impl From<String> for WorkItemKey {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+impl From<&str> for WorkItemKey {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+impl std::fmt::Display for WorkItemKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -82,34 +228,7 @@ impl std::fmt::Display for WorkLifecycleState {
         f.write_str(self.as_str())
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct WorkOwnerKey(pub String);
-impl From<String> for WorkOwnerKey {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for WorkOwnerKey {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for WorkOwnerKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+pub type WorkOwnerKey = meerkat_machine_schema::catalog::dsl::workgraph_lifecycle::WorkOwnerKey;
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -132,6 +251,10 @@ pub struct State {
     pub phase: Phase,
     pub revision: u64,
     pub unresolved_blocker_count: u64,
+    pub topology_item_keys: std::collections::BTreeSet<WorkItemKey>,
+    pub topology_edge_keys: std::collections::BTreeSet<WorkEdgeKey>,
+    pub blocks_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
+    pub parent_reachability: std::collections::BTreeSet<WorkDependencyPathKey>,
     pub claim_owner_key: Option<WorkOwnerKey>,
     pub claimed_at_utc_ms: Option<u64>,
     pub lease_expires_at_utc_ms: Option<u64>,
@@ -193,10 +316,11 @@ pub mod inputs {
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ValidateLink {
-        pub endpoints_exist: bool,
-        pub self_edge: bool,
-        pub duplicate_edge: bool,
-        pub would_create_cycle: bool,
+        pub kind: WorkEdgeKind,
+        pub from_item_key: WorkItemKey,
+        pub to_item_key: WorkItemKey,
+        pub edge_key: WorkEdgeKey,
+        pub reverse_path_key: WorkDependencyPathKey,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct CloseCompleted {
@@ -423,6 +547,10 @@ pub fn initial_state() -> State {
         phase: Phase::Absent,
         revision: 0,
         unresolved_blocker_count: 0,
+        topology_item_keys: Default::default(),
+        topology_edge_keys: Default::default(),
+        blocks_reachability: Default::default(),
+        parent_reachability: Default::default(),
         claim_owner_key: None,
         claimed_at_utc_ms: None,
         lease_expires_at_utc_ms: None,

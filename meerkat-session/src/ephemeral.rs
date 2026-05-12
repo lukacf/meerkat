@@ -437,6 +437,7 @@ pub trait SessionAgent: Send {
         prompt: meerkat_core::types::ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
         _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
@@ -448,6 +449,11 @@ pub trait SessionAgent: Send {
         if render_metadata.is_some() {
             return Err(meerkat_core::error::AgentError::ConfigError(
                 "render_metadata requires a runtime-backed surface".to_string(),
+            ));
+        }
+        if !typed_turn_appends.is_empty() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "typed turn appends require a runtime-backed surface".to_string(),
             ));
         }
         self.run_with_events(prompt, event_tx).await
@@ -3363,8 +3369,16 @@ async fn session_task<A: SessionAgent>(
                     skill_references,
                     flow_tool_overlay,
                     pre_turn_context_appends,
+                    typed_turn_appends,
                     metadata,
                 ) = (*runtime).into_effective_parts();
+                let prompt = if typed_turn_appends.is_empty() {
+                    prompt
+                } else {
+                    meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                        &typed_turn_appends,
+                    )
+                };
                 let execution_kind = metadata
                     .as_ref()
                     .and_then(|metadata| metadata.execution_kind);
@@ -3522,6 +3536,7 @@ async fn session_task<A: SessionAgent>(
                                 prompt,
                                 handling_mode,
                                 render_metadata,
+                                typed_turn_appends,
                                 execution_kind,
                                 agent_event_tx.clone(),
                             ))
@@ -4313,7 +4328,7 @@ mod runtime_turn_metadata_tests {
             .await
             .expect("deferred session should create");
         let appends = vec![PendingSystemContextAppend {
-            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] token birch seventeen".to_string(),
+            text: "Peer terminal response from test\nRequest ID: req\nStatus: completed\ntoken birch seventeen".to_string(),
             source: Some("peer_response_terminal:test:req".to_string()),
             idempotency_key: Some("peer_response_terminal:test:req".to_string()),
             accepted_at: meerkat_core::time_compat::SystemTime::now(),

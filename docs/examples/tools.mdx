@@ -359,7 +359,7 @@ Tool visibility can change during a session. Changes are staged and atomically a
   </Tab>
 </Tabs>
 
-**Composition rule:** most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` when its tool set changes, and a `tool_config_changed` event is emitted to the event stream.
+**Composition rule:** most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The conversation records a typed `tool_config` system notice when the tool set changes, and a `tool_config_changed` event is emitted to the event stream.
 
 ## Advanced: Custom tools (Rust SDK)
 

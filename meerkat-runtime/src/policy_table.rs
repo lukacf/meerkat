@@ -202,9 +202,9 @@ impl DefaultPolicyTable {
             // input with `QueueMode::Fifo` queues a turn-start so the runtime
             // loop's `WakeIfIdle` path has something to dequeue and execute.
             //
-            // The payload still flows through the durable system-context
-            // append path (`input_to_context_append`), so the rendered
-            // `[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]` text is deduped on
+            // The payload still flows through the durable typed
+            // system-context append path (`input_to_context_append`), so the
+            // peer terminal response fact is deduped on
             // `peer_response_terminal:{peer_id}:{request_id}` rather than
             // stacking as ordinary user appends (`input_to_append` returns
             // `None` for this convention).
@@ -572,6 +572,7 @@ mod tests {
             header,
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);
@@ -599,6 +600,7 @@ mod tests {
             },
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: Some(RuntimeTurnMetadata {
                 handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
                 ..Default::default()

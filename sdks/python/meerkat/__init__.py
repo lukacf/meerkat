@@ -194,6 +194,8 @@ from .types import (
     WorkGraphEventKind,
     WorkGraphItemFilter,
     WorkGraphOwner,
+    WorkGraphOwnerKey,
+    WorkGraphOwnerKind,
     WorkGraphPriority,
     WorkGraphReadyFilter,
     WorkGraphSnapshot,

@@ -8,13 +8,18 @@ use crate::machines::workgraph_lifecycle as wg_dsl;
 use crate::types::{
     AddEvidenceRequest, ClaimWorkItemRequest, CloseWorkItemRequest, CreateWorkItemRequest,
     ReleaseWorkItemRequest, UpdateWorkItemRequest, WorkClaim, WorkEdge, WorkEdgeKind,
-    WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemId, WorkNamespace, WorkStatus,
+    WorkGraphEvent, WorkGraphEventKind, WorkGraphMachineState, WorkItem, WorkItemId, WorkNamespace,
+    WorkStatus,
 };
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WorkGraphMachine;
 
 impl WorkGraphMachine {
+    pub fn validate_item_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
+        validate_item_machine_projection(item)
+    }
+
     pub fn create_item(
         request: CreateWorkItemRequest,
         realm_id: String,
@@ -53,7 +58,7 @@ impl WorkGraphMachine {
             | WorkStatus::Failed => unreachable!("invalid create status rejected above"),
         };
         let dsl_state = apply_new_item_dsl(input)?;
-        let item = WorkItem {
+        let mut item = WorkItem {
             id: WorkItemId::generated(),
             realm_id,
             namespace,
@@ -64,6 +69,7 @@ impl WorkGraphMachine {
             labels: normalize_labels(request.labels)?,
             owner: None,
             claim: None,
+            machine_state: dsl_state.clone(),
             revision: dsl_state.revision,
             due_at: dsl_state.due_at_utc_ms.and_then(millis_to_datetime),
             not_before: dsl_state.not_before_utc_ms.and_then(millis_to_datetime),
@@ -74,6 +80,7 @@ impl WorkGraphMachine {
             external_refs: request.external_refs,
             evidence_refs: request.evidence_refs,
         };
+        sync_item_from_machine_state(&mut item)?;
         let event = item_event(&item, WorkGraphEventKind::Created, now)?;
         Ok((item, event))
     }
@@ -88,13 +95,13 @@ impl WorkGraphMachine {
         let snoozed_until = request.snoozed_until.or(item.snoozed_until);
         let dsl_state = apply_item_dsl(
             &item,
-            0,
+            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Update {
                 expected_revision: request.expected_revision,
                 due_at_utc_ms: due_at.map(datetime_to_millis),
                 not_before_utc_ms: not_before.map(datetime_to_millis),
                 snoozed_until_utc_ms: snoozed_until.map(datetime_to_millis),
-                unresolved_blocker_count: 0,
+                unresolved_blocker_count: item.machine_state.unresolved_blocker_count,
             },
             Some(request.expected_revision),
         )?;
@@ -111,11 +118,8 @@ impl WorkGraphMachine {
         if let Some(labels) = request.labels {
             item.labels = normalize_labels(labels)?;
         }
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
-        item.revision = dsl_state.revision;
-        item.due_at = dsl_state.due_at_utc_ms.and_then(millis_to_datetime);
-        item.not_before = dsl_state.not_before_utc_ms.and_then(millis_to_datetime);
-        item.snoozed_until = dsl_state.snoozed_until_utc_ms.and_then(millis_to_datetime);
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         if !request.external_refs.is_empty() {
             item.external_refs = request.external_refs;
         }
@@ -129,22 +133,43 @@ impl WorkGraphMachine {
         request: ClaimWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
-        Self::claim_item_with_unresolved_blockers(item, 0, request, now)
+        Self::claim_ready_item(item, request, now)
     }
 
     pub fn claim_ready_item(
         item: WorkItem,
-        all_items: &BTreeMap<WorkItemId, WorkItem>,
-        edges: &[WorkEdge],
         request: ClaimWorkItemRequest,
         now: DateTime<Utc>,
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         Self::claim_item_with_unresolved_blockers(
             item.clone(),
-            unresolved_blocker_count(&item, all_items, edges),
+            item.machine_state.unresolved_blocker_count,
             request,
             now,
         )
+    }
+
+    pub fn refresh_eligibility(
+        mut item: WorkItem,
+        unresolved_blocker_count: u64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<(WorkItem, WorkGraphEvent)>, WorkGraphError> {
+        if item.machine_state.unresolved_blocker_count == unresolved_blocker_count {
+            return Ok(None);
+        }
+        let dsl_state = apply_item_dsl(
+            &item,
+            unresolved_blocker_count,
+            wg_dsl::WorkGraphLifecycleInput::RefreshEligibility {
+                unresolved_blocker_count,
+            },
+            None,
+        )?;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
+        item.updated_at = now;
+        let event = item_event(&item, WorkGraphEventKind::Updated, now)?;
+        Ok(Some((item, event)))
     }
 
     fn claim_item_with_unresolved_blockers(
@@ -176,8 +201,8 @@ impl WorkGraphMachine {
             claimed_at: now,
             lease_expires_at,
         });
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
-        item.revision = dsl_state.revision;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::Claimed, now)?;
         Ok((item, event))
@@ -190,7 +215,7 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            0,
+            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Release {
                 expected_revision: request.expected_revision,
             },
@@ -198,8 +223,8 @@ impl WorkGraphMachine {
         )?;
         item.claim = None;
         item.owner = None;
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
-        item.revision = dsl_state.revision;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::Released, now)?;
         Ok((item, event))
@@ -212,15 +237,14 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            0,
+            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Block { expected_revision },
             Some(expected_revision),
         )?;
-        item.status = WorkStatus::Blocked;
         item.claim = None;
         item.owner = None;
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
-        item.revision = dsl_state.revision;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::Blocked, now)?;
         Ok((item, event))
@@ -250,12 +274,16 @@ impl WorkGraphMachine {
                 ));
             }
         };
-        let dsl_state = apply_item_dsl(&item, 0, dsl_input, Some(request.expected_revision))?;
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
+        let dsl_state = apply_item_dsl(
+            &item,
+            item.machine_state.unresolved_blocker_count,
+            dsl_input,
+            Some(request.expected_revision),
+        )?;
         item.claim = None;
         item.owner = None;
-        item.terminal_at = dsl_state.terminal_at_utc_ms.and_then(millis_to_datetime);
-        item.revision = dsl_state.revision;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::Closed, now)?;
         Ok((item, event))
@@ -268,30 +296,28 @@ impl WorkGraphMachine {
     ) -> Result<(WorkItem, WorkGraphEvent), WorkGraphError> {
         let dsl_state = apply_item_dsl(
             &item,
-            0,
+            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::AddEvidence {
                 expected_revision: request.expected_revision,
             },
             Some(request.expected_revision),
         )?;
         item.evidence_refs.push(request.evidence);
-        item.status = work_status_from_dsl(dsl_state.lifecycle_phase)?;
-        item.revision = dsl_state.revision;
+        item.machine_state = dsl_state;
+        sync_item_from_machine_state(&mut item)?;
         item.updated_at = now;
         let event = item_event(&item, WorkGraphEventKind::EvidenceAdded, now)?;
         Ok((item, event))
     }
 
-    pub fn is_ready(
-        item: &WorkItem,
-        all_items: &BTreeMap<WorkItemId, WorkItem>,
-        edges: &[WorkEdge],
-        now: DateTime<Utc>,
-    ) -> bool {
-        let owner_key = wg_dsl::WorkOwnerKey("__ready_probe__".to_string());
+    pub fn is_ready(item: &WorkItem, now: DateTime<Utc>) -> bool {
+        let owner_key = wg_dsl::WorkOwnerKey {
+            kind: wg_dsl::WorkOwnerKind::Label,
+            id: "__ready_probe__".to_string(),
+        };
         apply_item_dsl(
             item,
-            unresolved_blocker_count(item, all_items, edges),
+            item.machine_state.unresolved_blocker_count,
             wg_dsl::WorkGraphLifecycleInput::Claim {
                 expected_revision: item.revision,
                 owner_key,
@@ -303,41 +329,29 @@ impl WorkGraphMachine {
         .is_ok()
     }
 
-    pub fn ready_items(
-        items: Vec<WorkItem>,
-        edges: &[WorkEdge],
-        now: DateTime<Utc>,
-    ) -> Vec<WorkItem> {
-        let all_items = items
-            .iter()
-            .cloned()
-            .map(|item| (item.id.clone(), item))
-            .collect::<BTreeMap<_, _>>();
+    pub fn ready_items(items: Vec<WorkItem>, now: DateTime<Utc>) -> Vec<WorkItem> {
         items
             .into_iter()
-            .filter(|item| Self::is_ready(item, &all_items, edges, now))
+            .filter(|item| Self::is_ready(item, now))
             .collect()
     }
 
     pub fn validate_link(
         edge: &WorkEdge,
+        existing_items: &[WorkItem],
         existing_edges: &[WorkEdge],
-        endpoints_exist: bool,
     ) -> Result<(), WorkGraphError> {
-        let self_edge = edge.from_id == edge.to_id;
-        let duplicate_edge = existing_edges.iter().any(|existing| {
-            existing.kind == edge.kind
-                && existing.from_id == edge.from_id
-                && existing.to_id == edge.to_id
-        });
-        let would_create_cycle = matches!(edge.kind, WorkEdgeKind::Blocks | WorkEdgeKind::Parent)
-            && has_path(existing_edges, edge.kind, &edge.to_id, &edge.from_id);
-        apply_link_validation_dsl(wg_dsl::WorkGraphLifecycleInput::ValidateLink {
-            endpoints_exist,
-            self_edge,
-            duplicate_edge,
-            would_create_cycle,
-        })?;
+        let topology_state = topology_state(existing_items, existing_edges);
+        apply_link_validation_dsl(
+            topology_state,
+            wg_dsl::WorkGraphLifecycleInput::ValidateLink {
+                kind: dsl_edge_kind(edge.kind),
+                from_item_key: work_item_key(&edge.from_id),
+                to_item_key: work_item_key(&edge.to_id),
+                edge_key: work_edge_key(edge.kind, &edge.from_id, &edge.to_id),
+                reverse_path_key: dependency_path_key(edge.kind, &edge.to_id, &edge.from_id),
+            },
+        )?;
         Ok(())
     }
 }
@@ -375,8 +389,11 @@ fn apply_new_item_dsl(
     Ok(dsl_auth.state)
 }
 
-fn apply_link_validation_dsl(input: wg_dsl::WorkGraphLifecycleInput) -> Result<(), WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::new();
+fn apply_link_validation_dsl(
+    state: WorkGraphMachineState,
+    input: wg_dsl::WorkGraphLifecycleInput,
+) -> Result<(), WorkGraphError> {
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input)
         .map_err(|error| WorkGraphError::InvalidTransition(format!("{error:?}")))?;
     Ok(())
@@ -387,11 +404,11 @@ fn apply_item_dsl(
     unresolved_blocker_count: u64,
     input: wg_dsl::WorkGraphLifecycleInput,
     expected_revision: Option<u64>,
-) -> Result<wg_dsl::WorkGraphLifecycleMachineState, WorkGraphError> {
-    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(project_item(
-        item,
-        unresolved_blocker_count,
-    )?);
+) -> Result<WorkGraphMachineState, WorkGraphError> {
+    validate_item_machine_projection(item)?;
+    let mut state = item.machine_state.clone();
+    state.unresolved_blocker_count = unresolved_blocker_count;
+    let mut dsl_auth = wg_dsl::WorkGraphLifecycleMachineAuthority::from_state(state);
     wg_dsl::WorkGraphLifecycleMachineMutator::apply(&mut dsl_auth, input).map_err(|error| {
         if let Some(expected) = expected_revision
             && item.revision != expected
@@ -405,46 +422,6 @@ fn apply_item_dsl(
         WorkGraphError::InvalidTransition(format!("{error:?}"))
     })?;
     Ok(dsl_auth.state)
-}
-
-fn project_item(
-    item: &WorkItem,
-    unresolved_blocker_count: u64,
-) -> Result<wg_dsl::WorkGraphLifecycleMachineState, WorkGraphError> {
-    Ok(wg_dsl::WorkGraphLifecycleMachineState {
-        lifecycle_phase: dsl_state_from_work_status(item.status),
-        revision: item.revision,
-        unresolved_blocker_count,
-        claim_owner_key: item
-            .claim
-            .as_ref()
-            .map(|claim| work_owner_key(&claim.owner))
-            .transpose()?,
-        claimed_at_utc_ms: item
-            .claim
-            .as_ref()
-            .map(|claim| datetime_to_millis(claim.claimed_at)),
-        lease_expires_at_utc_ms: item
-            .claim
-            .as_ref()
-            .and_then(|claim| claim.lease_expires_at.map(datetime_to_millis)),
-        due_at_utc_ms: item.due_at.map(datetime_to_millis),
-        not_before_utc_ms: item.not_before.map(datetime_to_millis),
-        snoozed_until_utc_ms: item.snoozed_until.map(datetime_to_millis),
-        terminal_at_utc_ms: item.terminal_at.map(datetime_to_millis),
-        evidence_count: u64::try_from(item.evidence_refs.len()).unwrap_or(u64::MAX),
-    })
-}
-
-fn dsl_state_from_work_status(status: WorkStatus) -> wg_dsl::WorkLifecycleState {
-    match status {
-        WorkStatus::Open => wg_dsl::WorkLifecycleState::Open,
-        WorkStatus::InProgress => wg_dsl::WorkLifecycleState::InProgress,
-        WorkStatus::Blocked => wg_dsl::WorkLifecycleState::Blocked,
-        WorkStatus::Completed => wg_dsl::WorkLifecycleState::Completed,
-        WorkStatus::Cancelled => wg_dsl::WorkLifecycleState::Cancelled,
-        WorkStatus::Failed => wg_dsl::WorkLifecycleState::Failed,
-    }
 }
 
 fn work_status_from_dsl(status: wg_dsl::WorkLifecycleState) -> Result<WorkStatus, WorkGraphError> {
@@ -461,28 +438,214 @@ fn work_status_from_dsl(status: wg_dsl::WorkLifecycleState) -> Result<WorkStatus
     }
 }
 
-fn unresolved_blocker_count(
-    item: &WorkItem,
-    all_items: &BTreeMap<WorkItemId, WorkItem>,
-    edges: &[WorkEdge],
-) -> u64 {
-    edges
-        .iter()
-        .filter(|edge| edge.kind == WorkEdgeKind::Blocks && edge.to_id == item.id)
-        .filter(|edge| {
-            all_items
-                .get(&edge.from_id)
-                .is_none_or(|blocker| !blocker.status.is_terminal_success())
-        })
-        .count()
-        .try_into()
-        .unwrap_or(u64::MAX)
+fn sync_item_from_machine_state(item: &mut WorkItem) -> Result<(), WorkGraphError> {
+    item.status = work_status_from_dsl(item.machine_state.lifecycle_phase)?;
+    item.revision = item.machine_state.revision;
+    item.due_at = item
+        .machine_state
+        .due_at_utc_ms
+        .and_then(millis_to_datetime);
+    item.not_before = item
+        .machine_state
+        .not_before_utc_ms
+        .and_then(millis_to_datetime);
+    item.snoozed_until = item
+        .machine_state
+        .snoozed_until_utc_ms
+        .and_then(millis_to_datetime);
+    item.terminal_at = item
+        .machine_state
+        .terminal_at_utc_ms
+        .and_then(millis_to_datetime);
+    Ok(())
+}
+
+fn validate_item_machine_projection(item: &WorkItem) -> Result<(), WorkGraphError> {
+    let status = work_status_from_dsl(item.machine_state.lifecycle_phase)?;
+    if item.status != status {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} status projection {:?} does not match machine state {:?}",
+            item.id, item.status, status
+        )));
+    }
+    if item.revision != item.machine_state.revision {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} revision projection {} does not match machine state {}",
+            item.id, item.revision, item.machine_state.revision
+        )));
+    }
+    if item.due_at.map(datetime_to_millis) != item.machine_state.due_at_utc_ms {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} due_at projection does not match machine state",
+            item.id
+        )));
+    }
+    if item.not_before.map(datetime_to_millis) != item.machine_state.not_before_utc_ms {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} not_before projection does not match machine state",
+            item.id
+        )));
+    }
+    if item.snoozed_until.map(datetime_to_millis) != item.machine_state.snoozed_until_utc_ms {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} snoozed_until projection does not match machine state",
+            item.id
+        )));
+    }
+    if item.terminal_at.map(datetime_to_millis) != item.machine_state.terminal_at_utc_ms {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} terminal_at projection does not match machine state",
+            item.id
+        )));
+    }
+    if let Some(claim) = &item.claim {
+        let claim_owner_key = work_owner_key(&claim.owner)?;
+        if item.machine_state.claim_owner_key.as_ref() != Some(&claim_owner_key) {
+            return Err(WorkGraphError::Store(format!(
+                "work item {} claim owner projection does not match machine state",
+                item.id
+            )));
+        }
+        if item.machine_state.claimed_at_utc_ms != Some(datetime_to_millis(claim.claimed_at)) {
+            return Err(WorkGraphError::Store(format!(
+                "work item {} claim time projection does not match machine state",
+                item.id
+            )));
+        }
+        if item.machine_state.lease_expires_at_utc_ms
+            != claim.lease_expires_at.map(datetime_to_millis)
+        {
+            return Err(WorkGraphError::Store(format!(
+                "work item {} claim lease projection does not match machine state",
+                item.id
+            )));
+        }
+    } else if item.machine_state.claim_owner_key.is_some()
+        || item.machine_state.claimed_at_utc_ms.is_some()
+        || item.machine_state.lease_expires_at_utc_ms.is_some()
+    {
+        return Err(WorkGraphError::Store(format!(
+            "work item {} machine state has a claim without a claim projection",
+            item.id
+        )));
+    }
+    Ok(())
 }
 
 fn work_owner_key(owner: &crate::types::WorkOwner) -> Result<wg_dsl::WorkOwnerKey, WorkGraphError> {
-    serde_json::to_string(owner)
-        .map(wg_dsl::WorkOwnerKey)
-        .map_err(|error| WorkGraphError::InvalidInput(error.to_string()))
+    let kind = match owner.key.kind {
+        crate::types::WorkOwnerKind::Principal => wg_dsl::WorkOwnerKind::Principal,
+        crate::types::WorkOwnerKind::Agent => wg_dsl::WorkOwnerKind::Agent,
+        crate::types::WorkOwnerKind::Session => wg_dsl::WorkOwnerKind::Session,
+        crate::types::WorkOwnerKind::Mob => wg_dsl::WorkOwnerKind::Mob,
+        crate::types::WorkOwnerKind::Label => wg_dsl::WorkOwnerKind::Label,
+    };
+    Ok(wg_dsl::WorkOwnerKey {
+        kind,
+        id: owner.key.id.clone(),
+    })
+}
+
+fn topology_state(
+    existing_items: &[WorkItem],
+    existing_edges: &[WorkEdge],
+) -> WorkGraphMachineState {
+    WorkGraphMachineState {
+        topology_item_keys: existing_items
+            .iter()
+            .map(|item| work_item_key(&item.id))
+            .collect(),
+        topology_edge_keys: existing_edges
+            .iter()
+            .map(|edge| work_edge_key(edge.kind, &edge.from_id, &edge.to_id))
+            .collect(),
+        blocks_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Blocks),
+        parent_reachability: dependency_reachability(existing_edges, WorkEdgeKind::Parent),
+        ..Default::default()
+    }
+}
+
+fn dependency_reachability(
+    edges: &[WorkEdge],
+    kind: WorkEdgeKind,
+) -> BTreeSet<wg_dsl::WorkDependencyPathKey> {
+    let mut adjacency = BTreeMap::<WorkItemId, BTreeSet<WorkItemId>>::new();
+    for edge in edges.iter().filter(|edge| edge.kind == kind) {
+        adjacency
+            .entry(edge.from_id.clone())
+            .or_default()
+            .insert(edge.to_id.clone());
+    }
+
+    let mut reachability = BTreeSet::new();
+    for start in adjacency.keys() {
+        let mut stack = adjacency
+            .get(start)
+            .into_iter()
+            .flat_map(|targets| targets.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            if !seen.insert(current.clone()) {
+                continue;
+            }
+            reachability.insert(dependency_path_key(kind, start, &current));
+            if let Some(targets) = adjacency.get(&current) {
+                stack.extend(targets.iter().cloned());
+            }
+        }
+    }
+    reachability
+}
+
+fn work_item_key(id: &WorkItemId) -> wg_dsl::WorkItemKey {
+    wg_dsl::WorkItemKey(id.as_str().to_string())
+}
+
+fn work_edge_key(
+    kind: WorkEdgeKind,
+    from_id: &WorkItemId,
+    to_id: &WorkItemId,
+) -> wg_dsl::WorkEdgeKey {
+    wg_dsl::WorkEdgeKey(format!(
+        "{}:{}:{}",
+        edge_kind_key(kind),
+        from_id.as_str(),
+        to_id.as_str()
+    ))
+}
+
+fn dependency_path_key(
+    kind: WorkEdgeKind,
+    from_id: &WorkItemId,
+    to_id: &WorkItemId,
+) -> wg_dsl::WorkDependencyPathKey {
+    wg_dsl::WorkDependencyPathKey(format!(
+        "{}:{}:{}",
+        edge_kind_key(kind),
+        from_id.as_str(),
+        to_id.as_str()
+    ))
+}
+
+fn dsl_edge_kind(kind: WorkEdgeKind) -> wg_dsl::WorkEdgeKind {
+    match kind {
+        WorkEdgeKind::Blocks => wg_dsl::WorkEdgeKind::Blocks,
+        WorkEdgeKind::Parent => wg_dsl::WorkEdgeKind::Parent,
+        WorkEdgeKind::Related => wg_dsl::WorkEdgeKind::Related,
+        WorkEdgeKind::Supersedes => wg_dsl::WorkEdgeKind::Supersedes,
+        WorkEdgeKind::DerivedFrom => wg_dsl::WorkEdgeKind::DerivedFrom,
+    }
+}
+
+fn edge_kind_key(kind: WorkEdgeKind) -> &'static str {
+    match kind {
+        WorkEdgeKind::Blocks => "blocks",
+        WorkEdgeKind::Parent => "parent",
+        WorkEdgeKind::Related => "related",
+        WorkEdgeKind::Supersedes => "supersedes",
+        WorkEdgeKind::DerivedFrom => "derived_from",
+    }
 }
 
 fn datetime_to_millis(dt: DateTime<Utc>) -> u64 {
@@ -513,36 +676,13 @@ fn seconds_to_duration(seconds: u64) -> Duration {
     Duration::seconds(seconds)
 }
 
-fn has_path(
-    edges: &[WorkEdge],
-    kind: WorkEdgeKind,
-    start: &WorkItemId,
-    target: &WorkItemId,
-) -> bool {
-    let mut stack = vec![start.clone()];
-    let mut seen = BTreeSet::new();
-    while let Some(current) = stack.pop() {
-        if !seen.insert(current.clone()) {
-            continue;
-        }
-        if &current == target {
-            return true;
-        }
-        stack.extend(
-            edges
-                .iter()
-                .filter(|edge| edge.kind == kind && edge.from_id == current)
-                .map(|edge| edge.to_id.clone()),
-        );
-    }
-    false
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::types::{ClaimWorkItemRequest, CloseWorkItemRequest, WorkOwner};
+    use crate::types::{
+        ClaimWorkItemRequest, CloseWorkItemRequest, UpdateWorkItemRequest, WorkOwner, WorkOwnerKey,
+    };
 
     fn create(title: &str, now: DateTime<Utc>) -> WorkItem {
         WorkGraphMachine::create_item(
@@ -568,21 +708,43 @@ mod tests {
         .0
     }
 
+    fn owner(id: &str) -> WorkOwner {
+        WorkOwner::new(WorkOwnerKey::label(id).expect("owner key"))
+    }
+
     #[test]
     fn blocked_items_are_never_ready() {
         let now = Utc::now();
-        let mut item = create("blocked", now);
-        item.status = WorkStatus::Blocked;
-        assert!(WorkGraphMachine::ready_items(vec![item], &[], now).is_empty());
+        let item = create("blocked", now);
+        let (item, _) = WorkGraphMachine::block_item(item, 1, now).expect("block");
+        assert!(WorkGraphMachine::ready_items(vec![item], now).is_empty());
     }
 
     #[test]
     fn future_due_items_are_not_ready() {
         let now = Utc::now();
-        let mut item = create("future", now);
-        item.due_at = Some(now + Duration::hours(1));
+        let item = create("future", now);
+        let (item, _) = WorkGraphMachine::update_item(
+            item,
+            UpdateWorkItemRequest {
+                id: WorkItemId::generated(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: 1,
+                title: None,
+                description: None,
+                priority: None,
+                labels: None,
+                due_at: Some(now + Duration::hours(1)),
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+            },
+            now,
+        )
+        .expect("update due");
 
-        assert!(WorkGraphMachine::ready_items(vec![item], &[], now).is_empty());
+        assert!(WorkGraphMachine::ready_items(vec![item], now).is_empty());
     }
 
     #[test]
@@ -608,7 +770,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: 2,
-                owner: WorkOwner::default(),
+                owner: owner("worker"),
                 lease_seconds: None,
                 lease_expires_at: None,
             },
@@ -638,7 +800,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: 1,
-                owner: WorkOwner::default(),
+                owner: owner("worker"),
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },
@@ -652,7 +814,7 @@ mod tests {
                 realm_id: None,
                 namespace: None,
                 expected_revision: 2,
-                owner: WorkOwner::default(),
+                owner: owner("worker-2"),
                 lease_seconds: Some(60),
                 lease_expires_at: None,
             },

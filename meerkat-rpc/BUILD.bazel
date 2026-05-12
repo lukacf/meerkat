@@ -279,6 +279,7 @@ rust_test(
     compile_data = [
         "Cargo.toml",
         "src/main.rs",
+        "src/session_runtime.rs",
     ] + [
         "//:live_smoke_support",
     ],

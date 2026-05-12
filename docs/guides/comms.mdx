@@ -621,13 +621,13 @@ The important architectural split is:
 
 Historically this was sometimes described as "turn-boundary inbox draining." That is not the primary mental model anymore. The canonical model is runtime-backed queueing and admission.
 
-### Message injection format
+### Transcript and model projection
 
-Incoming messages are formatted as text for the LLM:
+Incoming comms are persisted as typed `system_notice` blocks with `comms` payloads. `role=user` remains reserved for human/operator-authored text. The runtime projects those typed blocks into provider-facing text only while assembling model input:
 
-- **Message**: `[COMMS MESSAGE from <peer>]\n<body>`
-- **Request**: `[COMMS REQUEST from peer_id <peer-id> (display_name: <name>) (id: <uuid>)]\nIntent: <intent>\nParams: <json>\n\nTo respond, call send_response with peer_id="<peer-id>", in_reply_to="<uuid>", status="completed" or "failed", and result=<json>. display_name is diagnostic only.`
-- **Response**: `[COMMS RESPONSE from <peer> (to request: <uuid>)]\nStatus: <status>\nResult: <json>`
+- **Message**: `comms.kind = "message"` plus peer identity and optional content blocks.
+- **Request**: `comms.kind = "request"` plus peer identity, request id, intent, params payload, and response guidance in the model projection.
+- **Response**: `comms.kind = "response_terminal"` or `response_progress` plus peer identity, request id, status, and payload.
 
 ## Typed peer lifecycle notices
 
@@ -745,14 +745,14 @@ event_address = "127.0.0.1:4201"   # Plain-text event listener
 echo '{"body":"hello from external system"}' | nc 127.0.0.1 4201
 ```
 
-### Event injection format
+### Event transcript format
 
-Events are injected into the agent's context with source tagging:
+External events are persisted as typed `external_event` system-notice blocks with `source`, `event_type`, optional `body`, payload, and content blocks. The provider-facing source/body text is an internal projection and is not stored as user-authored transcript text.
 
-- **Stdin**: `[EVENT via stdin] <body>`
-- **Webhook**: `[EVENT via webhook] <body>`
-- **RPC**: `[EVENT via rpc] <body>` (with optional `[source: name]` prefix)
-- **TCP/UDS**: `[EVENT via tcp] <body>` or `[EVENT via uds] <body>`
+- **Stdin**: `source = "stdin"`
+- **Webhook**: `source = "webhook"`
+- **RPC**: `source = "rpc"` with optional structured source metadata.
+- **TCP/UDS**: `source = "tcp"` or `source = "uds"`
 
 ### Delivery vs observation
 

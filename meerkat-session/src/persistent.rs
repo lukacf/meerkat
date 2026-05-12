@@ -6805,8 +6805,7 @@ mod tests {
         durable
             .set_system_context_state(SessionSystemContextState {
                 applied: vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] token birch seventeen"
-                        .to_string(),
+                    text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
                             .to_string(),
@@ -6875,8 +6874,7 @@ mod tests {
         durable
             .set_system_context_state(SessionSystemContextState {
                 applied: vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] token birch seventeen"
-                        .to_string(),
+                    text: "Peer terminal response from 550e8400-e29b-41d4-a716-446655440000\nRequest ID: req-123\nStatus: completed\ntoken birch seventeen".to_string(),
                     source: Some(
                         "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
                             .to_string(),
@@ -11112,7 +11110,7 @@ mod tests {
                 &session_id,
                 RunId::new(),
                 vec![PendingSystemContextAppend {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+                    text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
                     source: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
                     accepted_at: meerkat_core::time_compat::SystemTime::now(),
@@ -11207,12 +11205,13 @@ mod tests {
             },
         );
         req.runtime.pre_turn_context_appends = vec![PendingSystemContextAppend {
-            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response. Result: {\"token\":\"birch seventeen\"}.".to_string(),
+            text: "Peer terminal response\nPayload: {\"token\":\"birch seventeen\"}".to_string(),
             source: Some(
-                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123"
-                    .to_string(),
+                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string(),
             ),
-            idempotency_key: Some("peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string()),
+            idempotency_key: Some(
+                "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".to_string(),
+            ),
             accepted_at: meerkat_core::time_compat::SystemTime::now(),
         }];
 

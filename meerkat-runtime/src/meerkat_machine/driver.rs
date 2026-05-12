@@ -1923,6 +1923,7 @@ mod tests {
             },
             text: "drive the queue".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let resume_id = resume_input.id().clone();

@@ -4305,7 +4305,10 @@ mod tests {
             result.is_err(),
             "lifecycle acquire should fail before TokenStore save"
         );
-        let err = result.err().expect("helper should return RPC response");
+        let err = match result {
+            Ok(_) => return,
+            Err(err) => err,
+        };
 
         let error = err.error.expect("helper should return RPC error");
         assert_eq!(error.code, crate::error::INTERNAL_ERROR);

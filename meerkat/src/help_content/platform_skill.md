@@ -541,7 +541,7 @@ Real-time events include `text_delta`, tool lifecycle events, hook events, and t
 
 ### Background work and recovery
 
-Background shell jobs (shell tool with `&` or `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. Each completion appears as a `[SYSTEM NOTICE][BG_JOB]` (or equivalent) message at the next LLM turn boundary, so the agent sees and reasons over it. Idle keep-alive sessions wake automatically when a completion lands.
+Background shell jobs (shell tool with `&` or `background: true`), mob member terminals, and async external tool results all deliver back into the agent through a single completion stream. Each completion is persisted as a typed `system_notice` block such as `background_job` at the next LLM turn boundary, then projected into provider-facing text for the model. Idle keep-alive sessions wake automatically when a completion lands.
 
 If the runtime is backed by persistent storage, completion state and cursors survive process restarts (bounded-loss; you may see one duplicate notice on the seam). Without persistence, conversation history resumes but pending background work doesn't.
 
@@ -600,13 +600,13 @@ Tool visibility can change during a session without restarting the agent. All ch
 - **Per-turn overlay** — `TurnToolOverlay` on `StartTurnRequest.flow_tool_overlay`. Ephemeral, used by mob flow steps to restrict tools per step.
 - **Configured MCP servers** — CLI `rkat mcp add/remove/list/get` edits `.rkat/mcp.toml` or `~/.rkat/mcp.toml`. New `rkat run` and `rkat run --resume` sessions load that config.
 - **Live MCP mutation** — JSON-RPC `mcp/add`, `mcp/remove`, `mcp/reload`, REST `POST /sessions/{id}/mcp/*`, MCP-server tools, and SDK helpers stage server changes on the `McpRouter`. Applied at next turn boundary. Removals drain in-flight calls before finalizing.
-- **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A `[MCP_PENDING]` system notice is injected while servers are still connecting.
+- **Async MCP loading** — At startup, MCP servers connect in parallel in the background. The agent loop polls `poll_external_updates()` at each `CallingLlm` boundary. Tools appear as each server completes its handshake. A typed `mcp` system notice is recorded while servers are still connecting.
   - Per-server timeout: `connect_timeout_secs` in `.rkat/mcp.toml` (default: 10s)
   - CLI: `--wait-for-mcp` flag blocks before the first turn until all servers finish connecting
   - SDK: `McpRouterAdapter::wait_until_ready(timeout)` provides the same blocking behavior
   - `AgentBuildConfig.wait_for_mcp: bool` field for programmatic surface control
 - **Composition** — most-restrictive wins (allow-lists intersect, deny-lists union, deny beats allow).
-- **Agent awareness** — `ToolConfigChanged` event emitted + `[SYSTEM NOTICE]` injected into conversation on any change.
+- **Agent awareness** — `ToolConfigChanged` event emitted + typed `tool_config` system notice recorded on any change.
 
 Surface availability:
 

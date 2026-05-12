@@ -1303,6 +1303,7 @@ fn make_prompt(text: &str) -> Input {
         },
         text: text.into(),
         blocks: None,
+        typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
 }

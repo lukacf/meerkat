@@ -3768,7 +3768,7 @@ mod tests {
         let canonical_body = meerkat_core::types::text_content(&blocks);
         assert_eq!(
             interaction.rendered_text,
-            format!("[COMMS MESSAGE from sender]\n{canonical_body}")
+            meerkat_core::format_peer_message_projection("sender", &canonical_body)
         );
         match &interaction.content {
             meerkat_core::InteractionContent::Message {

@@ -1416,7 +1416,7 @@ mod tests {
         let prepared_request_id = prepared.request_id.map(|id| id.to_string());
         assert_eq!(prepared_request_id.as_deref(), Some(request_id.as_str()));
         assert!(prepared.text_projection.starts_with(&format!(
-            "[COMMS REQUEST from peer_id {} (display_name: sender-agent) (id: {request_id})]\nIntent: review",
+            "Peer request from peer_id {} (display_name: sender-agent) (id: {request_id})\nIntent: review",
             sender.public_key().to_peer_id()
         )));
         assert!(prepared.text_projection.contains("\"peer_id\""));
@@ -1462,7 +1462,10 @@ mod tests {
             .expect("machine accepted plain event should prepare");
 
         assert_eq!(prepared.class, PeerInputClass::PlainEvent);
-        assert_eq!(prepared.text_projection, "[EVENT via tcp] event body");
+        assert_eq!(
+            prepared.text_projection,
+            "External event via tcp: event body"
+        );
         assert_eq!(machine.plain_calls(), 1);
     }
 
@@ -1576,7 +1579,7 @@ mod tests {
         );
         assert_eq!(
             prepared.text_projection,
-            "[EVENT via tcp] event body".to_string()
+            "External event via tcp: event body".to_string()
         );
 
         match prepared.item {

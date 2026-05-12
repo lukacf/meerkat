@@ -1098,7 +1098,25 @@ pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                     "Failed",
                 ],
             ),
-            NamedTypeBinding::string("WorkOwnerKey"),
+            NamedTypeBinding::string("WorkItemKey"),
+            NamedTypeBinding::string("WorkEdgeKey"),
+            NamedTypeBinding::string("WorkDependencyPathKey"),
+            NamedTypeBinding::string_enum(
+                "WorkEdgeKind",
+                &["Blocks", "Parent", "Related", "Supersedes", "DerivedFrom"],
+            ),
+            NamedTypeBinding::string_enum(
+                "WorkOwnerKind",
+                &["Principal", "Agent", "Session", "Mob", "Label"],
+            ),
+            NamedTypeBinding::type_path_struct(
+                "WorkOwnerKey",
+                "crate::catalog::dsl::workgraph_lifecycle::WorkOwnerKey",
+                vec![
+                    TypePathStructField::named("kind", "WorkOwnerKind"),
+                    TypePathStructField::string("id"),
+                ],
+            ),
         ],
         vec![],
     )

@@ -5775,6 +5775,14 @@ fn cli_render_context_append_text(
             Some(label) if !label.trim().is_empty() => format!("[Reference] {label} ({uri})"),
             _ => format!("[Reference] {uri}"),
         },
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                *kind,
+                body.clone(),
+                blocks.clone(),
+            )
+            .model_projection_text()
+        }
         _ => String::new(),
     }
 }
@@ -5949,7 +5957,8 @@ impl meerkat_core::lifecycle::CoreExecutor for CliRuntimeExecutor {
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
                 pre_turn_context_appends,
                 primitive.turn_metadata().cloned(),
-            ),
+            )
+            .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
 
         // Persistent path: use apply_runtime_turn for real receipt + snapshot.
@@ -8816,7 +8825,9 @@ async fn show_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()> {
                 }
                 Message::SystemNotice(notice) => {
                     println!("\n[{}] SYSTEM NOTICE ({:?}):", i + 1, notice.kind);
-                    println!("  {}", notice.body);
+                    if let Some(body) = notice.body.as_deref() {
+                        println!("  {body}");
+                    }
                 }
                 Message::User(u) => {
                     println!("\n[{}] USER:", i + 1);
@@ -11329,6 +11340,36 @@ mod tests {
         assert_ne!(
             preload[0].source_uuid,
             meerkat_core::skills::SourceUuid::builtin()
+        );
+    }
+
+    #[test]
+    fn cli_context_system_notice_projects_via_typed_notice() {
+        let blocks = vec![meerkat_core::types::SystemNoticeBlock::Comms {
+            kind: "response_terminal".to_string(),
+            direction: meerkat_core::types::SystemNoticeDirection::Incoming,
+            peer: None,
+            request_id: Some("req-1".to_string()),
+            intent: Some("checksum_token".to_string()),
+            status: Some("completed".to_string()),
+            summary: Some("Peer terminal response".to_string()),
+            payload: None,
+            content: Vec::new(),
+        }];
+        let content = meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+            kind: meerkat_core::types::SystemNoticeKind::Comms,
+            body: Some("Peer terminal response context".to_string()),
+            blocks: blocks.clone(),
+        };
+
+        assert_eq!(
+            cli_render_context_append_text(&content),
+            meerkat_core::types::SystemNoticeMessage::with_blocks(
+                meerkat_core::types::SystemNoticeKind::Comms,
+                Some("Peer terminal response context".to_string()),
+                blocks,
+            )
+            .model_projection_text()
         );
     }
 

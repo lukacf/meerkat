@@ -26,6 +26,7 @@ fn make_prompt_input(text: &str) -> Input {
         },
         text: text.into(),
         blocks: None,
+        typed_turn_appends: Vec::new(),
         turn_metadata: None,
     })
 }
@@ -294,6 +295,7 @@ async fn reject_derived_prompt() {
         },
         text: "hi".into(),
         blocks: None,
+        typed_turn_appends: Vec::new(),
         turn_metadata: None,
     });
     let result = driver.accept_input(input).await.unwrap();

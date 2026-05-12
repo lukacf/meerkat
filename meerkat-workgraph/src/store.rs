@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction, params};
 
 use crate::WorkGraphError;
+use crate::WorkGraphMachine;
 use crate::types::{
     WorkEdge, WorkGraphEvent, WorkGraphEventKind, WorkItem, WorkItemFilter, WorkItemId,
     WorkNamespace,
@@ -208,6 +209,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         item: WorkItem,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
         if guard.items.contains_key(&key) {
@@ -227,6 +229,7 @@ impl WorkGraphStore for MemoryWorkGraphStore {
         expected_previous_revision: u64,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         let mut guard = self.inner.write().await;
         let key = item_key(&item.realm_id, &item.namespace, &item.id);
         let Some(current) = guard.items.get(&key) else {
@@ -468,6 +471,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         item: WorkItem,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
@@ -486,6 +490,7 @@ impl WorkGraphStore for SqliteWorkGraphStore {
         expected_previous_revision: u64,
         event: WorkGraphEvent,
     ) -> Result<WorkItem, WorkGraphError> {
+        WorkGraphMachine::validate_item_projection(&item)?;
         self.with_connection(|conn| {
             let tx = conn
                 .transaction()
@@ -893,9 +898,10 @@ mod tests {
 
     use crate::types::WorkEdge;
     use crate::{
-        CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore, WorkEdgeKind,
-        WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind, WorkGraphService,
-        WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace,
+        ClaimWorkItemRequest, CreateWorkItemRequest, LinkWorkItemsRequest, MemoryWorkGraphStore,
+        WorkEdgeKind, WorkGraphError, WorkGraphEvent, WorkGraphEventFilter, WorkGraphEventKind,
+        WorkGraphService, WorkGraphStore, WorkItemFilter, WorkItemId, WorkNamespace, WorkOwner,
+        WorkOwnerKey, WorkStatus,
     };
 
     fn test_edge() -> WorkEdge {
@@ -1033,6 +1039,93 @@ mod tests {
         let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
         let fetched = service.get(None, None, item.id.clone()).await.expect("get");
         assert_eq!(fetched.title, "persist me");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn sqlite_legacy_item_without_machine_state_backfills_on_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("workgraph.sqlite3");
+        let store = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let item = service
+            .create(CreateWorkItemRequest {
+                realm_id: None,
+                namespace: None,
+                title: "legacy item".to_string(),
+                description: None,
+                priority: Default::default(),
+                labels: BTreeSet::new(),
+                due_at: None,
+                not_before: None,
+                snoozed_until: None,
+                external_refs: Vec::new(),
+                evidence_refs: Vec::new(),
+                status: None,
+            })
+            .await
+            .expect("create");
+
+        store
+            .with_connection(|conn| {
+                let json: String = conn
+                    .query_row(
+                        "SELECT item_json FROM workgraph_items
+                         WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                        rusqlite::params![
+                            &item.realm_id,
+                            item.namespace.as_str(),
+                            item.id.as_str()
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                let mut value = serde_json::from_str::<serde_json::Value>(&json)
+                    .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                value
+                    .as_object_mut()
+                    .expect("item json object")
+                    .remove("machine_state");
+                conn.execute(
+                    "UPDATE workgraph_items
+                        SET item_json = ?4
+                      WHERE realm_id = ?1 AND namespace = ?2 AND item_id = ?3",
+                    rusqlite::params![
+                        &item.realm_id,
+                        item.namespace.as_str(),
+                        item.id.as_str(),
+                        serde_json::to_string(&value)
+                            .map_err(|err| WorkGraphError::Store(err.to_string()))?
+                    ],
+                )
+                .map_err(|err| WorkGraphError::Store(err.to_string()))?;
+                Ok(())
+            })
+            .expect("strip machine state");
+
+        let reopened = std::sync::Arc::new(crate::SqliteWorkGraphStore::open(&path).expect("open"));
+        let service = WorkGraphService::with_scope(reopened, "realm", WorkNamespace::default());
+        let legacy = service.get(None, None, item.id).await.expect("get legacy");
+        assert_eq!(legacy.machine_state.revision, legacy.revision);
+        assert!(matches!(
+            legacy.machine_state.lifecycle_phase,
+            crate::machines::workgraph_lifecycle::WorkLifecycleState::Open
+        ));
+
+        let claimed = service
+            .claim(ClaimWorkItemRequest {
+                id: legacy.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: legacy.revision,
+                owner: WorkOwner::new(WorkOwnerKey::label("worker").expect("owner")),
+                lease_seconds: Some(60),
+                lease_expires_at: None,
+            })
+            .await
+            .expect("claim legacy");
+        assert_eq!(claimed.status, WorkStatus::InProgress);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

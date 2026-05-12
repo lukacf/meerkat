@@ -298,7 +298,7 @@ fn extract_system_prompt_returns_system_message_content() {
 #[test]
 fn extract_system_prompt_returns_rendered_notice_text() {
     let notice = SystemNoticeMessage::new(SystemNoticeKind::McpPending, "MCP servers connecting");
-    let rendered = notice.rendered_text();
+    let rendered = notice.model_projection_text();
     let msgs = vec![Message::SystemNotice(notice)];
     assert_eq!(
         extract_system_prompt_from_seed_messages_runtime(&msgs),

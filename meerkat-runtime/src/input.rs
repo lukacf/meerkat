@@ -11,7 +11,9 @@ use meerkat_core::lifecycle::run_primitive::{
     RuntimeTurnMetadata,
 };
 use meerkat_core::ops::{OpEvent, OperationId};
-use meerkat_core::types::HandlingMode;
+use meerkat_core::types::{
+    HandlingMode, SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticePeer,
+};
 use meerkat_core::{
     BlobStore, BlobStoreError, MissingBlobBehavior, PeerConversationProjection,
     PeerResponseProgressProjectionPhase, PeerResponseTerminalCorrelationId,
@@ -275,6 +277,12 @@ pub struct PromptInput {
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// Runtime-authored typed transcript appends that travel with this turn.
+    ///
+    /// These are not operator-authored prompt content. The runtime projects
+    /// them into model-facing text only when building the provider request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_turn_appends: Vec<ConversationAppend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
@@ -295,6 +303,7 @@ impl PromptInput {
             },
             text: text.into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
@@ -323,6 +332,7 @@ impl PromptInput {
             },
             text,
             blocks,
+            typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
@@ -683,76 +693,6 @@ pub(crate) fn peer_prompt_text(peer: &PeerInput) -> String {
         .unwrap_or_else(|| peer.body.clone())
 }
 
-/// Optional block prefix for peer message inputs.
-pub(crate) fn peer_block_prefix_text(peer: &PeerInput) -> Option<String> {
-    if matches!(
-        peer.convention,
-        Some(PeerConvention::ResponseTerminal { .. })
-    ) && let Ok(Some(fact)) = peer_response_terminal_fact(peer)
-    {
-        return Some(fact.prompt_text());
-    }
-
-    if matches!(peer.convention, Some(PeerConvention::Message))
-        && let Some(prefix) = rendered_message_prefix(&peer.body)
-    {
-        return Some(prefix);
-    }
-
-    peer_projection_from_peer_input(peer).and_then(|projection| projection.block_prefix_text())
-}
-
-fn rendered_message_prefix(body: &str) -> Option<String> {
-    let prefix = body.lines().next()?.trim();
-    if prefix.starts_with("[COMMS MESSAGE from ") && prefix.ends_with(']') {
-        Some(prefix.to_string())
-    } else {
-        None
-    }
-}
-
-fn rendered_message_body_text(body: &str, prefix: &str) -> Option<String> {
-    let text = body
-        .lines()
-        .skip_while(|line| line.trim() != prefix)
-        .skip(1)
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !is_media_projection_line(line))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if text.is_empty() { None } else { Some(text) }
-}
-
-fn is_media_projection_line(line: &str) -> bool {
-    (line.starts_with("[image:") || line.starts_with("[video:")) && line.ends_with(']')
-}
-
-fn blocks_include_text_projection(
-    blocks: &[meerkat_core::types::ContentBlock],
-    expected: &str,
-) -> bool {
-    let expected = expected.trim();
-    if expected.is_empty() {
-        return true;
-    }
-    if blocks
-        .iter()
-        .any(|block| matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == expected))
-    {
-        return true;
-    }
-    let joined = blocks
-        .iter()
-        .filter_map(|block| match block {
-            meerkat_core::types::ContentBlock::Text { text } => Some(text.trim()),
-            _ => None,
-        })
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
-    joined == expected
-}
-
 pub(crate) fn input_prompt_text(input: &Input) -> String {
     match input {
         Input::Prompt(p) => p.text.clone(),
@@ -785,6 +725,120 @@ fn external_event_projection_text(event: &ExternalEventInput) -> String {
     meerkat_core::interaction::format_external_event_projection(source_name, body)
 }
 
+fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
+    let (peer_id, display_name) = match &peer.header.source {
+        InputOrigin::Peer {
+            peer_id,
+            display_identity,
+            ..
+        } => (peer_id.clone(), display_identity.clone()),
+        _ => return None,
+    };
+    let (kind, request_id, intent, status) = match &peer.convention {
+        Some(PeerConvention::Message) | None => ("message", None, None, None),
+        Some(PeerConvention::Request { request_id, intent }) => (
+            "request",
+            Some(request_id.clone()),
+            Some(intent.clone()),
+            None,
+        ),
+        Some(PeerConvention::ResponseProgress { request_id, phase }) => (
+            "response_progress",
+            Some(request_id.clone()),
+            None,
+            Some(format!("{phase:?}")),
+        ),
+        Some(PeerConvention::ResponseTerminal { request_id, status }) => (
+            "response_terminal",
+            Some(request_id.clone()),
+            None,
+            Some(format!("{status:?}")),
+        ),
+    };
+    let summary = match kind {
+        "request" => intent.as_ref().map_or_else(
+            || "Peer request".to_string(),
+            |intent| format!("Peer request: {intent}"),
+        ),
+        "response_progress" => "Peer response progress".to_string(),
+        "response_terminal" => "Peer response terminal".to_string(),
+        _ => "Peer message".to_string(),
+    };
+    let content = if let Some(blocks) = peer.blocks.clone().filter(|blocks| !blocks.is_empty()) {
+        blocks
+    } else if peer.body.is_empty() {
+        Vec::new()
+    } else {
+        vec![meerkat_core::types::ContentBlock::Text {
+            text: peer.body.clone(),
+        }]
+    };
+    Some(CoreRenderable::SystemNotice {
+        kind: SystemNoticeKind::Comms,
+        body: Some(summary.clone()),
+        blocks: vec![SystemNoticeBlock::Comms {
+            kind: kind.to_string(),
+            direction: SystemNoticeDirection::Incoming,
+            peer: Some(SystemNoticePeer {
+                id: peer_id,
+                display_name,
+            }),
+            request_id,
+            intent,
+            status,
+            summary: Some(summary),
+            payload: peer.payload.clone(),
+            content,
+        }],
+    })
+}
+
+fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderable {
+    let source = match &event.header.source {
+        InputOrigin::External { source_name } if !source_name.trim().is_empty() => {
+            source_name.clone()
+        }
+        _ => event.event_type.clone(),
+    };
+    let content = event.blocks.clone().unwrap_or_default();
+    let content_text = (!content.is_empty()).then(|| meerkat_core::types::text_content(&content));
+    let body = event
+        .payload
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|body| !body.is_empty())
+        .filter(|body| !body_is_represented_by_blocks(body, content_text.as_deref(), &content))
+        .map(ToOwned::to_owned);
+    let summary = body.as_ref().map_or_else(
+        || format!("External event via {source}"),
+        std::clone::Clone::clone,
+    );
+    CoreRenderable::SystemNotice {
+        kind: SystemNoticeKind::ExternalEvent,
+        body: Some(summary.clone()),
+        blocks: vec![SystemNoticeBlock::ExternalEvent {
+            source,
+            event_type: event.event_type.clone(),
+            summary: Some(summary),
+            body,
+            payload: Some(event.payload.clone()),
+            content,
+        }],
+    }
+}
+
+fn body_is_represented_by_blocks(
+    body: &str,
+    content_text: Option<&str>,
+    blocks: &[meerkat_core::types::ContentBlock],
+) -> bool {
+    content_text.is_some_and(|content_text| content_text.trim() == body)
+        || blocks.iter().any(|block| {
+            matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == body)
+        })
+}
+
 fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     if matches!(
         input,
@@ -797,69 +851,63 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
         return None;
     }
 
-    let content = match input {
-        Input::Prompt(p) if p.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: p.blocks.clone().unwrap_or_default(),
-        },
-        Input::Peer(p) if p.blocks.is_some() => {
-            let raw_blocks = p.blocks.clone().unwrap_or_default();
-            if let Some(prefix) = peer_block_prefix_text(p) {
-                let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                    text: prefix.clone(),
-                }];
-                if let Some(body_text) = rendered_message_body_text(&p.body, &prefix)
-                    && !blocks_include_text_projection(&raw_blocks, &body_text)
-                {
-                    blocks.push(meerkat_core::types::ContentBlock::Text { text: body_text });
-                }
-                blocks.extend(raw_blocks);
-                CoreRenderable::Blocks { blocks }
-            } else {
-                let body_already_in_blocks = raw_blocks.first().is_some_and(|b| {
-                    matches!(b, meerkat_core::types::ContentBlock::Text { text } if text == &p.body)
-                });
-                if p.body.is_empty() || body_already_in_blocks {
-                    CoreRenderable::Blocks { blocks: raw_blocks }
-                } else {
-                    let mut blocks = vec![meerkat_core::types::ContentBlock::Text {
-                        text: p.body.clone(),
-                    }];
-                    blocks.extend(raw_blocks);
-                    CoreRenderable::Blocks { blocks }
-                }
-            }
+    let (role, content) = match input {
+        Input::Prompt(p)
+            if !p.typed_turn_appends.is_empty()
+                && p.text.trim().is_empty()
+                && p.blocks.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            return None;
         }
-        Input::FlowStep(f) if f.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: f.blocks.clone().unwrap_or_default(),
-        },
-        Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-            blocks: e.blocks.clone().unwrap_or_default(),
-        },
-        Input::Prompt(_) | Input::Peer(_) | Input::FlowStep(_) | Input::ExternalEvent(_) => {
+        Input::Prompt(p) if p.blocks.is_some() => (
+            ConversationAppendRole::User,
+            CoreRenderable::Blocks {
+                blocks: p.blocks.clone().unwrap_or_default(),
+            },
+        ),
+        Input::Prompt(_) => (
+            ConversationAppendRole::User,
             CoreRenderable::Text {
                 text: input_prompt_text(input),
-            }
-        }
+            },
+        ),
+        Input::Peer(p) => peer_notice_renderable(p)
+            .map(|content| (ConversationAppendRole::SystemNotice, content))?,
+        Input::FlowStep(f) => (
+            ConversationAppendRole::SystemNotice,
+            CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Generic,
+                body: Some(format!("Flow step {}", f.step_id)),
+                blocks: vec![SystemNoticeBlock::RuntimeNotice {
+                    category: "flow_step".to_string(),
+                    detail: Some(f.instructions.clone()),
+                    payload: None,
+                }],
+            },
+        ),
+        Input::ExternalEvent(e) => (
+            ConversationAppendRole::SystemNotice,
+            external_event_notice_renderable(e),
+        ),
         Input::Continuation(_) | Input::Operation(_) => return None,
     };
 
-    Some(ConversationAppend {
-        role: ConversationAppendRole::User,
-        content,
-    })
+    Some(ConversationAppend { role, content })
 }
 
 fn input_to_context_append(input: &Input) -> Option<ConversationContextAppend> {
-    let projection = match input {
-        Input::Peer(peer) => peer_projection_from_peer_input(peer)?,
+    let (projection, content) = match input {
+        Input::Peer(peer) => {
+            let projection = peer_projection_from_peer_input(peer)?;
+            let content = peer_notice_renderable(peer)?;
+            (projection, content)
+        }
         _ => return None,
     };
 
     Some(ConversationContextAppend {
         key: projection.context_key()?,
-        content: CoreRenderable::Text {
-            text: projection.prompt_text(),
-        },
+        content,
     })
 }
 
@@ -872,8 +920,30 @@ fn peer_response_terminal_context_append(
 
     Ok(Some(ConversationContextAppend {
         key: fact.context_key(),
-        content: CoreRenderable::Text {
-            text: fact.prompt_text(),
+        content: CoreRenderable::SystemNotice {
+            kind: SystemNoticeKind::Comms,
+            body: Some("Peer terminal response context".to_string()),
+            blocks: vec![SystemNoticeBlock::Comms {
+                kind: "response_terminal".to_string(),
+                direction: SystemNoticeDirection::Incoming,
+                peer: Some(SystemNoticePeer {
+                    id: fact.source.route_identity.to_string(),
+                    display_name: Some(fact.source.display_identity.to_string()),
+                }),
+                request_id: Some(fact.correlation_id.to_string()),
+                intent: None,
+                status: Some(
+                    match fact.status {
+                        PeerResponseTerminalProjectionStatus::Completed => "completed",
+                        PeerResponseTerminalProjectionStatus::Failed => "failed",
+                        PeerResponseTerminalProjectionStatus::Cancelled => "cancelled",
+                    }
+                    .to_string(),
+                ),
+                summary: Some("Peer terminal response".to_string()),
+                payload: fact.render_payload.as_ref().cloned(),
+                content: Vec::new(),
+            }],
         },
     }))
 }
@@ -883,6 +953,10 @@ pub(crate) fn runtime_input_projection(
 ) -> crate::ingress_types::RuntimeInputProjection {
     crate::ingress_types::RuntimeInputProjection {
         append: input_to_append(input),
+        additional_appends: match input {
+            Input::Prompt(prompt) => prompt.typed_turn_appends.clone(),
+            _ => Vec::new(),
+        },
         context_append: input_to_context_append(input),
     }
 }
@@ -918,18 +992,73 @@ mod tests {
         }
     }
 
+    fn typed_runtime_notice_append(detail: &str) -> ConversationAppend {
+        ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Generic,
+                body: Some(detail.to_string()),
+                blocks: vec![meerkat_core::types::SystemNoticeBlock::RuntimeNotice {
+                    category: "test".to_string(),
+                    detail: Some(detail.to_string()),
+                    payload: None,
+                }],
+            },
+        }
+    }
+
     #[test]
     fn prompt_input_serde() {
         let input = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "prompt");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Prompt(_)));
+    }
+
+    #[test]
+    fn prompt_input_typed_turn_appends_project_without_user_text() {
+        let append = typed_runtime_notice_append("peer delivery");
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: String::new(),
+            blocks: None,
+            typed_turn_appends: vec![append.clone()],
+            turn_metadata: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        assert!(
+            projection.append.is_none(),
+            "empty runtime-authored prompt carrier must not synthesize a user append"
+        );
+        assert_eq!(projection.additional_appends, vec![append]);
+    }
+
+    #[test]
+    fn prompt_input_typed_turn_appends_serde_roundtrip() {
+        let append = typed_runtime_notice_append("typed appends persist");
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: String::new(),
+            blocks: None,
+            typed_turn_appends: vec![append.clone()],
+            turn_metadata: None,
+        });
+
+        let json = serde_json::to_value(&input).unwrap();
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        let Input::Prompt(prompt) = parsed else {
+            panic!("expected prompt input");
+        };
+        assert_eq!(prompt.text, "");
+        assert_eq!(prompt.typed_turn_appends, vec![append]);
     }
 
     #[test]
@@ -949,27 +1078,28 @@ mod tests {
     }
 
     #[test]
-    fn peer_message_blocks_prefix_uses_rendered_display_label_not_canonical_origin() {
+    fn peer_message_blocks_preserve_typed_comms_content_without_prefix_injection() {
         let mut header = make_header();
         header.source = InputOrigin::Peer {
             peer_id: "canonical-peer-id".into(),
             display_identity: Some("display-agent".into()),
             runtime_id: None,
         };
+        let original_blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
         let input = Input::Peer(PeerInput {
             header,
             convention: Some(PeerConvention::Message),
-            body: "[COMMS MESSAGE from display-agent]\ncaption\n[image: image/png]".into(),
+            body: "Peer message from display-agent:\ncaption\n[image: image/png]".into(),
             payload: None,
-            blocks: Some(vec![
-                meerkat_core::types::ContentBlock::Text {
-                    text: "caption".into(),
-                },
-                meerkat_core::types::ContentBlock::Image {
-                    media_type: "image/png".into(),
-                    data: "abc".into(),
-                },
-            ]),
+            blocks: Some(original_blocks.clone()),
             handling_mode: None,
         });
 
@@ -980,21 +1110,41 @@ mod tests {
             peer_projection_from_peer_input(peer)
                 .and_then(|projection| projection.block_prefix_text())
                 .as_deref(),
-            Some("[COMMS MESSAGE from canonical-peer-id]")
+            Some("Peer message from canonical-peer-id")
         );
 
         let projection = runtime_input_projection(&input);
         let append = projection.append.expect("conversation append");
-        let CoreRenderable::Blocks { blocks } = append.content else {
-            panic!("expected multimodal blocks");
+        let CoreRenderable::SystemNotice { blocks, .. } = &append.content else {
+            panic!("expected typed system notice");
+        };
+        let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+            blocks.first()
+        else {
+            panic!("expected comms block");
         };
         assert_eq!(
-            blocks.first(),
-            Some(&meerkat_core::types::ContentBlock::Text {
-                text: "[COMMS MESSAGE from display-agent]".into()
-            })
+            peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
+            Some("display-agent")
         );
-        assert!(!meerkat_core::types::text_content(&blocks).contains("canonical-peer-id"));
+        assert_eq!(
+            content, &original_blocks,
+            "typed comms content must be the original blocks, not rendered projection text plus blocks"
+        );
+        let projected =
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &[append],
+            )
+            .text_content();
+        assert_eq!(
+            projected.matches("Peer message from display-agent").count(),
+            1,
+            "provider projection must not nest a rendered peer projection inside typed content"
+        );
+        assert!(
+            !projected
+                .contains("Peer message from display-agent:\nPeer message from display-agent")
+        );
     }
 
     #[test]
@@ -1036,11 +1186,18 @@ mod tests {
         let projection = runtime_input_projection_for_machine_batch(&input);
         let context = projection.context_append.expect("context append");
         assert_eq!(context.key, expected_canonical_key);
-        let CoreRenderable::Text { text } = context.content else {
-            panic!("expected text context");
+        let CoreRenderable::SystemNotice { blocks, .. } = context.content else {
+            panic!("expected typed context");
         };
-        assert!(text.contains("from display-agent"));
-        assert!(!text.contains(route_id));
+        let Some(meerkat_core::types::SystemNoticeBlock::Comms { peer, .. }) = blocks.first()
+        else {
+            panic!("expected comms block");
+        };
+        assert_eq!(
+            peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
+            Some("display-agent")
+        );
+        assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some(route_id));
     }
 
     #[test]
@@ -1070,17 +1227,20 @@ mod tests {
 
         let projection = runtime_input_projection_for_machine_batch(&input);
         let append = projection.append.expect("conversation append");
-        let CoreRenderable::Blocks { blocks } = append.content else {
-            panic!("expected multimodal append");
+        let CoreRenderable::SystemNotice { blocks, .. } = append.content else {
+            panic!("expected typed append");
         };
+        let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+            blocks.first()
+        else {
+            panic!("expected comms block");
+        };
+        assert_eq!(
+            peer.as_ref().and_then(|peer| peer.display_name.as_deref()),
+            Some("display-agent")
+        );
         assert!(matches!(
-            blocks.first(),
-            Some(meerkat_core::types::ContentBlock::Text { text })
-                if text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
-                    && text.contains("from display-agent")
-        ));
-        assert!(matches!(
-            blocks.get(1),
+            content.first(),
             Some(meerkat_core::types::ContentBlock::Image { media_type, .. })
                 if media_type == "image/jpeg"
         ));
@@ -1200,6 +1360,58 @@ mod tests {
     }
 
     #[test]
+    fn external_event_blocks_project_to_typed_notice_without_flattening() {
+        let mut header = make_header();
+        header.source = InputOrigin::External {
+            source_name: "webhook".into(),
+        };
+        let original_blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: meerkat_core::types::ImageData::Inline {
+                    data: "abc123".into(),
+                },
+            },
+        ];
+        let input = Input::ExternalEvent(ExternalEventInput {
+            header,
+            event_type: "webhook.received".into(),
+            payload: serde_json::json!({"body": "caption"}),
+            blocks: Some(original_blocks.clone()),
+            handling_mode: HandlingMode::Queue,
+            render_metadata: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        let append = projection.append.expect("conversation append");
+        assert_eq!(append.role, ConversationAppendRole::SystemNotice);
+        let CoreRenderable::SystemNotice { blocks, .. } = append.content else {
+            panic!("expected typed system notice");
+        };
+        let Some(meerkat_core::types::SystemNoticeBlock::ExternalEvent {
+            source,
+            body,
+            content,
+            ..
+        }) = blocks.first()
+        else {
+            panic!("expected external event block");
+        };
+        assert_eq!(source, "webhook");
+        assert_eq!(
+            body, &None,
+            "body text represented by typed content blocks must not be duplicated as prose"
+        );
+        assert_eq!(
+            content, &original_blocks,
+            "external events must preserve canonical blocks instead of flattening them to text"
+        );
+    }
+
+    #[test]
     fn legacy_external_event_payload_blocks_migrate_to_canonical_blocks_owner() {
         let mut input = Input::ExternalEvent(ExternalEventInput {
             header: make_header(),
@@ -1298,6 +1510,7 @@ mod tests {
             header: make_header(),
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert_eq!(prompt.kind(), InputKind::Prompt);

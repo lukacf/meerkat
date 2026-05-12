@@ -226,18 +226,25 @@ fn map_response_convention(
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
-    if !interaction.rendered_text.trim().is_empty() {
+    let content_body = match &interaction.content {
+        InteractionContent::Message { body, blocks } => {
+            meerkat_core::comms::CommsContentAuthority::text_projection(body, blocks.as_deref())
+        }
+        InteractionContent::Request { params, blocks, .. } => {
+            let body = serde_json::to_string(params).unwrap_or_default();
+            meerkat_core::comms::CommsContentAuthority::text_projection(&body, blocks.as_deref())
+        }
+        InteractionContent::Response { result, blocks, .. } => {
+            let body = serde_json::to_string(result).unwrap_or_default();
+            meerkat_core::comms::CommsContentAuthority::text_projection(&body, blocks.as_deref())
+        }
+    };
+    if peer_blocks(interaction).is_none_or(|blocks| blocks.is_empty())
+        && !interaction.rendered_text.trim().is_empty()
+    {
         return interaction.rendered_text.clone();
     }
-    match &interaction.content {
-        InteractionContent::Message { body, .. } => body.clone(),
-        InteractionContent::Request { params, .. } => {
-            serde_json::to_string(params).unwrap_or_default()
-        }
-        InteractionContent::Response { result, .. } => {
-            serde_json::to_string(result).unwrap_or_default()
-        }
-    }
+    content_body
 }
 
 fn peer_blocks(interaction: &InboxInteraction) -> Option<Vec<meerkat_core::types::ContentBlock>> {
@@ -757,7 +764,7 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "stale rendered text");
+            assert_eq!(peer.body, "see image\n[image: image/png]");
             assert_eq!(peer.blocks, Some(blocks));
         } else {
             panic!("Expected PeerInput");
@@ -826,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_message_uses_rendered_projection_while_preserving_blocks() {
+    fn multimodal_message_uses_blocks_as_body_projection() {
         let blocks = vec![
             meerkat_core::types::ContentBlock::Text {
                 text: "caption text".into(),
@@ -850,7 +857,7 @@ mod tests {
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "stale rendered text");
+            assert_eq!(peer.body, "caption text\n[image: image/png]");
         } else {
             panic!("Expected PeerInput");
         }

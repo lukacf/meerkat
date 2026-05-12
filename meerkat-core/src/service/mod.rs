@@ -7,7 +7,7 @@ pub mod transport;
 
 use crate::event::AgentEvent;
 use crate::event::EventEnvelope;
-use crate::lifecycle::run_primitive::RuntimeTurnMetadata;
+use crate::lifecycle::run_primitive::{ConversationAppend, RuntimeTurnMetadata};
 use crate::session::{PendingSystemContextAppend, SystemContextStageError};
 use crate::time_compat::SystemTime;
 #[cfg(target_arch = "wasm32")]
@@ -810,6 +810,12 @@ pub struct StartTurnRuntimeSemantics {
     /// Runtime-owned system-context appends that must be applied at this
     /// turn boundary before the model run starts.
     pub pre_turn_context_appends: Vec<PendingSystemContextAppend>,
+    /// Canonical runtime-authored typed appends for this turn.
+    ///
+    /// Provider prompt text is an internal projection derived from these
+    /// appends at the runtime/service boundary. These appends are the
+    /// authorship source used for transcript persistence.
+    pub typed_turn_appends: Vec<ConversationAppend>,
     /// Canonical runtime-authored metadata for this turn.
     ///
     /// Runtime-backed callers populate this once at the machine boundary and
@@ -826,6 +832,7 @@ impl Default for StartTurnRuntimeSemantics {
             skill_references: None,
             flow_tool_overlay: None,
             pre_turn_context_appends: Vec::new(),
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         }
     }
@@ -847,6 +854,7 @@ impl StartTurnRuntimeSemantics {
             skill_references,
             flow_tool_overlay,
             pre_turn_context_appends,
+            typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
@@ -857,6 +865,12 @@ impl StartTurnRuntimeSemantics {
             turn_metadata: Some(turn_metadata),
             ..Self::default()
         }
+    }
+
+    #[must_use]
+    pub fn with_typed_turn_appends(mut self, typed_turn_appends: Vec<ConversationAppend>) -> Self {
+        self.typed_turn_appends = typed_turn_appends;
+        self
     }
 }
 

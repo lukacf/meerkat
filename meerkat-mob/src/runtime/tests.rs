@@ -36,8 +36,8 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    HandlingMode, Message, RunResult, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult,
-    Usage,
+    ContentBlock, ContentInput, HandlingMode, Message, RunResult, SessionId, SystemNoticeBlock,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolProvenance, ToolResult, Usage,
 };
 use meerkat_core::{
     AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
@@ -4966,6 +4966,28 @@ impl SessionAgent for OverlayProbeSessionAgent {
             })
             .await;
         Ok(result)
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        _typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if handling_mode != HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "unexpected overlay-probe handling mode: {handling_mode:?}"
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "overlay probe does not consume render metadata".to_string(),
+            ));
+        }
+        self.run_with_events(prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
@@ -23275,6 +23297,43 @@ impl RuntimeBackedRealCommsSessionService {
     }
 }
 
+fn provider_visible_prompt_from_start_turn_request(req: &StartTurnRequest) -> ContentInput {
+    let mut blocks = req.prompt.clone().into_blocks();
+    for append in &req.runtime.typed_turn_appends {
+        let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+            kind,
+            body,
+            blocks: notice_blocks,
+        } = &append.content
+        else {
+            continue;
+        };
+        let projection =
+            SystemNoticeMessage::with_blocks(*kind, body.clone(), notice_blocks.clone())
+                .model_projection_text();
+        if !projection.trim().is_empty() {
+            blocks.push(ContentBlock::Text { text: projection });
+        }
+        for notice_block in notice_blocks {
+            let content = match notice_block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+                _ => continue,
+            };
+            blocks.extend(content.iter().filter_map(|block| match block {
+                ContentBlock::Image { .. } | ContentBlock::Video { .. } => Some(block.clone()),
+                ContentBlock::Text { .. } | _ => None,
+            }));
+        }
+    }
+    if blocks.len() == 1
+        && let ContentBlock::Text { text } = blocks.remove(0)
+    {
+        return ContentInput::Text(text);
+    }
+    ContentInput::Blocks(blocks)
+}
+
 #[async_trait]
 impl SessionService for RuntimeBackedRealCommsSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
@@ -23543,6 +23602,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        let provider_visible_prompt = provider_visible_prompt_from_start_turn_request(&req);
         let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
         if !pre_turn_context_appends.is_empty() {
             for append in pre_turn_context_appends {
@@ -23569,7 +23629,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .push(req.prompt);
+            .push(provider_visible_prompt);
         self.applied_runtime_render_metadata
             .write()
             .await
@@ -23739,7 +23799,7 @@ fn peer_request_notice_request_id(text: &str) -> uuid::Uuid {
     let request_id = text
         .split("Request ID: ")
         .nth(1)
-        .and_then(|tail| tail.split('.').next())
+        .and_then(|tail| tail.split_whitespace().next())
         .expect("peer request notice should include a Request ID");
     uuid::Uuid::parse_str(request_id).expect("request ID should be a UUID")
 }
@@ -23850,8 +23910,8 @@ async fn test_peer_message_reaches_idle_autonomous_member_after_kickoff_completi
     .expect("peer message should reach runtime apply path");
     let delivered_text = delivered.text_content();
     assert!(
-        delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-1]"),
-        "peer message should carry comms source label: {delivered_text:?}"
+        delivered_text.contains("Peer message from test-mob/lead/l-1"),
+        "peer message should carry typed comms source projection: {delivered_text:?}"
     );
     assert!(
         delivered_text.contains("caption: this block text should survive"),
@@ -24007,8 +24067,8 @@ async fn test_peer_message_reaches_ready_autonomous_member_before_kickoff_settle
     .expect("peer message should reach a startup-ready autonomous member");
     let delivered_text = delivered.text_content();
     assert!(
-        delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-prekickoff]"),
-        "peer message should carry comms source label: {delivered_text:?}"
+        delivered_text.contains("Peer message from test-mob/lead/l-prekickoff"),
+        "peer message should carry typed comms source projection: {delivered_text:?}"
     );
     assert!(
         delivered_text.contains("caption: startup-ready multimodal comms must still deliver"),
@@ -24135,8 +24195,8 @@ async fn test_peer_messages_reach_all_ready_autonomous_members_before_kickoff_se
 
         let delivered_text = delivered.text_content();
         assert!(
-            delivered_text.contains("[COMMS MESSAGE from test-mob/lead/l-multi]"),
-            "peer message should carry comms source label for {agent_identity}: {delivered_text:?}"
+            delivered_text.contains("Peer message from test-mob/lead/l-multi"),
+            "peer message should carry typed comms source projection for {agent_identity}: {delivered_text:?}"
         );
         assert!(
             delivered_text.contains(&format!("caption: fanout should reach {agent_identity}")),
@@ -24378,11 +24438,11 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
             let prompts = service.applied_runtime_prompts(&sid_responder).await;
-            if prompts.iter().skip(responder_baseline).any(|prompt| {
-                prompt
-                    .text_content()
-                    .contains("[SYSTEM NOTICE][PEER_REQUEST]")
-            }) {
+            if prompts
+                .iter()
+                .skip(responder_baseline)
+                .any(|prompt| prompt.text_content().contains("Peer request from"))
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -24419,7 +24479,7 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
                     let idempotency_key = append.idempotency_key.as_deref().unwrap_or_default();
                     let expected_source =
                         format!("peer_response_terminal:{responder_route_identity}:{request_id}");
-                    text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                    text.contains("Peer terminal response from")
                         && text.contains("from test-mob/worker/w-responder")
                         && text.contains("lighthouse")
                         && text.contains(&format!("Request ID: {request_id}"))
@@ -24688,7 +24748,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             let prompts = service.applied_runtime_prompts(&sid_responder).await;
             if prompts.iter().skip(responder_baseline).any(|prompt| {
                 let text = prompt.text_content();
-                text.contains("[SYSTEM NOTICE][PEER_REQUEST]")
+                text.contains("Peer request from")
                     && text.contains("Intent: ping")
                     && text.contains(&format!("Request ID: {request_id}"))
             }) {
@@ -24727,9 +24787,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
                 .iter()
                 .skip(requester_context_baseline)
                 .any(|append| {
-                    append
-                        .text
-                        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                    append.text.contains("Peer terminal response from")
                         && append.text.contains(&format!("Request ID: {request_id}"))
                         && append.text.contains("\"message\": \"pong\"")
                 })
@@ -24851,7 +24909,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
                 .skip(responder_baseline)
                 .find(|prompt| {
                     let text = prompt.text_content();
-                    text.contains("[SYSTEM NOTICE][PEER_REQUEST]")
+                    text.contains("Peer request from")
                         && text.contains("Intent: checksum_token")
                         && text.contains("Request ID: ")
                 })
@@ -24897,9 +24955,7 @@ async fn test_mcp_send_request_response_terminal_steer_is_visible_to_requester()
                 .iter()
                 .skip(requester_context_baseline)
                 .find(|append| {
-                    append
-                        .text
-                        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
+                    append.text.contains("Peer terminal response from")
                         && append.text.contains("from test-mob/worker/w-mcp-responder")
                         && append.text.contains(&format!("Request ID: {request_id}"))
                         && append.text.contains("Status: completed")

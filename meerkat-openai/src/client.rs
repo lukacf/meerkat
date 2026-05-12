@@ -622,7 +622,7 @@ impl OpenAiClient {
                     items.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
-                        "content": notice.rendered_text()
+                        "content": notice.model_projection_text()
                     }));
                 }
                 Message::User(u) => {

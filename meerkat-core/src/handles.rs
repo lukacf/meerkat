@@ -436,7 +436,7 @@ impl PeerResponseTerminalFact {
 
     pub fn prompt_text(&self) -> String {
         format!(
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from {}. Request ID: {}. Status: {}. Result: {}.",
+            "Peer terminal response from {}. Request ID: {}. Status: {}. Result: {}.",
             self.source.display_identity,
             self.correlation_id,
             self.status.label(),
@@ -479,7 +479,7 @@ impl PeerConversationProjection {
 
     pub fn block_prefix_text(&self) -> Option<String> {
         match self {
-            Self::Message { peer_id } => Some(format!("[COMMS MESSAGE from {peer_id}]")),
+            Self::Message { peer_id } => Some(format!("Peer message from {peer_id}")),
             Self::Request { .. }
             | Self::ResponseProgress { .. }
             | Self::ResponseTerminal { .. } => None,
@@ -508,7 +508,7 @@ impl PeerConversationProjection {
                     request_id.clone(),
                 );
                 format!(
-                    "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id {peer_id}{display_suffix}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. {} Do not use send_message for this reply.",
+                    "Peer request from peer_id {peer_id}{display_suffix}. Intent: {intent}. Request ID: {request_id}. Params: {}. This is not a normal user request and not a prompt for direct user-facing output. {} Do not use send_message for this reply.",
                     format_peer_projection_payload(payload.as_ref()),
                     response_call.instruction_text()
                 )
@@ -519,7 +519,7 @@ impl PeerConversationProjection {
                 phase,
                 payload,
             } => format!(
-                "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
+                "Peer response progress from {peer_id}. Request ID: {request_id}. Phase: {}. Payload: {}.",
                 phase.label(),
                 format_peer_projection_payload(payload.as_ref())
             ),
@@ -1711,7 +1711,7 @@ mod tests {
         );
         assert_eq!(
             projection.prompt_text(),
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
+            "Peer terminal response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
         );
     }
 
@@ -1727,7 +1727,7 @@ mod tests {
         assert_eq!(projection.context_key(), None);
         assert_eq!(
             projection.prompt_text(),
-            "[SYSTEM NOTICE][PEER_RESPONSE_PROGRESS] Correlated peer response progress from operator-rt. Request ID: req-789. Phase: partial_result. Payload: {\n  \"chunk\": \"alpha\"\n}."
+            "Peer response progress from operator-rt. Request ID: req-789. Phase: partial_result. Payload: {\n  \"chunk\": \"alpha\"\n}."
         );
     }
 

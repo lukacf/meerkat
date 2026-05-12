@@ -368,13 +368,14 @@ fn openai_realtime_authoritative_system_context(
 fn openai_realtime_terminal_peer_response_summary(
     append: &PendingSystemContextAppend,
 ) -> Option<String> {
-    if !append
-        .text
-        .contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]")
-    {
+    let source = append.source.as_deref().unwrap_or("runtime_system_context");
+    if !source.starts_with("peer_response_terminal:") {
         return None;
     }
-    let (_, result_text) = append.text.split_once("Result:")?;
+    let (_, result_text) = append
+        .text
+        .split_once("Payload:")
+        .or_else(|| append.text.split_once("Result:"))?;
     let mut deserializer = serde_json::Deserializer::from_str(result_text.trim());
     let result = serde_json::Value::deserialize(&mut deserializer).ok()?;
     let intent = result
@@ -384,8 +385,6 @@ fn openai_realtime_terminal_peer_response_summary(
         .get("request_subject")
         .and_then(|value| value.as_str());
     let token = result.get("token").and_then(|value| value.as_str());
-    let source = append.source.as_deref().unwrap_or("runtime_system_context");
-
     let mut fields = vec![
         format!("source `{source}`"),
         format!("request_intent `{intent}`"),
@@ -1013,7 +1012,7 @@ fn openai_realtime_instructions(
                 .take(1)
                 .filter_map(|message| match message {
                     Message::System(system) => Some(system.content.trim().to_string()),
-                    Message::SystemNotice(notice) => Some(notice.rendered_text()),
+                    Message::SystemNotice(notice) => Some(notice.model_projection_text()),
                     _ => None,
                 })
                 .filter(|text| !text.is_empty()),
@@ -1031,7 +1030,7 @@ fn openai_realtime_instructions(
             .take(1)
             .filter_map(|message| match message {
                 Message::System(system) => Some(system.content.trim().to_string()),
-                Message::SystemNotice(notice) => Some(notice.rendered_text()),
+                Message::SystemNotice(notice) => Some(notice.model_projection_text()),
                 _ => None,
             })
             .filter(|text| !text.is_empty()),
@@ -4566,7 +4565,7 @@ mod tests {
     #[test]
     fn instructions_do_not_promote_rendered_runtime_marker_without_typed_context() {
         let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(format!(
-            "You are the realtime operator.{}\n[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst. Request ID: req-123. Status: completed. Result: {{\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}}.",
+            "You are the realtime operator.{}\n[Runtime System Context]\nsource: peer_response_terminal:analyst:req-123\n\nPeer terminal response from analyst\nRequest ID: req-123\nStatus: completed\nPayload: {{\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}}",
             meerkat_core::SYSTEM_CONTEXT_SEPARATOR
         )))];
 
@@ -4582,8 +4581,8 @@ mod tests {
             "rendered marker text must not become runtime authority: {instructions}"
         );
         assert!(
-            instructions.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"),
-            "rendered marker text may remain as ordinary prompt projection: {instructions}"
+            instructions.contains("Peer terminal response from analyst"),
+            "rendered terminal text may remain as ordinary prompt projection: {instructions}"
         );
     }
 
@@ -4618,11 +4617,11 @@ mod tests {
             "You are the realtime operator.".to_string(),
         ))];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {
+            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {
   \"request_intent\": \"checksum_token\",
   \"request_subject\": \"alpha beta gamma\",
   \"token\": \"birch seventeen\"
-}."
+}"
             .to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
@@ -4653,7 +4652,7 @@ mod tests {
             "expected waiting-state override guidance: {instructions}"
         );
         assert!(
-            instructions.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"),
+            instructions.contains("Peer terminal response from analyst-rt"),
             "expected raw terminal runtime fact to remain visible: {instructions}"
         );
     }
@@ -4673,7 +4672,7 @@ mod tests {
             }),
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}.".to_string(),
+            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\"request_intent\":\"checksum_token\",\"request_subject\":\"alpha beta gamma\",\"token\":\"birch seventeen\"}".to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,
@@ -4761,7 +4760,7 @@ mod tests {
                 "You are the realtime operator.".to_string(),
             )),
             Message::System(meerkat_core::SystemMessage::new(
-                "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\n[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}.",
+                "[Runtime System Context]\nsource: peer_response_terminal:analyst-rt:req-123\n\nPeer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}",
             )),
             Message::User(meerkat_core::UserMessage::text("hello")),
             Message::Assistant(meerkat_core::AssistantMessage {
@@ -4791,7 +4790,7 @@ mod tests {
             },
         ];
         let runtime_system_context = vec![PendingSystemContextAppend {
-            text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from analyst-rt. Request ID: req-123. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}.".to_string(),
+            text: "Peer terminal response from analyst-rt\nRequest ID: req-123\nStatus: completed\nPayload: {\n  \"request_intent\": \"checksum_token\",\n  \"token\": \"birch seventeen\"\n}".to_string(),
             source: Some("peer_response_terminal:analyst-rt:req-123".to_string()),
             idempotency_key: Some("req-123".to_string()),
             accepted_at: meerkat_core::time_compat::SystemTime::UNIX_EPOCH,

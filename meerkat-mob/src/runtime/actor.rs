@@ -176,7 +176,10 @@ fn render_fork_context(
                 lines.push(format!("[system]: {}", s.content));
             }
             Message::SystemNotice(notice) => {
-                lines.push(format!("[system_notice]: {}", notice.rendered_text()));
+                lines.push(format!(
+                    "[system_notice]: {}",
+                    notice.model_projection_text()
+                ));
             }
             Message::User(u) => {
                 lines.push(format!("[user]: {}", u.text_content()));
@@ -2635,6 +2638,7 @@ impl MobActor {
                 } else {
                     None
                 },
+                typed_turn_appends: Vec::new(),
                 turn_metadata: None,
             });
 

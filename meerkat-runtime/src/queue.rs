@@ -103,6 +103,7 @@ mod tests {
             },
             text: "test".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
     }

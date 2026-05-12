@@ -344,7 +344,7 @@ impl GeminiClient {
                 Message::SystemNotice(notice) => {
                     contents.push(serde_json::json!({
                         "role": "user",
-                        "parts": [{"text": notice.rendered_text()}]
+                        "parts": [{"text": notice.model_projection_text()}]
                     }));
                 }
                 Message::User(u) => {

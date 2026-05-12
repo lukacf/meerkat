@@ -174,8 +174,13 @@ fn budget_warning_event(exceeded: BudgetExceeded) -> AgentEvent {
     }
 }
 
-fn synthetic_notice_message(kind: SystemNoticeKind, body: impl Into<String>) -> Message {
-    Message::SystemNotice(SystemNoticeMessage::new(kind, body))
+fn synthetic_notice_block_message(
+    kind: SystemNoticeKind,
+    body: impl Into<String>,
+    block: crate::types::SystemNoticeBlock,
+) -> Message {
+    let body = body.into();
+    Message::SystemNotice(SystemNoticeMessage::with_block(kind, Some(body), block))
 }
 
 fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
@@ -1280,12 +1285,21 @@ where
                         .map(|handle| handle.pending_server_ids().into_iter().collect())
                         .unwrap_or_default();
                     if !pending_servers.is_empty() {
-                        self.session.push(synthetic_notice_message(
+                        let body = format!(
+                            "Servers connecting: {}. Tools will appear when ready.",
+                            pending_servers.join(", ")
+                        );
+                        self.session.push(synthetic_notice_block_message(
                             SystemNoticeKind::McpPending,
-                            format!(
-                                "Servers connecting: {}. Tools will appear when ready.",
-                                pending_servers.join(", ")
-                            ),
+                            body.clone(),
+                            crate::types::SystemNoticeBlock::Mcp {
+                                server_id: None,
+                                operation: None,
+                                phase: Some(crate::event::ExternalToolDeltaPhase::Pending),
+                                persisted: false,
+                                detail: Some(body),
+                                pending_sources: pending_servers,
+                            },
                         ));
                     }
 
@@ -1330,9 +1344,15 @@ where
                                 entry.display_name, job_id, status_str, detail,
                             );
                             notice.push_str("\nUse shell_job_status to get the full output.");
-                            self.session.push(synthetic_notice_message(
+                            self.session.push(synthetic_notice_block_message(
                                 SystemNoticeKind::BackgroundJob,
                                 notice,
+                                crate::types::SystemNoticeBlock::BackgroundJob {
+                                    job_id,
+                                    display_name: Some(entry.display_name.clone()),
+                                    status: terminal_status,
+                                    detail: Some(detail),
+                                },
                             ));
                         }
                         self.applied_cursor = batch.watermark;
@@ -1375,9 +1395,15 @@ where
                             completion.detail,
                         );
                         notice.push_str("\nUse shell_job_status to get the full output.");
-                        self.session.push(synthetic_notice_message(
+                        self.session.push(synthetic_notice_block_message(
                             SystemNoticeKind::BackgroundJob,
                             notice,
+                            crate::types::SystemNoticeBlock::BackgroundJob {
+                                job_id: completion.job_id.clone(),
+                                display_name: Some(completion.display_name.clone()),
+                                status: terminal_status,
+                                detail: Some(completion.detail.clone()),
+                            },
                         ));
                     }
 
@@ -1467,24 +1493,26 @@ where
                                         applied.applied_revision.0,
                                     );
                                     let status = status_info.status_text();
+                                    let payload = ToolConfigChangedPayload::new(
+                                        ToolConfigChangeOperation::Reload,
+                                        "tool_scope",
+                                        status_info,
+                                        false,
+                                    )
+                                    .with_applied_at_turn(Some(turn_count))
+                                    .with_domain(Some(ToolConfigChangeDomain::ToolScope));
                                     emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: ToolConfigChangedPayload::new(
-                                            ToolConfigChangeOperation::Reload,
-                                            "tool_scope",
-                                            status_info,
-                                            false,
-                                        )
-                                        .with_applied_at_turn(Some(turn_count))
-                                        .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
+                                        payload: payload.clone(),
                                     });
                                     // Represent runtime notices as user-scoped synthetic context
                                     // (same pattern as peer lifecycle updates) so this does not
                                     // mutate or replace the canonical system prompt.
-                                    self.session.push(synthetic_notice_message(
+                                    self.session.push(synthetic_notice_block_message(
                                         SystemNoticeKind::ToolScope,
                                         format!(
                                             "Tool configuration changed at turn boundary: {status}"
                                         ),
+                                        crate::types::SystemNoticeBlock::ToolConfig { payload },
                                     ));
                                 }
                                 let visible_names_set = applied
@@ -1538,20 +1566,21 @@ where
                                             removed_hidden_names.len(),
                                             pending_sources.len(),
                                         );
+                                    let payload = ToolConfigChangedPayload::new(
+                                        ToolConfigChangeOperation::Reload,
+                                        "deferred_catalog",
+                                        status_info,
+                                        false,
+                                    )
+                                    .with_applied_at_turn(Some(turn_count))
+                                    .with_domain(Some(ToolConfigChangeDomain::DeferredCatalog))
+                                    .with_deferred_catalog_delta(Some(DeferredCatalogDelta {
+                                        added_hidden_names: added_hidden_names.clone(),
+                                        removed_hidden_names: removed_hidden_names.clone(),
+                                        pending_sources: pending_sources.clone(),
+                                    }));
                                     emit_event!(AgentEvent::ToolConfigChanged {
-                                        payload: ToolConfigChangedPayload::new(
-                                            ToolConfigChangeOperation::Reload,
-                                            "deferred_catalog",
-                                            status_info,
-                                            false,
-                                        )
-                                        .with_applied_at_turn(Some(turn_count))
-                                        .with_domain(Some(ToolConfigChangeDomain::DeferredCatalog))
-                                        .with_deferred_catalog_delta(Some(DeferredCatalogDelta {
-                                            added_hidden_names: added_hidden_names.clone(),
-                                            removed_hidden_names: removed_hidden_names.clone(),
-                                            pending_sources: pending_sources.clone(),
-                                        },)),
+                                        payload: payload.clone(),
                                     });
                                     let mut notice_parts = Vec::new();
                                     if !added_hidden_names.is_empty() {
@@ -1573,12 +1602,13 @@ where
                                         ));
                                     }
                                     if !notice_parts.is_empty() {
-                                        self.session.push(synthetic_notice_message(
+                                        self.session.push(synthetic_notice_block_message(
                                             SystemNoticeKind::ToolScope,
                                             format!(
                                                 "Deferred catalog changed at turn boundary: {}",
                                                 notice_parts.join("; ")
                                             ),
+                                            crate::types::SystemNoticeBlock::ToolConfig { payload },
                                         ));
                                     }
                                 }
@@ -1589,25 +1619,27 @@ where
                             Err(err) => {
                                 let status_info =
                                     ToolConfigChangeStatus::warning_failed_closed(err.to_string());
+                                let payload = ToolConfigChangedPayload::new(
+                                    ToolConfigChangeOperation::Reload,
+                                    "tool_scope",
+                                    status_info,
+                                    false,
+                                )
+                                .with_applied_at_turn(Some(turn_count))
+                                .with_domain(Some(ToolConfigChangeDomain::ToolScope));
                                 tracing::warn!(
                                     error = %err,
                                     "tool scope boundary apply failed; closing visible tool set for this boundary"
                                 );
                                 emit_event!(AgentEvent::ToolConfigChanged {
-                                    payload: ToolConfigChangedPayload::new(
-                                        ToolConfigChangeOperation::Reload,
-                                        "tool_scope",
-                                        status_info,
-                                        false,
-                                    )
-                                    .with_applied_at_turn(Some(turn_count))
-                                    .with_domain(Some(ToolConfigChangeDomain::ToolScope)),
+                                    payload: payload.clone(),
                                 });
-                                self.session.push(synthetic_notice_message(
+                                self.session.push(synthetic_notice_block_message(
                                     SystemNoticeKind::ToolScopeWarning,
                                     format!(
                                         "Tool scope apply failed ({err}); closing the visible tool set until the next boundary."
                                     ),
+                                    crate::types::SystemNoticeBlock::ToolConfig { payload },
                                 ));
                                 self.tool_scope.fail_closed_projection().unwrap_or_else(
                                     |close_err| {
@@ -5858,7 +5890,7 @@ mod tests {
                 Message::SystemNotice(notice)
                     if is_synthetic_notice(msg, SystemNoticeKind::ToolScopeWarning) =>
                 {
-                    Some(notice.rendered_text())
+                    notice.body.clone()
                 }
                 _ => None,
             })

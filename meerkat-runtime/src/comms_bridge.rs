@@ -226,12 +226,7 @@ fn map_response_convention(
 }
 
 fn peer_rendered_body(interaction: &InboxInteraction) -> String {
-    // For every content kind, prefer the comms-owned `rendered_text`
-    // projection when present: it already carries the authoritative
-    // `[from]: <kind>` framing that later prompt-rendering relies on
-    // (see `peer_prompt_text`). Fall back to the content-specific
-    // serialization only when rendered_text is empty.
-    if !interaction.rendered_text.is_empty() {
+    if !interaction.rendered_text.trim().is_empty() {
         return interaction.rendered_text.clone();
     }
     match &interaction.content {
@@ -495,7 +490,7 @@ mod tests {
                     blocks: None,
                 },
                 id: request_id,
-                rendered_text: "[COMMS REQUEST stale helper prose]".into(),
+                rendered_text: "stale helper prose".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Steer,
                 render_metadata: None,
             },
@@ -527,11 +522,11 @@ mod tests {
             panic!("Expected peer source");
         };
         assert_eq!(peer_id, "11111111-1111-4111-8111-111111111111");
-        assert_eq!(peer.body, "[COMMS REQUEST stale helper prose]");
+        assert_eq!(peer.body, "stale helper prose");
 
         let prompt = crate::input::input_prompt_text(&input);
         assert!(prompt.starts_with(
-            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id 11111111-1111-4111-8111-111111111111 (display_name: test-mob/lead/l-requester)."
+            "Peer request from peer_id 11111111-1111-4111-8111-111111111111 (display_name: test-mob/lead/l-requester)."
         ));
         assert!(prompt.contains("\"peer_id\":\"11111111-1111-4111-8111-111111111111\""));
         assert!(prompt.contains("\"display_name\":\"test-mob/lead/l-requester\""));
@@ -599,7 +594,7 @@ mod tests {
                     blocks: None,
                 },
                 id,
-                rendered_text: "[COMMS MESSAGE from event:webhook]\nhello".into(),
+                rendered_text: "stale rendered text".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
             },
@@ -609,7 +604,7 @@ mod tests {
                 .expect("classified peer event should project to peer input");
         match input {
             Input::Peer(peer) => {
-                assert_eq!(peer.body, "[COMMS MESSAGE from event:webhook]\nhello");
+                assert_eq!(peer.body, "stale rendered text");
                 match peer.header.source {
                     InputOrigin::Peer { peer_id, .. } => {
                         assert_eq!(peer_id, test_peer_id().as_str());
@@ -651,7 +646,7 @@ mod tests {
                     blocks: None,
                 },
                 id,
-                rendered_text: "[COMMS REQUEST from display-agent]".into(),
+                rendered_text: "stale rendered text".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
             },
@@ -670,7 +665,7 @@ mod tests {
             }
             other => panic!("Expected peer source, got {other:?}"),
         }
-        assert_eq!(peer.body, "[COMMS REQUEST from display-agent]");
+        assert_eq!(peer.body, "stale rendered text");
     }
 
     #[test]
@@ -695,7 +690,7 @@ mod tests {
                     blocks: None,
                 },
                 id,
-                rendered_text: "[COMMS MESSAGE from display-agent]\nhello".into(),
+                rendered_text: "stale rendered text".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
             },
@@ -714,12 +709,7 @@ mod tests {
     }
 
     #[test]
-    fn request_body_prefers_rendered_text_and_preserves_structured_payload() {
-        // Comms-owned `rendered_text` is the authoritative projection for
-        // request/response conventions too (not just messages): it carries
-        // the `[COMMS REQUEST ...]` framing downstream prompt rendering
-        // relies on. The structured JSON still flows through `payload` for
-        // consumers that need the raw params.
+    fn request_body_preserves_rendered_text_and_structured_payload() {
         let interaction = InboxInteraction {
             from_route: None,
             from: "event:webhook".into(),
@@ -729,17 +719,13 @@ mod tests {
                 blocks: None,
             },
             id: make_interaction_id(),
-            rendered_text: "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
-                .into(),
+            rendered_text: "stale rendered text".into(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(
-                peer.body,
-                "[COMMS REQUEST from event:webhook (id: req)]\nIntent: mob.peer_added"
-            );
+            assert_eq!(peer.body, "stale rendered text");
             assert_eq!(peer.payload, Some(serde_json::json!({"peer":"agent-1"})));
         } else {
             panic!("Expected PeerInput");
@@ -765,13 +751,13 @@ mod tests {
                 blocks: Some(blocks.clone()),
             },
             id: make_interaction_id(),
-            rendered_text: "[COMMS MESSAGE from peer-1]\nsee image".into(),
+            rendered_text: "stale rendered text".into(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(peer.body, "[COMMS MESSAGE from peer-1]\nsee image");
+            assert_eq!(peer.body, "stale rendered text");
             assert_eq!(peer.blocks, Some(blocks));
         } else {
             panic!("Expected PeerInput");
@@ -858,16 +844,13 @@ mod tests {
                 blocks: Some(blocks),
             },
             id: make_interaction_id(),
-            rendered_text: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            rendered_text: "stale rendered text".into(),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata: None,
         };
         let input = peer_input_for_test(&interaction, &LogicalRuntimeId::new("test"));
         if let Input::Peer(peer) = input {
-            assert_eq!(
-                peer.body,
-                "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]"
-            );
+            assert_eq!(peer.body, "stale rendered text");
         } else {
             panic!("Expected PeerInput");
         }
@@ -897,7 +880,7 @@ mod tests {
                     blocks: Some(blocks.clone()),
                 },
                 id,
-                rendered_text: "[EVENT via webhook] see image".into(),
+                rendered_text: "stale rendered text".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 render_metadata: None,
             },
@@ -939,7 +922,7 @@ mod tests {
                     blocks: None,
                 },
                 id,
-                rendered_text: "[EVENT via webhook] urgent".into(),
+                rendered_text: "stale rendered text".into(),
                 handling_mode: meerkat_core::types::HandlingMode::Steer,
                 render_metadata: Some(render_metadata.clone()),
             },
@@ -1014,14 +997,16 @@ mod tests {
             .expect("terminal machine-batch context projection");
         let expected_key = format!("peer_response_terminal:{route_id}:{in_reply_to}");
         assert_eq!(context.key, expected_key);
-        let meerkat_core::lifecycle::run_primitive::CoreRenderable::Text { text } = context.content
+        let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice { blocks, .. } =
+            context.content
         else {
-            panic!("Expected terminal context text");
+            panic!("Expected terminal context notice");
         };
-        assert!(
-            text.contains("from Peer One"),
-            "terminal prompt should use display identity: {text}",
-        );
+        assert!(matches!(
+            blocks.first(),
+            Some(meerkat_core::types::SystemNoticeBlock::Comms { peer, .. })
+                if peer.as_ref().and_then(|peer| peer.display_name.as_deref()) == Some("Peer One")
+        ));
     }
 
     #[test]

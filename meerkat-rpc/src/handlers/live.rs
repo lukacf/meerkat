@@ -65,15 +65,15 @@ const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
 /// returns `Some` (i.e. the session has a resolved root system prompt or
 /// build instructions). When that returns `None`, the original first
 /// message is left in place — and the canonical session transcript can
-/// legitimately lead with a `Message::SystemNotice` (e.g. a runtime-injected
-/// `[SYSTEM NOTICE][MCP_PENDING]` notice from an idle pre-prompt session).
+/// legitimately lead with a `Message::SystemNotice` (e.g. a typed MCP-pending
+/// notice from an idle pre-prompt session).
 /// Without honoring `SystemNotice` here, a refresh whose snapshot leads
 /// with one would silently emit empty instructions and wipe whatever the
 /// realtime provider had in its session-level `instructions` field.
 ///
-/// We use `SystemNoticeMessage::rendered_text()` (the same projection the
-/// session_runtime root-system-message helper uses on line 405) so the
-/// provider sees the prefix-tagged form, not the raw body.
+/// We use `SystemNoticeMessage::model_projection_text()` so the provider sees
+/// the internal projection without making rendered prose part of the transcript
+/// contract.
 ///
 /// We deliberately consult only `seed_messages[0]` (matching the projector's
 /// invariant) and ignore any later `Message::System` / `Message::SystemNotice`
@@ -81,7 +81,7 @@ const LIVE_WS_DEFAULT_AUDIO_FORMAT: &str = "pcm_24k_mono";
 fn extract_system_prompt_from_seed_messages(seed_messages: &[Message]) -> Option<String> {
     match seed_messages.first()? {
         Message::System(system) => Some(system.content.clone()),
-        Message::SystemNotice(notice) => Some(notice.rendered_text()),
+        Message::SystemNotice(notice) => Some(notice.model_projection_text()),
         _ => None,
     }
 }
@@ -1035,11 +1035,11 @@ mod tests {
     }
 
     #[test]
-    fn extract_system_prompt_returns_rendered_text_for_first_system_notice() {
+    fn extract_system_prompt_returns_model_projection_for_first_system_notice() {
         // R10 (review-3 follow-up): when the canonical projection leaves a
         // `Message::SystemNotice` at index 0 of the seed history (e.g. a
         // pre-prompt session whose only lead message is a runtime-injected
-        // `[SYSTEM NOTICE][MCP_PENDING]` notice — `realtime_projection_messages`
+        // typed MCP-pending notice — `realtime_projection_messages`
         // in `session_runtime.rs:435-444` does NOT rewrite the slot when
         // `realtime_projection_root_system_message` returns `None`), the
         // snapshot builder must surface the notice's *rendered* text as the
@@ -1047,13 +1047,13 @@ mod tests {
         // `session.update` rebuilds instructions only from
         // `runtime_system_context` and silently wipes whatever instructions
         // the realtime provider already had at session level. We use
-        // `rendered_text()` (prefix-tagged) to match the projection the
-        // session_runtime root-system helper itself emits on line 405.
+        // `model_projection_text()` to match the provider-facing projection
+        // without persisting prefix prose as transcript content.
         use meerkat_core::types::{Message, SystemNoticeKind, SystemNoticeMessage};
 
         let notice =
             SystemNoticeMessage::new(SystemNoticeKind::McpPending, "stub server connecting");
-        let expected = notice.rendered_text();
+        let expected = notice.model_projection_text();
         let messages = vec![
             Message::SystemNotice(notice),
             Message::User(meerkat_core::types::UserMessage::text("hi".to_string())),

@@ -298,11 +298,11 @@ pub use types::{
     ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
     ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta,
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
-    SystemNoticeKind, SystemNoticeMessage, ToolCall, ToolCallIter, ToolCallView, ToolDef,
-    ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind,
-    TranscriptSource, Usage, UserMessage, VideoData,
-    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
-    has_video, is_supported_video_media_type, validate_inline_video_blocks,
+    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
+    SystemNoticePeer, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName,
+    ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptSource, Usage,
+    UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
+    has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
 };
 pub use web_search::*;
 

@@ -467,6 +467,7 @@ mod image_generation_substrate {
             "make an image".to_string().into(),
             meerkat_core::types::HandlingMode::Queue,
             None,
+            Vec::new(),
             Some(RuntimeExecutionKind::ContentTurn),
             run_tx,
         )

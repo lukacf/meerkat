@@ -11,7 +11,7 @@ use crate::connection::AuthBindingRef;
 use crate::provider::Provider;
 use crate::service::TurnToolOverlay;
 use crate::skills::SkillKey;
-use crate::types::{HandlingMode, RenderMetadata};
+use crate::types::{HandlingMode, RenderMetadata, SystemNoticeBlock, SystemNoticeKind};
 
 /// When to apply a conversation mutation relative to the run lifecycle.
 #[non_exhaustive]
@@ -41,6 +41,14 @@ pub enum CoreRenderable {
     /// these from various typed sources (peer messages, external events) and core
     /// needs to render them into conversation messages — not a pass-through boundary.
     Json { value: serde_json::Value },
+    /// Typed runtime-authored system notice content.
+    SystemNotice {
+        kind: SystemNoticeKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<SystemNoticeBlock>,
+    },
     /// Reference to an external artifact.
     Reference { uri: String, label: Option<String> },
 }
@@ -1706,43 +1714,48 @@ impl RunPrimitive {
     /// Consolidates the 5 near-identical `extract_prompt` / `extract_runtime_prompt`
     /// functions that were duplicated across RPC, REST, MCP, mob, and CLI surfaces.
     pub fn extract_content_input(&self) -> crate::types::ContentInput {
-        use crate::types::{ContentBlock, ContentInput};
         match self {
             RunPrimitive::StagedInput(staged) => {
-                let mut all_blocks = Vec::new();
-                for append in &staged.appends {
-                    match &append.content {
-                        CoreRenderable::Text { text } => {
-                            all_blocks.push(ContentBlock::Text { text: text.clone() });
-                        }
-                        CoreRenderable::Blocks { blocks } => {
-                            all_blocks.extend(blocks.iter().cloned());
-                        }
-                        _ => {}
-                    }
-                }
-                if all_blocks.is_empty() {
-                    ContentInput::Text(String::new())
-                } else if all_blocks.len() == 1 {
-                    if let ContentBlock::Text { text } = &all_blocks[0] {
-                        ContentInput::Text(text.clone())
-                    } else {
-                        ContentInput::Blocks(all_blocks)
-                    }
-                } else {
-                    ContentInput::Blocks(all_blocks)
-                }
+                content_input_from_conversation_appends(&staged.appends)
             }
-            RunPrimitive::ImmediateAppend(append) => match &append.content {
-                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-                _ => ContentInput::Text(String::new()),
-            },
-            RunPrimitive::ImmediateContextAppend(ctx) => match &ctx.content {
-                CoreRenderable::Text { text } => ContentInput::Text(text.clone()),
-                CoreRenderable::Blocks { blocks } => ContentInput::Blocks(blocks.clone()),
-                _ => ContentInput::Text(String::new()),
-            },
+            RunPrimitive::ImmediateAppend(append) => {
+                content_input_from_core_renderable(&append.content)
+            }
+            RunPrimitive::ImmediateContextAppend(ctx) => {
+                content_input_from_core_renderable(&ctx.content)
+            }
+        }
+    }
+
+    /// Project this primitive into provider-visible input.
+    ///
+    /// Unlike [`RunPrimitive::extract_content_input`], this is allowed to
+    /// render typed runtime-authored notices into model text. The rendered text
+    /// is an internal provider projection only; transcript persistence remains
+    /// typed `SystemNotice` content.
+    pub fn model_projection_content_input(&self) -> crate::types::ContentInput {
+        match self {
+            RunPrimitive::StagedInput(staged) => {
+                model_projection_content_input_from_conversation_appends(&staged.appends)
+            }
+            RunPrimitive::ImmediateAppend(append) => {
+                model_projection_content_input_from_core_renderable(&append.content)
+            }
+            RunPrimitive::ImmediateContextAppend(ctx) => {
+                model_projection_content_input_from_core_renderable(&ctx.content)
+            }
+        }
+    }
+
+    /// Runtime-authored transcript appends carried by this primitive.
+    ///
+    /// Provider prompt text is derived separately; these appends remain the
+    /// durable authorship source for transcript persistence.
+    pub fn typed_turn_appends(&self) -> Vec<ConversationAppend> {
+        match self {
+            RunPrimitive::StagedInput(staged) => staged.appends.clone(),
+            RunPrimitive::ImmediateAppend(append) => vec![append.clone()],
+            RunPrimitive::ImmediateContextAppend(_) => Vec::new(),
         }
     }
 
@@ -1815,6 +1828,111 @@ impl RunPrimitive {
                 && !staged.context_appends.is_empty()
                 && staged.boundary == RunApplyBoundary::Immediate
         )
+    }
+}
+
+pub fn content_input_from_conversation_appends(
+    appends: &[ConversationAppend],
+) -> crate::types::ContentInput {
+    let mut all_blocks = Vec::new();
+    for append in appends {
+        append_content_blocks(&append.content, &mut all_blocks);
+    }
+    content_input_from_blocks(all_blocks)
+}
+
+pub fn model_projection_content_input_from_conversation_appends(
+    appends: &[ConversationAppend],
+) -> crate::types::ContentInput {
+    let mut all_blocks = Vec::new();
+    for append in appends {
+        append_model_projection_blocks(&append.content, &mut all_blocks);
+    }
+    content_input_from_blocks(all_blocks)
+}
+
+fn content_input_from_core_renderable(content: &CoreRenderable) -> crate::types::ContentInput {
+    let mut all_blocks = Vec::new();
+    append_content_blocks(content, &mut all_blocks);
+    content_input_from_blocks(all_blocks)
+}
+
+fn model_projection_content_input_from_core_renderable(
+    content: &CoreRenderable,
+) -> crate::types::ContentInput {
+    let mut all_blocks = Vec::new();
+    append_model_projection_blocks(content, &mut all_blocks);
+    content_input_from_blocks(all_blocks)
+}
+
+fn append_content_blocks(
+    content: &CoreRenderable,
+    all_blocks: &mut Vec<crate::types::ContentBlock>,
+) {
+    use crate::types::ContentBlock;
+    match content {
+        CoreRenderable::Text { text } => {
+            all_blocks.push(ContentBlock::Text { text: text.clone() });
+        }
+        CoreRenderable::Blocks { blocks } => {
+            all_blocks.extend(blocks.iter().cloned());
+        }
+        CoreRenderable::SystemNotice { .. } => {}
+        _ => {}
+    }
+}
+
+fn append_model_projection_blocks(
+    content: &CoreRenderable,
+    all_blocks: &mut Vec<crate::types::ContentBlock>,
+) {
+    use crate::types::{ContentBlock, SystemNoticeMessage};
+    match content {
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            let projection = SystemNoticeMessage::with_blocks(*kind, body.clone(), blocks.clone())
+                .model_projection_text();
+            if !projection.trim().is_empty() {
+                all_blocks.push(ContentBlock::Text { text: projection });
+            }
+            append_system_notice_media_blocks(blocks, all_blocks);
+        }
+        _ => append_content_blocks(content, all_blocks),
+    }
+}
+
+fn append_system_notice_media_blocks(
+    blocks: &[SystemNoticeBlock],
+    all_blocks: &mut Vec<crate::types::ContentBlock>,
+) {
+    for block in blocks {
+        let content = match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+            _ => continue,
+        };
+        all_blocks.extend(
+            content
+                .iter()
+                .filter(|block| !matches!(block, crate::types::ContentBlock::Text { .. }))
+                .cloned(),
+        );
+    }
+}
+
+fn content_input_from_blocks(
+    all_blocks: Vec<crate::types::ContentBlock>,
+) -> crate::types::ContentInput {
+    use crate::types::{ContentBlock, ContentInput};
+    if all_blocks.is_empty() {
+        ContentInput::Text(String::new())
+    } else if all_blocks.len() == 1 {
+        if let ContentBlock::Text { text } = &all_blocks[0] {
+            ContentInput::Text(text.clone())
+        } else {
+            ContentInput::Blocks(all_blocks)
+        }
+    } else {
+        ContentInput::Blocks(all_blocks)
     }
 }
 
@@ -1928,6 +2046,113 @@ mod tests {
         );
     }
 
+    #[test]
+    fn system_notice_append_does_not_leak_projection_into_operator_prompt() {
+        let append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Comms,
+                body: Some("Peer request: checksum_token".to_string()),
+                blocks: vec![SystemNoticeBlock::Comms {
+                    kind: "peer_request".to_string(),
+                    direction: crate::types::SystemNoticeDirection::Incoming,
+                    peer: Some(crate::types::SystemNoticePeer {
+                        id: crate::comms::PeerId::new().to_string(),
+                        display_name: Some("worker-1".to_string()),
+                    }),
+                    request_id: Some(crate::time_compat::new_uuid_v7().to_string()),
+                    intent: Some("checksum_token".to_string()),
+                    status: None,
+                    summary: Some("Peer request: checksum_token".to_string()),
+                    payload: None,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: "What is the token?".to_string(),
+                    }],
+                }],
+            },
+        };
+        let p = make_staged(vec![append.clone()]);
+
+        assert_eq!(p.typed_turn_appends(), vec![append]);
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
+        );
+        let projection = p.model_projection_content_input().text_content();
+        assert!(projection.contains("Peer request"));
+        assert!(projection.contains("checksum_token"));
+        assert!(projection.contains("What is the token?"));
+    }
+
+    #[test]
+    fn system_notice_media_remains_typed_notice_not_operator_prompt() {
+        let image = crate::types::ContentBlock::Image {
+            media_type: "image/png".to_string(),
+            data: crate::types::ImageData::Inline {
+                data: "aW1hZ2U=".to_string(),
+            },
+        };
+        let p = make_staged(vec![ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::ExternalEvent,
+                body: Some("External event".to_string()),
+                blocks: vec![SystemNoticeBlock::ExternalEvent {
+                    source: "webhook".to_string(),
+                    event_type: "image".to_string(),
+                    summary: Some("Webhook image".to_string()),
+                    body: Some("Do not inject this prose".to_string()),
+                    payload: None,
+                    content: vec![
+                        crate::types::ContentBlock::Text {
+                            text: "Do not inject this text".to_string(),
+                        },
+                        image,
+                    ],
+                }],
+            },
+        }]);
+
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
+        );
+        match p.model_projection_content_input() {
+            crate::types::ContentInput::Blocks(blocks) => {
+                assert!(blocks.iter().any(|block| matches!(
+                    block,
+                    crate::types::ContentBlock::Text { text }
+                        if text.contains("Do not inject this prose")
+                            && text.contains("Do not inject this text")
+                )));
+                assert!(
+                    blocks
+                        .iter()
+                        .any(|block| matches!(block, crate::types::ContentBlock::Image { .. }))
+                );
+            }
+            other => panic!("expected typed notice projection with media blocks, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn typed_turn_appends_excludes_context_only_appends() {
+        let p = RunPrimitive::ImmediateContextAppend(ConversationContextAppend {
+            key: "ctx".to_string(),
+            content: CoreRenderable::SystemNotice {
+                kind: SystemNoticeKind::Comms,
+                body: Some("context".to_string()),
+                blocks: Vec::new(),
+            },
+        });
+
+        assert!(p.typed_turn_appends().is_empty());
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
+        );
+    }
+
     // --- is_context_only_immediate tests ---
 
     #[test]
@@ -2005,7 +2230,7 @@ mod tests {
             context_appends: vec![ConversationContextAppend {
                 key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
                 content: CoreRenderable::Text {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                    text: "Peer terminal response: done".into(),
                 },
             }],
             contributing_input_ids: vec![InputId::new()],
@@ -2031,14 +2256,14 @@ mod tests {
                 role: ConversationAppendRole::User,
                 content: CoreRenderable::Blocks {
                     blocks: vec![crate::types::ContentBlock::Text {
-                        text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                        text: "Peer terminal response: done".into(),
                     }],
                 },
             }],
             context_appends: vec![ConversationContextAppend {
                 key: "peer_response_terminal:550e8400-e29b-41d4-a716-446655440000:req-123".into(),
                 content: CoreRenderable::Text {
-                    text: "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] done".into(),
+                    text: "Peer terminal response: done".into(),
                 },
             }],
             contributing_input_ids: vec![InputId::new()],

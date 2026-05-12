@@ -786,7 +786,10 @@ pub enum WireSessionMessage {
     },
     SystemNotice {
         kind: SystemNoticeKind,
-        body: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        blocks: Vec<meerkat_core::SystemNoticeBlock>,
         created_at: String,
     },
     User {
@@ -824,6 +827,7 @@ impl From<Message> for WireSessionMessage {
             Message::SystemNotice(message) => Self::SystemNotice {
                 kind: message.kind,
                 body: message.body,
+                blocks: message.blocks,
                 created_at: message.created_at.to_rfc3339(),
             },
             Message::User(message) => {

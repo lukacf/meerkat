@@ -1512,14 +1512,14 @@ fn runtime_external_event_projection_findings_for_sources(
         ));
     }
 
-    if !input_source
-        .contains("Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks")
+    if !input_source.contains("SystemNoticeBlock::ExternalEvent")
+        || !input_source.contains("content: event.blocks.clone().unwrap_or_default()")
     {
         findings.push(error_finding(
             "RuntimeExternalEventProjectionAlignment",
             input_path,
             "input_to_append",
-            "runtime loop must preserve ExternalEvent blocks as block renderables instead of flattening them to text"
+            "runtime loop must preserve ExternalEvent blocks inside typed system notices instead of flattening them to text"
                 .to_string(),
             false,
         ));
@@ -1856,11 +1856,24 @@ mod tests {
             }
         ";
         let loop_source = r"
+            fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderable {
+                CoreRenderable::SystemNotice {
+                    kind: SystemNoticeKind::ExternalEvent,
+                    body: Some(String::new()),
+                    blocks: vec![SystemNoticeBlock::ExternalEvent {
+                        source: String::new(),
+                        event_type: String::new(),
+                        summary: None,
+                        body: None,
+                        payload: Some(event.payload.clone()),
+                        content: event.blocks.clone().unwrap_or_default(),
+                    }],
+                }
+            }
+
             fn input_to_append(input: &Input) -> Option<ConversationAppend> {
                 let content = match input {
-                    Input::ExternalEvent(e) if e.blocks.is_some() => CoreRenderable::Blocks {
-                        blocks: e.blocks.clone().unwrap_or_default(),
-                    },
+                    Input::ExternalEvent(e) => external_event_notice_renderable(e),
                     _ => todo!(),
                 };
                 Some(todo!())

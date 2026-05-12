@@ -94,21 +94,20 @@ pub fn apply_precheck_gates(
 /// `None`, the canonical session transcript's original first message is
 /// left in place — and that can legitimately be a `Message::SystemNotice`
 /// (e.g. an idle pre-prompt session whose only lead is a runtime-injected
-/// `[SYSTEM NOTICE][MCP_PENDING]` notice). Without honoring `SystemNotice`
+/// typed MCP-pending notice). Without honoring `SystemNotice`
 /// here, a `propagate_config_to_live_channels` refresh whose snapshot
 /// leads with one would silently emit empty instructions on
 /// `session.update` and wipe the realtime provider's session-level
-/// instructions. We use `SystemNoticeMessage::rendered_text()` (the
-/// prefix-tagged form, matching the projection the root-system helper
-/// itself emits) so the provider sees the same string the agent loop
-/// would.
+/// instructions. We use `SystemNoticeMessage::model_projection_text()` so
+/// the provider sees the internal projection without making prefix prose a
+/// transcript contract again.
 #[must_use]
 pub fn extract_system_prompt_from_seed_messages_runtime(
     seed_messages: &[Message],
 ) -> Option<String> {
     match seed_messages.first()? {
         Message::System(system) => Some(system.content.clone()),
-        Message::SystemNotice(notice) => Some(notice.rendered_text()),
+        Message::SystemNotice(notice) => Some(notice.model_projection_text()),
         _ => None,
     }
 }
@@ -271,7 +270,7 @@ pub fn realtime_projection_root_system_message(session: &Session) -> Option<Mess
                 .first()
                 .and_then(|message| match message {
                     Message::System(system) => Some(system.content.clone()),
-                    Message::SystemNotice(notice) => Some(notice.rendered_text()),
+                    Message::SystemNotice(notice) => Some(notice.model_projection_text()),
                     _ => None,
                 })
         })

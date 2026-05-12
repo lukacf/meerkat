@@ -368,7 +368,13 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let appends = projections
         .iter()
-        .filter_map(|projection| projection.append.clone())
+        .flat_map(|projection| {
+            projection
+                .append
+                .clone()
+                .into_iter()
+                .chain(projection.additional_appends.clone())
+        })
         .collect::<Vec<_>>();
     let context_appends = projections
         .iter()
@@ -1080,7 +1086,7 @@ mod tests {
     use crate::input::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::run_primitive::{
-        ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
+        ConversationAppend, ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
     };
     use std::sync::{
         Arc,
@@ -1248,6 +1254,7 @@ mod tests {
             },
             text: text.into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
     }
@@ -1302,16 +1309,13 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "[COMMS MESSAGE from peer-1]\nplain body payload".into(),
+            body: "plain body payload".into(),
             payload: None,
             blocks: None,
             handling_mode: None,
         });
 
-        assert_eq!(
-            input_to_prompt(&input),
-            "[COMMS MESSAGE from peer-1]\nplain body payload"
-        );
+        assert_eq!(input_to_prompt(&input), "plain body payload");
     }
 
     #[test]
@@ -1342,9 +1346,9 @@ mod tests {
         });
 
         let prompt = input_to_prompt(&input);
-        assert!(prompt.starts_with(
-            "[SYSTEM NOTICE][PEER_REQUEST] Correlated peer request from peer_id 11111111-1111-4111-8111-111111111111. Intent: checksum_token. Request ID: req-123."
-        ));
+        assert!(
+            prompt.starts_with("Peer request from peer_id 11111111-1111-4111-8111-111111111111")
+        );
         assert!(prompt.contains("\"peer_id\":\"11111111-1111-4111-8111-111111111111\""));
         assert!(prompt.contains("\"in_reply_to\":\"req-123\""));
         assert!(prompt.contains("\"status\":\"completed\""));
@@ -1387,13 +1391,16 @@ mod tests {
         let context = projection
             .context_append
             .expect("terminal peer response should project in machine batch");
-        let CoreRenderable::Text { text } = context.content else {
-            panic!("expected terminal context text");
+        let CoreRenderable::SystemNotice { blocks, .. } = context.content else {
+            panic!("expected typed terminal context");
         };
-        assert_eq!(
-            text,
-            "[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL] Correlated peer response from Analyst. Request ID: 018f6f79-7a82-7c4e-a552-a3b86f9630f1. Status: completed. Result: {\n  \"request_intent\": \"checksum_token\",\n  \"request_subject\": \"alpha beta gamma\",\n  \"token\": \"birch seventeen\"\n}."
-        );
+        assert!(matches!(
+            blocks.first(),
+            Some(meerkat_core::types::SystemNoticeBlock::Comms { peer, request_id, status, .. })
+                if peer.as_ref().and_then(|peer| peer.display_name.as_deref()) == Some("Analyst")
+                    && request_id.as_deref() == Some("018f6f79-7a82-7c4e-a552-a3b86f9630f1")
+                    && status.as_deref() == Some("completed")
+        ));
     }
 
     #[test]
@@ -1436,9 +1443,18 @@ mod tests {
         let context = projection
             .context_append
             .expect("terminal peer response should project in machine batch");
-        let CoreRenderable::Text { text: rendered } = context.content else {
-            panic!("expected terminal context text");
+        let CoreRenderable::SystemNotice { blocks, .. } = context.content else {
+            panic!("expected typed terminal context");
         };
+        let rendered = blocks
+            .first()
+            .and_then(|block| match block {
+                meerkat_core::types::SystemNoticeBlock::Comms { payload, .. } => {
+                    payload.as_ref().map(ToString::to_string)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         assert!(
             !rendered.contains("Authoritative result fields:"),
             "runtime must not emit scenario-specific authoritative-field hints: {rendered}"
@@ -1472,6 +1488,43 @@ mod tests {
             CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
             other => return Err(format!("expected text content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn input_to_primitive_preserves_typed_prompt_appends_without_user_text() -> Result<(), String> {
+        let typed_append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Comms,
+                body: Some("Peer message".to_string()),
+                blocks: vec![meerkat_core::types::SystemNoticeBlock::Comms {
+                    kind: "message".to_string(),
+                    direction: meerkat_core::types::SystemNoticeDirection::Incoming,
+                    peer: None,
+                    request_id: None,
+                    intent: None,
+                    status: None,
+                    summary: Some("Peer message".to_string()),
+                    payload: None,
+                    content: Vec::new(),
+                }],
+            },
+        };
+        let mut input = make_prompt("");
+        let Input::Prompt(prompt) = &mut input else {
+            return Err("expected prompt".to_string());
+        };
+        prompt.typed_turn_appends = vec![typed_append.clone()];
+        let input_id = input.id().clone();
+
+        let primitive = input_to_primitive(&input, input_id.clone())
+            .expect("single input metadata cannot conflict");
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            return Err("expected staged input".to_string());
+        };
+        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert_eq!(staged.appends, vec![typed_append]);
         Ok(())
     }
 
@@ -1571,11 +1624,14 @@ mod tests {
             )
         );
         match &staged.context_appends[0].content {
-            CoreRenderable::Text { text } => {
-                assert!(text.contains("[SYSTEM NOTICE][PEER_RESPONSE_TERMINAL]"));
-                assert!(text.contains("birch seventeen"));
+            CoreRenderable::SystemNotice { blocks, .. } => {
+                assert!(matches!(
+                    blocks.first(),
+                    Some(meerkat_core::types::SystemNoticeBlock::Comms { payload, .. })
+                        if payload.as_ref().is_some_and(|payload| payload.to_string().contains("birch seventeen"))
+                ));
             }
-            other => return Err(format!("expected text content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -1946,18 +2002,16 @@ mod tests {
         };
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 3);
-                assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[COMMS MESSAGE from p]".into(),
-                    }
-                );
-                assert_eq!(got[1], blocks[0]);
-                assert_eq!(got[2], blocks[1]);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+                    got.first()
+                else {
+                    return Err("expected comms block".into());
+                };
+                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("p"));
+                assert_eq!(content, &blocks);
             }
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -1989,7 +2043,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "[COMMS MESSAGE from peer-1]\ncaption text\n[image: image/png]".into(),
+            body: "caption text".into(),
             payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
@@ -2002,18 +2056,16 @@ mod tests {
         };
 
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 3);
-                assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[COMMS MESSAGE from peer-1]".into(),
-                    }
-                );
-                assert_eq!(got[1], blocks[0]);
-                assert_eq!(got[2], blocks[1]);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+                    got.first()
+                else {
+                    return Err("expected comms block".into());
+                };
+                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
+                assert_eq!(content, &blocks);
             }
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -2041,7 +2093,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "[COMMS MESSAGE from peer-1]\n[image: image/png]".into(),
+            body: String::new(),
             payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
@@ -2054,17 +2106,16 @@ mod tests {
         };
 
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 2);
-                assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[COMMS MESSAGE from peer-1]".into(),
-                    }
-                );
-                assert_eq!(got[1], blocks[0]);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+                    got.first()
+                else {
+                    return Err("expected comms block".into());
+                };
+                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
+                assert_eq!(content, &blocks);
             }
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -2091,8 +2142,7 @@ mod tests {
                 correlation_id: None,
             },
             convention: Some(crate::input::PeerConvention::Message),
-            body: "[COMMS MESSAGE from peer-1]\nPlease describe the attached image.\n[image: image/png]"
-                .into(),
+            body: "Please describe the attached image.".into(),
             payload: None,
             blocks: Some(blocks.clone()),
             handling_mode: None,
@@ -2105,21 +2155,20 @@ mod tests {
         };
 
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                assert_eq!(got.len(), 3);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
+                    got.first()
+                else {
+                    return Err("expected comms block".into());
+                };
+                assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
                 assert_eq!(
-                    got[0],
-                    meerkat_core::types::ContentBlock::Text {
-                        text: "[COMMS MESSAGE from peer-1]".into(),
-                    }
-                );
-                assert_eq!(
-                    got[1],
-                    meerkat_core::types::ContentBlock::Text {
+                    content.first(),
+                    Some(&meerkat_core::types::ContentBlock::Text {
                         text: "Please describe the attached image.".into(),
-                    }
+                    })
                 );
-                assert_eq!(got[2], blocks[0]);
+                assert_eq!(content.get(1), Some(&blocks[0]));
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }
@@ -2166,8 +2215,14 @@ mod tests {
         };
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => assert_eq!(got.len(), 2),
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                assert!(matches!(
+                    got.first(),
+                    Some(meerkat_core::types::SystemNoticeBlock::RuntimeNotice { category, detail, .. })
+                        if category == "flow_step" && detail.as_deref() == Some("analyze this screenshot")
+                ));
+            }
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -2212,13 +2267,15 @@ mod tests {
         };
         assert_eq!(staged.appends.len(), 1);
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                // Blocks are preserved directly — no synthetic text header prepended.
-                assert_eq!(got.len(), 2);
-                assert_eq!(got[0], blocks[0]);
-                assert_eq!(got[1], blocks[1]);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::ExternalEvent { content, .. }) =
+                    got.first()
+                else {
+                    return Err("expected external event block".into());
+                };
+                assert_eq!(content, &blocks);
             }
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -2256,12 +2313,15 @@ mod tests {
             other => return Err(format!("expected staged input, got {other:?}")),
         };
         match &staged.appends[0].content {
-            CoreRenderable::Blocks { blocks: got } => {
-                // Image-only blocks preserved directly without text header.
-                assert_eq!(got.len(), 1);
-                assert_eq!(got[0], blocks[0]);
+            CoreRenderable::SystemNotice { blocks: got, .. } => {
+                let Some(meerkat_core::types::SystemNoticeBlock::ExternalEvent { content, .. }) =
+                    got.first()
+                else {
+                    return Err("expected external event block".into());
+                };
+                assert_eq!(content, &blocks);
             }
-            other => return Err(format!("expected blocks content, got {other:?}")),
+            other => return Err(format!("expected typed content, got {other:?}")),
         }
         Ok(())
     }
@@ -2288,7 +2348,7 @@ mod tests {
             render_metadata: None,
         });
 
-        assert_eq!(input_to_prompt(&input), "[EVENT via webhook]");
+        assert_eq!(input_to_prompt(&input), "External event via webhook");
         Ok(())
     }
 
@@ -2319,7 +2379,7 @@ mod tests {
                         body: "build failed".into(),
                         blocks: None,
                     },
-                    rendered_text: "[EVENT via webhook] build failed".into(),
+                    rendered_text: "External event via webhook: build failed".into(),
                     handling_mode: meerkat_core::types::HandlingMode::Queue,
                     render_metadata: None,
                 },
@@ -2349,7 +2409,10 @@ mod tests {
         });
 
         assert_eq!(input_to_prompt(&from_comms), input_to_prompt(&direct));
-        assert_eq!(input_to_prompt(&direct), "[EVENT via webhook] build failed");
+        assert_eq!(
+            input_to_prompt(&direct),
+            "External event via webhook: build failed"
+        );
         Ok(())
     }
 

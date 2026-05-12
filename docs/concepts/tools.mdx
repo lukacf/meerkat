@@ -94,7 +94,7 @@ Tool visibility can change during a session without restarting the agent. Change
 
 **Live MCP mutation.** MCP servers can be added or removed from a running session. Additions connect the server and register its tools; removals drain in-flight calls before finalizing. Both are staged and applied at the next turn boundary.
 
-**Composition rule:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The agent receives a `[SYSTEM NOTICE]` in the conversation when its tool set changes, and a `tool_config_changed` event is emitted to the event stream.
+**Composition rule:** Most-restrictive wins. Multiple allow-lists intersect, multiple deny-lists union, and deny always beats allow. The conversation records a typed `tool_config` system notice when the tool set changes, and a `tool_config_changed` event is emitted to the event stream.
 
 ### Live MCP controls
 

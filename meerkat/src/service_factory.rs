@@ -88,6 +88,7 @@ impl SessionAgent for FactoryAgent {
         prompt: meerkat_core::types::ContentInput,
         handling_mode: HandlingMode,
         render_metadata: Option<RenderMetadata>,
+        typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
         execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
@@ -107,7 +108,13 @@ impl SessionAgent for FactoryAgent {
             ));
         }
         self.agent.set_runtime_execution_kind(execution_kind);
-        self.agent.run_with_events(prompt, event_tx).await
+        if typed_turn_appends.is_empty() {
+            self.agent.run_with_events(prompt, event_tx).await
+        } else {
+            self.agent
+                .run_with_events_and_typed_turn_appends(prompt, typed_turn_appends, event_tx)
+                .await
+        }
     }
 
     async fn run_pending_with_events(
@@ -1372,6 +1379,7 @@ mod tests {
             "inspect".to_string().into(),
             HandlingMode::Queue,
             None,
+            Vec::new(),
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             run_tx,
         )
@@ -1440,6 +1448,7 @@ mod tests {
             "inspect".to_string().into(),
             HandlingMode::Queue,
             None,
+            Vec::new(),
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn),
             run_tx,
         )

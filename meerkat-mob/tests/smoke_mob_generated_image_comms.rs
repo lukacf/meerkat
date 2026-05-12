@@ -305,7 +305,13 @@ fn message_summary(message: &Message) -> String {
         Message::SystemNotice(notice) => format!(
             "system_notice:{:?} body={}",
             notice.kind,
-            notice.body.chars().take(240).collect::<String>()
+            notice
+                .body
+                .as_deref()
+                .unwrap_or_default()
+                .chars()
+                .take(240)
+                .collect::<String>()
         ),
         Message::User(user) => {
             let text = text_content(&user.content);

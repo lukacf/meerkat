@@ -74,7 +74,7 @@ CLI config commands operate on the selected realm:
 ```bash
 rkat --realm team-alpha config get --format json
 rkat --realm team-alpha config get --format json --with-generation
-rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.2"}}' --expected-generation 4
+rkat --realm team-alpha config patch --json '{"agent":{"model":"gpt-5.5"}}' --expected-generation 4
 ```
 
 Without `--realm`, CLI uses the workspace-derived default realm (`ws-...`).

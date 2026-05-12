@@ -1,80 +1,279 @@
 ---
 title: "Self-hosting models"
-description: "General guide to using self-hosted OpenAI-compatible model servers with Meerkat, with Gemma 4 as a worked example."
+description: "Register OpenAI-compatible local or private model servers, including the Gemma 4 aliases Meerkat supports."
 icon: "microchip"
 ---
 
-Use this guide when you want Meerkat to talk to models served from your own infrastructure or a local machine.
+Self-hosted models are configured as first-class Meerkat model IDs. Once an
+alias such as `gemma-4-31b` is registered, users can pass it anywhere they would
+pass a hosted model:
 
-## What this guide is for
+```bash
+rkat run -m gemma-4-31b "Summarize this repository"
+rkat run --resume -m gemma-4-e4b "Keep going, but use the faster local model"
+rkat models
+rkat doctor
+```
 
-This page explains the shared self-hosting model in Meerkat:
+This guide covers the general self-hosting contract and the Gemma 4 worked
+example. There is no separate Gemma page: Gemma 4 is one family under the same
+self-hosted model system as Ollama, LM Studio, vLLM, or another private
+OpenAI-compatible endpoint.
 
-- server definitions
-- model aliases
-- OpenAI-compatible transport expectations
-- validation and debugging
+## Model
 
-It then points to Gemma 4 as the main worked example.
+Every self-hosted setup has two pieces:
 
-## The shared Meerkat model
+| Config section | Owns |
+|----------------|------|
+| `self_hosted.servers.<server_id>` | Transport, base URL, API style, and credentials for one serving endpoint |
+| `self_hosted.models.<alias>` | The Meerkat-facing model ID, display metadata, capabilities, and upstream `remote_model` |
 
-Every self-hosted setup has two parts:
+The alias is the name users type. The `remote_model` is the model name returned
+or expected by the serving stack.
 
-1. a server definition under `self_hosted.servers.<server_id>`
-2. one or more model aliases under `self_hosted.models.<alias>`
+<Note>
+Prefer `bearer_token_env` over `bearer_token` so secrets stay out of checked-in
+configuration.
+</Note>
 
-The alias is what users type. The upstream server/model identity stays inside the self-hosted config.
+## Server Shape
 
-## Recommended default
+For Ollama, LM Studio, vLLM, and most private gateways, use the
+OpenAI-compatible transport:
 
-For current Meerkat usage, prefer:
-
-- `transport = "openai_compatible"`
-- `api_style = "chat_completions"`
-
-for Ollama, LM Studio, and vLLM unless you have explicitly verified a different server-specific workflow.
-
-## Basic shape
-
-```toml
+```toml config.toml
 [self_hosted.servers.local]
 transport = "openai_compatible"
 base_url = "http://127.0.0.1:11434"
 api_style = "chat_completions"
 bearer_token_env = "LOCAL_LLM_TOKEN"
+```
 
-[self_hosted.models.my-local-model]
+`api_style = "chat_completions"` is the conservative default for Gemma 4 and
+other self-hosted tool-calling models. Use another API style only after the
+specific serving stack has been validated with Meerkat tools, structured output,
+and multimodal input.
+
+## Alias Shape
+
+```toml config.toml
+[self_hosted.models.gemma-4-31b]
 server = "local"
-remote_model = "provider/model-name"
-display_name = "My Local Model"
-family = "custom"
-context_window = 128000
+remote_model = "gemma4:31b"
+display_name = "Gemma 4 31B"
+family = "gemma-4"
+tier = "supported"
+context_window = 256000
 max_output_tokens = 8192
 vision = true
 image_tool_results = true
+inline_video = false
 supports_temperature = true
 supports_thinking = true
 supports_reasoning = true
+call_timeout_secs = 600
 ```
 
-## Validation checklist
+`supports_thinking` and `supports_reasoning` describe the behavior Meerkat
+should expose through the configured transport. Gemma 4 is reasoning-capable,
+but normalized reasoning controls and trace streaming still vary by serving
+stack, so validate the behavior you plan to rely on.
 
-- `rkat models` shows the alias under the `self_hosted` provider group
-- `rkat doctor` shows the server as reachable
-- `rkat run -m <alias> "say hello"` works without `--provider`
-- the configured alias matches the upstream `remote_model`
+<Warning>
+Meerkat's current self-hosted path does not expose self-hosted Gemma audio or a
+self-hosted realtime transport. Treat these aliases as text, image-input, and
+tool-capable models unless a dedicated self-hosted realtime path is documented.
+</Warning>
 
-## Worked example: Gemma 4
+## Gemma 4 Aliases
 
-For a detailed practical guide using real Gemma 4 aliases and server recipes, see:
+Recommended aliases:
 
-- [Self-hosted Gemma 4](/guides/self-hosted-gemma4)
+| Alias | Good default use |
+|-------|------------------|
+| `gemma-4-e2b` | Lowest-footprint local experiments |
+| `gemma-4-e4b` | Fast local iteration with more headroom |
+| `gemma-4-26b-a4b` | Stronger quality on a serious local or remote GPU setup |
+| `gemma-4-31b` | Best quality of the four, usually best on a dedicated server |
 
-That page should be treated as the concrete worked example, not the entire generic self-hosting story.
+## Ollama
 
-## See also
+Use Ollama when the model runs on the same machine as Meerkat and you want the
+lightest local setup.
 
-- [Providers](/concepts/providers)
-- [Quickstart](/quickstart)
-- [CLI configuration](/cli/configuration)
+<Steps>
+  <Step title="Serve the model">
+    ```bash
+    ollama pull gemma4:31b
+    ollama list
+    ```
+  </Step>
+  <Step title="Register Ollama">
+    ```toml config.toml
+    [self_hosted.servers.ollama]
+    transport = "openai_compatible"
+    base_url = "http://127.0.0.1:11434"
+    api_style = "chat_completions"
+    ```
+  </Step>
+  <Step title="Add aliases">
+    ```toml config.toml
+    [self_hosted.models.gemma-4-e2b]
+    server = "ollama"
+    remote_model = "gemma4:e2b"
+    display_name = "Gemma 4 E2B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 128000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+
+    [self_hosted.models.gemma-4-31b]
+    server = "ollama"
+    remote_model = "gemma4:31b"
+    display_name = "Gemma 4 31B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+    ```
+  </Step>
+</Steps>
+
+## LM Studio
+
+Use LM Studio when you want a desktop-managed OpenAI-compatible server.
+
+<Steps>
+  <Step title="Start the local server">
+    Load the Gemma 4 model in LM Studio, then start the local server.
+  </Step>
+  <Step title="Register LM Studio">
+    ```toml config.toml
+    [self_hosted.servers.lmstudio]
+    transport = "openai_compatible"
+    base_url = "http://127.0.0.1:1234"
+    api_style = "chat_completions"
+    ```
+  </Step>
+  <Step title="Alias the served model">
+    Use the model name LM Studio exposes in its `/v1/models` output.
+
+    ```toml config.toml
+    [self_hosted.models.gemma-4-e4b]
+    server = "lmstudio"
+    remote_model = "google/gemma-4-e4b"
+    display_name = "Gemma 4 E4B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 128000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    ```
+  </Step>
+</Steps>
+
+## vLLM
+
+Use vLLM when you want a private server with more deployment control.
+
+<Steps>
+  <Step title="Launch vLLM">
+    Start vLLM with the Gemma 4 model you want to expose.
+  </Step>
+  <Step title="Register the server">
+    ```toml config.toml
+    [self_hosted.servers.vllm]
+    transport = "openai_compatible"
+    base_url = "http://my-gpu-box:8000"
+    api_style = "chat_completions"
+    bearer_token_env = "VLLM_API_TOKEN"
+    ```
+  </Step>
+  <Step title="Add remote aliases">
+    Point aliases at the exact model names your vLLM endpoint exposes.
+
+    ```toml config.toml
+    [self_hosted.models.gemma-4-26b-a4b]
+    server = "vllm"
+    remote_model = "google/gemma-4-26b-a4b"
+    display_name = "Gemma 4 26B A4B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+
+    [self_hosted.models.gemma-4-31b]
+    server = "vllm"
+    remote_model = "google/gemma-4-31b"
+    display_name = "Gemma 4 31B"
+    family = "gemma-4"
+    tier = "supported"
+    context_window = 256000
+    max_output_tokens = 8192
+    vision = true
+    image_tool_results = true
+    inline_video = false
+    supports_temperature = true
+    supports_thinking = true
+    supports_reasoning = true
+    call_timeout_secs = 600
+    ```
+  </Step>
+</Steps>
+
+## Validation
+
+Run these after adding or editing self-hosted model config:
+
+```bash
+rkat models
+rkat doctor
+rkat run -m gemma-4-31b "Say hello in one sentence."
+```
+
+The expected result:
+
+- `rkat models` shows a `self_hosted` provider group and the aliases you added.
+- `rkat doctor` reports the server as reachable.
+- `rkat run -m ...` works without an explicit `--provider`.
+- The alias points at the exact upstream `remote_model` exposed by the server.
+
+## See Also
+
+<CardGroup cols={3}>
+  <Card title="Providers" icon="plug" href="/concepts/providers">
+    Hosted and self-hosted provider model.
+  </Card>
+  <Card title="CLI configuration" icon="gear" href="/cli/configuration">
+    Config file locations and model settings.
+  </Card>
+  <Card title="CLI commands" icon="terminal" href="/cli/commands">
+    Commands for running, diagnosing, and inspecting models.
+  </Card>
+</CardGroup>

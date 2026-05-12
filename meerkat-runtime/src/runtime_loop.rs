@@ -50,6 +50,10 @@ pub(crate) fn for_input(
             handling_mode: Some(continuation.handling_mode),
             ..Default::default()
         },
+        Input::Peer(peer) => RuntimeTurnMetadata {
+            handling_mode: peer.handling_mode,
+            ..Default::default()
+        },
         _ => RuntimeTurnMetadata::default(),
     };
     metadata.execution_kind = Some(semantics.execution_kind);
@@ -2591,6 +2595,26 @@ mod tests {
         assert_eq!(
             meta.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
+        );
+    }
+
+    #[test]
+    fn primitive_from_peer_input_preserves_explicit_handling_mode() {
+        let mut input = make_peer_message("peer-steer", "urgent helper update");
+        let Input::Peer(peer) = &mut input else {
+            panic!("make_peer_message must build a peer input");
+        };
+        peer.handling_mode = Some(meerkat_core::types::HandlingMode::Steer);
+
+        let primitive = input_to_primitive(&input, input.id().clone())
+            .expect("single peer input metadata cannot conflict");
+        let meta = primitive
+            .turn_metadata()
+            .expect("peer primitive should carry turn metadata");
+        assert_eq!(
+            meta.handling_mode,
+            Some(meerkat_core::types::HandlingMode::Steer),
+            "peer handling_mode must survive primitive construction for live/steer projection"
         );
     }
 

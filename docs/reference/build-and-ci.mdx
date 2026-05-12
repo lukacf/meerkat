@@ -1,0 +1,113 @@
+---
+title: "Build And CI"
+description: "The Make, Cargo, BuildBuddy, and release validation surfaces used by Meerkat contributors."
+icon: "helmet-safety"
+---
+
+Make is the developer-facing command surface. Cargo is the default backend.
+BuildBuddy/Bazel is an opt-in acceleration backend for machines with access to
+the GCP-backed runner pool.
+
+## Local Commands
+
+Use these commands for normal development:
+
+```bash
+make build
+make check
+make lint
+make test
+make agent-gate
+```
+
+Avoid raw `cargo` for normal repo work. When you need targeted Cargo commands,
+use `./scripts/repo-cargo` so output roots and multi-agent work stay isolated.
+
+## BuildBuddy Opt-In
+
+Set `MEERKAT_BUILDBUDDY=1` to route the same Make lanes through the BuildBuddy
+backend:
+
+```bash
+MEERKAT_BUILDBUDDY=1 make build
+MEERKAT_BUILDBUDDY=1 make check
+MEERKAT_BUILDBUDDY=1 make lint
+MEERKAT_BUILDBUDDY=1 make test
+MEERKAT_BUILDBUDDY=1 make e2e-fast
+MEERKAT_BUILDBUDDY=1 make e2e-system
+MEERKAT_BUILDBUDDY=1 make e2e-live
+MEERKAT_BUILDBUDDY=1 make e2e-smoke
+```
+
+Use `BUILDBUDDY_DRY_RUN=1` with explicit BuildBuddy Make targets to inspect the
+selected command without running it.
+
+The Make targets delegate through `scripts/run-build-backend-lane`; when
+BuildBuddy is enabled, that switch calls `scripts/buildbuddy-dev`.
+
+## Test Lanes
+
+| Lane | Scope |
+| --- | --- |
+| `make test-unit` | Fast unit coverage. |
+| `make test-int` | Integration-fast coverage without e2e scenarios. |
+| `make e2e-fast` | Deterministic end-to-end lane. |
+| `make e2e-system` | Local real-resource scenarios. |
+| `make e2e-live` | Targeted live-provider checks when credentials are configured. |
+| `make e2e-smoke` | Compound live-provider smoke scenarios. |
+
+The canonical e2e lane taxonomy lives in
+`tests/integration/src/e2e_lanes.rs`. Scripts and BuildBuddy targets route to
+that taxonomy rather than inventing separate lane names.
+
+## Architecture Gates
+
+Machine and surface contracts have direct Make targets:
+
+```bash
+make verify-version-parity
+make verify-schema-freshness
+make verify-rpc-surface-alignment
+make verify-sdk-wrapper-freshness
+make machine-check-drift
+make machine-verify
+make seam-inventory
+make audit-generated-headers
+```
+
+These gates protect generated schemas, SDK wrappers, machine artifacts, and
+runtime authority invariants.
+
+## CI Shape
+
+GitHub Actions selects one backend for a run:
+
+- default Cargo lanes for normal contributors
+- owner-gated GCP BuildBuddy lanes when the secret-backed runner pool is
+  available
+
+The BuildBuddy workflow starts the control plane, scales executors up, submits
+the selected lanes, then scales executors down. The final CI gate checks the
+selected backend result.
+
+## Doctor
+
+Run:
+
+```bash
+make buildbuddy-doctor
+```
+
+The doctor checks the API key, pinned `bb` CLI, generated Bazel files, selector
+behavior, lane isolation, and docs wiring without printing secrets.
+
+## Multi-Agent Work
+
+Separate Git worktrees are already isolated by path hash. If multiple agents
+share one checkout, set a distinct `RUST_LANE_ID` per agent when you want stable
+warm local output roots.
+
+## See Also
+
+- [CD and distribution](/guides/cd-and-distribution)
+- [Machine Authority](/reference/machine-authority)

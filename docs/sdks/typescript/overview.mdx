@@ -83,6 +83,7 @@ The TypeScript SDK (`@rkat/sdk`) is a thin wrapper over Meerkat's settled runtim
 | `getConfig()` | Read runtime configuration |
 | `setConfig(config)` | Replace runtime configuration |
 | `patchConfig(patch)` | Merge-patch runtime configuration |
+| `liveOpen/liveStatus/liveClose/liveSendInput/liveCommitInput/liveInterrupt/liveTruncate/liveRefresh` | Direct wrappers for the `live/*` RPC surface |
 
 ### Auth wrappers
 
@@ -132,6 +133,32 @@ Image-generation wire contracts are exported for integrations that inspect tool 
 | `session.send(command)` | Send a typed comms command scoped to this session |
 | `session.peers()` | List peers visible to this session's comms runtime |
 | `session.subscribeEvents()` | Open a standalone event subscription; returns `EventSubscription<AgentEventEnvelope>` |
+
+### Live channel helper
+
+`RealtimeChannel` and the old realtime convenience helpers are no longer part of
+the public SDK. Use `LiveChannel.session(client, session.id, options?)` for a
+session-bound wrapper around the `live/*` methods. The SDK returns the transport
+bootstrap from `live/open`; callers still own the WebSocket connection to
+`openResult.transport.url`.
+
+```typescript
+import { LiveChannel, MeerkatClient } from "@rkat/sdk";
+
+const client = new MeerkatClient();
+await client.connect({ liveWs: true });
+
+const session = await client.createSession("Open a live channel");
+const channel = LiveChannel.session(client, session.id, {
+  turningMode: "explicit_commit",
+});
+
+const openResult = await channel.open();
+// Connect to openResult.transport.url externally.
+await channel.sendInputText("hello");
+await channel.commitInput("text");
+await channel.close();
+```
 
 ### Mob methods
 
@@ -185,10 +212,14 @@ export interface ConnectOptions {
   stateRoot?: string;
   contextRoot?: string;
   userConfigRoot?: string;
+  liveWs?: boolean;
 }
 ```
 
 `realmId` and `isolated` are mutually exclusive. If `realmId` is omitted and `isolated` is not set, the spawned `rkat-rpc` process uses its normal isolated-mode default rather than a shared default realm. Reuse `realmId` explicitly to share sessions and config across processes or surfaces.
+Set `liveWs: true` when you need the `live/*` adapter surface; the SDK starts
+`rkat-rpc` with an ephemeral live WebSocket listener and `live/open` returns the
+transport URL/token for your client to connect.
 
 ### createSession()
 

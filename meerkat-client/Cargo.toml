@@ -23,13 +23,13 @@ meerkat-gemini = { workspace = true, optional = true, default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
-async-trait = { workspace = true }
 futures = { workspace = true }
-serde_json = { workspace = true }
 reqwest = { workspace = true }
 axum = { workspace = true }
 schemars = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
 
 [features]
 default = ["anthropic", "openai", "gemini"]

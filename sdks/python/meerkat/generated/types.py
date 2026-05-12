@@ -2,14 +2,14 @@ from __future__ import annotations
 
 """Generated wire types for Meerkat SDK.
 
-Contract version: 0.6.5
+Contract version: 0.6.6
 """
 
 from dataclasses import dataclass, field
 from typing import Any, Literal, NotRequired, Optional, Required, TypedDict
 
 
-CONTRACT_VERSION = "0.6.5"
+CONTRACT_VERSION = "0.6.6"
 
 
 @dataclass
@@ -378,7 +378,6 @@ class WireMobToolConfig:
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
     mob: Optional[bool] = None
-    mob_tasks: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
 
@@ -989,7 +988,6 @@ class MobToolConfigInput:
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
     mob: Optional[bool] = None
-    mob_tasks: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
 
@@ -1436,6 +1434,7 @@ instead of producing sideband text.
 Default (`None`) preserves the prior wire shape: callers that omit the
 field get `ProviderManaged`, matching the legacy behavior."""
     session_id: str
+    transport: Optional[Literal['websocket', 'webrtc']] = None
     turning_mode: Optional[RealtimeTurningMode] = None
 
 
@@ -1512,11 +1511,17 @@ class WireLiveTransportBootstrapWebsocket(TypedDict, total=False):
     transport: Required[Literal['websocket']]
     url: Required[str]
 
+class WireLiveTransportBootstrapWebrtc(TypedDict, total=False):
+    answer_method: Required[str]
+    http_url: NotRequired[str]
+    token: Required[str]
+    transport: Required[Literal['webrtc']]
+
 class WireLiveTransportBootstrapUnknown(TypedDict, total=False):
     debug: Required[str]
     transport: Required[Literal['unknown']]
 
-WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapUnknown
+WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapWebrtc | WireLiveTransportBootstrapUnknown
 
 @dataclass
 class LiveOpenResult:
@@ -1532,6 +1537,20 @@ follow-up); G8 (P2): `transport` typed-mirror."""
     channel_id: str
     continuity: WireLiveContinuityMode
     transport: WireLiveTransportBootstrap
+
+
+@dataclass
+class LiveWebrtcAnswerParams:
+    """Request payload for `live/webrtc/answer`."""
+    channel_id: str
+    offer_sdp: str
+    token: str
+
+
+@dataclass
+class LiveWebrtcAnswerResult:
+    """Response payload for `live/webrtc/answer`."""
+    answer_sdp: str
 
 
 @dataclass

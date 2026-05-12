@@ -1,12 +1,12 @@
 //! Mob events for structural state changes.
 //!
-//! Events are the source of truth for mob state. The roster and task board
-//! are projections rebuilt by replaying events.
+//! Events are the source of truth for mob state. The roster is rebuilt by
+//! replaying events.
 
 use crate::definition::MobDefinition;
 use crate::ids::{
     AgentIdentity, AgentRuntimeId, FenceToken, FlowId, Generation, MobId, ProfileName, RunId,
-    StepId, TaskId,
+    StepId,
 };
 use crate::roster::MobMemberKickoffSnapshot;
 use crate::runtime_mode::MobRuntimeMode;
@@ -368,26 +368,6 @@ pub enum MobEventKind {
         /// Canonical name of the external peer removed from local trust.
         peer_name: PeerName,
     },
-    /// A task was created on the shared task board.
-    TaskCreated {
-        /// Unique task identifier.
-        task_id: TaskId,
-        /// Short subject line.
-        subject: String,
-        /// Detailed description.
-        description: String,
-        /// Task IDs that must be completed before this task can be claimed.
-        blocked_by: Vec<TaskId>,
-    },
-    /// A task's status or owner was updated.
-    TaskUpdated {
-        /// Task being updated.
-        task_id: TaskId,
-        /// New status.
-        status: super::tasks::TaskStatus,
-        /// New owner identity (if assigned).
-        owner: Option<AgentIdentity>,
-    },
     /// Flow run started.
     FlowStarted {
         run_id: RunId,
@@ -639,7 +619,6 @@ mod tests {
     use crate::definition::{BackendConfig, MobDefinition, WiringRules};
     use crate::ids::MobId;
     use crate::profile::{Profile, ProfileBinding, ToolConfig};
-    use crate::tasks::TaskStatus;
     use serde_json::json;
     use std::collections::BTreeMap;
     use uuid::Uuid;
@@ -713,25 +692,6 @@ mod tests {
     #[test]
     fn test_mob_reset_roundtrip() {
         roundtrip(&MobEventKind::MobReset);
-    }
-
-    #[test]
-    fn test_task_created_roundtrip() {
-        roundtrip(&MobEventKind::TaskCreated {
-            task_id: TaskId::from("task-001"),
-            subject: "Implement feature".to_string(),
-            description: "Build the widget factory".to_string(),
-            blocked_by: vec![TaskId::from("task-000")],
-        });
-    }
-
-    #[test]
-    fn test_task_updated_roundtrip() {
-        roundtrip(&MobEventKind::TaskUpdated {
-            task_id: TaskId::from("task-001"),
-            status: TaskStatus::InProgress,
-            owner: Some(AgentIdentity::from("agent-1")),
-        });
     }
 
     #[test]

@@ -11,6 +11,7 @@ use meerkat_core::service::SessionQuery;
 use meerkat_core::skills::{SkillKey, SkillRef};
 use meerkat_core::{
     BudgetLimits, ContentInput, HookRunOverrides, OutputSchema, Provider, ToolCategoryOverride,
+    ToolFilter,
 };
 use meerkat_runtime::SessionServiceRuntimeExt;
 use serde::{Deserialize, Serialize};
@@ -104,9 +105,21 @@ pub struct CreateSessionParams {
     /// Enable semantic memory. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_memory: Option<bool>,
+    /// Enable schedule tools. Omit to use runtime defaults.
+    #[serde(default)]
+    pub enable_schedule: Option<bool>,
     /// Enable mob tools. Omit to use runtime defaults.
     #[serde(default)]
     pub enable_mob: Option<bool>,
+    /// Enable Meerkat-owned fallback web search. Omit to keep hidden.
+    #[serde(default)]
+    pub enable_web_search: Option<bool>,
+    /// Optional session-local tool visibility filter.
+    #[serde(default)]
+    pub tool_filter: Option<ToolFilter>,
+    /// Enable WorkGraph tools. Omit to use runtime defaults.
+    #[serde(default)]
+    pub enable_workgraph: Option<bool>,
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
@@ -259,6 +272,7 @@ pub async fn handle_create(
         return RpcResponse::error(id, error::INVALID_PARAMS, err);
     }
 
+    let model_was_explicit = params.model.is_some();
     let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
         config_runtime
             .get()
@@ -277,6 +291,7 @@ pub async fn handle_create(
                 .unwrap_or("claude-sonnet-4-5")
                 .to_string()
         });
+    let provider_was_explicit = params.provider.is_some();
     let provider = match params
         .provider
         .as_deref()
@@ -303,7 +318,13 @@ pub async fn handle_create(
     };
 
     let mut build_config = AgentBuildConfig::new(model_name);
-    build_config.provider = provider;
+    build_config.provider = if provider_was_explicit || model_was_explicit {
+        provider
+    } else {
+        None
+    };
+    build_config.resume_override_mask.model = model_was_explicit;
+    build_config.resume_override_mask.provider = provider_was_explicit;
     build_config.max_tokens = params.max_tokens;
     build_config.system_prompt = params.system_prompt;
     build_config.output_schema = output_schema;
@@ -315,14 +336,28 @@ pub async fn handle_create(
     build_config.comms_name = params.comms_name;
     build_config.peer_meta = params.peer_meta;
     build_config.override_memory = ToolCategoryOverride::from_override(params.enable_memory);
+    build_config.override_schedule = ToolCategoryOverride::from_override(params.enable_schedule);
+    build_config.override_workgraph = ToolCategoryOverride::from_override(params.enable_workgraph);
     build_config.apply_generated_create_only_mob_operator_access(
         ToolCategoryOverride::from_override(params.enable_mob),
     );
+    build_config.override_web_search =
+        ToolCategoryOverride::from_override(params.enable_web_search);
+    if let Some(tool_filter) = params.tool_filter
+        && let Err(err) = build_config.set_initial_tool_filter(tool_filter)
+    {
+        return RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("Invalid tool_filter: {err}"),
+        );
+    }
     // Mob tools factory — injected via FactoryAgentBuilder.default_mob_tools or
     // AgentFactory.mob_tools. No per-handler wiring needed; the factory resolves
     // it at build time.
     build_config.budget_limits = params.budget_limits;
     build_config.provider_params = params.provider_params;
+    build_config.resume_override_mask.auth_binding = params.auth_binding.is_some();
     build_config.auth_binding = params.auth_binding;
     build_config.additional_instructions = params.additional_instructions;
     build_config.app_context = params.app_context;

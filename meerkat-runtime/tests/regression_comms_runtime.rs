@@ -304,7 +304,7 @@ async fn accepted_response_no_wake() {
 
     // Verify driver: accepted but no wake, queued (not immediately consumed)
     let outcome = driver.accept_input(input).await.unwrap();
-    assert!(outcome.is_accepted());
+    assert!(outcome.is_accepted(), "unexpected outcome: {outcome:?}");
     assert_machine_owned_admission_signal(&outcome, false, PostAdmissionSignal::None);
     assert_eq!(
         driver.take_post_admission_signal(),
@@ -594,11 +594,11 @@ async fn no_input_no_wake() {
 }
 
 // ---------------------------------------------------------------------------
-// Additional: Message while running — queue policy, cooperative interrupt
+// Additional: Message while running with explicit Queue — queue policy, no interrupt
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn message_while_running_requests_cooperative_interrupt() {
+async fn message_while_running_with_explicit_queue_stays_queued() {
     let mut driver = EphemeralRuntimeDriver::new(rid());
 
     // Start a run
@@ -607,9 +607,44 @@ async fn message_while_running_requests_cooperative_interrupt() {
     let interaction = make_message("peer-1", "hello");
     let input = runtime_input_for_interaction(&interaction, &rid());
 
-    // peer_message + running → StageRunStart + cooperative interrupt
+    // peer_message + running + explicit Queue → StageRunStart + no interrupt
     let policy = DefaultPolicyTable::resolve(&input, false);
     assert_eq!(policy.apply_mode, meerkat_runtime::ApplyMode::StageRunStart);
+    assert_eq!(policy.wake_mode, meerkat_runtime::WakeMode::None);
+
+    let outcome = driver.accept_input(input).await.unwrap();
+    assert!(outcome.is_accepted());
+    assert_eq!(
+        post_admission_signal_from_accept_outcome(&outcome, false),
+        PostAdmissionSignal::None
+    );
+    assert_eq!(
+        driver.take_post_admission_signal(),
+        PostAdmissionSignal::None
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Additional: Steered message while running — cooperative interrupt
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn message_with_steer_while_running_requests_cooperative_interrupt() {
+    let mut driver = EphemeralRuntimeDriver::new(rid());
+
+    // Start a run
+    bind_running(&mut driver);
+
+    let mut interaction = make_message("peer-1", "hello");
+    interaction.handling_mode = meerkat_core::types::HandlingMode::Steer;
+    let input = runtime_input_for_interaction(&interaction, &rid());
+
+    // peer_message + explicit steer + running → StageRunBoundary + cooperative interrupt
+    let policy = DefaultPolicyTable::resolve(&input, false);
+    assert_eq!(
+        policy.apply_mode,
+        meerkat_runtime::ApplyMode::StageRunBoundary
+    );
     assert_eq!(
         policy.wake_mode,
         meerkat_runtime::WakeMode::InterruptYielding

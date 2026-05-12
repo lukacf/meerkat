@@ -28,9 +28,6 @@ pub struct ToolConfig {
     /// Enable mob management tools (spawn, retire, wire, unwire, list).
     #[serde(default)]
     pub mob: bool,
-    /// Enable shared task list tools (create, list, update, get).
-    #[serde(default)]
-    pub mob_tasks: bool,
     /// Enable schedule tools (create, list, update, pause, resume, delete).
     #[serde(default)]
     pub schedule: bool,
@@ -210,7 +207,6 @@ mod tests {
             comms: true,
             memory: false,
             mob: true,
-            mob_tasks: true,
             schedule: true,
             image_generation: true,
             mcp: vec!["server-a".to_string(), "server-b".to_string()],
@@ -229,7 +225,6 @@ mod tests {
             comms: false,
             memory: false,
             mob: false,
-            mob_tasks: false,
             schedule: false,
             image_generation: false,
             mcp: vec!["mcp-server".to_string()],
@@ -251,7 +246,6 @@ mod tests {
                 comms: true,
                 memory: false,
                 mob: true,
-                mob_tasks: true,
                 schedule: false,
                 image_generation: false,
                 mcp: vec![],
@@ -281,7 +275,6 @@ mod tests {
                 comms: true,
                 memory: false,
                 mob: false,
-                mob_tasks: true,
                 schedule: false,
                 image_generation: false,
                 mcp: vec!["code-server".to_string()],
@@ -308,7 +301,6 @@ mod tests {
         assert!(!config.comms);
         assert!(!config.memory);
         assert!(!config.mob);
-        assert!(!config.mob_tasks);
         assert!(!config.schedule);
         assert!(config.mcp.is_empty());
         assert!(config.rust_bundles.is_empty());

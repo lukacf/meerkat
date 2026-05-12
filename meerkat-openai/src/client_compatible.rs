@@ -140,7 +140,6 @@ impl OpenAiCompatibleClient {
         }
 
         if let Some(tag) = crate::client::openai_tag(request) {
-            use meerkat_core::lifecycle::run_primitive::ReasoningEffort as TypedReasoningEffort;
             if self.supports_reasoning {
                 if let Some(reasoning) = tag.reasoning.as_ref() {
                     let v = reasoning.as_value();
@@ -149,11 +148,7 @@ impl OpenAiCompatibleClient {
                     }
                 }
                 if let Some(effort) = tag.reasoning_effort {
-                    let s = match effort {
-                        TypedReasoningEffort::Low => "low",
-                        TypedReasoningEffort::Medium => "medium",
-                        TypedReasoningEffort::High => "high",
-                    };
+                    let s = effort.as_legacy_str();
                     if !body["reasoning"].is_object() {
                         body["reasoning"] = serde_json::json!({});
                     }
@@ -912,6 +907,34 @@ mod tests {
         assert_eq!(body["reasoning_effort"], "medium");
         assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
         assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn build_chat_completions_body_preserves_xhigh_reasoning_effort() {
+        let client = OpenAiCompatibleClient::new(
+            OpenAiCompatibleMode::ChatCompletions,
+            "remote-model".to_string(),
+            "http://localhost:11434/v1".to_string(),
+            None,
+            true,
+            true,
+            true,
+        );
+        let request = LlmRequest::new(
+            "gemma-4-31b",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        )
+        .with_openai_tag_merge(|t| {
+            t.reasoning_effort =
+                Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::XHigh);
+        });
+
+        let body = client
+            .build_chat_completions_body(&request)
+            .expect("body should build");
+
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        assert_eq!(body["reasoning_effort"], "xhigh");
     }
 
     #[tokio::test]

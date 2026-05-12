@@ -28,7 +28,7 @@ use meerkat_machine_schema::{
 };
 
 #[test]
-fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
+fn canonical_machine_registry_contains_kernel_and_perimeter_entries() {
     let names = canonical_machine_schemas()
         .into_iter()
         .map(|schema| schema.machine.as_str().to_owned())
@@ -47,7 +47,10 @@ fn canonical_machine_registry_contains_only_two_kernel_and_perimeter_entries() {
             // — auth lifecycle is orthogonal to MeerkatMachine's
             // lifecycle and gets its own canonical machine per
             // dogma §1 "one semantic fact, one owner".
-            "AuthMachine"
+            "AuthMachine",
+            // WorkGraph: realm-scoped commitment graph lifecycle,
+            // readiness, claim state, and topology validation.
+            "WorkGraphLifecycleMachine",
         ]
     );
 
@@ -593,8 +596,6 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         "WireMembers",
         "UnwireMembers",
         "SubmitWork",
-        "TaskCreate",
-        "TaskUpdate",
         "SubscribeMobEvents",
     ] {
         assert!(
@@ -610,7 +611,7 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
         );
     }
 
-    for required in ["EmitFlowRunNotice", "NotifyCoordinator", "EmitTaskNotice"] {
+    for required in ["EmitFlowRunNotice", "NotifyCoordinator"] {
         assert!(
             effect_names.iter().any(|name| name == &required),
             "MobMachine should absorb effect {required}"
@@ -619,7 +620,7 @@ fn mob_machine_absorbs_flow_orchestrator_runtime_bridge_and_public_command_domai
 }
 
 #[test]
-fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
+fn mob_machine_merges_flow_wiring_and_runtime_bridge_state() {
     let schema = mob_machine();
     let field_names = schema
         .state
@@ -656,7 +657,6 @@ fn mob_machine_merges_flow_task_wiring_and_runtime_bridge_state() {
         "UnwireMembersRunning",
         "StageSpawnRunning",
         "CompleteSpawnRunning",
-        "TaskCreateRunning",
         "BindCoordinatorRunning",
         "RunFlowRunning",
         "StartFlowRunning",
@@ -763,10 +763,6 @@ fn mob_runtime_command_surface_is_fully_accounted_for_by_canonical_schema_inputs
         "Complete",
         "Reset",
         "Destroy",
-        "TaskCreate",
-        "TaskUpdate",
-        "TaskList",
-        "TaskGet",
         "RosterSnapshot",
         "ListMembers",
         "ListMembersIncludingRetiring",
@@ -873,8 +869,6 @@ fn every_mutating_mob_runtime_command_has_transition_coverage() {
         "Complete",
         "Reset",
         "Destroy",
-        "TaskCreate",
-        "TaskUpdate",
         "SubscribeAgentEvents",
         "SubscribeAllAgentEvents",
         "SubscribeMobEvents",
@@ -941,8 +935,6 @@ fn every_query_runtime_command_has_expected_surface_coverage() {
         .collect::<std::collections::BTreeSet<_>>();
     for required in [
         "FlowStatus",
-        "TaskList",
-        "TaskGet",
         "RosterSnapshot",
         "ListMembers",
         "ListMembersIncludingRetiring",

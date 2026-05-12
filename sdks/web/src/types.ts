@@ -285,8 +285,6 @@ export interface ToolConfig {
   memory?: boolean;
   /** Enable mob management tools (spawn, retire, wire, unwire, list). */
   mob?: boolean;
-  /** Enable shared task list tools. */
-  mob_tasks?: boolean;
   /** MCP server names this profile connects to. */
   mcp?: string[];
 }

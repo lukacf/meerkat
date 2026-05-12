@@ -180,7 +180,10 @@ is_global_path() {
   esac
 }
 
-mapfile -t changed < <(collect_changed_paths | awk 'NF' | sort -u)
+changed=()
+while IFS= read -r path; do
+  changed+=("${path}")
+done < <(collect_changed_paths | awk 'NF' | sort -u)
 relevant=()
 global=0
 for path in "${changed[@]}"; do

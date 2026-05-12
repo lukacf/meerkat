@@ -401,6 +401,20 @@ impl AgentError {
             message: message.into(),
         }
     }
+
+    pub fn llm_empty_response(provider: &'static str) -> Self {
+        Self::llm(
+            provider,
+            LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
+                LlmProviderErrorKind::IncompleteResponse,
+                serde_json::json!({
+                    "reason": "provider completed without user-visible text, images, or tool calls"
+                }),
+            )),
+            "LLM completed without user-visible text, images, or tool calls",
+        )
+    }
+
     pub fn is_graceful(&self) -> bool {
         matches!(
             self,

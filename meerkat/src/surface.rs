@@ -14,6 +14,7 @@ mod stdio_json;
 
 pub use embedded::{
     build_embedded_service, build_embedded_service_from_builder, set_default_schedule_tools,
+    set_default_workgraph_tools,
 };
 pub use meerkat_core::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

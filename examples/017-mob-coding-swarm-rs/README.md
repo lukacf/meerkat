@@ -9,7 +9,6 @@ for coding tasks. The mob runtime handles spawning, wiring, and lifecycle.
 - `MobBuilder` — create or resume a mob
 - `MobHandle` — interact with a running mob
 - Mob tools — spawn, retire, wire, status
-- Task board — shared task tracking across agents
 
 ## Mob Architecture
 ```

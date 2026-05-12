@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.6] - 2026-05-11
+
+Meerkat 0.6.6 is a patch release for live transport smoke coverage, session
+scheduling ergonomics, auth binding fallback behavior, inherited mob tooling,
+and release/documentation polish on top of the 0.6.5 live-adapter release.
+
+### Added
+
+- **Current-session schedule targets** (#671) — scheduler tools now accept a
+  `current_session` shortcut for create/update calls and persist it as the
+  concrete running `resumable_session` target during agent execution.
+- **Live WebRTC smoke transport** (#676) — the JSON-RPC live path now has a
+  WebRTC smoke-test surface and live controller peer ingress forwards helper
+  and delegate comms into the active live adapter.
+- **Docs validation gate** (#672) — public docs now include a Mintlify
+  validation command that checks navigation, frontmatter, links, anchors,
+  fences, orphan pages, and generated HTML before publishing.
+
+### Changed
+
+- **Auth binding fallback resolution** (#674) — agent construction now scans
+  configured realm bindings when provider/model/auth binding are omitted, while
+  preserving strict behavior for explicit provider, model, or binding requests.
+- **Public docs refresh** (#672) — architecture, mobs, self-hosting, runtime,
+  machine, and build documentation were rewritten around the current 0.6.5+
+  surfaces and obsolete/internal public pages were removed from navigation.
+- **Dependency refresh** (#663, #664, #665) — updated `apple_support`,
+  `rules_cc`, and `tower-http` to keep toolchain and HTTP middleware
+  dependencies current.
+- **Release workflow hardening** — release CI now accepts the reusable Cargo
+  gate shape, uses native Rust toolchain executables on Windows, and keeps Web
+  SDK recovery builds alive while serializing the expensive WASM publish build.
+
+### Fixed
+
+- **Inherited mob tooling category caps** (#677) — inherited parent-visible tool
+  filters no longer get silently capped by the selected profile's tool category
+  booleans before the inherited allow-list is applied.
+- **Live peer ingress visibility** (#676) — comms tools remain visible before
+  trusted peers are wired so live sessions can use peer and message tools after
+  later live wiring.
+- **Auth binding model precedence** (#674) — explicit model selections now stay
+  ahead of resolved binding `default_model` values after a fallback binding is
+  selected.
+
 ## [0.6.5] - 2026-05-10
 
 Meerkat 0.6.5 ships the live-adapter MVP and a SessionRuntime split that moves

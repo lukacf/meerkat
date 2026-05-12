@@ -22,6 +22,7 @@ use meerkat_core::image_generation::{
 use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::lifecycle::run_primitive::{
     AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag, ProviderTag,
+    ReasoningEffort,
 };
 use meerkat_core::{Message, StopReason, UserMessage};
 use meerkat_gemini::{GeminiImageOutputOptions, GeminiImageTurnPlan};
@@ -322,7 +323,28 @@ async fn e2e_smoke_openai_live_image_generation() -> Result<(), Box<dyn std::err
     };
     let image_model =
         std::env::var("RKAT_OPENAI_IMAGE_MODEL").unwrap_or_else(|_| "gpt-image-2".into());
+    let hosted_reasoning_effort = match std::env::var("RKAT_OPENAI_IMAGE_REASONING_EFFORT")
+        .as_deref()
+    {
+        Ok("none") => ReasoningEffort::None,
+        Ok("low") | Err(_) => ReasoningEffort::Low,
+        Ok("medium") => ReasoningEffort::Medium,
+        Ok("high") => ReasoningEffort::High,
+        Ok("xhigh") => ReasoningEffort::XHigh,
+        Ok(other) => {
+            eprintln!("Ignoring unsupported RKAT_OPENAI_IMAGE_REASONING_EFFORT={other}; using low");
+            ReasoningEffort::Low
+        }
+    };
     let client = OpenAiClient::new(api_key);
+    let mut hosted_provider_params = OpenAiImageProviderParams::default();
+    hosted_provider_params.reasoning_effort = Some(hosted_reasoning_effort);
+    hosted_provider_params.web_search = Some(serde_json::json!({
+        "search_context_size": "low",
+        "external_web_access": true,
+        "return_token_budget": "default"
+    }));
+
     let (provider_model, execution_plan) = if image_model == "gpt-image-2" {
         (
             "gpt-5.4".to_string(),
@@ -336,7 +358,7 @@ async fn e2e_smoke_openai_live_image_generation() -> Result<(), Box<dyn std::err
                     tool_name: "image_generation".into(),
                     model: ModelId::new(image_model.clone()),
                     output: OpenAiImageOutputOptions::default(),
-                    provider_params: OpenAiImageProviderParams::default(),
+                    provider_params: hosted_provider_params,
                 })?,
             },
         )

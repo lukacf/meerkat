@@ -4,7 +4,7 @@ description: "Open live audio/text channels on sessions using realtime-capable m
 icon: "microphone"
 ---
 
-Live channels in Meerkat provide low-latency audio and text streaming through the `live/*` JSON-RPC methods. To use a live channel, create a session on a realtime-capable model (for example `gpt-realtime-2`) and call `live/open` to start the channel explicitly. The previous automatic attachment model (`session/realtime_attachment_status`, `realtime/open_info`, etc.) has been replaced by this caller-initiated surface.
+Live channels in Meerkat provide low-latency audio and text streaming through the `live/*` JSON-RPC methods. To use a live channel, create a session on a realtime-capable model (for example `gpt-realtime-2`) and call `live/open` to start the channel explicitly. Channel creation, status, refresh, input, interruption, truncation, and close are all caller-initiated through the live surface.
 
 This guide covers how to open live channels, send input, and observe channel state.
 
@@ -18,12 +18,12 @@ Use this guide when you want to:
 - reason about live channels in the context of the normal session model
 
 <Note>
-`ModelCapabilities.realtime` remains the capability bit that gates whether `live/open` succeeds. The `live/*` RPC methods replace the previous `realtime/*` bootstrap methods and `session/realtime_attachment_status`. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport.
+`ModelCapabilities.realtime` remains the capability bit that gates whether `live/open` succeeds. The `--live-ws <addr>` flag on `rkat-rpc` enables the WebSocket listener required for audio transport.
 </Note>
 
 ## Mental model
 
-A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.2`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime-2`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
+A session has exactly one conversation history. The session's LLM client is the active delivery mechanism for that history; most models deliver via request/response (e.g. Anthropic `claude-opus-4-7`, OpenAI `gpt-5.5`), a small class delivers via a persistent bidirectional socket (e.g. OpenAI `gpt-realtime-2`). The only thing a realtime-capable model changes is *how* the model is reached — the session still owns history, tools, context, and turn boundaries.
 
 ```text
         +--------------------------+
@@ -48,7 +48,7 @@ Key invariants:
 
 ## Realtime-capable models
 
-`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat-models`). Capability is derived from the model family:
+`ModelCapabilities.realtime: bool` is set per model in the curated catalog (`meerkat_core::model_profile`, re-exported by `meerkat-models`). Capability is catalog data, not prefix inference:
 
 - **OpenAI**: `gpt-realtime-2` — the only realtime-capable model in the current catalog.
 - **Gemini**: reserved for future `*-live*` endpoints — no production models today.

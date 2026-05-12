@@ -1026,6 +1026,16 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
         "Wire projection of LiveTransportBootstrap (internally-tagged on `transport`).",
     )
     append_python_dataclass("LiveOpenResult", wire_schema, "Response payload for live/open.")
+    append_python_dataclass(
+        "LiveWebrtcAnswerParams",
+        wire_schema,
+        "Request payload for live/webrtc/answer.",
+    )
+    append_python_dataclass(
+        "LiveWebrtcAnswerResult",
+        wire_schema,
+        "Response payload for live/webrtc/answer.",
+    )
     append_python_dataclass("LiveChannelParams", wire_schema, "Request payload for live/{status,close,interrupt}.")
     append_python_dataclass("LiveStatusResult", wire_schema, "Response payload for live/status.")
     append_python_dataclass("LiveSendInputParams", wire_schema, "Request payload for live/send_input.")
@@ -1477,6 +1487,8 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     # (discriminated union on `transport`).
     append_typescript_alias("WireLiveTransportBootstrap", wire_schema)
     append_typescript_interface("LiveOpenResult", wire_schema)
+    append_typescript_interface("LiveWebrtcAnswerParams", wire_schema)
+    append_typescript_interface("LiveWebrtcAnswerResult", wire_schema)
     append_typescript_interface("LiveChannelParams", wire_schema)
     append_typescript_interface("LiveStatusResult", wire_schema)
     append_typescript_interface("LiveSendInputParams", wire_schema)

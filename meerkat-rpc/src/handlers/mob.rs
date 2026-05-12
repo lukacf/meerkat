@@ -128,7 +128,6 @@ fn profile_from_wire(profile: WireMobProfile) -> Profile {
             comms: tools.comms,
             memory: tools.memory,
             mob: tools.mob,
-            mob_tasks: tools.mob_tasks,
             schedule: tools.schedule,
             image_generation: tools.image_generation,
             mcp: tools.mcp,

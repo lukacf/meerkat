@@ -112,7 +112,7 @@ impl LiveTokenString {
     }
 
     /// Mint a fresh random token. UUIDv4 hex with hyphens — guaranteed URL-safe.
-    fn random() -> Self {
+    pub(crate) fn random() -> Self {
         Self(Uuid::new_v4().to_string())
     }
 

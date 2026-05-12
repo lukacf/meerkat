@@ -498,7 +498,7 @@ impl ToolFilter {
 }
 
 /// Typed mirror of [`meerkat_core::types::ToolSourceKind`] — closed
-/// 10-variant discriminant for tool provenance classification.
+/// Closed discriminant for tool provenance classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum ToolSourceKind {
     #[default]
@@ -507,8 +507,8 @@ pub enum ToolSourceKind {
     Comms,
     Memory,
     Schedule,
+    WorkGraph,
     Mob,
-    MobTasks,
     Callback,
     Mcp,
     RustBundle,
@@ -522,8 +522,8 @@ impl From<&meerkat_core::types::ToolSourceKind> for ToolSourceKind {
             meerkat_core::types::ToolSourceKind::Comms => Self::Comms,
             meerkat_core::types::ToolSourceKind::Memory => Self::Memory,
             meerkat_core::types::ToolSourceKind::Schedule => Self::Schedule,
+            meerkat_core::types::ToolSourceKind::WorkGraph => Self::WorkGraph,
             meerkat_core::types::ToolSourceKind::Mob => Self::Mob,
-            meerkat_core::types::ToolSourceKind::MobTasks => Self::MobTasks,
             meerkat_core::types::ToolSourceKind::Callback => Self::Callback,
             meerkat_core::types::ToolSourceKind::Mcp => Self::Mcp,
             meerkat_core::types::ToolSourceKind::RustBundle => Self::RustBundle,

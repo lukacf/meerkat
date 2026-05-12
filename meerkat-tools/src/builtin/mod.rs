@@ -35,6 +35,8 @@ pub mod store;
 pub mod tasks;
 pub mod types;
 pub mod utility;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod web_search;
 
 // Re-export core types for convenience
 #[cfg(feature = "comms")]

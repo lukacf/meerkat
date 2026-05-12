@@ -20,6 +20,7 @@ Canonical machine set:
 - `auth`
 - `occurrence_lifecycle`
 - `schedule_lifecycle`
+- `work_graph_lifecycle`
 
 Status:
 
@@ -30,6 +31,7 @@ Status:
   - `specs/machines/auth/`
   - `specs/machines/occurrence_lifecycle/`
   - `specs/machines/schedule_lifecycle/`
+  - `specs/machines/work_graph_lifecycle/`
 - the schema catalog and generated authority artifacts must match these specs
 - where implementation or catalog coverage diverges, `mapping.md` calls that
   out explicitly

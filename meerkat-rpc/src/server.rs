@@ -148,6 +148,17 @@ impl<R: AsyncBufRead + Unpin, W: TransportWriter> RpcServer<R, W> {
         self
     }
 
+    /// Attach a live WebRTC transport for `live/open` token minting and SDP
+    /// answer signaling.
+    #[cfg(feature = "live-webrtc")]
+    pub fn with_live_webrtc(
+        mut self,
+        state: std::sync::Arc<meerkat_live::LiveWebrtcState>,
+    ) -> Self {
+        self.router = self.router.with_live_webrtc(state);
+        self
+    }
+
     #[cfg(feature = "mob")]
     /// Create a new RPC server with an optional skill runtime and explicit mob state.
     ///
@@ -513,19 +524,33 @@ pub async fn serve_stdio_with_options(
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    live_ws: Option<LiveWsConfig>,
+    live: Option<LiveConfig>,
 ) -> Result<(), ServerError> {
     let stdin = tokio::io::stdin();
     let stdout = BlockingWriter::stdout();
     let reader = BufReader::new(stdin);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, stdout, runtime, config_store, skill_runtime);
-    if let Some(live_ws) = live_ws {
-        server = server
-            .with_live_ws(live_ws.state, live_ws.base_url)
-            .with_live_session_factory_opt(live_ws.session_factory);
+    if let Some(live) = live {
+        if let Some(ws) = live.ws {
+            server = server.with_live_ws(ws.state, ws.base_url);
+        }
+        #[cfg(feature = "live-webrtc")]
+        if let Some(webrtc_state) = live.webrtc_state {
+            server = server.with_live_webrtc(webrtc_state);
+        }
+        server = server.with_live_session_factory_opt(live.session_factory);
     }
     server.run().await
+}
+
+/// Optional live transport configuration to thread into the RPC server.
+#[derive(Clone)]
+pub struct LiveConfig {
+    pub ws: Option<LiveWsConfig>,
+    #[cfg(feature = "live-webrtc")]
+    pub webrtc_state: Option<Arc<meerkat_live::LiveWebrtcState>>,
+    pub session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
 /// Optional live WebSocket configuration to thread into the RPC server.
@@ -533,7 +558,6 @@ pub async fn serve_stdio_with_options(
 pub struct LiveWsConfig {
     pub state: Arc<meerkat_live::LiveWsState>,
     pub base_url: String,
-    pub session_factory: Option<Arc<dyn meerkat_client::realtime_session::RealtimeSessionFactory>>,
 }
 
 /// Accept a single RPC client over an already-connected TCP stream.
@@ -555,16 +579,21 @@ pub async fn serve_tcp_connection_with_options(
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    live_ws: Option<LiveWsConfig>,
+    live: Option<LiveConfig>,
 ) -> Result<(), ServerError> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
     let mut server =
         RpcServer::new_with_skill_runtime(reader, write_half, runtime, config_store, skill_runtime);
-    if let Some(live_ws) = live_ws {
-        server = server
-            .with_live_ws(live_ws.state, live_ws.base_url)
-            .with_live_session_factory_opt(live_ws.session_factory);
+    if let Some(live) = live {
+        if let Some(ws) = live.ws {
+            server = server.with_live_ws(ws.state, ws.base_url);
+        }
+        #[cfg(feature = "live-webrtc")]
+        if let Some(webrtc_state) = live.webrtc_state {
+            server = server.with_live_webrtc(webrtc_state);
+        }
+        server = server.with_live_session_factory_opt(live.session_factory);
     }
     server.skip_shutdown_on_eof = true;
     server.run().await
@@ -584,7 +613,7 @@ pub async fn serve_tcp_with_options(
     runtime: Arc<SessionRuntime>,
     config_store: Arc<dyn ConfigStore>,
     skill_runtime: Option<Arc<meerkat_core::skills::SkillRuntime>>,
-    live_ws: Option<LiveWsConfig>,
+    live: Option<LiveConfig>,
 ) -> Result<(), ServerError> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("RPC TCP listener bound to {addr}");
@@ -594,14 +623,14 @@ pub async fn serve_tcp_with_options(
         let runtime = Arc::clone(&runtime);
         let config_store = Arc::clone(&config_store);
         let skill_runtime = skill_runtime.clone();
-        let live_ws = live_ws.clone();
+        let live = live.clone();
         tokio::spawn(async move {
             if let Err(e) = serve_tcp_connection_with_options(
                 stream,
                 runtime,
                 config_store,
                 skill_runtime,
-                live_ws,
+                live,
             )
             .await
             {

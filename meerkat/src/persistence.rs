@@ -10,6 +10,9 @@ use meerkat_schedule::{DisabledScheduleStore, ScheduleStore};
 use meerkat_session::event_store::{EventStore, FileEventStore};
 #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
 use meerkat_session::projector::SessionProjector;
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+use meerkat_workgraph::SqliteWorkGraphStore;
+use meerkat_workgraph::{DisabledWorkGraphStore, WorkGraphStore};
 
 #[cfg(feature = "session-store")]
 use meerkat_runtime::{MeerkatMachine, RuntimeStore, RuntimeStoreError};
@@ -36,6 +39,8 @@ pub enum PersistenceError {
     Store(#[from] StoreError),
     #[error(transparent)]
     Runtime(#[from] RuntimeStoreError),
+    #[error(transparent)]
+    WorkGraph(#[from] meerkat_workgraph::WorkGraphError),
 }
 
 /// Backend-owned pairing of a session store with its matching runtime companion.
@@ -47,6 +52,7 @@ pub struct PersistenceBundle {
     store_path: Option<PathBuf>,
     session_store: Arc<dyn SessionStore>,
     schedule_store: Arc<dyn ScheduleStore>,
+    workgraph_store: Arc<dyn WorkGraphStore>,
     #[cfg(feature = "session-store")]
     runtime_store: Option<Arc<dyn RuntimeStore>>,
     blob_store: Arc<dyn BlobStore>,
@@ -57,6 +63,15 @@ pub struct PersistenceBundle {
     projector: Option<Arc<SessionProjector>>,
     #[cfg(feature = "session-store")]
     runtime_adapter: Arc<MeerkatMachine>,
+}
+
+#[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
+struct RealmSubsystemStores {
+    session_store: Arc<dyn SessionStore>,
+    runtime_store: Option<Arc<dyn RuntimeStore>>,
+    blob_store: Arc<dyn BlobStore>,
+    schedule_store: Arc<dyn ScheduleStore>,
+    workgraph_store: Arc<dyn WorkGraphStore>,
 }
 
 impl PersistenceBundle {
@@ -81,6 +96,23 @@ impl PersistenceBundle {
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
     ) -> Self {
+        Self::new_with_subsystem_stores(
+            session_store,
+            runtime_store,
+            blob_store,
+            schedule_store,
+            Arc::new(DisabledWorkGraphStore),
+        )
+    }
+
+    #[cfg(feature = "session-store")]
+    pub fn new_with_subsystem_stores(
+        session_store: Arc<dyn SessionStore>,
+        runtime_store: Option<Arc<dyn RuntimeStore>>,
+        blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
+        workgraph_store: Arc<dyn WorkGraphStore>,
+    ) -> Self {
         let runtime_adapter = match &runtime_store {
             Some(store) => Arc::new(MeerkatMachine::persistent(
                 store.clone(),
@@ -95,6 +127,7 @@ impl PersistenceBundle {
             store_path: None,
             session_store,
             schedule_store,
+            workgraph_store,
             runtime_store,
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
@@ -117,6 +150,21 @@ impl PersistenceBundle {
         blob_store: Arc<dyn BlobStore>,
         schedule_store: Arc<dyn ScheduleStore>,
     ) -> Self {
+        Self::new_with_subsystem_stores(
+            session_store,
+            blob_store,
+            schedule_store,
+            Arc::new(DisabledWorkGraphStore),
+        )
+    }
+
+    #[cfg(not(feature = "session-store"))]
+    pub fn new_with_subsystem_stores(
+        session_store: Arc<dyn SessionStore>,
+        blob_store: Arc<dyn BlobStore>,
+        schedule_store: Arc<dyn ScheduleStore>,
+        workgraph_store: Arc<dyn WorkGraphStore>,
+    ) -> Self {
         Self {
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
             manifest: None,
@@ -124,6 +172,7 @@ impl PersistenceBundle {
             store_path: None,
             session_store,
             schedule_store,
+            workgraph_store,
             blob_store,
             artifact_store: Arc::new(meerkat_store::MemoryArtifactStore::new()),
             #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -134,17 +183,19 @@ impl PersistenceBundle {
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
-    pub fn with_realm_context(
+    fn with_realm_context(
         manifest: RealmManifest,
         store_path: PathBuf,
         projection_root: PathBuf,
-        session_store: Arc<dyn SessionStore>,
-        runtime_store: Option<Arc<dyn RuntimeStore>>,
-        blob_store: Arc<dyn BlobStore>,
-        schedule_store: Arc<dyn ScheduleStore>,
+        stores: RealmSubsystemStores,
     ) -> Self {
-        let mut bundle =
-            Self::new_with_schedule_store(session_store, runtime_store, blob_store, schedule_store);
+        let mut bundle = Self::new_with_subsystem_stores(
+            stores.session_store,
+            stores.runtime_store,
+            stores.blob_store,
+            stores.schedule_store,
+            stores.workgraph_store,
+        );
         let event_store: Arc<dyn EventStore> = Arc::new(FileEventStore::new(
             projection_root.join(".rkat").join("events"),
         ));
@@ -171,6 +222,10 @@ impl PersistenceBundle {
 
     pub fn schedule_store(&self) -> Arc<dyn ScheduleStore> {
         self.schedule_store.clone()
+    }
+
+    pub fn workgraph_store(&self) -> Arc<dyn WorkGraphStore> {
+        self.workgraph_store.clone()
     }
 
     #[cfg(all(feature = "session-store", not(target_arch = "wasm32")))]
@@ -237,14 +292,20 @@ pub async fn open_realm_persistence_in(
             let artifact_store: Arc<dyn ArtifactStore> =
                 Arc::new(FsArtifactStore::new(paths.root.join("artifacts")));
             let schedule_store: Arc<dyn ScheduleStore> = Arc::new(DisabledScheduleStore);
+            let workgraph_store: Arc<dyn WorkGraphStore> = Arc::new(SqliteWorkGraphStore::open(
+                paths.root.join("workgraph.sqlite3"),
+            )?);
             let mut bundle = PersistenceBundle::with_realm_context(
                 manifest.clone(),
                 store_path,
                 paths.root,
-                session_store,
-                None,
-                blob_store,
-                schedule_store,
+                RealmSubsystemStores {
+                    session_store,
+                    runtime_store: None,
+                    blob_store,
+                    schedule_store,
+                    workgraph_store,
+                },
             );
             bundle.artifact_store = artifact_store;
             bundle
@@ -256,6 +317,9 @@ pub async fn open_realm_persistence_in(
             let schedule_store = Arc::new(SqliteScheduleStore::open(
                 paths.sessions_sqlite_path.clone(),
             )?) as Arc<dyn ScheduleStore>;
+            let workgraph_store = Arc::new(SqliteWorkGraphStore::open(
+                paths.root.join("workgraph.sqlite3"),
+            )?) as Arc<dyn WorkGraphStore>;
             let runtime_store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(
                 sqlite_store.path().to_path_buf(),
             )?) as Arc<dyn RuntimeStore>;
@@ -267,10 +331,13 @@ pub async fn open_realm_persistence_in(
                 manifest.clone(),
                 store_path,
                 paths.root,
-                sqlite_store as Arc<dyn SessionStore>,
-                Some(runtime_store),
-                blob_store,
-                schedule_store,
+                RealmSubsystemStores {
+                    session_store: sqlite_store as Arc<dyn SessionStore>,
+                    runtime_store: Some(runtime_store),
+                    blob_store,
+                    schedule_store,
+                    workgraph_store,
+                },
             );
             bundle.artifact_store = artifact_store;
             bundle

@@ -20,6 +20,7 @@ meerkat-machine-schema = { path = "../meerkat-machine-schema" }
 meerkat-runtime = { path = "../meerkat-runtime" }
 meerkat-mob = { path = "../meerkat-mob" }
 meerkat-schedule = { path = "../meerkat-schedule", features = ["machine-schema-exports"] }
+meerkat-workgraph = { path = "../meerkat-workgraph", features = ["machine-schema-exports"] }
 
 [lints]
 workspace = true

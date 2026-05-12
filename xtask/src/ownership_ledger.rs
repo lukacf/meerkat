@@ -10,7 +10,8 @@ use syn::{ImplItem, Item, ItemFn, ItemImpl, Type};
 
 use crate::public_contracts::repo_root;
 
-const DOC_PATH: &str = "docs/architecture/finite-ownership-ledger.md";
+pub const DOC_PATH: &str =
+    "docs-internal/archive/public-docs-removed-2026-05-11/architecture/finite-ownership-ledger.md";
 const BASELINE_PATH: &str = "xtask/ownership-baseline.toml";
 
 #[derive(Debug, Clone, Args, Default)]
@@ -1052,6 +1053,11 @@ fn build_report(registry: &OwnershipRegistry, findings: Vec<OwnershipFinding>) -
 
 fn render_markdown(report: &OwnershipReport) -> String {
     let mut out = String::new();
+    out.push_str("---\n");
+    out.push_str("title: Finite Ownership Ledger\n");
+    out.push_str("description: Generated inventory of Meerkat semantic ownership boundaries.\n");
+    out.push_str("icon: diagram-project\n");
+    out.push_str("---\n\n");
     out.push_str("# Finite Ownership Ledger\n\n");
     out.push_str("**Status**: Generated\n");
     out.push_str("**Source**: `xtask ownership-ledger`\n\n");
@@ -1722,8 +1728,6 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                     "complete",
                     "reset",
                     "destroy",
-                    "task_create",
-                    "task_update",
                     "set_spawn_policy",
                     "shutdown",
                     "force_cancel_member",
@@ -1750,8 +1754,6 @@ fn boundary_manifest() -> BoundaryDiscoveryManifest {
                 "handle_submit_work",
                 "handle_cancel_all_work",
                 "handle_rotate_supervisor",
-                "handle_task_create",
-                "handle_task_update",
                 "handle_run_flow",
                 "handle_cancel_flow",
                 "handle_flow_cleanup",
@@ -2978,28 +2980,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
         ),
         semantic_operation_entry!(
             "meerkat-mob/src/runtime/handle.rs",
-            "task_create",
-            BoundaryKind::PublicInherent,
-            "MobHandle",
-            &["task_board"],
-            "MobTaskBoardService event + projection contract",
-            &["task create command applies through canonical task-board authority semantics"],
-            &["task helper surface cannot invent independent task truth"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
-            "task_update",
-            BoundaryKind::PublicInherent,
-            "MobHandle",
-            &["task_board"],
-            "MobTaskBoardService event + projection contract",
-            &["task update command applies through canonical task-board authority semantics"],
-            &["task helper surface cannot invent independent task truth"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/handle.rs",
             "set_spawn_policy",
             BoundaryKind::PublicInherent,
             "MobHandle",
@@ -3193,28 +3173,6 @@ fn semantic_operations() -> Vec<SemanticOperationEntry> {
             &[
                 "partial remote or local activation failure returns a typed incomplete outcome with rollback and retry/pending state instead of committing current local authority",
             ],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
-            "handle_task_create",
-            BoundaryKind::EnumDispatch,
-            "MobActor",
-            &["task_board"],
-            "MobTaskBoardService event + projection contract",
-            &["task-create command applies canonical task board transition"],
-            &["task-create command cannot bypass canonical task-board validation"],
-            EntryStatus::Closed,
-        ),
-        semantic_operation_entry!(
-            "meerkat-mob/src/runtime/actor.rs",
-            "handle_task_update",
-            BoundaryKind::EnumDispatch,
-            "MobActor",
-            &["task_board"],
-            "MobTaskBoardService event + projection contract",
-            &["task-update command applies canonical task board transition"],
-            &["task-update command cannot bypass canonical task-board validation"],
             EntryStatus::Closed,
         ),
         semantic_operation_entry!(

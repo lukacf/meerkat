@@ -144,11 +144,12 @@ jobs:
       (github.event_name != 'workflow_dispatch' ||
        (github.event.inputs.publish_web_sdk_only != 'true' &&
         github.event.inputs.publish_release_assets_only != 'true')) &&
-      !((github.event_name == 'workflow_dispatch' &&
-         github.event.inputs.release_backend == 'buildbuddy') ||
-        (github.event_name != 'workflow_dispatch' &&
-         (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-          vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))
+      !(github.actor == 'lukacf' &&
+        ((github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.release_backend == 'buildbuddy') ||
+         (github.event_name != 'workflow_dispatch' &&
+          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+           vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -213,11 +214,12 @@ jobs:
       (github.event_name != 'workflow_dispatch' ||
        (github.event.inputs.publish_web_sdk_only != 'true' &&
         github.event.inputs.publish_release_assets_only != 'true')) &&
-      ((github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.release_backend == 'buildbuddy') ||
-       (github.event_name != 'workflow_dispatch' &&
-        (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-         vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))
+      (github.actor == 'lukacf' &&
+       ((github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.release_backend == 'buildbuddy') ||
+        (github.event_name != 'workflow_dispatch' &&
+         (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+          vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -280,7 +282,7 @@ jobs:
         run: |
           set -euo pipefail
           ci_result="${{ needs.require_ci_green.result }}"
-          bb_selected="${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')) }}"
+          bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           cargo_result="${{ needs.release_validate_cargo.result }}"
           buildbuddy_result="${{ needs.release_validate_buildbuddy.result }}"
 
@@ -311,11 +313,12 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true')) &&
-      !((github.event_name == 'workflow_dispatch' &&
-         github.event.inputs.release_backend == 'buildbuddy') ||
-        (github.event_name != 'workflow_dispatch' &&
-         (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-          vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))
+      !(github.actor == 'lukacf' &&
+        ((github.event_name == 'workflow_dispatch' &&
+          github.event.inputs.release_backend == 'buildbuddy') ||
+         (github.event_name != 'workflow_dispatch' &&
+          (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+           vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
     runs-on: ${{ matrix.runs-on }}
     strategy:
       fail-fast: false
@@ -439,11 +442,12 @@ jobs:
       (startsWith(github.ref, 'refs/tags/v') ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.publish_release_assets_only == 'true')) &&
-      ((github.event_name == 'workflow_dispatch' &&
-        github.event.inputs.release_backend == 'buildbuddy') ||
-       (github.event_name != 'workflow_dispatch' &&
-        (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
-         vars.MEERKAT_RELEASE_BUILDBUDDY == '1')))
+      (github.actor == 'lukacf' &&
+       ((github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.release_backend == 'buildbuddy') ||
+        (github.event_name != 'workflow_dispatch' &&
+         (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' ||
+          vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))))
     runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
     env:
       BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -614,7 +618,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          bb_selected="${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1')) }}"
+          bb_selected="${{ github.actor == 'lukacf' && ((github.event_name == 'workflow_dispatch' && github.event.inputs.release_backend == 'buildbuddy') || (github.event_name != 'workflow_dispatch' && (vars.MEERKAT_RELEASE_BUILDBUDDY == 'true' || vars.MEERKAT_RELEASE_BUILDBUDDY == '1'))) }}"
           github_result="${{ needs.build_binaries.result }}"
           buildbuddy_result="${{ needs.build_binaries_buildbuddy.result }}"
 
@@ -842,6 +846,7 @@ jobs:
        github.event.inputs.publish_web_sdk_only != 'true'))
     needs: [require_ci_green, release_validate_gate]
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -931,9 +936,17 @@ jobs:
           fi
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="0.13.1"
+          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+            --output "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          wasm-pack --version
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown
@@ -1002,9 +1015,17 @@ jobs:
 
 
       - name: Install wasm-pack
-        uses: taiki-e/install-action@v2
-        with:
-          tool: wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="0.13.1"
+          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+            --output "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          wasm-pack --version
 
       - name: Add wasm32 target
         run: rustup target add wasm32-unknown-unknown

@@ -6118,8 +6118,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {

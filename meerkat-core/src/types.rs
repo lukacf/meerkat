@@ -1484,7 +1484,6 @@ impl SystemNoticeBlock {
             }
             Self::ExternalEvent {
                 source,
-                event_type,
                 body,
                 payload,
                 content,
@@ -1492,7 +1491,7 @@ impl SystemNoticeBlock {
             } => {
                 let mut lines = vec![crate::interaction::format_external_event_projection(
                     source,
-                    body.as_deref().or(Some(event_type.as_str())),
+                    body.as_deref(),
                 )];
                 for block in content {
                     let text = block.text_projection();

@@ -2,7 +2,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
-use meerkat_core::types::{AssistantBlock, ContentInput, HandlingMode, Message, text_content};
+use meerkat_core::types::{
+    AssistantBlock, ContentBlock, ContentInput, HandlingMode, ImageData, Message,
+    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, text_content,
+};
 use meerkat_core::{AssistantImageRef, BlobRef};
 use meerkat_mob::definition::{RoleWiringRule, WiringRules};
 use meerkat_mob::{
@@ -213,8 +216,49 @@ async fn wait_for_member_histories_to_settle(
     }
 }
 
+fn system_notice_block_has_image(block: &SystemNoticeBlock) -> bool {
+    match block {
+        SystemNoticeBlock::Comms { content, .. }
+        | SystemNoticeBlock::ExternalEvent { content, .. } => meerkat_core::has_images(content),
+        _ => false,
+    }
+}
+
 fn message_has_image(message: &Message) -> bool {
-    matches!(message, Message::User(user) if meerkat_core::has_images(&user.content))
+    match message {
+        Message::User(user) => meerkat_core::has_images(&user.content),
+        Message::SystemNotice(notice) => notice.blocks.iter().any(system_notice_block_has_image),
+        _ => false,
+    }
+}
+
+#[test]
+fn message_has_image_detects_typed_comms_notice_images() {
+    let message = Message::SystemNotice(SystemNoticeMessage::with_block(
+        SystemNoticeKind::Comms,
+        Some("Peer message".to_string()),
+        SystemNoticeBlock::Comms {
+            kind: "message".to_string(),
+            direction: SystemNoticeDirection::Incoming,
+            peer: None,
+            request_id: None,
+            intent: None,
+            status: None,
+            summary: Some("Peer message".to_string()),
+            payload: None,
+            content: vec![ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Blob {
+                    blob_id: "blob-smoke".into(),
+                },
+            }],
+        },
+    ));
+
+    assert!(
+        message_has_image(&message),
+        "generated-image comms smoke must count typed comms notice media as received image"
+    );
 }
 
 fn tool_uses(message: &Message) -> Vec<(&str, Value)> {

@@ -860,6 +860,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prepare_bindings_rejects_same_runtime_with_different_fence() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let session_id = SessionId::new();
+        machine.register_session(session_id.clone()).await;
+
+        let signal_surface = Arc::new(RecordingSignalSurface::default());
+        let schema = meerkat_machine_schema::catalog::meerkat_mob_seam_composition();
+        let table = RouteTable::from_schema(&schema).expect("catalog routes");
+        let dispatcher: CatalogCompositionSignalDispatcher<MeerkatSeamSignal> =
+            CatalogCompositionSignalDispatcher::new(schema.name.clone(), table)
+                .with_consumer(signal_surface.clone());
+        machine.set_composition_signal_dispatcher(Arc::new(dispatcher));
+
+        let first_input = mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: mm_dsl::AgentRuntimeId("operator-rt:0".into()),
+            fence_token: mm_dsl::FenceToken(17),
+            generation: mm_dsl::Generation(0),
+            session_id: mm_dsl::SessionId(session_id.to_string()),
+        };
+        machine
+            .apply_routed_meerkat_input(&session_id, first_input)
+            .await
+            .expect("initial authoritative binding applies");
+
+        let conflicting_fence = mm_dsl::MeerkatMachineInput::PrepareBindings {
+            agent_runtime_id: mm_dsl::AgentRuntimeId("operator-rt:0".into()),
+            fence_token: mm_dsl::FenceToken(18),
+            generation: mm_dsl::Generation(0),
+            session_id: mm_dsl::SessionId(session_id.to_string()),
+        };
+        machine
+            .apply_routed_meerkat_input(&session_id, conflicting_fence)
+            .await
+            .expect_err("same runtime with a different fence is not idempotent");
+
+        let state = machine
+            .session_dsl_state(&session_id)
+            .await
+            .expect("session state remains available");
+        assert!(
+            matches!(&state.active_runtime_id, Some(value) if value.0 == "operator-rt:0"),
+            "conflicting fence must not rewrite active_runtime_id: {:?}",
+            state.active_runtime_id
+        );
+        assert!(matches!(
+            state.active_fence_token,
+            Some(mm_dsl::FenceToken(17))
+        ));
+
+        let log = signal_surface.log.lock().await;
+        assert_eq!(
+            log.len(),
+            1,
+            "rejected fence mismatch must not publish a shadow RuntimeBound signal"
+        );
+    }
+
+    #[tokio::test]
     async fn session_owned_prepare_bindings_rejects_conflicting_authoritative_runtime() {
         let machine = Arc::new(MeerkatMachine::ephemeral());
         let session_id = SessionId::new();

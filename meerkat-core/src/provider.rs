@@ -74,15 +74,16 @@ mod tests {
     use super::Provider;
 
     #[test]
-    fn provider_openai_serializes_to_canonical_spelling() {
-        let json = serde_json::to_string(&Provider::OpenAI).expect("serialize provider");
+    fn provider_openai_serializes_to_canonical_spelling() -> Result<(), serde_json::Error> {
+        let json = serde_json::to_string(&Provider::OpenAI)?;
         assert_eq!(json, "\"openai\"");
 
-        let decoded: Provider = serde_json::from_str("\"openai\"").expect("deserialize provider");
+        let decoded: Provider = serde_json::from_str("\"openai\"")?;
         assert_eq!(decoded, Provider::OpenAI);
         assert!(
             serde_json::from_str::<Provider>("\"open_a_i\"").is_err(),
             "non-canonical OpenAI spelling must fail closed",
         );
+        Ok(())
     }
 }

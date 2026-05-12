@@ -887,8 +887,12 @@ mod tests {
                 terminal_outcome: TurnTerminalOutcome::None,
                 terminal_cause_kind: None,
             },
-        )
-        .expect("projection should accept non-terminal transition");
+        );
+        assert!(
+            effects.is_ok(),
+            "projection should accept non-terminal transition: {effects:?}"
+        );
+        let effects = effects.unwrap_or_default();
 
         assert!(
             effects.is_empty(),

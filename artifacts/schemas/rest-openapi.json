@@ -8629,22 +8629,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -8685,18 +8669,8 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/components/schemas/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -8705,7 +8679,7 @@
         "required": [
           "operation",
           "target",
-          "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

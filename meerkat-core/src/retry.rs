@@ -49,21 +49,21 @@ impl LlmRetryFailure {
                 message,
             } => match reason {
                 LlmFailureReason::RateLimited { retry_after } => Some(Self {
-                    provider: (*provider).to_string(),
+                    provider: provider.to_string(),
                     kind: LlmRetryFailureKind::RateLimited,
                     retry_after_ms: retry_after.map(duration_millis_u64),
                     duration_ms: None,
                     message: message.clone(),
                 }),
                 LlmFailureReason::NetworkTimeout { duration_ms } => Some(Self {
-                    provider: (*provider).to_string(),
+                    provider: provider.to_string(),
                     kind: LlmRetryFailureKind::NetworkTimeout,
                     retry_after_ms: None,
                     duration_ms: Some(*duration_ms),
                     message: message.clone(),
                 }),
                 LlmFailureReason::CallTimeout { duration_ms } => Some(Self {
-                    provider: (*provider).to_string(),
+                    provider: provider.to_string(),
                     kind: LlmRetryFailureKind::CallTimeout,
                     retry_after_ms: None,
                     duration_ms: Some(*duration_ms),
@@ -73,7 +73,7 @@ impl LlmRetryFailure {
                     if provider_error.is_retryable() =>
                 {
                     Some(Self {
-                        provider: (*provider).to_string(),
+                        provider: provider.to_string(),
                         kind: LlmRetryFailureKind::RetryableProviderError,
                         retry_after_ms: None,
                         duration_ms: None,
@@ -461,7 +461,7 @@ mod tests {
     fn retry_schedule_carries_typed_failure_and_delay_plan() {
         let policy = RetryPolicy::default().with_max_retries(3);
         let error = AgentError::Llm {
-            provider: "test",
+            provider: crate::Provider::Other,
             reason: LlmFailureReason::RateLimited {
                 retry_after: Some(Duration::from_secs(60)),
             },
@@ -544,7 +544,7 @@ mod tests {
     fn retry_schedule_rejects_non_retryable_errors() {
         let policy = RetryPolicy::default().with_max_retries(3);
         let error = AgentError::Llm {
-            provider: "test",
+            provider: crate::Provider::Other,
             reason: LlmFailureReason::AuthError,
             message: "auth".to_string(),
         };
@@ -556,7 +556,7 @@ mod tests {
     fn retry_schedule_reads_typed_provider_retryability() {
         let policy = RetryPolicy::default().with_max_retries(3);
         let error = AgentError::Llm {
-            provider: "test",
+            provider: crate::Provider::Other,
             reason: LlmFailureReason::ProviderError(LlmProviderError::retryable(
                 LlmProviderErrorKind::ServerOverloaded,
                 serde_json::json!({
@@ -580,7 +580,7 @@ mod tests {
     fn retry_schedule_ignores_json_only_provider_retryability() {
         let policy = RetryPolicy::default().with_max_retries(3);
         let error = AgentError::Llm {
-            provider: "test",
+            provider: crate::Provider::Other,
             reason: LlmFailureReason::ProviderError(LlmProviderError::non_retryable(
                 LlmProviderErrorKind::InvalidRequest,
                 serde_json::json!({

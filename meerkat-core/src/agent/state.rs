@@ -470,7 +470,7 @@ where
                             // CallBudget flows through step 5 retry logic below.
                             match source {
                                 CallTimeoutSource::CallBudget => Err(AgentError::Llm {
-                                    provider: self.client.provider().as_str(),
+                                    provider: self.client.provider(),
                                     reason: crate::error::LlmFailureReason::CallTimeout {
                                         duration_ms: effective_timeout.as_millis() as u64,
                                     },

@@ -739,7 +739,7 @@ impl TurnErrorMetadata {
                     TurnTerminalOutcome::Failed,
                     message.clone(),
                 );
-                metadata.provider = Some((*provider).to_string());
+                metadata.provider = Some(provider.to_string());
                 metadata.retryable = Some(error.is_recoverable());
                 if let LlmFailureReason::InvalidModel(model) = reason {
                     metadata.model = Some(model.clone());

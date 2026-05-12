@@ -5579,7 +5579,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_key".to_string(),
-                default_model: Some("gpt-5.4".to_string()),
+                default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
             },
         );
@@ -5643,7 +5643,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "openai_api".to_string(),
                 auth_profile: "openai_key".to_string(),
-                default_model: Some("gpt-5.4".to_string()),
+                default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
             },
         );
@@ -5784,7 +5784,7 @@ mod tests {
             ProviderBindingConfig {
                 backend_profile: "anthropic_api".to_string(),
                 auth_profile: "anthropic_key".to_string(),
-                default_model: Some("claude-sonnet-4-6".to_string()),
+                default_model: Some("claude-opus-4-7".to_string()),
                 policy: Default::default(),
             },
         );

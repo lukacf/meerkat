@@ -1302,7 +1302,7 @@ source = { kind = "managed_store" }
 [dev.binding.openai_oauth]
 backend_profile = "openai_chatgpt"
 auth_profile = "openai_oauth"
-default_model = "gpt-5.4"
+default_model = "gpt-5.5"
 "#,
         );
         let preferred_realm = RealmId::parse("dev").unwrap();

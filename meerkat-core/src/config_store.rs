@@ -272,7 +272,7 @@ mod tests {
             crate::ProviderBindingConfig {
                 backend_profile: "openai_chatgpt".to_string(),
                 auth_profile: "openai_oauth".to_string(),
-                default_model: Some("gpt-5.4".to_string()),
+                default_model: Some("gpt-5.5".to_string()),
                 policy: Default::default(),
             },
         );

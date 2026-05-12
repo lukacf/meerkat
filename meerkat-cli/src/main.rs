@@ -3548,10 +3548,15 @@ impl LoginProvider {
     }
 
     fn sample_model(self) -> &'static str {
+        meerkat_core::model_profile::catalog::default_model(self.config_provider())
+            .expect("login provider must have a catalog default model")
+    }
+
+    fn legacy_sample_models(self) -> &'static [&'static str] {
         match self {
-            Self::Anthropic => "claude-sonnet-4-6",
-            Self::OpenAi => "gpt-5.4",
-            Self::Google => "gemini-2.5-flash",
+            Self::Anthropic => &["claude-sonnet-4-6", "claude-opus-4-6"],
+            Self::OpenAi => &["gpt-5.4"],
+            Self::Google => &["gemini-3.1-flash-lite"],
         }
     }
 }
@@ -3761,11 +3766,13 @@ fn ensure_cli_interactive_oauth_config(provider: LoginProvider, config: &mut Con
             },
         );
         changed = true;
-    } else if provider == LoginProvider::Google
-        && let Some(binding) = section.binding.get_mut(binding_id)
+    } else if let Some(binding) = section.binding.get_mut(binding_id)
         && binding.backend_profile == backend_profile_id
         && binding.auth_profile == auth_profile_id
-        && binding.default_model.as_deref() == Some("gemini-3.1-flash-lite")
+        && binding
+            .default_model
+            .as_deref()
+            .is_some_and(|model| provider.legacy_sample_models().contains(&model))
     {
         binding.default_model = Some(provider.sample_model().to_string());
         changed = true;
@@ -11617,6 +11624,89 @@ mod tests {
         assert_eq!(target.auth_binding.realm.as_str(), "dev");
         assert_eq!(target.auth_binding.binding.as_str(), "openai_oauth");
         assert_eq!(target.auth_profile.auth_method, "managed_chatgpt_oauth");
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_oauth_config_uses_current_provider_default_models() {
+        let mut config = Config::default();
+
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::Anthropic,
+            &mut config
+        ));
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+
+        let realm = config.realm.get("dev").expect("dev realm");
+        assert_eq!(
+            realm
+                .binding
+                .get("anthropic_oauth")
+                .and_then(|binding| binding.default_model.as_deref()),
+            meerkat_core::model_profile::catalog::default_model("anthropic")
+        );
+        assert_eq!(
+            realm
+                .binding
+                .get("openai_oauth")
+                .and_then(|binding| binding.default_model.as_deref()),
+            meerkat_core::model_profile::catalog::default_model("openai")
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
+    #[test]
+    fn test_cli_interactive_oauth_config_heals_legacy_provider_default_models() {
+        let mut config = Config::default();
+
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::Anthropic,
+            &mut config
+        ));
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+
+        let realm = config.realm.get_mut("dev").expect("dev realm");
+        realm
+            .binding
+            .get_mut("anthropic_oauth")
+            .expect("anthropic oauth binding")
+            .default_model = Some("claude-sonnet-4-6".to_string());
+        realm
+            .binding
+            .get_mut("openai_oauth")
+            .expect("openai oauth binding")
+            .default_model = Some("gpt-5.4".to_string());
+
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::Anthropic,
+            &mut config
+        ));
+        assert!(ensure_cli_interactive_oauth_config(
+            LoginProvider::OpenAi,
+            &mut config
+        ));
+
+        let realm = config.realm.get("dev").expect("dev realm");
+        assert_eq!(
+            realm
+                .binding
+                .get("anthropic_oauth")
+                .and_then(|binding| binding.default_model.as_deref()),
+            meerkat_core::model_profile::catalog::default_model("anthropic")
+        );
+        assert_eq!(
+            realm
+                .binding
+                .get("openai_oauth")
+                .and_then(|binding| binding.default_model.as_deref()),
+            meerkat_core::model_profile::catalog::default_model("openai")
+        );
     }
 
     #[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]

@@ -1999,6 +1999,16 @@ mod tests {
     }
 
     #[test]
+    fn config_template_agent_model_tracks_anthropic_catalog_default() {
+        let config = Config::template().expect("template parses");
+        assert_eq!(
+            config.agent.model.as_str(),
+            crate::model_profile::catalog::default_model("anthropic")
+                .expect("anthropic catalog default")
+        );
+    }
+
+    #[test]
     fn test_limits_max_sessions_configures_runtime_capacity() {
         let mut config = Config::default();
         config

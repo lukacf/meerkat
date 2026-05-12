@@ -482,18 +482,19 @@ mod identity_tests {
     use super::*;
 
     #[test]
-    fn skill_key_for_dir_uses_source_relative_path() {
+    fn skill_key_for_dir_uses_source_relative_path() -> Result<(), Box<dyn std::error::Error>> {
         let root = PathBuf::from("/repo/skills");
-        let source_uuid = SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7").unwrap();
+        let source_uuid = SourceUuid::parse("a93d587d-8f44-438f-8189-6e8cf549f6e7")?;
         let key = skill_key_for_dir(
             &root,
             &source_uuid,
             &PathBuf::from("/repo/skills/team-a/shared/alpha"),
         )
-        .unwrap();
+        .map_err(std::io::Error::other)?;
 
         assert_eq!(key.source_uuid, source_uuid);
         assert_eq!(key.skill_name.as_str(), "team-a/shared/alpha");
+        Ok(())
     }
 
     #[test]

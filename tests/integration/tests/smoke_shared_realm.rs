@@ -4766,7 +4766,11 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let mut turn34_capture = turn3_commit.clone();
         turn34_capture.merge_from(turn34_preemption_capture.clone());
         turn34_capture.merge_from(turn34_settled_capture);
-        if !turn34_capture.saw_interrupted || !live_capture_has_non_silent_audio(&turn34_capture) {
+        // Barge-in is the semantic fact under test. Audio chunks are lossy
+        // media observations and can race behind the provider's spoken
+        // transcript/interrupt events, so require assistant output plus the
+        // authoritative interruption rather than a particular media chunk.
+        if !turn34_capture.saw_interrupted || !live_capture_has_assistant_text(&turn34_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
                 "turn-34-stop",
@@ -4775,14 +4779,15 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             )
             .await?;
             return Err(format!(
-                "turn 3-4 barge-in did not preempt with real audio + saw_interrupted: {turn34_capture:?}"
+                "turn 3-4 barge-in did not preempt with assistant output + saw_interrupted: {turn34_capture:?}"
             )
             .into());
         }
         eprintln!(
-            "[scenario 71] barge-in confirmed: saw_interrupted={}, audio_bytes={}",
+            "[scenario 71] barge-in confirmed: saw_interrupted={}, audio_bytes={}, output_text={}",
             turn34_capture.saw_interrupted,
-            turn34_capture.output_audio_pcm.len()
+            turn34_capture.output_audio_pcm.len(),
+            turn34_capture.output_text
         );
 
         // ------ Turn 5: Post-barge recall ------

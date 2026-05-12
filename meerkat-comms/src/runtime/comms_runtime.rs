@@ -3718,8 +3718,11 @@ mod tests {
             requester.as_ref(),
             CommsCommand::PeerRequest {
                 to: peer_route(&responder_name, responder.public_key()),
-                intent: "route-mode".to_string(),
-                params: serde_json::json!({"expect": "steer"}),
+                request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenParams {
+                        subject: "route-mode".to_string(),
+                    },
+                ),
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Steer,
                 stream: InputStreamMode::None,
@@ -3760,7 +3763,13 @@ mod tests {
                 to: peer_route(&requester_name, requester.public_key()),
                 in_reply_to: interaction_id,
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({"ok": true}),
+                result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenResult {
+                        request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                        request_subject: "route-mode".to_string(),
+                        token: "ok".to_string(),
+                    },
+                )),
                 blocks: None,
                 handling_mode: None,
             },

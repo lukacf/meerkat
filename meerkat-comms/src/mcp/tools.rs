@@ -427,8 +427,7 @@ fn project_peer_request_command(
         .into_core_request()
         .map_err(|err| format!("Invalid arguments: {err}"))?;
     let meerkat_core::comms::CommsCommandRequest::PeerRequest {
-        intent,
-        params,
+        request,
         blocks,
         handling_mode,
         stream,
@@ -439,8 +438,7 @@ fn project_peer_request_command(
     };
     Ok(CommsCommand::PeerRequest {
         to,
-        intent,
-        params,
+        request,
         blocks,
         handling_mode: handling_mode.unwrap_or_default(),
         stream: stream.unwrap_or(InputStreamMode::None),
@@ -1448,7 +1446,7 @@ mod tests {
         );
         assert_eq!(in_reply_to.0, request_id);
         assert_eq!(*status, ResponseStatus::Completed);
-        assert_eq!(*result, Value::Null);
+        assert!(result.is_none());
     }
 
     #[test]
@@ -1953,10 +1951,12 @@ mod tests {
         );
         assert_eq!(result["receipt"]["stream_reserved"], true);
         let sent = runtime.sent.lock();
-        let [CommsCommand::PeerRequest { intent, params, .. }] = sent.as_slice() else {
+        let [CommsCommand::PeerRequest { request, .. }] = sent.as_slice() else {
             panic!("expected one peer request command, got {sent:?}");
         };
-        assert_eq!(intent, meerkat_core::comms::SUPERVISOR_BRIDGE_INTENT);
+        let meerkat_core::comms::PeerRequestPayload::SupervisorBridge(params) = request else {
+            panic!("expected supervisor bridge request payload, got {request:?}");
+        };
         assert_eq!(params, &bridge_command_json());
     }
 
@@ -1993,6 +1993,10 @@ mod tests {
         let sent = runtime.sent.lock();
         let [CommsCommand::PeerResponse { result, .. }] = sent.as_slice() else {
             panic!("expected one peer response command, got {sent:?}");
+        };
+        let Some(meerkat_core::comms::PeerResponsePayload::SupervisorBridge(result)) = result
+        else {
+            panic!("expected supervisor bridge response payload, got {result:?}");
         };
         assert_eq!(result, &bridge_reply_json());
     }
@@ -2074,9 +2078,10 @@ mod tests {
         let [CommsCommand::PeerResponse { result, .. }] = sent.as_slice() else {
             panic!("expected one peer response command, got {sent:?}");
         };
-        assert_eq!(
-            result,
-            &checksum_token_reply_json("alpha beta gamma", "birch seventeen")
-        );
+        let Some(meerkat_core::comms::PeerResponsePayload::ChecksumToken(result)) = result else {
+            panic!("expected checksum token response payload, got {result:?}");
+        };
+        assert_eq!(result.request_subject, "alpha beta gamma");
+        assert_eq!(result.token, "birch seventeen");
     }
 }

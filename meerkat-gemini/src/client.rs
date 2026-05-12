@@ -9,7 +9,8 @@ use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarn
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
     ImageGenerationIntent, ImageOperationTerminalClass, Message, OutputSchema, Provider,
-    ProviderImageMetadata, ProviderTextDisposition, StopReason, ToolResult, Usage, UserMessage,
+    ProviderImageMetadata, ProviderTextDisposition, ServerToolContent, StopReason, ToolResult,
+    Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -1599,8 +1600,9 @@ impl LlmClient for GeminiClient {
                                 if let Some(grounding_metadata) = cand.grounding_metadata {
                                     yield LlmEvent::ServerToolContent {
                                         id: None,
-                                        name: "google_search".to_string(),
-                                        content: grounding_metadata,
+                                        content: ServerToolContent::GeminiGroundingMetadata {
+                                            grounding_metadata,
+                                        },
                                         meta: None,
                                     };
                                 }
@@ -1627,8 +1629,8 @@ impl LlmClient for GeminiClient {
         streaming::ensure_terminal_done(inner)
     }
 
-    fn provider(&self) -> &'static str {
-        "gemini"
+    fn provider(&self) -> Provider {
+        Provider::Gemini
     }
 
     fn provider_id(&self) -> meerkat_core::Provider {
@@ -1806,10 +1808,11 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "google_search".to_string(),
-                        content: serde_json::json!({
-                            "groundingChunks": []
-                        }),
+                        content: ServerToolContent::GeminiGroundingMetadata {
+                            grounding_metadata: serde_json::json!({
+                                "groundingChunks": []
+                            }),
+                        },
                         meta: None,
                     },
                     assistant_image_block(),
@@ -2115,9 +2118,12 @@ mod tests {
         let mut grounding = None;
         while let Some(event) = stream.next().await {
             match event? {
-                LlmEvent::ServerToolContent { name, content, .. } => {
-                    assert_eq!(name, "google_search");
-                    grounding = Some(content);
+                LlmEvent::ServerToolContent { content, .. } => {
+                    let ServerToolContent::GeminiGroundingMetadata { grounding_metadata } = content
+                    else {
+                        panic!("expected Gemini grounding metadata");
+                    };
+                    grounding = Some(grounding_metadata);
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}

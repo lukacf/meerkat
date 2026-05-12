@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use meerkat_core::ToolDef;
 use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
+use meerkat_core::{ToolCallArguments, ToolDef};
 use rmcp::{
     model::{CallToolRequestParams, Content, RawContent},
     service::{RoleClient, RunningService},
@@ -65,13 +65,25 @@ impl McpProtocol {
     /// Unsupported content fails closed so callers do not observe lossy
     /// success.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let arguments = args.as_object().cloned();
+        let args = ToolCallArguments::from_value(args.clone()).map_err(|error| {
+            McpError::InvalidToolArguments {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        self.call_tool_arguments(name, &args).await
+    }
 
+    pub async fn call_tool_arguments(
+        &self,
+        name: &str,
+        args: &ToolCallArguments,
+    ) -> Result<Vec<ContentBlock>, McpError> {
         let result = self
             .service
             .call_tool(CallToolRequestParams {
                 name: name.to_string().into(),
-                arguments,
+                arguments: Some(args.to_object_map()),
                 meta: None,
                 task: None,
             })
@@ -98,13 +110,25 @@ impl McpProtocol {
 
     /// Call a tool, returning only text content (errors on non-text content).
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
-        let arguments = args.as_object().cloned();
+        let args = ToolCallArguments::from_value(args.clone()).map_err(|error| {
+            McpError::InvalidToolArguments {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        self.call_tool_text_arguments(name, &args).await
+    }
 
+    pub async fn call_tool_text_arguments(
+        &self,
+        name: &str,
+        args: &ToolCallArguments,
+    ) -> Result<String, McpError> {
         let result = self
             .service
             .call_tool(CallToolRequestParams {
                 name: name.to_string().into(),
-                arguments,
+                arguments: Some(args.to_object_map()),
                 meta: None,
                 task: None,
             })

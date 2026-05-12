@@ -1062,6 +1062,44 @@ async fn provisional_dsl_rollback_after_shell_failure_leaks_no_routed_signal_or_
 }
 
 #[tokio::test]
+async fn retire_unbound_session_does_not_emit_runtime_retired_signal() {
+    let machine = MeerkatMachine::ephemeral();
+    let session_id = SessionId::new();
+    machine.register_session(session_id.clone()).await;
+    let signal_surface = install_recording_meerkat_signal_dispatcher(&machine);
+
+    let (_, effects) = machine
+        .apply_session_dsl_input(
+            &session_id,
+            dsl::MeerkatMachineInput::Retire {
+                session_id: dsl::SessionId::from_domain(&session_id),
+            },
+            "Retire(test unbound)",
+        )
+        .await
+        .expect("unbound retire should be accepted");
+
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, dsl::MeerkatMachineEffect::RuntimeRetired { .. })),
+        "unbound retire must not manufacture a RuntimeRetired signal without typed runtime identity"
+    );
+    assert!(
+        signal_surface.log.lock().await.is_empty(),
+        "unbound retire must not route an empty runtime-retired signal"
+    );
+
+    let state = machine
+        .session_dsl_state(&session_id)
+        .await
+        .expect("session DSL state");
+    assert_eq!(state.lifecycle_phase, dsl::MeerkatPhase::Retired);
+    assert!(state.active_runtime_id.is_none());
+    assert!(state.active_fence_token.is_none());
+}
+
+#[tokio::test]
 async fn authoritative_dsl_apply_rolls_back_state_when_effect_dispatch_fails() {
     let machine = MeerkatMachine::ephemeral();
     let session_id = SessionId::new();
@@ -1143,7 +1181,10 @@ async fn persistent_retire_signal_failure_recovery_preserves_durable_terminal_st
         memory_blob_store(),
     );
     let session_id = SessionId::new();
-    machine.register_session(session_id.clone()).await;
+    machine
+        .prepare_bindings(session_id.clone())
+        .await
+        .expect("prepare bindings before retire");
     install_rejecting_meerkat_signal_dispatcher(&machine);
 
     let runtime_id = runtime_id_for_session(&session_id);

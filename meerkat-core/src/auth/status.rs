@@ -7,6 +7,23 @@ use super::error::AuthErrorKind;
 use crate::handles::{AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeasePhase, AuthLeaseSnapshot};
 use crate::provider::Provider;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AuthBackendKind {
+    OpenAiApi,
+    ChatgptBackend,
+    AnthropicApi,
+    Bedrock,
+    Vertex,
+    Foundry,
+    GoogleGenai,
+    VertexAi,
+    GoogleCodeAssist,
+    SelfHosted,
+    OpenAiCompatible,
+}
+
 /// Public auth status phase shared by REST, RPC, CLI, and generated SDK wire
 /// payloads.
 ///
@@ -100,8 +117,8 @@ fn epoch_secs_until(now: DateTime<Utc>, expires_at: u64) -> i64 {
 pub struct AuthStatus {
     pub profile_id: String,
     pub provider: Provider,
-    pub backend_kind: String,
-    pub auth_method: String,
+    pub backend_kind: AuthBackendKind,
+    pub auth_method: super::PersistedAuthMode,
     pub source_label: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(with = "Option<String>"))]
@@ -139,8 +156,8 @@ mod tests {
         let status = AuthStatus {
             profile_id: "openai_api_key".into(),
             provider: Provider::OpenAI,
-            backend_kind: "openai_api".into(),
-            auth_method: "api_key".into(),
+            backend_kind: AuthBackendKind::OpenAiApi,
+            auth_method: crate::PersistedAuthMode::ApiKey,
             source_label: "env:OPENAI_API_KEY".into(),
             expires_at: None,
             account_id: None,

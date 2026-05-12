@@ -101,7 +101,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider(),
+                                self.client.provider().as_str(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -113,7 +113,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         e.failure_reason(),
                         e.to_string(),
                     ));
@@ -154,7 +154,7 @@ impl<C: LlmClient + 'static> AgentLlmClient for LlmClientAdapter<C> {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> meerkat_core::Provider {
         self.client.provider()
     }
 
@@ -1439,8 +1439,8 @@ mod sanity {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         fn model(&self) -> &'static str {

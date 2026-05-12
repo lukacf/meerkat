@@ -2,7 +2,7 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, BTreeSet};
 
-use meerkat_contracts::capability::MobpackCapabilityRequirement;
+use meerkat_contracts::capability::{MobpackCapabilityId, MobpackCapabilityRequirement};
 use meerkat_mob::MobDefinition;
 
 use crate::targz::normalize_for_archive;
@@ -157,16 +157,56 @@ pub struct MobpackSection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequiresSection {
     #[serde(default)]
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<MobpackManifestCapability>,
 }
 
 impl RequiresSection {
-    pub fn typed_capabilities(
-        &self,
-    ) -> impl Iterator<Item = MobpackCapabilityRequirement<'_>> + '_ {
-        self.capabilities
-            .iter()
-            .map(|capability| MobpackCapabilityRequirement::parse(capability))
+    pub fn typed_capabilities(&self) -> impl Iterator<Item = &MobpackManifestCapability> + '_ {
+        self.capabilities.iter()
+    }
+}
+
+/// Capability requirement from `manifest.toml`.
+///
+/// The archive format keeps the historical string-array shape, but the parsed
+/// manifest carries the classified capability identity as the operative value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobpackManifestCapability {
+    raw: String,
+    id: MobpackCapabilityId,
+}
+
+impl MobpackManifestCapability {
+    pub fn parse(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        let id = MobpackCapabilityRequirement::parse(&raw).id();
+        Self { raw, id }
+    }
+
+    pub fn raw(&self) -> &str {
+        &self.raw
+    }
+
+    pub fn id(&self) -> MobpackCapabilityId {
+        self.id
+    }
+}
+
+impl Serialize for MobpackManifestCapability {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.raw)
+    }
+}
+
+impl<'de> Deserialize<'de> for MobpackManifestCapability {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Ok(Self::parse(String::deserialize(deserializer)?))
     }
 }
 
@@ -248,7 +288,7 @@ fn valid_manifest_skill_path(value: &str) -> bool {
 mod tests {
     use super::*;
     use meerkat_contracts::capability::{
-        CapabilityId, HostProcessCapabilityId, MobpackCapabilityId, MobpackCapabilityRequirement,
+        CapabilityId, HostProcessCapabilityId, MobpackCapabilityId,
     };
 
     #[test]
@@ -286,7 +326,10 @@ mod tests {
                 description: Some("Review assistant".to_string()),
             },
             requires: Some(RequiresSection {
-                capabilities: vec!["comms".to_string(), "shell".to_string()],
+                capabilities: vec![
+                    MobpackManifestCapability::parse("comms"),
+                    MobpackManifestCapability::parse("shell"),
+                ],
             }),
             models,
             profiles,
@@ -299,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_section_preserves_strings_and_exposes_typed_capabilities() {
+    fn test_requires_section_exposes_typed_capabilities_and_serializes_compat_strings() {
         let manifest: MobpackManifest = toml::from_str(
             r#"
 [mobpack]
@@ -314,18 +357,17 @@ capabilities = ["comms", "shell", "mcp_stdio", "vendor.custom"]
         let requires = manifest.requires.unwrap();
 
         assert_eq!(
-            requires.capabilities,
-            vec![
-                "comms".to_string(),
-                "shell".to_string(),
-                "mcp_stdio".to_string(),
-                "vendor.custom".to_string(),
-            ]
+            requires
+                .capabilities
+                .iter()
+                .map(MobpackManifestCapability::raw)
+                .collect::<Vec<_>>(),
+            vec!["comms", "shell", "mcp_stdio", "vendor.custom"]
         );
 
         let typed = requires
             .typed_capabilities()
-            .map(MobpackCapabilityRequirement::id)
+            .map(MobpackManifestCapability::id)
             .collect::<Vec<_>>();
         assert_eq!(
             typed,
@@ -335,6 +377,16 @@ capabilities = ["comms", "shell", "mcp_stdio", "vendor.custom"]
                 MobpackCapabilityId::HostProcess(HostProcessCapabilityId::McpStdio),
                 MobpackCapabilityId::Unknown,
             ]
+        );
+
+        let encoded = toml::to_string(&RequiresSection {
+            capabilities: requires.capabilities,
+        })
+        .unwrap();
+        assert!(
+            encoded.contains(
+                "capabilities = [\"comms\", \"shell\", \"mcp_stdio\", \"vendor.custom\"]"
+            )
         );
     }
 

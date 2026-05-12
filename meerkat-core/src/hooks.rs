@@ -204,17 +204,13 @@ pub struct HookToolCall {
 
 /// Tool result view exposed to hooks.
 ///
-/// `content_blocks` is the canonical typed tool-result content. `content` is
-/// retained as a legacy display projection for existing hook consumers.
+/// `content_blocks` is the canonical typed tool-result content.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct HookToolResult {
     pub tool_use_id: String,
     pub name: String,
-    /// Legacy text projection retained for existing hooks.
-    pub content: String,
     /// Canonical typed tool-result content exposed to hooks.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content_blocks: Vec<ContentBlock>,
     pub is_error: bool,
     /// Legacy side flag retained for Rust compatibility. New hook payloads
@@ -236,7 +232,6 @@ impl HookToolResult {
         Self {
             tool_use_id: tool_use_id.into(),
             name: name.into(),
-            content: result.text_content(),
             content_blocks: result.content.clone(),
             is_error: result.is_error,
             has_images: result.has_images(),
@@ -254,16 +249,10 @@ pub struct HookInvocation {
     pub turn_number: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_input: Option<ContentInput>,
-    /// Text-only projection of `prompt_input` for legacy hooks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_report: Option<AgentErrorReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<AgentErrorClass>,
-    /// Display projection of `error_report.message` for legacy hooks.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm_request: Option<HookLlmRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,10 +270,8 @@ impl HookInvocation {
             session_id,
             turn_number: None,
             prompt_input: None,
-            prompt: None,
             error_report: None,
             error_class: None,
-            error: None,
             llm_request: None,
             llm_response: None,
             tool_call: None,
@@ -293,10 +280,8 @@ impl HookInvocation {
     }
 
     pub fn run_started(session_id: SessionId, prompt_input: ContentInput) -> Self {
-        let prompt = prompt_input.text_content();
         Self {
             prompt_input: Some(prompt_input),
-            prompt: Some(prompt),
             ..Self::new(HookPoint::RunStarted, session_id)
         }
     }
@@ -312,7 +297,6 @@ impl HookInvocation {
         let error_report = AgentErrorReport::from_agent_error(error);
         Self {
             error_class: Some(error_report.class),
-            error: Some(error_report.message.clone()),
             error_report: Some(error_report),
             ..Self::new(HookPoint::RunFailed, session_id)
         }
@@ -681,13 +665,14 @@ mod tests {
         let hook_result = HookToolResult {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
-            content: tr.text_content(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
-        // text_content concatenates text projections; image blocks produce "[image: image/png]"
-        assert_eq!(hook_result.content, "hello\n[image: image/png]");
+        assert_eq!(
+            hook_result.content_blocks,
+            vec![text_block("hello"), image_block("image/png", "AAAA")]
+        );
         assert!(hook_result.has_images);
     }
 
@@ -697,12 +682,10 @@ mod tests {
         let hook_result = HookToolResult {
             tool_use_id: tr.tool_use_id.clone(),
             name: "test_tool".into(),
-            content: tr.text_content(),
             content_blocks: tr.content.clone(),
             is_error: tr.is_error,
             has_images: tr.has_images(),
         };
-        assert_eq!(hook_result.content, "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
         assert!(!hook_result.has_images);
     }
@@ -712,7 +695,6 @@ mod tests {
         let tr = ToolResult::new("tc_1".into(), "just text".into(), false);
         let hook_result = HookToolResult::from_tool_result("test_tool", &tr);
 
-        assert_eq!(hook_result.content, "just text");
         assert_eq!(hook_result.content_blocks, vec![text_block("just text")]);
 
         let json = serde_json::to_value(&hook_result).expect("serialize hook tool result");
@@ -732,7 +714,6 @@ mod tests {
             ToolResult::with_blocks("tc_1".into(), vec![image_block("image/png", "AAAA")], false);
         let hook_result = HookToolResult::from_tool_result("view_image", &tr);
 
-        assert_eq!(hook_result.content, "[image: image/png]");
         assert_eq!(
             hook_result.content_blocks,
             vec![image_block("image/png", "AAAA")]
@@ -767,7 +748,6 @@ mod tests {
         );
         let hook_result = HookToolResult::from_tool_result("mixed_tool", &tr);
 
-        assert_eq!(hook_result.content, "before\n[image: image/png]\nafter");
         assert_eq!(hook_result.content_blocks, tr.content);
     }
 
@@ -782,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn hook_tool_result_has_images_serde_default() {
+    fn hook_tool_result_rejects_legacy_content_without_blocks() {
         // Verify has_images defaults to false when deserializing JSON without it.
         // This ensures backwards compatibility with existing hook payloads.
         let json = r#"{
@@ -791,9 +771,11 @@ mod tests {
             "content": "hello",
             "is_error": false
         }"#;
-        let result: HookToolResult =
-            serde_json::from_str(json).expect("should deserialize without has_images");
-        assert!(!result.has_images);
+        let result: Result<HookToolResult, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "legacy content-only hook tool result must not deserialize"
+        );
     }
 
     #[test]
@@ -801,7 +783,6 @@ mod tests {
         let result = HookToolResult {
             tool_use_id: "tc_1".into(),
             name: "tool".into(),
-            content: "text".into(),
             content_blocks: vec![text_block("text")],
             is_error: false,
             has_images: true,
@@ -815,7 +796,6 @@ mod tests {
         let decoded: HookToolResult = serde_json::from_value(serde_json::json!({
             "tool_use_id": "tc_1",
             "name": "tool",
-            "content": "text",
             "content_blocks": [{"type": "text", "text": "text"}],
             "is_error": false,
             "has_images": true

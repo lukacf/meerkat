@@ -371,10 +371,10 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .clone();
     let key = TokenKey::from_auth_binding(binding.auth_binding_ref());
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(binding.auth_binding_ref());
-    let lifecycle_guard = if crate::auth_store::persisted_auth_mode_for_auth_method(
-        &binding.auth_profile().auth_method,
-    )
-    .is_some_and(crate::auth_store::persisted_auth_mode_is_oauth_login)
+    let lifecycle_guard = if binding
+        .auth_profile()
+        .persisted_auth_mode()
+        .is_some_and(crate::auth_store::persisted_auth_mode_is_oauth_login)
     {
         Some(meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await)
     } else {
@@ -385,7 +385,7 @@ pub async fn load_managed_store_tokens_with_lifecycle(
         .await
         .map_err(|e| ProviderAuthError::SourceResolutionFailed(e.to_string()))?
         .ok_or_else(|| interactive_login_error(binding))?;
-    let expected_mode = require_persisted_auth_mode(&tokens, &binding.auth_profile().auth_method)?;
+    let expected_mode = require_persisted_auth_mode(&tokens, binding.auth_profile())?;
     let is_oauth_login = crate::auth_store::persisted_auth_mode_is_oauth_login(expected_mode);
     if is_oauth_login && !oauth_lifecycle_marker_payload_valid_for_tokens(&tokens) {
         return Err(stale_credential_error());
@@ -483,12 +483,13 @@ pub async fn load_managed_store_tokens_with_lifecycle(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn persisted_auth_mode_for_method(
-    auth_method: &str,
+fn persisted_auth_mode_for_profile(
+    auth_profile: &meerkat_core::AuthProfile,
 ) -> Result<PersistedAuthMode, ProviderAuthError> {
-    crate::auth_store::persisted_auth_mode_for_auth_method(auth_method).ok_or_else(|| {
+    auth_profile.persisted_auth_mode().ok_or_else(|| {
         ProviderAuthError::SourceResolutionFailed(format!(
-            "auth_method '{auth_method}' cannot resolve persisted credentials from TokenStore"
+            "auth_method '{}' cannot resolve persisted credentials from TokenStore",
+            auth_profile.auth_method,
         ))
     })
 }
@@ -980,11 +981,15 @@ pub async fn publish_managed_store_tokens_lifecycle_and_save(
 #[cfg(not(target_arch = "wasm32"))]
 pub fn require_persisted_auth_mode(
     tokens: &PersistedTokens,
-    auth_method: &str,
+    auth_profile: &meerkat_core::AuthProfile,
 ) -> Result<PersistedAuthMode, ProviderAuthError> {
-    let expected = persisted_auth_mode_for_method(auth_method)?;
+    let expected = persisted_auth_mode_for_profile(auth_profile)?;
     if tokens.auth_mode != expected {
-        return Err(persisted_auth_mode_mismatch(tokens, auth_method, expected));
+        return Err(persisted_auth_mode_mismatch(
+            tokens,
+            &auth_profile.auth_method,
+            expected,
+        ));
     }
     Ok(expected)
 }

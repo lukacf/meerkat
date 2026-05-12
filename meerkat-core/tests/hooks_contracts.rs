@@ -23,7 +23,7 @@ fn hooks_config_roundtrip_contract() -> Result<(), Box<dyn std::error::Error>> {
             priority: 5,
             runtime: HookRuntimeConfig::new(
                 HookRuntimeKind::InProcess,
-                Some(json!({"name": "guard_pre_tool", "config": {"mode": "strict"}})),
+                Some(json!({"name": "guard_pre_tool"})),
             )?,
             ..Default::default()
         }],
@@ -45,14 +45,12 @@ fn hook_invocation_outcome_roundtrip_contract() -> Result<(), Box<dyn std::error
         session_id: SessionId::new(),
         turn_number: Some(1),
         prompt_input: Some(ContentInput::Text("hello typed prompt".to_string())),
-        prompt: Some("legacy prompt projection".to_string()),
         error_report: Some(AgentErrorReport {
             class: AgentErrorClass::Llm,
             reason: None,
             message: "typed failure".to_string(),
         }),
         error_class: Some(AgentErrorClass::Llm),
-        error: Some("legacy failure projection".to_string()),
         llm_request: Some(HookLlmRequest {
             max_tokens: 512,
             temperature: Some(0.1),

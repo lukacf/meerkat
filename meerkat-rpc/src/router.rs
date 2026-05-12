@@ -3547,8 +3547,8 @@ args = [{}]
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -3624,8 +3624,8 @@ args = [{}]
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -6348,11 +6348,13 @@ args = [{}]
                 ),
                 in_reply_to,
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({
-                    "request_intent": "checksum_token",
-                    "request_subject": "alpha beta gamma",
-                    "token": "birch seventeen",
-                }),
+                result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenResult {
+                        request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                        request_subject: "alpha beta gamma".to_string(),
+                        token: "birch seventeen".to_string(),
+                    },
+                )),
                 blocks: None,
                 handling_mode: None,
             },

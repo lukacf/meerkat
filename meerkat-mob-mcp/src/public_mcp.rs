@@ -4,7 +4,8 @@ use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobEventsResult, MobFlowStatusResult, MobLifecycleParams, MobLifecycleResult,
     MobMemberSendParams, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobEvent,
-    WireMobRun, WireMobRuntimeMode, WireRuntimeBinding, WireTrustedPeerIdentity,
+    WireMobRun, WireMobRuntimeMode, WireMobState, WireRuntimeBinding,
+    WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;
@@ -17,6 +18,16 @@ use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(not(target_arch = "wasm32"))]
 use tokio::net::TcpStream;
+
+fn wire_mob_state(state: meerkat_mob::MobState) -> WireMobState {
+    match state {
+        meerkat_mob::MobState::Creating => WireMobState::Creating,
+        meerkat_mob::MobState::Running => WireMobState::Running,
+        meerkat_mob::MobState::Stopped => WireMobState::Stopped,
+        meerkat_mob::MobState::Completed => WireMobState::Completed,
+        meerkat_mob::MobState::Destroyed => WireMobState::Destroyed,
+    }
+}
 
 fn spawn_result_payload(mob_id: &meerkat_mob::MobId, result: &meerkat_mob::SpawnResult) -> Value {
     json!({
@@ -467,7 +478,7 @@ pub async fn handle_public_tools_call(
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?
                 .into_iter()
-                .map(|(mob_id, status)| json!({"mob_id": mob_id, "status": status.to_string()}))
+                .map(|(mob_id, status)| json!({"mob_id": mob_id, "status": wire_mob_state(status)}))
                 .collect::<Vec<_>>();
             Ok(json!({ "mobs": mobs }))
         }
@@ -478,7 +489,7 @@ pub async fn handle_public_tools_call(
                 .mob_status(&mob_id)
                 .await
                 .map_err(|err| McpToolError::invalid_params(err.to_string()))?;
-            Ok(json!({ "mob_id": mob_id, "status": status.to_string() }))
+            Ok(json!({ "mob_id": mob_id, "status": wire_mob_state(status) }))
         }
         "meerkat_mob_lifecycle" => {
             let input: MobLifecycleParams = parse_args(arguments)?;

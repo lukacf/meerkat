@@ -198,7 +198,6 @@ export interface RunFailedEvent {
   readonly type: "run_failed";
   readonly sessionId: string;
   readonly errorClass: string;
-  readonly error: string;
   readonly terminalCauseKind?: TurnTerminalCauseKind;
   readonly errorReport?: AgentErrorReport | null;
 }
@@ -258,7 +257,6 @@ export interface ToolExecutionCompletedEvent {
   readonly type: "tool_execution_completed";
   readonly id: string;
   readonly name: string;
-  readonly result: string;
   readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
   readonly error?: ToolResultError | null;
@@ -394,11 +392,7 @@ export type SkillResolutionFailureReason =
 export interface SkillResolutionFailedEvent {
   readonly type: "skill_resolution_failed";
   readonly skillKey?: SkillKey;
-  readonly reason?: SkillResolutionFailureReason;
-  /** Legacy display mirror. Prefer `skillKey` when present. */
-  readonly reference: string;
-  /** Legacy display mirror. Prefer `reason` for structured handling. */
-  readonly error: string;
+  readonly reason: SkillResolutionFailureReason;
 }
 
 // ---------------------------------------------------------------------------
@@ -462,11 +456,10 @@ export type ToolConfigChangeStatus =
   | ExternalToolDeltaToolConfigChangeStatus;
 
 export interface ToolConfigChangedPayload {
-  readonly operation?: ToolConfigChangeOperation;
-  readonly target?: string;
-  readonly status?: string;
-  readonly status_info?: ToolConfigChangeStatus;
-  readonly persisted?: boolean;
+  readonly operation: ToolConfigChangeOperation;
+  readonly target: string;
+  readonly status_info: ToolConfigChangeStatus;
+  readonly persisted: boolean;
   readonly applied_at_turn?: number;
 }
 
@@ -479,7 +472,6 @@ export interface BackgroundJobCompletedEvent {
   readonly type: "background_job_completed";
   readonly jobId: string;
   readonly displayName: string;
-  readonly legacyStatus?: string;
   readonly terminalStatus: BackgroundJobTerminalStatus;
   readonly detail: string;
 }
@@ -789,13 +781,9 @@ function parseContentInput(raw: unknown): ContentInput {
   return String(raw ?? "");
 }
 
-function parseContentBlocks(raw: unknown, legacyText?: unknown): readonly ContentBlock[] {
+function parseContentBlocks(raw: unknown): readonly ContentBlock[] {
   if (Array.isArray(raw)) return raw as readonly ContentBlock[];
-  if (raw != null) throw new Error("content must be a content block array");
-  if (typeof legacyText === "string" && legacyText.length > 0) {
-    return [{ type: "text", text: legacyText }];
-  }
-  return [];
+  throw new Error("content must be a content block array");
 }
 
 function parseToolConfigChangeStatus(raw: unknown): ToolConfigChangeStatus | undefined {
@@ -1107,7 +1095,6 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         sessionId: requireStringField(raw, "session_id"),
         errorClass: requireStringField(raw, "error_class"),
-        error: requireStringField(raw, "error"),
         ...terminalCauseKindField(raw),
         ...(hasOwn(raw, "error_report") ? { errorReport: parseAgentErrorReport(raw.error_report) ?? null } : {}),
       };
@@ -1154,8 +1141,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         type,
         id: requireStringField(raw, "id"),
         name: requireStringField(raw, "name"),
-        result: requireStringField(raw, "result"),
-        content: parseContentBlocks(raw.content, raw.result),
+        content: parseContentBlocks(raw.content),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
         ...(hasOwn(raw, "error") ? { error: parseToolResultError(raw.error) ?? null } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
@@ -1199,16 +1185,15 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         injectionBytes: requireNumberField(raw, "injection_bytes"),
       };
     case "skill_resolution_failed": {
-      const reference = requireStringField(raw, "reference");
-      const error = requireStringField(raw, "error");
       const skillKey = parseSkillKey(raw.skill_key);
-      const reason = parseSkillResolutionFailureReason(raw.reason, error);
+      const reason = parseSkillResolutionFailureReason(raw.reason, "");
+      if (!reason) {
+        throw new Error("reason must be SkillResolutionFailureReason");
+      }
       return {
         type,
         ...(skillKey ? { skillKey } : {}),
-        ...(reason ? { reason } : {}),
-        reference,
-        error,
+        reason,
       };
     }
 
@@ -1234,25 +1219,25 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         ? appliedAtTurnRaw
         : undefined;
       const statusInfo = parseToolConfigChangeStatus(payloadRaw?.status_info);
+      if (!statusInfo) {
+        throw new Error("payload.status_info must be ToolConfigChangeStatus");
+      }
       return {
         type,
         payload: {
-          ...(statusInfo != null ? { status_info: statusInfo } : {}),
           operation: requireOneOf(requireStringField(payloadRaw, "operation"), "operation", ["add", "remove", "reload"] as const),
           target: requireStringField(payloadRaw, "target"),
-          status: requireStringField(payloadRaw, "status"),
+          status_info: statusInfo,
           persisted: requireBooleanField(payloadRaw, "persisted"),
           ...(appliedAtTurn != null ? { applied_at_turn: appliedAtTurn } : {}),
         },
       };
     }
     case "background_job_completed": {
-      const legacyStatus = typeof raw.status === "string" ? raw.status : undefined;
       return {
         type,
         jobId: requireStringField(raw, "job_id"),
         displayName: requireStringField(raw, "display_name"),
-        ...(legacyStatus != null ? { legacyStatus } : {}),
         terminalStatus: requireOneOf(
           requireStringField(raw, "terminal_status"),
           "terminal_status",

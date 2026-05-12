@@ -5,29 +5,17 @@
 //! feature pages (`effort`, `extended-thinking`, `adaptive-thinking`,
 //! `context-windows`, `compaction`, `structured-outputs`).
 
-use super::{BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport};
+use super::{BetaHeader, BetaValue, ModelCapabilities, ModelEffortLevel, ThinkingSupport};
 use crate::Provider;
 use crate::model_profile::catalog::ModelTier;
 
 // ── Beta headers ──────────────────────────────────────────────────────────
 
-const BETA_COMPACTION: BetaHeader = BetaHeader {
-    feature: "compaction",
-    header_name: "anthropic-beta",
-    header_value: "compact-2026-01-12",
-};
+const BETA_COMPACTION: BetaHeader = BetaHeader::AnthropicCompaction20260112;
 
-const BETA_STRUCTURED_OUTPUT: BetaHeader = BetaHeader {
-    feature: "structured_output",
-    header_name: "anthropic-beta",
-    header_value: "structured-outputs-2025-11-13",
-};
+const BETA_STRUCTURED_OUTPUT: BetaHeader = BetaHeader::AnthropicStructuredOutputs20251113;
 
-const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader {
-    feature: "interleaved_thinking",
-    header_name: "anthropic-beta",
-    header_value: "interleaved-thinking-2025-05-14",
-};
+const BETA_INTERLEAVED_THINKING: BetaHeader = BetaHeader::AnthropicInterleavedThinking20250514;
 
 /// Headers advertised for models with adaptive thinking + compaction
 /// (Opus 4.7, Opus 4.6, Sonnet 4.6).
@@ -44,23 +32,38 @@ const LEGACY_THINKING_BETAS: &[BetaHeader] = &[BETA_STRUCTURED_OUTPUT, BETA_INTE
 /// Batch API extended-output beta (300k cap). Applies to Opus 4.7 / 4.6 /
 /// Sonnet 4.6 per the official Models overview.
 const BETA_OUTPUT_300K: BetaValue<u32> = BetaValue {
-    header: "anthropic-beta: output-300k-2026-03-24",
+    header: BetaHeader::AnthropicOutput300k20260324,
     value: 300_000,
 };
 
 // ── Effort tiers ──────────────────────────────────────────────────────────
 
 /// Effort tiers accepted by Opus 4.7 only; `xhigh` sits between `high` and `max`.
-const OPUS_47_EFFORT: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+const OPUS_47_EFFORT: &[ModelEffortLevel] = &[
+    ModelEffortLevel::Low,
+    ModelEffortLevel::Medium,
+    ModelEffortLevel::High,
+    ModelEffortLevel::XHigh,
+    ModelEffortLevel::Max,
+];
 
 /// Effort tiers accepted by Opus 4.6 and Sonnet 4.6.
-const CLAUDE_46_EFFORT: &[&str] = &["low", "medium", "high", "max"];
+const CLAUDE_46_EFFORT: &[ModelEffortLevel] = &[
+    ModelEffortLevel::Low,
+    ModelEffortLevel::Medium,
+    ModelEffortLevel::High,
+    ModelEffortLevel::Max,
+];
 
 /// Effort tiers accepted by Opus 4.5 (verified against the live API:
 /// "This model does not support effort level 'max'. Supported levels: high,
 /// low, medium." — so `max` is rejected on 4.5 despite the docs listing the
 /// model on the effort page.)
-const OPUS_45_EFFORT: &[&str] = &["low", "medium", "high"];
+const OPUS_45_EFFORT: &[ModelEffortLevel] = &[
+    ModelEffortLevel::Low,
+    ModelEffortLevel::Medium,
+    ModelEffortLevel::High,
+];
 
 // ── Catalog rows ─────────────────────────────────────────────────────────
 

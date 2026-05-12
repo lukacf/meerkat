@@ -14,8 +14,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use meerkat_contracts::wire::{
-    WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthStatus, WireAuthStatusDetail,
-    WireBackendProfile, WireBindingIdentity, WireProviderBinding, WireRealmConnectionSet,
+    WireAuthBindingRef, WireAuthError, WireAuthMethod, WireAuthProfile, WireAuthStatus,
+    WireAuthStatusDetail, WireBackendKind, WireBackendProfile, WireBindingIdentity,
+    WireProviderBinding, WireRealmConnectionSet,
 };
 
 fn sample_auth_binding() -> meerkat_core::AuthBindingRef {
@@ -74,24 +75,30 @@ fn auth_binding_serde_roundtrip() {
 }
 
 #[test]
-fn backend_profile_wire_carries_provider_as_string() {
+fn backend_profile_wire_carries_typed_provider_and_backend_kind() {
     let bp = sample_backend_profile();
     let wire: WireBackendProfile = (&bp).into();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"provider\":\"openai\""));
     assert!(s.contains("\"backend_kind\":\"openai_api\""));
+    assert!(!s.contains("\"options\""));
     let back: WireBackendProfile = serde_json::from_str(&s).unwrap();
     assert_eq!(back, wire);
+    assert_eq!(back.provider, meerkat_core::Provider::OpenAI);
+    assert_eq!(back.backend_kind, WireBackendKind::OpenAiApi);
 }
 
 #[test]
-fn auth_profile_wire_carries_source_discriminator() {
+fn auth_profile_wire_carries_typed_auth_and_source_discriminators() {
     let ap = sample_auth_profile();
     let wire: WireAuthProfile = (&ap).into();
     let s = serde_json::to_string(&wire).unwrap();
     assert!(s.contains("\"source_kind\":\"env\""));
+    assert!(s.contains("\"auth_method\":\"api_key\""));
     let back: WireAuthProfile = serde_json::from_str(&s).unwrap();
     assert_eq!(back, wire);
+    assert_eq!(back.provider, meerkat_core::Provider::OpenAI);
+    assert_eq!(back.auth_method, WireAuthMethod::ApiKey);
 }
 
 #[test]
@@ -164,8 +171,8 @@ fn auth_error_tagged_discriminator_matches_domain() {
 fn auth_status_wire_with_error_roundtrips() {
     let status = WireAuthStatus {
         profile_id: "p1".to_string(),
-        provider: "openai".to_string(),
-        auth_method: "managed_chatgpt_oauth".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        auth_method: WireAuthMethod::ManagedChatgptOauth,
         state: meerkat_core::AuthStatusPhase::ReauthRequired,
         expires_at: None,
         last_refresh_at: None,
@@ -185,8 +192,8 @@ fn auth_status_detail_wire_flattens_binding_identity() {
     let status = WireAuthStatusDetail {
         identity: WireBindingIdentity::from(&auth_binding),
         profile_id: "prod_env_key".to_string(),
-        provider: "openai".to_string(),
-        auth_method: "api_key".to_string(),
+        provider: meerkat_core::Provider::OpenAI,
+        auth_method: WireAuthMethod::ApiKey,
         state: meerkat_core::AuthStatusPhase::Valid,
         expires_at: None,
         last_refresh_at: Some("2026-04-28T00:00:00Z".to_string()),

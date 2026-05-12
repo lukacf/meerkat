@@ -202,7 +202,6 @@ class RunFailed(Event):
 
     session_id: str = ""
     error_class: str = ""
-    error: str = ""
     terminal_cause_kind: TurnTerminalCauseKind | None = None
     error_report: AgentErrorReport | None = None
 
@@ -299,7 +298,6 @@ class ToolExecutionCompleted(Event):
 
     id: str = ""
     name: str = ""
-    result: str = ""
     content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
     error: ToolResultError | None = None
@@ -455,9 +453,7 @@ class SkillResolutionFailed(Event):
     """A skill reference could not be resolved."""
 
     skill_key: SkillKey | None = None
-    reason: SkillResolutionFailureReason | None = None
-    reference: str = ""
-    error: str = ""
+    reason: SkillResolutionFailureReason = field(default_factory=SkillResolutionFailureReason)
 
 
 # ---------------------------------------------------------------------------
@@ -543,8 +539,9 @@ class ToolConfigChangedPayload:
 
     operation: str | None = None
     target: str | None = None
-    status: str | None = None
-    status_info: ToolConfigChangeStatus | None = None
+    status_info: ToolConfigChangeStatus = field(
+        default_factory=BoundaryAppliedToolConfigChangeStatus
+    )
     persisted: bool | None = None
     applied_at_turn: int | None = None
 
@@ -564,7 +561,6 @@ class BackgroundJobCompleted(Event):
     display_name: str
     terminal_status: BackgroundJobTerminalStatus
     detail: str
-    legacy_status: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -989,14 +985,10 @@ def _require_bool(raw: dict[str, Any], field_name: str) -> bool:
     return value
 
 
-def _parse_content_blocks(raw: Any, legacy_text: Any = None) -> list[ContentBlock]:
+def _parse_content_blocks(raw: Any) -> list[ContentBlock]:
     if isinstance(raw, list) and all(isinstance(block, dict) for block in raw):
         return cast(list[ContentBlock], raw)
-    if raw is not None:
-        raise ValueError("content must be a content block list")
-    if isinstance(legacy_text, str) and legacy_text:
-        return [{"type": "text", "text": legacy_text}]
-    return []
+    raise ValueError("content must be a content block list")
 
 
 _STRING_FIELDS = {
@@ -1015,7 +1007,6 @@ _STRING_FIELDS = {
     "point",
     "reason_code",
     "message",
-    "reference",
     "interaction_id",
 }
 
@@ -1048,15 +1039,15 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "run_completed": ("session_id", "result", "usage"),
         "extraction_succeeded": ("session_id", "structured_output"),
         "extraction_failed": ("session_id", "last_output", "attempts", "reason"),
-        "run_failed": ("session_id", "error_class", "error"),
+        "run_failed": ("session_id", "error_class"),
         "turn_started": ("turn_number",),
         "text_delta": ("delta",),
         "text_complete": ("content",),
         "tool_call_requested": ("id", "name"),
-        "tool_result_received": ("id", "name", "is_error"),
+        "tool_result_received": ("id", "name", "content", "is_error"),
         "turn_completed": ("stop_reason", "usage"),
         "tool_execution_started": ("id", "name"),
-        "tool_execution_completed": ("id", "name", "result"),
+        "tool_execution_completed": ("id", "name", "content"),
         "tool_execution_timed_out": ("id", "name", "timeout_ms"),
         "compaction_started": ("input_tokens", "estimated_history_tokens", "message_count"),
         "compaction_completed": ("summary_tokens", "messages_before", "messages_after"),
@@ -1068,7 +1059,7 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         "hook_failed": ("hook_id", "point", "error"),
         "hook_denied": ("hook_id", "point", "reason_code", "message"),
         "skills_resolved": ("skills", "injection_bytes"),
-        "skill_resolution_failed": ("reference", "error"),
+        "skill_resolution_failed": ("reason",),
         "interaction_complete": ("interaction_id", "result"),
         "interaction_failed": ("interaction_id", "error"),
         "stream_truncated": ("reason",),
@@ -1089,7 +1080,8 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         if operation not in {"add", "remove", "reload"}:
             raise ValueError("payload.operation must be add, remove, or reload")
         _require_str(payload, "target")
-        _require_str(payload, "status")
+        if _parse_tool_config_change_status(payload.get("status_info")) is None:
+            raise ValueError("payload.status_info must be ToolConfigChangeStatus")
         _require_bool(payload, "persisted")
         return
     if event_type == "turn_completed":
@@ -1127,6 +1119,14 @@ def _validate_known_event(event_type: str, raw: dict[str, Any]) -> None:
         elif field_name in {"patch", "envelope"}:
             if not isinstance(raw.get(field_name), dict):
                 raise ValueError(f"{field_name} must be object")
+        elif (
+            field_name == "content"
+            and event_type in {"tool_result_received", "tool_execution_completed"}
+        ):
+            _parse_content_blocks(raw.get("content"))
+        elif field_name == "reason" and event_type == "skill_resolution_failed":
+            if _parse_skill_resolution_failure_reason(raw.get("reason"), "") is None:
+                raise ValueError("reason must be SkillResolutionFailureReason")
         elif field_name in _STRING_FIELDS:
             _require_str(raw, field_name)
         elif field_name in _NUMBER_FIELDS:
@@ -1175,10 +1175,7 @@ def parse_event(raw: dict[str, Any]) -> Event:
             if f == "usage":
                 kwargs["usage"] = _parse_usage(raw.get("usage"))
             elif f == "content" and cls in {ToolResultReceived, ToolExecutionCompleted}:
-                kwargs["content"] = _parse_content_blocks(
-                    raw.get("content"),
-                    raw.get("result") if cls is ToolExecutionCompleted else None,
-                )
+                kwargs["content"] = _parse_content_blocks(raw.get("content"))
             elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
             elif f == "error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
@@ -1192,10 +1189,10 @@ def parse_event(raw: dict[str, Any]) -> Event:
             elif f == "skill_key" and cls is SkillResolutionFailed:
                 kwargs["skill_key"] = _parse_skill_key(raw.get("skill_key"))
             elif f == "reason" and cls is SkillResolutionFailed:
-                kwargs["reason"] = _parse_skill_resolution_failure_reason(
-                    raw.get("reason"),
-                    raw["error"],
-                )
+                reason = _parse_skill_resolution_failure_reason(raw.get("reason"), "")
+                if reason is None:
+                    raise ValueError("reason must be SkillResolutionFailureReason")
+                kwargs["reason"] = reason
             elif f == "payload" and cls is ToolConfigChanged:
                 payload_raw = raw["payload"]
                 assert isinstance(payload_raw, dict)
@@ -1203,7 +1200,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 kwargs["payload"] = ToolConfigChangedPayload(
                     operation=payload_raw["operation"],
                     target=payload_raw["target"],
-                    status=payload_raw["status"],
                     status_info=_parse_tool_config_change_status(
                         payload_raw.get("status_info")
                     ),
@@ -1213,11 +1209,6 @@ def parse_event(raw: dict[str, Any]) -> Event:
                         if isinstance(applied_at_turn_raw, int)
                         else None
                     ),
-                )
-            elif f == "legacy_status" and cls is BackgroundJobCompleted:
-                legacy_status = raw.get("status")
-                kwargs["legacy_status"] = (
-                    legacy_status if isinstance(legacy_status, str) else None
                 )
             elif f == "terminal_status" and cls is BackgroundJobCompleted:
                 kwargs["terminal_status"] = cast(

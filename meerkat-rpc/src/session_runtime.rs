@@ -1447,11 +1447,13 @@ impl SessionRuntime {
             if ov.clear_provider_params {
                 Some(TurnMetadataOverride::Clear)
             } else {
-                let provider = ov
+                let provider_name = ov
                     .provider
                     .as_deref()
                     .or(provider_hint)
                     .unwrap_or("unknown");
+                let provider = meerkat_core::Provider::parse_strict(provider_name)
+                    .unwrap_or(meerkat_core::Provider::Other);
                 ov.provider_params.clone().map(|params| {
                     TurnMetadataOverride::Set(ProviderParamsOverride::from_legacy_provider_value(
                         provider, &params,
@@ -8171,8 +8173,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -8258,7 +8260,7 @@ mod tests {
                 .await
         }
 
-        fn provider(&self) -> &'static str {
+        fn provider(&self) -> meerkat_core::Provider {
             self.inner.provider()
         }
 
@@ -8329,8 +8331,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -8499,8 +8501,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -8546,8 +8548,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -8602,8 +8604,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -10498,11 +10500,13 @@ mod tests {
                 ),
                 in_reply_to,
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({
-                    "request_intent": "checksum_token",
-                    "request_subject": "alpha beta gamma",
-                    "token": "birch seventeen",
-                }),
+                result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenResult {
+                        request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                        request_subject: "alpha beta gamma".to_string(),
+                        token: "birch seventeen".to_string(),
+                    },
+                )),
                 blocks: None,
                 handling_mode: None,
             },

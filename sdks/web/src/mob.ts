@@ -61,7 +61,11 @@ interface MobWasmBindings {
   ) => Promise<string>;
   mob_member_send: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
   mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
-  mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
+  mob_respawn: (
+    mobId: string,
+    agentIdentity: string,
+    initialMessage?: ContentInput,
+  ) => Promise<string>;
   mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
@@ -317,6 +321,13 @@ function parseWireMemberState(raw: unknown, message: string): WireMemberState {
 }
 
 const WIRE_HANDLING_MODES: readonly HandlingMode[] = ['queue', 'steer'];
+const MOB_LIFECYCLE_STATUSES = new Set<MobStatus['status']>([
+  'Creating',
+  'Running',
+  'Stopped',
+  'Completed',
+  'Destroyed',
+]);
 
 function parseWireHandlingMode(raw: unknown, message: string): HandlingMode {
   if (typeof raw === 'string' && WIRE_HANDLING_MODES.includes(raw as HandlingMode)) {
@@ -361,10 +372,12 @@ export function parseMobStatusResult(
     'status',
     `${context}: missing status`,
   );
+  if (!MOB_LIFECYCLE_STATUSES.has(status as MobStatus['status'])) {
+    throw new Error(`${context}: invalid status`);
+  }
   return {
     mob_id: mobId,
-    status,
-    state: status,
+    status: status as MobStatus['status'],
   };
 }
 
@@ -1049,13 +1062,7 @@ export class Mob {
     agentIdentity: string,
     initialMessage?: string | ContentBlock[],
   ): Promise<MobRespawnResult> {
-    const payload =
-      initialMessage != null
-        ? typeof initialMessage === 'string'
-          ? initialMessage
-          : JSON.stringify(initialMessage)
-        : undefined;
-    const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, payload);
+    const json = await this.bindings.mob_respawn(this.mobId, agentIdentity, initialMessage);
     return parseMobRespawnResult(parseJsonPayload(json, 'Invalid mob respawn response'));
   }
 
@@ -1140,7 +1147,7 @@ export class Mob {
 
   /** Perform a lifecycle action (stop, resume, complete, destroy). */
   async lifecycle(action: MobLifecycleAction): Promise<MobLifecycleResult> {
-    const json = await this.bindings.mob_lifecycle(this.mobId, action);
+    const json = await this.bindings.mob_lifecycle(this.mobId, JSON.stringify({ action }));
     return parseMobLifecycleResult(
       parseJsonPayload(json, 'Invalid mob/lifecycle response'),
     );

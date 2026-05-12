@@ -1437,10 +1437,10 @@ mod tests {
             panic!("expected assistant image blocks effect");
         };
         assert!(matches!(blocks.as_slice(), [AssistantBlock::Image { .. }]));
-        let ContentBlock::Text { text } = &outcome.result.content[0] else {
-            panic!("expected JSON text tool result");
+        let ContentBlock::Json { value } = &outcome.result.content[0] else {
+            panic!("expected JSON tool result block");
         };
-        let result: ImageGenerationToolResult = serde_json::from_str(text).unwrap();
+        let result: ImageGenerationToolResult = serde_json::from_value(value.clone()).unwrap();
         assert!(matches!(
             result.terminal,
             ImageOperationTerminalClass::Generated

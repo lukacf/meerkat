@@ -425,6 +425,7 @@ pub fn peer_response_terminal_input(
     let correlation_id = CorrelationId::from_uuid(request_id.as_uuid());
     let request_id = request_id.to_string();
     let peer_id = peer_id.to_string();
+    let idempotency_key = peer_response_terminal_idempotency_key(&peer_id, &request_id);
     let display_identity = display_name.map_or_else(|| peer_id.clone(), |name| name.as_string());
 
     Input::Peer(PeerInput {
@@ -438,7 +439,7 @@ pub fn peer_response_terminal_input(
             },
             durability: InputDurability::Durable,
             visibility: InputVisibility::default(),
-            idempotency_key: None,
+            idempotency_key: Some(idempotency_key),
             supersession_key: None,
             correlation_id: Some(correlation_id),
         },
@@ -451,6 +452,13 @@ pub fn peer_response_terminal_input(
         blocks: None,
         handling_mode: None,
     })
+}
+
+pub fn peer_response_terminal_idempotency_key(
+    peer_id: impl std::fmt::Display,
+    request_id: impl std::fmt::Display,
+) -> IdempotencyKey {
+    IdempotencyKey::new(format!("peer_response_terminal:{peer_id}:{request_id}"))
 }
 
 /// Flow step input from mob orchestration.
@@ -1658,6 +1666,7 @@ mod tests {
                             },
                         durability: InputDurability::Durable,
                         correlation_id,
+                        idempotency_key,
                         ..
                     },
                 convention: Some(PeerConvention::ResponseTerminal { request_id, status }),
@@ -1673,6 +1682,12 @@ mod tests {
                     correlation_id,
                     Some(CorrelationId::from_uuid(
                         uuid::Uuid::parse_str("00000000-0000-4000-8000-000000000162").unwrap()
+                    ))
+                );
+                assert_eq!(
+                    idempotency_key,
+                    Some(IdempotencyKey::new(
+                        "peer_response_terminal:00000000-0000-4000-8000-000000000161:00000000-0000-4000-8000-000000000162"
                     ))
                 );
                 assert_eq!(status, ResponseTerminalStatus::Cancelled);

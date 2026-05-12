@@ -9,6 +9,7 @@ pub mod error;
 pub mod lease;
 pub mod lifecycle;
 pub mod metadata;
+pub mod oauth_provider;
 pub mod principal;
 pub mod status;
 pub mod token_store;
@@ -40,12 +41,13 @@ pub use metadata::{
     GoogleAuthMetadata, GoogleRouteHints, OpenAiAuthMetadata, OpenAiRouteHints,
     ProviderAuthMetadata,
 };
+pub use oauth_provider::OAuthProviderIdentity;
 pub use principal::{
     ActingOnBehalfOf, AuthGrant, GrantAction, GrantScope, PrincipalContractError, PrincipalId,
     PrincipalKind, PrincipalRef, VisibilityClass, can_observe_visibility,
     metadata_grants_no_visibility,
 };
-pub use status::{AuthErrorSummary, AuthStatus, AuthStatusPhase};
+pub use status::{AuthBackendKind, AuthErrorSummary, AuthStatus, AuthStatusPhase};
 pub use token_store::{
     PersistedAuthMode, PersistedTokens, RefreshCoordinator, RefreshError, RefreshFn, TokenKey,
     TokenStore, TokenStoreError,

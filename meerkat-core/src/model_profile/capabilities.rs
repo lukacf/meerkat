@@ -93,8 +93,8 @@ pub struct ModelCapabilities {
     /// Accepted values for effort control. Empty slice = unsupported.
     /// Applies to both Anthropic `output_config.effort` and OpenAI
     /// `reasoning.effort`; the two schemas live in different request shapes but
-    /// share the enum here since the levels are all strings.
-    pub effort_levels: &'static [&'static str],
+    /// share the same closed capability domain.
+    pub effort_levels: &'static [ModelEffortLevel],
 
     // ── Features ──────────────────────────────────────────────────────
     /// Provider-native web search tool support.
@@ -124,21 +124,94 @@ pub struct ModelCapabilities {
 /// A capability value that is only available when a specific beta header is set.
 #[derive(Debug, Clone, Copy)]
 pub struct BetaValue<T: 'static> {
-    /// Full header to send (`"anthropic-beta: context-1m-2025-08-07"` style).
-    pub header: &'static str,
+    /// Typed beta header that enables this value.
+    pub header: BetaHeader,
     /// The value enabled by the header (e.g. extended context window size).
     pub value: T,
 }
 
+/// Closed effort domain owned by the model capability catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelEffortLevel {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ModelEffortLevel {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// Closed beta feature domain owned by the model capability catalog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModelBetaFeature {
+    Compaction,
+    StructuredOutput,
+    InterleavedThinking,
+    ExtendedOutput300k,
+}
+
+impl ModelBetaFeature {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Compaction => "compaction",
+            Self::StructuredOutput => "structured_output",
+            Self::InterleavedThinking => "interleaved_thinking",
+            Self::ExtendedOutput300k => "extended_output_300k",
+        }
+    }
+}
+
 /// A beta header that gates a feature on this model.
-#[derive(Debug, Clone, Copy)]
-pub struct BetaHeader {
-    /// Short feature identifier (e.g. `"compaction"`).
-    pub feature: &'static str,
-    /// HTTP header name (usually `"anthropic-beta"`).
-    pub header_name: &'static str,
-    /// HTTP header value (e.g. `"compact-2026-01-12"`).
-    pub header_value: &'static str,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BetaHeader {
+    AnthropicCompaction20260112,
+    AnthropicStructuredOutputs20251113,
+    AnthropicInterleavedThinking20250514,
+    AnthropicOutput300k20260324,
+}
+
+impl BetaHeader {
+    pub const fn feature(self) -> ModelBetaFeature {
+        match self {
+            Self::AnthropicCompaction20260112 => ModelBetaFeature::Compaction,
+            Self::AnthropicStructuredOutputs20251113 => ModelBetaFeature::StructuredOutput,
+            Self::AnthropicInterleavedThinking20250514 => ModelBetaFeature::InterleavedThinking,
+            Self::AnthropicOutput300k20260324 => ModelBetaFeature::ExtendedOutput300k,
+        }
+    }
+
+    pub const fn header_name(self) -> &'static str {
+        match self {
+            Self::AnthropicCompaction20260112
+            | Self::AnthropicStructuredOutputs20251113
+            | Self::AnthropicInterleavedThinking20250514
+            | Self::AnthropicOutput300k20260324 => "anthropic-beta",
+        }
+    }
+
+    pub const fn header_value(self) -> &'static str {
+        match self {
+            Self::AnthropicCompaction20260112 => "compact-2026-01-12",
+            Self::AnthropicStructuredOutputs20251113 => "structured-outputs-2025-11-13",
+            Self::AnthropicInterleavedThinking20250514 => "interleaved-thinking-2025-05-14",
+            Self::AnthropicOutput300k20260324 => "output-300k-2026-03-24",
+        }
+    }
 }
 
 /// Thinking/reasoning support mode, provider-specific because the wire shapes differ.
@@ -201,7 +274,7 @@ mod tests {
     #[test]
     fn every_capability_matches_a_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id);
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id);
             assert!(
                 entry.is_some(),
                 "capability row '{}' (provider '{}') has no catalog entry",
@@ -213,9 +286,7 @@ mod tests {
 
     #[test]
     fn no_duplicate_capability_ids_within_provider() {
-        for provider_name in crate::model_profile::catalog::provider_names() {
-            let provider = Provider::parse_strict(provider_name)
-                .unwrap_or_else(|| panic!("catalog provider '{provider_name}' must parse"));
+        for &provider in crate::model_profile::catalog::providers() {
             let ids: Vec<&str> = all_capabilities()
                 .filter(|c| c.provider == provider)
                 .map(|c| c.id)
@@ -223,16 +294,14 @@ mod tests {
             let mut unique: Vec<&str> = ids.clone();
             unique.sort_unstable();
             unique.dedup();
-            assert_eq!(ids.len(), unique.len(), "duplicate ids in {provider_name}");
+            assert_eq!(ids.len(), unique.len(), "duplicate ids in {provider}");
         }
     }
 
     #[test]
     fn every_catalog_entry_has_capabilities() {
         for entry in crate::model_profile::catalog::catalog() {
-            let provider = Provider::parse_strict(entry.provider)
-                .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
-            let caps = capabilities_for(provider, entry.id);
+            let caps = capabilities_for(entry.provider, entry.id);
             assert!(
                 caps.is_some(),
                 "catalog model '{}' (provider '{}') has no capability row",
@@ -245,7 +314,7 @@ mod tests {
     #[test]
     fn tier_matches_catalog_entry() {
         for caps in all_capabilities() {
-            let entry = crate::model_profile::catalog::entry_for(caps.provider.as_str(), caps.id)
+            let entry = crate::model_profile::catalog::entry_for(caps.provider, caps.id)
                 .unwrap_or_else(|| panic!("missing catalog entry for {}", caps.id));
             assert_eq!(caps.tier, entry.tier, "tier mismatch for {}", caps.id);
         }
@@ -278,6 +347,36 @@ mod tests {
         assert!(
             capabilities_for(display_provider, "gemini-3-flash-preview").is_none(),
             "display provider strings must fail closed at the typed capability boundary"
+        );
+    }
+
+    #[test]
+    fn capability_value_domains_are_typed_before_projection() {
+        let opus = capabilities_for(Provider::Anthropic, "claude-opus-4-7")
+            .expect("opus 4.7 capability row");
+        assert_eq!(
+            opus.effort_levels,
+            &[
+                ModelEffortLevel::Low,
+                ModelEffortLevel::Medium,
+                ModelEffortLevel::High,
+                ModelEffortLevel::XHigh,
+                ModelEffortLevel::Max,
+            ]
+        );
+        assert!(
+            opus.beta_headers
+                .iter()
+                .all(|header| header.header_name() == "anthropic-beta")
+        );
+        assert!(
+            opus.beta_headers
+                .iter()
+                .any(|header| header.feature() == ModelBetaFeature::Compaction)
+        );
+        assert_eq!(
+            opus.max_output_tokens_beta.expect("300k beta").header,
+            BetaHeader::AnthropicOutput300k20260324
         );
     }
 }

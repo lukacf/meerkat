@@ -1,6 +1,7 @@
 use crate::error::LlmError;
 use crate::types::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
 use async_trait::async_trait;
+use meerkat_core::Provider;
 
 /// Simple test client that emits a deterministic response.
 pub struct TestClient {
@@ -46,8 +47,8 @@ impl LlmClient for TestClient {
         )))
     }
 
-    fn provider(&self) -> &'static str {
-        "test"
+    fn provider(&self) -> Provider {
+        Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

@@ -12,7 +12,214 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use meerkat_core::provider_matrix::{
+    AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
+    OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
+};
+use meerkat_core::{OAuthProviderIdentity, PersistedAuthMode};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WireConnectionProjectionError {
+    #[error("unknown backend kind '{kind}' for provider {provider:?}")]
+    UnknownBackendKind {
+        provider: meerkat_core::Provider,
+        kind: String,
+    },
+    #[error("unknown auth method '{method}' for provider {provider:?}")]
+    UnknownAuthMethod {
+        provider: meerkat_core::Provider,
+        method: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireBackendKind {
+    OpenAiApi,
+    ChatgptBackend,
+    AzureOpenAi,
+    AnthropicApi,
+    Bedrock,
+    Vertex,
+    Foundry,
+    GoogleGenai,
+    VertexAi,
+    GoogleCodeAssist,
+    SelfHosted,
+    OpenAiCompatible,
+}
+
+impl WireBackendKind {
+    pub fn from_provider_raw(
+        provider: meerkat_core::Provider,
+        raw: &str,
+    ) -> Result<Self, WireConnectionProjectionError> {
+        match provider {
+            meerkat_core::Provider::OpenAI => match OpenAiBackendKind::parse(raw) {
+                Some(OpenAiBackendKind::OpenAiApi) => Ok(Self::OpenAiApi),
+                Some(OpenAiBackendKind::ChatGptBackend) => Ok(Self::ChatgptBackend),
+                Some(OpenAiBackendKind::AzureOpenAi) => Ok(Self::AzureOpenAi),
+                None => Err(WireConnectionProjectionError::UnknownBackendKind {
+                    provider,
+                    kind: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Anthropic => match AnthropicBackendKind::parse(raw) {
+                Some(AnthropicBackendKind::AnthropicApi) => Ok(Self::AnthropicApi),
+                Some(AnthropicBackendKind::Bedrock) => Ok(Self::Bedrock),
+                Some(AnthropicBackendKind::Vertex) => Ok(Self::Vertex),
+                Some(AnthropicBackendKind::Foundry) => Ok(Self::Foundry),
+                None => Err(WireConnectionProjectionError::UnknownBackendKind {
+                    provider,
+                    kind: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Gemini => match GoogleBackendKind::parse(raw) {
+                Some(GoogleBackendKind::GoogleGenAi) => Ok(Self::GoogleGenai),
+                Some(GoogleBackendKind::VertexAi) => Ok(Self::VertexAi),
+                Some(GoogleBackendKind::GoogleCodeAssist) => Ok(Self::GoogleCodeAssist),
+                None => Err(WireConnectionProjectionError::UnknownBackendKind {
+                    provider,
+                    kind: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::SelfHosted => match SelfHostedBackendKind::parse(raw) {
+                Some(SelfHostedBackendKind::SelfHosted) => Ok(Self::SelfHosted),
+                Some(SelfHostedBackendKind::OpenAiCompatible) => Ok(Self::OpenAiCompatible),
+                None => Err(WireConnectionProjectionError::UnknownBackendKind {
+                    provider,
+                    kind: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Other => {
+                Err(WireConnectionProjectionError::UnknownBackendKind {
+                    provider,
+                    kind: raw.to_string(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireAuthMethod {
+    ApiKey,
+    AzureApiKey,
+    StaticBearer,
+    ManagedChatgptOauth,
+    ExternalChatgptTokens,
+    ExternalAuthorizer,
+    ClaudeAiOauth,
+    OauthToApiKey,
+    BedrockBearer,
+    BedrockAwsSigv4,
+    VertexGoogleAuth,
+    FoundryApiKey,
+    FoundryAzureAd,
+    BearerApiKey,
+    Adc,
+    ApiKeyExpress,
+    GoogleOauth,
+    ComputeAdc,
+    None,
+}
+
+impl WireAuthMethod {
+    pub fn from_provider_raw(
+        provider: meerkat_core::Provider,
+        raw: &str,
+    ) -> Result<Self, WireConnectionProjectionError> {
+        match provider {
+            meerkat_core::Provider::OpenAI => match OpenAiAuthMethod::parse(raw) {
+                Some(OpenAiAuthMethod::ApiKey) => Ok(Self::ApiKey),
+                Some(OpenAiAuthMethod::AzureApiKey) => Ok(Self::AzureApiKey),
+                Some(OpenAiAuthMethod::StaticBearer) => Ok(Self::StaticBearer),
+                Some(OpenAiAuthMethod::ManagedChatGptOauth) => Ok(Self::ManagedChatgptOauth),
+                Some(OpenAiAuthMethod::ExternalChatGptTokens) => Ok(Self::ExternalChatgptTokens),
+                Some(OpenAiAuthMethod::ExternalAuthorizer) => Ok(Self::ExternalAuthorizer),
+                None => Err(WireConnectionProjectionError::UnknownAuthMethod {
+                    provider,
+                    method: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Anthropic => match AnthropicAuthMethod::parse(raw) {
+                Some(AnthropicAuthMethod::ApiKey) => Ok(Self::ApiKey),
+                Some(AnthropicAuthMethod::StaticBearer) => Ok(Self::StaticBearer),
+                Some(AnthropicAuthMethod::ClaudeAiOauth) => Ok(Self::ClaudeAiOauth),
+                Some(AnthropicAuthMethod::OauthToApiKey) => Ok(Self::OauthToApiKey),
+                Some(AnthropicAuthMethod::ExternalAuthorizer) => Ok(Self::ExternalAuthorizer),
+                Some(AnthropicAuthMethod::BedrockBearer) => Ok(Self::BedrockBearer),
+                Some(AnthropicAuthMethod::BedrockAwsSigv4) => Ok(Self::BedrockAwsSigv4),
+                Some(AnthropicAuthMethod::VertexGoogleAuth) => Ok(Self::VertexGoogleAuth),
+                Some(AnthropicAuthMethod::FoundryApiKey) => Ok(Self::FoundryApiKey),
+                Some(AnthropicAuthMethod::FoundryAzureAd) => Ok(Self::FoundryAzureAd),
+                None => Err(WireConnectionProjectionError::UnknownAuthMethod {
+                    provider,
+                    method: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Gemini => match GoogleAuthMethod::parse(raw) {
+                Some(GoogleAuthMethod::ApiKey) => Ok(Self::ApiKey),
+                Some(GoogleAuthMethod::BearerApiKey) => Ok(Self::BearerApiKey),
+                Some(GoogleAuthMethod::ExternalAuthorizer) => Ok(Self::ExternalAuthorizer),
+                Some(GoogleAuthMethod::Adc) => Ok(Self::Adc),
+                Some(GoogleAuthMethod::ApiKeyExpress) => Ok(Self::ApiKeyExpress),
+                Some(GoogleAuthMethod::GoogleOauth) => Ok(Self::GoogleOauth),
+                Some(GoogleAuthMethod::ComputeAdc) => Ok(Self::ComputeAdc),
+                None => Err(WireConnectionProjectionError::UnknownAuthMethod {
+                    provider,
+                    method: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::SelfHosted => match SelfHostedAuthMethod::parse(raw) {
+                Some(SelfHostedAuthMethod::ApiKey) => Ok(Self::ApiKey),
+                Some(SelfHostedAuthMethod::StaticBearer) => Ok(Self::StaticBearer),
+                Some(SelfHostedAuthMethod::None) => Ok(Self::None),
+                None => Err(WireConnectionProjectionError::UnknownAuthMethod {
+                    provider,
+                    method: raw.to_string(),
+                }),
+            },
+            meerkat_core::Provider::Other => {
+                Err(WireConnectionProjectionError::UnknownAuthMethod {
+                    provider,
+                    method: raw.to_string(),
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum WireCredentialSourceKind {
+    InlineSecret,
+    ManagedStore,
+    Env,
+    ExternalResolver,
+    PlatformDefault,
+    Command,
+    FileDescriptor,
+}
+
+impl From<&meerkat_core::CredentialSourceSpec> for WireCredentialSourceKind {
+    fn from(value: &meerkat_core::CredentialSourceSpec) -> Self {
+        match value {
+            meerkat_core::CredentialSourceSpec::InlineSecret { .. } => Self::InlineSecret,
+            meerkat_core::CredentialSourceSpec::ManagedStore => Self::ManagedStore,
+            meerkat_core::CredentialSourceSpec::Env { .. } => Self::Env,
+            meerkat_core::CredentialSourceSpec::ExternalResolver { .. } => Self::ExternalResolver,
+            meerkat_core::CredentialSourceSpec::PlatformDefault => Self::PlatformDefault,
+            meerkat_core::CredentialSourceSpec::Command { .. } => Self::Command,
+            meerkat_core::CredentialSourceSpec::FileDescriptor { .. } => Self::FileDescriptor,
+        }
+    }
+}
 
 /// Wire projection of [`meerkat_core::AuthBindingRef`].
 ///
@@ -73,7 +280,7 @@ pub struct CreateProfileParams {
     pub binding_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_id: Option<String>,
-    pub auth_method: String,
+    pub auth_method: PersistedAuthMode,
     pub secret: String,
 }
 
@@ -81,7 +288,7 @@ pub struct CreateProfileParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginStartParams {
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub redirect_uri: String,
     pub realm_id: String,
     pub binding_id: String,
@@ -93,7 +300,7 @@ pub struct LoginStartParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct LoginCompleteParams {
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub code: String,
     pub state: String,
     pub redirect_uri: String,
@@ -107,7 +314,7 @@ pub struct LoginCompleteParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceStartParams {
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub realm_id: String,
     pub binding_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,7 +325,7 @@ pub struct DeviceStartParams {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct DeviceCompleteParams {
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub device_code: String,
     pub realm_id: String,
     pub binding_id: String,
@@ -145,26 +352,20 @@ pub struct ProvisionApiKeyParams {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireBackendProfile {
     pub id: String,
-    /// Provider as a normalized string: `"openai"` / `"anthropic"` /
-    /// `"gemini"` / `"self_hosted"`. Wire types don't carry the strict
-    /// `Provider` enum so consumers aren't forced to update their
-    /// schema when we add new providers.
-    pub provider: String,
-    pub backend_kind: String,
+    pub provider: meerkat_core::Provider,
+    pub backend_kind: WireBackendKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
-    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
-    pub options: serde_json::Value,
 }
 
 impl From<&meerkat_core::BackendProfile> for WireBackendProfile {
     fn from(value: &meerkat_core::BackendProfile) -> Self {
         Self {
             id: value.id.clone(),
-            provider: value.provider.as_str().to_string(),
-            backend_kind: value.backend_kind.clone(),
+            provider: value.provider,
+            backend_kind: WireBackendKind::from_provider_raw(value.provider, &value.backend_kind)
+                .expect("BackendProfile provider/backend_kind must be provider-matrix typed"),
             base_url: value.base_url.clone(),
-            options: value.options.clone(),
         }
     }
 }
@@ -179,21 +380,19 @@ impl From<&meerkat_core::BackendProfile> for WireBackendProfile {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireAuthProfile {
     pub id: String,
-    pub provider: String,
-    pub auth_method: String,
-    /// Discriminator: "inline_secret" / "managed_store" / "env" /
-    /// "external_resolver" / "platform_default" / "command" /
-    /// "file_descriptor".
-    pub source_kind: String,
+    pub provider: meerkat_core::Provider,
+    pub auth_method: WireAuthMethod,
+    pub source_kind: WireCredentialSourceKind,
 }
 
 impl From<&meerkat_core::AuthProfile> for WireAuthProfile {
     fn from(value: &meerkat_core::AuthProfile) -> Self {
         Self {
             id: value.id.clone(),
-            provider: value.provider.as_str().to_string(),
-            auth_method: value.auth_method.clone(),
-            source_kind: value.source.kind_label().to_string(),
+            provider: value.provider,
+            auth_method: WireAuthMethod::from_provider_raw(value.provider, &value.auth_method)
+                .expect("AuthProfile provider/auth_method must be provider-matrix typed"),
+            source_kind: WireCredentialSourceKind::from(&value.source),
         }
     }
 }
@@ -321,8 +520,8 @@ impl From<meerkat_core::AuthError> for WireAuthError {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireAuthStatus {
     pub profile_id: String,
-    pub provider: String,
-    pub auth_method: String,
+    pub provider: meerkat_core::Provider,
+    pub auth_method: WireAuthMethod,
     /// High-level health projected from typed auth-lease lifecycle truth.
     pub state: meerkat_core::AuthStatusPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -370,8 +569,8 @@ pub struct WireAuthProfileCreated {
     #[serde(flatten)]
     pub identity: WireBindingIdentity,
     pub profile_id: String,
-    pub provider: String,
-    pub auth_method: String,
+    pub provider: meerkat_core::Provider,
+    pub auth_method: WireAuthMethod,
     pub stored: bool,
 }
 
@@ -403,7 +602,7 @@ pub struct WireLoginStart {
     pub authorize_url: String,
     pub state: String,
     pub redirect_uri: String,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
 }
 
 /// `POST /auth/login/complete` / ready leg of device-code success body.
@@ -420,7 +619,7 @@ pub struct WireLoginReady {
     #[serde(flatten)]
     pub identity: WireBindingIdentity,
     pub profile_id: String,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
     pub has_refresh_token: bool,
@@ -438,7 +637,7 @@ pub struct WireDeviceStart {
     pub verification_uri_complete: Option<String>,
     pub expires_in: u64,
     pub interval: u64,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
 }
 
 /// `auth/login/device_complete` success body.
@@ -454,7 +653,7 @@ pub enum WireDeviceCompleteResult {
         #[serde(flatten)]
         identity: Box<WireBindingIdentity>,
         profile_id: String,
-        provider: String,
+        provider: OAuthProviderIdentity,
         #[serde(skip_serializing_if = "Option::is_none")]
         expires_at: Option<String>,
         has_refresh_token: bool,
@@ -469,8 +668,8 @@ pub struct WireProvisionApiKeyResult {
     #[serde(flatten)]
     pub identity: WireBindingIdentity,
     pub profile_id: String,
-    pub provider: String,
-    pub auth_mode: String,
+    pub provider: OAuthProviderIdentity,
+    pub auth_mode: PersistedAuthMode,
     pub has_api_key: bool,
     pub scopes: Vec<String>,
 }
@@ -515,8 +714,8 @@ pub struct WireAuthStatusDetail {
     #[serde(flatten)]
     pub identity: WireBindingIdentity,
     pub profile_id: String,
-    pub provider: String,
-    pub auth_method: String,
+    pub provider: meerkat_core::Provider,
+    pub auth_method: WireAuthMethod,
     pub state: meerkat_core::AuthStatusPhase,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
@@ -572,7 +771,8 @@ mod tests {
             options: serde_json::Value::Null,
         };
         let w: WireBackendProfile = (&bp).into();
-        assert_eq!(w.provider, "openai");
+        assert_eq!(w.provider, meerkat_core::Provider::OpenAI);
+        assert_eq!(w.backend_kind, WireBackendKind::OpenAiApi);
     }
 
     #[test]
@@ -598,7 +798,7 @@ mod tests {
         let ready = serde_json::to_value(WireDeviceCompleteResult::Ready {
             identity: Box::new(WireBindingIdentity::from(&cref)),
             profile_id: "console".to_string(),
-            provider: "anthropic".to_string(),
+            provider: OAuthProviderIdentity::AnthropicConsoleApiKey,
             expires_at: Some("2026-04-29T00:00:00Z".to_string()),
             has_refresh_token: true,
             scopes: vec!["org:create_api_key".to_string()],
@@ -624,8 +824,8 @@ mod tests {
         let value = serde_json::to_value(WireProvisionApiKeyResult {
             identity: WireBindingIdentity::from(&cref),
             profile_id: "console".to_string(),
-            provider: "anthropic".to_string(),
-            auth_mode: "oauth_to_api_key".to_string(),
+            provider: OAuthProviderIdentity::AnthropicConsoleApiKey,
+            auth_mode: PersistedAuthMode::OauthToApiKey,
             has_api_key: true,
             scopes: vec!["user:profile".to_string()],
         })
@@ -642,8 +842,8 @@ mod tests {
     fn auth_status_serde_roundtrip() {
         let status = WireAuthStatus {
             profile_id: "p".into(),
-            provider: "openai".into(),
-            auth_method: "managed_chatgpt_oauth".into(),
+            provider: meerkat_core::Provider::OpenAI,
+            auth_method: WireAuthMethod::ManagedChatgptOauth,
             state: meerkat_core::AuthStatusPhase::Valid,
             expires_at: Some(chrono::Utc::now()),
             last_refresh_at: None,

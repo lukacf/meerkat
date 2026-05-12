@@ -231,6 +231,23 @@ impl HandleDslAuthority {
             .map_err(|err| map_kernel_error(err, context))
     }
 
+    /// Build and apply a DSL signal while holding the authority mutex.
+    pub fn apply_signal_with_effects_from_state(
+        &self,
+        context: &'static str,
+        build: impl FnOnce(&mm_dsl::MeerkatMachineState) -> mm_dsl::MeerkatMachineSignal,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let signal = build(&guard.state);
+        guard
+            .apply_signal(signal)
+            .map(|transition| transition.effects)
+            .map_err(|err| map_kernel_error(err, context))
+    }
+
     /// Apply a DSL signal and sample state under the same authority mutex.
     pub fn apply_signal_and_sample<S>(
         &self,

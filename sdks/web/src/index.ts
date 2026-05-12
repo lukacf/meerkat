@@ -31,6 +31,8 @@ export type {
   AuthDeviceStart,
   AuthDeviceCompleteResult,
   AuthProvisionApiKeyResult,
+  OAuthProviderIdentity,
+  PersistedAuthMode,
   WireAuthMethod,
   WireAuthProvider,
   WireBackendKind,

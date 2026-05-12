@@ -11,9 +11,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use meerkat_core::{
     AgentBuilder, AgentError, AgentErrorClass, AgentEvent, AgentLlmClient, AgentSessionStore,
-    AgentToolDispatcher, HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation,
-    HookOutcome, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView,
-    ToolDef, ToolError, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
+    AgentToolDispatcher, ContentBlock, HookDecision, HookEngine, HookExecutionReport, HookId,
+    HookInvocation, HookOutcome, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason,
+    ToolCallView, ToolDef, ToolError, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -111,8 +111,8 @@ impl AgentLlmClient for ScenarioClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> crate::Provider {
+        crate::Provider::Other
     }
 
     fn model(&self) -> &'static str {
@@ -207,7 +207,7 @@ struct TestHookEngine {
     pre_llm_seen_max_tokens: Arc<Mutex<Vec<u32>>>,
     post_llm_seen_text: Arc<Mutex<Vec<String>>>,
     pre_tool_seen_args: Arc<Mutex<Vec<Value>>>,
-    post_tool_seen_content: Arc<Mutex<Vec<String>>>,
+    post_tool_seen_content: Arc<Mutex<Vec<Vec<ContentBlock>>>>,
 }
 
 #[async_trait]
@@ -266,7 +266,7 @@ impl HookEngine for TestHookEngine {
                     self.post_tool_seen_content
                         .lock()
                         .await
-                        .push(tool_result.content.clone());
+                        .push(tool_result.content_blocks.clone());
                 }
             }
             HookPoint::TurnBoundary if self.turn_boundary_deny => {
@@ -582,8 +582,8 @@ async fn post_tool_hooks_do_not_mutate_result() {
     assert_eq!(tool_result_message[0].text_content(), r#"{"value":"orig"}"#);
     assert_eq!(
         post_tool_seen_content.lock().await.as_slice(),
-        [r#"{"value":"orig"}"#.to_string()],
-        "post-tool hooks should observe the canonical tool result projection"
+        [ContentBlock::text_vec(r#"{"value":"orig"}"#.to_string())],
+        "post-tool hooks should observe the canonical typed tool result blocks"
     );
 }
 

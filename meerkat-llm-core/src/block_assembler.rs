@@ -258,17 +258,11 @@ impl BlockAssembler {
     pub fn on_server_tool_content(
         &mut self,
         id: Option<String>,
-        name: String,
-        content: serde_json::Value,
+        content: meerkat_core::ServerToolContent,
         meta: Option<Box<ProviderMeta>>,
     ) {
         self.slots.push(BlockSlot::Finalized(Box::new(
-            AssistantBlock::ServerToolContent {
-                id,
-                name,
-                content,
-                meta,
-            },
+            AssistantBlock::ServerToolContent { id, content, meta },
         )));
     }
 

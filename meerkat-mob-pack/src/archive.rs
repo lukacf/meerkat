@@ -1,3 +1,4 @@
+use crate::archive_path::{MobpackArchivePath, MobpackArchiveSection};
 use crate::manifest::MobpackManifest;
 use crate::pack::{ValidatedPackFiles, validate_extracted_pack_files};
 use crate::targz::{extract_targz_safe, normalize_for_archive};
@@ -53,14 +54,24 @@ impl MobpackArchive {
         let mut mcp = BTreeMap::new();
         let mut config = BTreeMap::new();
         for (path, bytes) in files {
-            if path.starts_with("skills/") {
-                skills.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("hooks/") {
-                hooks.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("mcp/") {
-                mcp.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("config/") {
-                config.insert(path.clone(), bytes.clone());
+            let archive_path = MobpackArchivePath::from_normalized(path.clone());
+            match archive_path.section() {
+                MobpackArchiveSection::Skills => {
+                    skills.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Hooks => {
+                    hooks.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Mcp => {
+                    mcp.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Config => {
+                    config.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Manifest
+                | MobpackArchiveSection::Definition
+                | MobpackArchiveSection::Signature
+                | MobpackArchiveSection::Other => {}
             }
         }
 

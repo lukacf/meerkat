@@ -30,8 +30,8 @@ pub struct CatalogEntry {
     pub id: &'static str,
     /// Human-readable display name (e.g., `"Claude Sonnet 4.6"`).
     pub display_name: &'static str,
-    /// Canonical provider string (`"anthropic"`, `"openai"`, or `"gemini"`).
-    pub provider: &'static str,
+    /// Typed provider owner.
+    pub provider: Provider,
     /// Recommendation tier.
     pub tier: ModelTier,
     /// Maximum input context window in tokens, if known.
@@ -45,8 +45,8 @@ pub struct CatalogEntry {
 /// Provider-level grouping with a default model.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderDefaults {
-    /// Canonical provider string.
-    pub provider: &'static str,
+    /// Typed provider owner.
+    pub provider: Provider,
     /// The default model ID for this provider.
     pub default_model_id: &'static str,
     /// All catalog models for this provider.
@@ -134,8 +134,8 @@ pub struct OpenAiRealtimeOperationalDefaults {
 // Static catalog data
 // ---------------------------------------------------------------------------
 
-/// Canonical provider names in alphabetical order.
-const PROVIDER_NAMES: &[&str] = &["anthropic", "gemini", "openai"];
+/// Catalog providers in stable display order.
+const PROVIDERS: &[Provider] = &[Provider::Anthropic, Provider::Gemini, Provider::OpenAI];
 
 /// Default model ID per provider. First recommended model wins.
 const DEFAULT_ANTHROPIC: &str = "claude-opus-4-7";
@@ -236,7 +236,7 @@ pub fn catalog() -> &'static [CatalogEntry] {
             .map(|c| CatalogEntry {
                 id: c.id,
                 display_name: c.display_name,
-                provider: c.provider.as_str(),
+                provider: c.provider,
                 tier: c.tier,
                 context_window: Some(c.context_window),
                 max_output_tokens: Some(c.max_output_tokens),
@@ -245,17 +245,17 @@ pub fn catalog() -> &'static [CatalogEntry] {
     })
 }
 
-/// Return canonical provider names.
-pub fn provider_names() -> &'static [&'static str] {
-    PROVIDER_NAMES
+/// Return catalog providers as typed identities.
+pub fn providers() -> &'static [Provider] {
+    PROVIDERS
 }
 
 /// Return the default model ID for a provider, or `None` if the provider is unknown.
-pub fn default_model(provider: &str) -> Option<&'static str> {
+pub fn default_model(provider: Provider) -> Option<&'static str> {
     match provider {
-        "anthropic" => Some(DEFAULT_ANTHROPIC),
-        "openai" => Some(DEFAULT_OPENAI),
-        "gemini" => Some(DEFAULT_GEMINI),
+        Provider::Anthropic => Some(DEFAULT_ANTHROPIC),
+        Provider::OpenAI => Some(DEFAULT_OPENAI),
+        Provider::Gemini => Some(DEFAULT_GEMINI),
         _ => None,
     }
 }
@@ -321,16 +321,15 @@ pub fn image_generation_provider_for_model(model_id: &str) -> Option<Provider> {
 }
 
 /// Return an iterator over model IDs in the catalog for a given provider.
-pub fn allowed_models(provider: &str) -> impl Iterator<Item = &'static str> + 'static {
-    let provider = provider.to_string();
+pub fn allowed_models(provider: Provider) -> impl Iterator<Item = &'static str> + 'static {
     catalog()
         .iter()
-        .filter(move |e| e.provider == provider.as_str())
+        .filter(move |e| e.provider == provider)
         .map(|e| e.id)
 }
 
 /// Look up a specific catalog entry by provider and model ID.
-pub fn entry_for(provider: &str, model_id: &str) -> Option<&'static CatalogEntry> {
+pub fn entry_for(provider: Provider, model_id: &str) -> Option<&'static CatalogEntry> {
     catalog()
         .iter()
         .find(|e| e.provider == provider && e.id == model_id)
@@ -342,7 +341,7 @@ pub fn entry_for(provider: &str, model_id: &str) -> Option<&'static CatalogEntry
 pub fn provider_defaults() -> &'static [ProviderDefaults] {
     static DEFAULTS: OnceLock<Vec<ProviderDefaults>> = OnceLock::new();
     DEFAULTS.get_or_init(|| {
-        PROVIDER_NAMES
+        PROVIDERS
             .iter()
             .filter_map(|&provider| {
                 let default_id = default_model(provider)?;
@@ -378,7 +377,7 @@ pub fn image_generation_provider_defaults() -> &'static [ImageGenerationProvider
                     models.extend(
                         catalog()
                             .iter()
-                            .filter(|entry| entry.provider == Provider::OpenAI.as_str())
+                            .filter(|entry| entry.provider == Provider::OpenAI)
                             .filter_map(|entry| image_generation_model(provider, entry.id)),
                     );
                 }
@@ -414,7 +413,7 @@ mod tests {
 
     #[test]
     fn exactly_one_default_per_provider() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in PROVIDERS {
             let result = default_model(provider);
             assert!(
                 result.is_some(),
@@ -425,7 +424,7 @@ mod tests {
 
     #[test]
     fn defaults_exist_in_catalog() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in PROVIDERS {
             let default = default_model(provider);
             assert!(
                 default.is_some(),
@@ -442,11 +441,10 @@ mod tests {
     }
 
     #[test]
-    fn all_provider_strings_canonical() {
-        let canonical: HashSet<&str> = PROVIDER_NAMES.iter().copied().collect();
+    fn all_catalog_entries_use_typed_provider_owners() {
         for entry in catalog() {
             assert!(
-                canonical.contains(entry.provider),
+                PROVIDERS.contains(&entry.provider),
                 "catalog entry '{}' has non-canonical provider '{}'",
                 entry.id,
                 entry.provider
@@ -456,7 +454,7 @@ mod tests {
 
     #[test]
     fn no_duplicate_model_ids_within_provider() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in PROVIDERS {
             let ids: Vec<&str> = catalog()
                 .iter()
                 .filter(|e| e.provider == provider)
@@ -476,7 +474,7 @@ mod tests {
         let defaults = provider_defaults();
         assert_eq!(
             defaults.len(),
-            PROVIDER_NAMES.len(),
+            PROVIDERS.len(),
             "provider_defaults() must cover all providers"
         );
         for pd in defaults {
@@ -496,7 +494,7 @@ mod tests {
 
     #[test]
     fn allowed_models_matches_catalog() {
-        for &provider in PROVIDER_NAMES {
+        for &provider in PROVIDERS {
             let allowed: Vec<&str> = allowed_models(provider).collect();
             let from_catalog: Vec<&str> = catalog()
                 .iter()
@@ -513,12 +511,10 @@ mod tests {
     #[test]
     fn catalog_matches_capability_table() {
         for entry in catalog() {
-            let provider = crate::Provider::parse_strict(entry.provider)
-                .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
-            let caps = capabilities::capabilities_for(provider, entry.id)
+            let caps = capabilities::capabilities_for(entry.provider, entry.id)
                 .expect("catalog entry must have a capability row");
             assert_eq!(entry.id, caps.id);
-            assert_eq!(entry.provider, caps.provider.as_str());
+            assert_eq!(entry.provider, caps.provider);
             assert_eq!(entry.display_name, caps.display_name);
             assert_eq!(entry.tier, caps.tier);
             assert_eq!(entry.context_window, Some(caps.context_window));

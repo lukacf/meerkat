@@ -6,9 +6,9 @@ use crate::transport::{
     headers_from_map, sse::ReqwestSseClient, streamable_http::ReqwestStreamableHttpClient,
 };
 use meerkat_core::McpServerConfig;
-use meerkat_core::ToolDef;
 use meerkat_core::mcp_config::{McpHttpTransport, McpTransportConfig};
 use meerkat_core::types::{ContentBlock, ToolProvenance, ToolSourceKind};
+use meerkat_core::{ToolCallArguments, ToolDef};
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use rmcp::{
@@ -180,13 +180,25 @@ impl McpConnection {
     /// image content are captured as [`ContentBlock`] variants; unsupported
     /// content fails closed so callers do not observe a lossy success.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
-        let arguments = args.as_object().cloned();
+        let args = ToolCallArguments::from_value(args.clone()).map_err(|error| {
+            McpError::InvalidToolArguments {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        self.call_tool_arguments(name, &args).await
+    }
 
+    pub async fn call_tool_arguments(
+        &self,
+        name: &str,
+        args: &ToolCallArguments,
+    ) -> Result<Vec<ContentBlock>, McpError> {
         let result = self
             .service
             .call_tool(CallToolRequestParams {
                 name: name.to_string().into(),
-                arguments,
+                arguments: Some(args.to_object_map()),
                 meta: None,
                 task: None,
             })
@@ -217,7 +229,13 @@ impl McpConnection {
     /// This is a convenience wrapper around [`call_tool`](Self::call_tool) that
     /// discards non-text content. Useful for callers that only need text.
     pub async fn call_tool_text(&self, name: &str, args: &Value) -> Result<String, McpError> {
-        let blocks = self.call_tool(name, args).await?;
+        let args = ToolCallArguments::from_value(args.clone()).map_err(|error| {
+            McpError::InvalidToolArguments {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        let blocks = self.call_tool_arguments(name, &args).await?;
         Ok(meerkat_core::types::text_content(&blocks))
     }
 

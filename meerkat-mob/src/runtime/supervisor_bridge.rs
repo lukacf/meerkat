@@ -274,11 +274,15 @@ impl MobSupervisorBridge {
         let params = serde_json::to_value(payload).map_err(|error| {
             MobError::Internal(format!("serialize supervisor payload: {error}"))
         })?;
+        if intent != super::bridge_protocol::SUPERVISOR_BRIDGE_INTENT {
+            return Err(MobError::Internal(format!(
+                "unsupported supervisor bridge request intent: {intent}"
+            )));
+        }
         let receipt = runtime
             .send(CommsCommand::PeerRequest {
                 to,
-                intent: intent.to_string(),
-                params,
+                request: meerkat_core::PeerRequestPayload::SupervisorBridge(params),
                 blocks: None,
                 handling_mode: HandlingMode::Queue,
                 stream: InputStreamMode::None,

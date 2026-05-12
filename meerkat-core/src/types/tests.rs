@@ -110,7 +110,7 @@ fn test_user_message_render_metadata_serialization() {
 }
 
 #[test]
-fn test_legacy_user_notice_deserializes_as_user_text() {
+fn test_legacy_user_notice_deserializes_as_user_even_with_notice_metadata() {
     let parsed: Message = serde_json::from_value(json!({
         "role": "user",
         "content": "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed.",
@@ -126,6 +126,10 @@ fn test_legacy_user_notice_deserializes_as_user_text() {
             assert_eq!(
                 user.text_content(),
                 "[SYSTEM NOTICE][TOOL_SCOPE] Tool configuration changed."
+            );
+            assert_eq!(
+                user.render_metadata.as_ref().map(|meta| meta.class),
+                Some(RenderClass::ToolScopeNotice)
             );
         }
         other => panic!("expected user message, got {other:?}"),
@@ -799,7 +803,7 @@ mod ordered_transcript_types {
         let meta = ProviderMeta::OpenAi {
             id: "reasoning_item_123".to_string(),
             encrypted_content: Some("encrypted_tokens_abc".to_string()),
-            phase: Some("reasoning".to_string()),
+            phase: Some(OpenAiReplayPhase::Reasoning),
         };
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -812,6 +816,21 @@ mod ordered_transcript_types {
         assert_eq!(value["id"], "reasoning_item_123");
         assert_eq!(value["encrypted_content"], "encrypted_tokens_abc");
         assert_eq!(value["phase"], "reasoning");
+    }
+
+    #[test]
+    fn test_provider_meta_openai_rejects_unknown_phase() {
+        let value = json!({
+            "provider": "open_ai",
+            "id": "reasoning_item_123",
+            "phase": "provider_owned_string"
+        });
+
+        let parsed = serde_json::from_value::<ProviderMeta>(value);
+        assert!(
+            parsed.is_err(),
+            "OpenAI replay phase must fail closed at the transcript boundary"
+        );
     }
 
     #[test]
@@ -1023,7 +1042,7 @@ mod ordered_transcript_types {
             meta: Some(Box::new(ProviderMeta::OpenAi {
                 id: "item_abc".to_string(),
                 encrypted_content: None,
-                phase: Some("response".to_string()),
+                phase: Some(OpenAiReplayPhase::Response),
             })),
         };
 
@@ -1550,6 +1569,22 @@ mod content_block_tests {
         let result = ToolResult::new("tc_1".to_string(), "hello".to_string(), false);
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["content"], "hello");
+    }
+
+    #[test]
+    fn tool_result_structured_json_serializes_as_typed_block() {
+        let result =
+            ToolResult::from_json_value("tc_1".to_string(), json!({"ok": true, "count": 2}), false);
+        assert!(matches!(
+            &result.content[..],
+            [ContentBlock::Json { value }] if value["ok"] == true
+        ));
+
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["content"][0]["type"], "json");
+        assert_eq!(json["content"][0]["value"]["count"], 2);
+        let projected: serde_json::Value = serde_json::from_str(&result.text_content()).unwrap();
+        assert_eq!(projected["ok"], true);
     }
 
     #[test]

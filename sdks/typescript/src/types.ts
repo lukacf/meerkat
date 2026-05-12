@@ -229,6 +229,16 @@ export interface SessionToolResult {
   readonly error?: ToolResultError | null;
 }
 
+export type ToolCallbackContent = string | readonly ContentBlock[];
+
+export interface ToolCallbackResult {
+  readonly content: ToolCallbackContent;
+  readonly isError?: boolean;
+  readonly is_error?: boolean;
+}
+
+export type ToolCallbackReturn = ToolCallbackContent | ToolCallbackResult;
+
 /**
  * Ordered block inside a block-assistant transcript message.
  *
@@ -442,14 +452,21 @@ export interface MobMember {
   readonly isFinal?: boolean;
 }
 
+export type MobLifecycleStatus =
+  | "Creating"
+  | "Running"
+  | "Stopped"
+  | "Completed"
+  | "Destroyed";
+
 export interface MobSummary {
   readonly mobId: string;
-  readonly status: string;
+  readonly status: MobLifecycleStatus;
 }
 
 export interface MobStatus {
   readonly mobId: string;
-  readonly status: string;
+  readonly status: MobLifecycleStatus;
 }
 
 export type MobLifecycleAction = "stop" | "resume" | "complete" | "destroy" | "reset";

@@ -9,6 +9,7 @@ import type {
   ToolCallback,
   ToolCallbackResult,
   MobStatus,
+  ContentInput,
 } from './types.js';
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
@@ -105,7 +106,7 @@ export interface WasmModule {
   destroy_runtime: () => void;
   create_session_simple: (configJson: string) => string;
   create_session: (mobpackBytes: Uint8Array, configJson: string) => string;
-  start_turn: (sessionId: string, prompt: string) => Promise<string>;
+  start_turn: (sessionId: string, prompt: ContentInput) => Promise<string>;
   get_session_state: (sessionId: string) => string;
   destroy_session: (sessionId: string) => void;
   poll_events: (sessionId: string) => string;
@@ -114,7 +115,7 @@ export interface WasmModule {
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_list: () => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
+  mob_lifecycle: (mobId: string, actionJson: string) => Promise<string>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
@@ -132,7 +133,11 @@ export interface WasmModule {
   ) => Promise<string>;
   mob_member_send: (mobId: string, agentIdentity: string, requestJson: string) => Promise<string>;
   mob_member_status: (mobId: string, agentIdentity: string) => Promise<string>;
-  mob_respawn: (mobId: string, agentIdentity: string, initialMessage?: string) => Promise<string>;
+  mob_respawn: (
+    mobId: string,
+    agentIdentity: string,
+    initialMessage?: ContentInput,
+  ) => Promise<string>;
   mob_force_cancel: (mobId: string, agentIdentity: string) => Promise<void>;
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;

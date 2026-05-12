@@ -45,9 +45,10 @@ pub use comms::{
 pub use connection::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
     LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams,
-    WireAuthBindingRef, WireAuthError, WireAuthProfile, WireAuthProfileCleared,
+    WireAuthBindingRef, WireAuthError, WireAuthMethod, WireAuthProfile, WireAuthProfileCleared,
     WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatus,
-    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
+    WireAuthStatusDetail, WireBackendKind, WireBackendProfile, WireBindingIdentity,
+    WireConnectionProjectionError, WireCredentialSourceKind, WireDeviceCompleteResult,
     WireDeviceStart, WireLoginReady, WireLoginStart, WireProviderBinding,
     WireProvisionApiKeyResult, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
 };
@@ -127,7 +128,8 @@ pub use mob::{
     WireMobLoopIterationLedgerEntry, WireMobMemberSpawnedEvent, WireMobMemberStatus,
     WireMobProfile, WireMobProjectionError, WireMobReconcileStage, WireMobRun, WireMobRunStatus,
     WireMobRuntimeMode, WireMobStepLedgerEntry, WireMobStepRunStatus, WireMobTaskStatus,
-    WireMobToolConfig, WireRenderClass, WireRenderMetadata, WireRenderSalience, WireRuntimeBinding,
+    WireMobState, WireMobToolConfig, WireRenderClass, WireRenderMetadata, WireRenderSalience,
+    WireRuntimeBinding,
     WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
     WireWorkOrigin,
 };

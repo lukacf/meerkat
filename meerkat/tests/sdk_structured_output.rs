@@ -74,8 +74,8 @@ impl LlmClient for MockLlmClientWithStructuredOutput {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -136,8 +136,8 @@ impl LlmClient for MockLlmClientWithNamedWrapper {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -207,8 +207,8 @@ impl LlmClient for MockLlmClientWithRetry {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {

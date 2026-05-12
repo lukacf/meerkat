@@ -163,6 +163,14 @@ from .types import (
 _MEERKAT_REPO = ("lukacf", "meerkat")
 _MEERKAT_BINARY = "rkat-rpc"
 _MEERKAT_BINARY_CACHE_ROOT = Path.home() / ".cache" / "meerkat" / "bin" / _MEERKAT_BINARY
+_MOB_LIFECYCLE_STATUSES = {
+    "Creating",
+    "Running",
+    "Stopped",
+    "Completed",
+    "Destroyed",
+}
+_APPEND_SYSTEM_CONTEXT_STATUSES = {"applied", "staged", "duplicate"}
 _MOB_SPAWN_MANY_FAILURE_CAUSES = {
     "profile_not_found",
     "member_not_found",
@@ -1377,18 +1385,30 @@ class MeerkatClient:
     async def list_mobs(self) -> list[dict[str, Any]]:
         self.require_capability("mob")
         result = await self._request("mob/list", {})
-        return result.get("mobs", [])
+        mobs = result.get("mobs")
+        if not isinstance(mobs, list):
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/list response: missing mobs")
+        normalized = []
+        for entry in mobs:
+            if not isinstance(entry, dict):
+                raise MeerkatError("INVALID_RESPONSE", "Invalid mob/list response: malformed mob")
+            status = entry.get("status")
+            if status not in _MOB_LIFECYCLE_STATUSES:
+                raise MeerkatError("INVALID_RESPONSE", "Invalid mob/list response: invalid status")
+            normalized.append({
+                "mob_id": str(entry.get("mob_id", entry.get("mobId", ""))),
+                "status": status,
+            })
+        return normalized
 
     async def mob_status(self, mob_id: str) -> dict[str, Any]:
         result = await self._request("mob/status", {"mob_id": mob_id})
         raw_status = result.get("status")
-        if isinstance(raw_status, str) and raw_status:
-            status = raw_status
-        elif isinstance(raw_status, dict) and raw_status:
-            status = next(iter(raw_status))
-        else:
+        if not isinstance(raw_status, str) or not raw_status:
             raise MeerkatError("INVALID_RESPONSE", "Invalid mob/status response: missing status")
-        return {"mob_id": str(result.get("mob_id", mob_id)), "status": status}
+        if raw_status not in _MOB_LIFECYCLE_STATUSES:
+            raise MeerkatError("INVALID_RESPONSE", "Invalid mob/status response: invalid status")
+        return {"mob_id": str(result.get("mob_id", mob_id)), "status": raw_status}
 
     async def list_mob_members(self, mob_id: str) -> list[MobMember]:
         result = await self._request("mob/members", {"mob_id": mob_id})
@@ -2257,10 +2277,10 @@ class MeerkatClient:
             "status",
             "Invalid mob/append_system_context response",
         )
-        if status not in {"staged", "duplicate"}:
+        if status not in _APPEND_SYSTEM_CONTEXT_STATUSES:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/append_system_context response: unknown status",
+                "Invalid mob/append_system_context response: invalid status",
             )
         return {
             "mob_id": str(result.get("mob_id", mob_id)),

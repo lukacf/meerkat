@@ -163,7 +163,7 @@ impl AgentLlmClient for MyCustomClient {
         ))
     }
 
-    fn provider(&self) -> &'static str { "my-provider" }
+    fn provider(&self) -> meerkat_core::Provider { meerkat_core::Provider::Other }
     fn model(&self) -> &str { "my-model" }
 }
 ```

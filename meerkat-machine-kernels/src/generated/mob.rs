@@ -1767,8 +1767,6 @@ pub struct State {
     pub run_step_target_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
     pub run_step_target_success_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
     pub run_step_target_terminal_failure_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
-    pub run_target_retry_counts:
-        std::collections::BTreeMap<RunId, std::collections::BTreeMap<String, u64>>,
     pub run_target_retry_counts_flat: std::collections::BTreeMap<RunStepKey, u64>,
     pub run_failure_count: std::collections::BTreeMap<RunId, u64>,
     pub run_consecutive_failure_count: std::collections::BTreeMap<RunId, u64>,
@@ -1950,7 +1948,6 @@ pub mod inputs {
         pub frame_id: Option<FrameId>,
         pub node_id: Option<FlowNodeId>,
         pub loop_instance_id: Option<LoopInstanceId>,
-        pub retry_key: Option<String>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AuthorizeFlowFrameReducerCommand {
@@ -2919,7 +2916,6 @@ pub fn initial_state() -> State {
         run_step_target_counts_flat: Default::default(),
         run_step_target_success_counts_flat: Default::default(),
         run_step_target_terminal_failure_counts_flat: Default::default(),
-        run_target_retry_counts: Default::default(),
         run_target_retry_counts_flat: Default::default(),
         run_failure_count: Default::default(),
         run_consecutive_failure_count: Default::default(),

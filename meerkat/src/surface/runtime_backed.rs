@@ -21,7 +21,7 @@ use tokio::sync::mpsc;
 
 #[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use crate::JsonlStore;
-#[cfg(test)]
+#[cfg(all(test, feature = "jsonl-store", not(target_arch = "wasm32")))]
 use crate::MachineSessionArchiveProtocol;
 use crate::{
     CreateSessionRequest, FactoryAgentBuilder, MachineServiceTurnCommitProtocol,

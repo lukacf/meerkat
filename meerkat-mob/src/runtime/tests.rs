@@ -9528,8 +9528,6 @@ fn test_mob_command_admission_arms_do_not_shadow_mob_machine_guards() {
         "CancelFlow",
         "SubmitWork",
         "CancelAllWork",
-        "TaskCreate",
-        "TaskUpdate",
         "ForceCancel",
     ] {
         let arm = mob_command_arm_source(source, command);

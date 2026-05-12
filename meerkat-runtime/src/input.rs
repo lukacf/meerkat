@@ -764,19 +764,8 @@ fn peer_notice_renderable(peer: &PeerInput) -> Option<CoreRenderable> {
         "response_terminal" => "Peer response terminal".to_string(),
         _ => "Peer message".to_string(),
     };
-    let content = if let Some(blocks) = peer.blocks.clone() {
-        let body_already_in_blocks = blocks.iter().any(|block| {
-            matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == peer.body.trim())
-        });
-        if peer.body.trim().is_empty() || body_already_in_blocks {
-            blocks
-        } else {
-            let mut content = vec![meerkat_core::types::ContentBlock::Text {
-                text: peer.body.clone(),
-            }];
-            content.extend(blocks);
-            content
-        }
+    let content = if let Some(blocks) = peer.blocks.clone().filter(|blocks| !blocks.is_empty()) {
+        blocks
     } else if peer.body.is_empty() {
         Vec::new()
     } else {
@@ -811,12 +800,15 @@ fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderabl
         }
         _ => event.event_type.clone(),
     };
+    let content = event.blocks.clone().unwrap_or_default();
+    let content_text = (!content.is_empty()).then(|| meerkat_core::types::text_content(&content));
     let body = event
         .payload
         .get("body")
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|body| !body.is_empty())
+        .filter(|body| !body_is_represented_by_blocks(body, content_text.as_deref(), &content))
         .map(ToOwned::to_owned);
     let summary = body.as_ref().map_or_else(
         || format!("External event via {source}"),
@@ -831,9 +823,20 @@ fn external_event_notice_renderable(event: &ExternalEventInput) -> CoreRenderabl
             summary: Some(summary),
             body,
             payload: Some(event.payload.clone()),
-            content: event.blocks.clone().unwrap_or_default(),
+            content,
         }],
     }
+}
+
+fn body_is_represented_by_blocks(
+    body: &str,
+    content_text: Option<&str>,
+    blocks: &[meerkat_core::types::ContentBlock],
+) -> bool {
+    content_text.is_some_and(|content_text| content_text.trim() == body)
+        || blocks.iter().any(|block| {
+            matches!(block, meerkat_core::types::ContentBlock::Text { text } if text.trim() == body)
+        })
 }
 
 fn input_to_append(input: &Input) -> Option<ConversationAppend> {
@@ -1082,20 +1085,21 @@ mod tests {
             display_identity: Some("display-agent".into()),
             runtime_id: None,
         };
+        let original_blocks = vec![
+            meerkat_core::types::ContentBlock::Text {
+                text: "caption".into(),
+            },
+            meerkat_core::types::ContentBlock::Image {
+                media_type: "image/png".into(),
+                data: "abc".into(),
+            },
+        ];
         let input = Input::Peer(PeerInput {
             header,
             convention: Some(PeerConvention::Message),
-            body: "caption".into(),
+            body: "Peer message from display-agent:\ncaption\n[image: image/png]".into(),
             payload: None,
-            blocks: Some(vec![
-                meerkat_core::types::ContentBlock::Text {
-                    text: "caption".into(),
-                },
-                meerkat_core::types::ContentBlock::Image {
-                    media_type: "image/png".into(),
-                    data: "abc".into(),
-                },
-            ]),
+            blocks: Some(original_blocks.clone()),
             handling_mode: None,
         });
 
@@ -1111,7 +1115,7 @@ mod tests {
 
         let projection = runtime_input_projection(&input);
         let append = projection.append.expect("conversation append");
-        let CoreRenderable::SystemNotice { blocks, .. } = append.content else {
+        let CoreRenderable::SystemNotice { blocks, .. } = &append.content else {
             panic!("expected typed system notice");
         };
         let Some(meerkat_core::types::SystemNoticeBlock::Comms { content, peer, .. }) =
@@ -1124,10 +1128,22 @@ mod tests {
             Some("display-agent")
         );
         assert_eq!(
-            content.first(),
-            Some(&meerkat_core::types::ContentBlock::Text {
-                text: "caption".into()
-            })
+            content, &original_blocks,
+            "typed comms content must be the original blocks, not rendered projection text plus blocks"
+        );
+        let projected =
+            meerkat_core::lifecycle::run_primitive::model_projection_content_input_from_conversation_appends(
+                &[append],
+            )
+            .text_content();
+        assert_eq!(
+            projected.matches("Peer message from display-agent").count(),
+            1,
+            "provider projection must not nest a rendered peer projection inside typed content"
+        );
+        assert!(
+            !projected
+                .contains("Peer message from display-agent:\nPeer message from display-agent")
         );
     }
 

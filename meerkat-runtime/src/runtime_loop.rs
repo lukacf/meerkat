@@ -2121,7 +2121,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_image_only_blocks_preserve_rendered_body_text() -> Result<(), String> {
+    fn peer_image_only_blocks_do_not_promote_body_to_typed_content() -> Result<(), String> {
         let blocks = vec![meerkat_core::types::ContentBlock::Image {
             media_type: "image/png".into(),
             data: "abc123".into(),
@@ -2162,13 +2162,7 @@ mod tests {
                     return Err("expected comms block".into());
                 };
                 assert_eq!(peer.as_ref().map(|peer| peer.id.as_str()), Some("peer-1"));
-                assert_eq!(
-                    content.first(),
-                    Some(&meerkat_core::types::ContentBlock::Text {
-                        text: "Please describe the attached image.".into(),
-                    })
-                );
-                assert_eq!(content.get(1), Some(&blocks[0]));
+                assert_eq!(content, &blocks);
             }
             other => return Err(format!("expected blocks content, got {other:?}")),
         }

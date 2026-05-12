@@ -210,6 +210,24 @@ fn test_system_notice_block_without_type_is_invalid() {
 }
 
 #[test]
+fn external_event_projection_without_body_uses_source_not_event_type_body() {
+    let block = SystemNoticeBlock::ExternalEvent {
+        source: "webhook".to_string(),
+        event_type: "webhook.received".to_string(),
+        summary: Some("External event via webhook".to_string()),
+        body: None,
+        payload: None,
+        content: vec![ContentBlock::Text {
+            text: "caption".to_string(),
+        }],
+    };
+
+    let projection = block.model_projection_text();
+    assert!(projection.starts_with("External event via webhook\ncaption"));
+    assert!(!projection.contains("External event via webhook: webhook.received"));
+}
+
+#[test]
 fn test_tool_call_serialization() {
     let tool_call = ToolCall::new(
         "tc_abc123".to_string(),

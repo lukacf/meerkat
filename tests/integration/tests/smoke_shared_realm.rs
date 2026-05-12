@@ -4191,89 +4191,52 @@ async fn settle_live_turn_after_input(
     Ok(capture)
 }
 
-async fn collect_live_observations_until_barge_in<F>(
-    writer: &mut LiveWsWrite,
+async fn collect_live_observations_until_live_interrupt<F>(
+    pump: &mut RpcEventPump,
+    rpc: &mut RpcProcess,
     reader: &mut LiveWsRead,
+    channel_id: &str,
     seed_capture: &LiveObservationCapture,
-    barge_in_pcm: &[u8],
     timeout_secs: u64,
-    start_barge_in: F,
+    start_interrupt: F,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>>
 where
     F: Fn(&LiveObservationCapture) -> bool,
 {
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut capture = seed_capture.clone();
-    let mut started_barge_in = start_barge_in(&capture);
-    let barge_in_chunks = chunk_pcm_bytes(
-        barge_in_pcm,
-        LIVE_AUDIO_FRAME_MS,
-        LIVE_AUDIO_TRAILING_SILENCE_MS,
-    );
-    let mut next_barge_in_chunk = 0_usize;
-    let mut next_barge_in_send_at = started_barge_in.then_some(Instant::now());
+    let mut interrupt_sent = false;
 
-    // If already started, send first chunk immediately
-    if started_barge_in
-        && next_barge_in_chunk < barge_in_chunks.len()
-        && next_barge_in_send_at.is_some_and(|t| Instant::now() >= t)
-    {
-        live_ws_send_audio_chunk(writer, &barge_in_chunks[next_barge_in_chunk]).await?;
-        next_barge_in_chunk += 1;
-        next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
-            .then_some(Instant::now() + Duration::from_millis(LIVE_AUDIO_FRAME_MS as u64));
+    if start_interrupt(&capture) {
+        pump.call(rpc, "live/interrupt", json!({"channel_id": channel_id}), 10)
+            .await?;
+        interrupt_sent = true;
     }
 
     while Instant::now() < deadline {
-        let now = Instant::now();
-        if started_barge_in
-            && next_barge_in_chunk < barge_in_chunks.len()
-            && next_barge_in_send_at.is_some_and(|t| now >= t)
-        {
-            live_ws_send_audio_chunk(writer, &barge_in_chunks[next_barge_in_chunk]).await?;
-            next_barge_in_chunk += 1;
-            next_barge_in_send_at = (next_barge_in_chunk < barge_in_chunks.len())
-                .then_some(Instant::now() + Duration::from_millis(LIVE_AUDIO_FRAME_MS as u64));
-            continue;
-        }
-
-        let wait_deadline = next_barge_in_send_at
-            .filter(|t| *t < deadline)
-            .unwrap_or(deadline);
-        let remaining = wait_deadline.saturating_duration_since(Instant::now());
+        let remaining = deadline.saturating_duration_since(Instant::now());
         let frame_text = match live_ws_next_text_frame(reader, remaining).await {
             Ok(Some(text)) => text,
-            Ok(None) => {
-                // timeout — keep waiting (outer deadline check will exit)
-                if started_barge_in
-                    && next_barge_in_chunk == barge_in_chunks.len()
-                    && capture.saw_interrupted
-                {
-                    return Ok(capture);
-                }
-                continue;
-            }
+            Ok(None) => continue,
             Err(_) => {
-                return Err("live websocket closed before barge-in completed".into());
+                return Err("live websocket closed before interrupt completed".into());
             }
         };
         observe_live_json_frame(&mut capture, &frame_text)?;
 
-        if !started_barge_in && start_barge_in(&capture) {
-            started_barge_in = true;
-            next_barge_in_send_at = Some(Instant::now());
+        if !interrupt_sent && start_interrupt(&capture) {
+            pump.call(rpc, "live/interrupt", json!({"channel_id": channel_id}), 10)
+                .await?;
+            interrupt_sent = true;
         }
 
-        if started_barge_in {
-            let barge_in_complete = next_barge_in_chunk == barge_in_chunks.len();
-            if barge_in_complete && capture.saw_interrupted {
-                return Ok(capture);
-            }
+        if interrupt_sent && capture.saw_interrupted {
+            return Ok(capture);
         }
     }
 
     Err(format!(
-        "timed out waiting for barge-in preemption (turn_interrupted): capture={capture:?}"
+        "timed out waiting for live interrupt preemption (turn_interrupted): interrupt_sent={interrupt_sent}, capture={capture:?}"
     )
     .into())
 }
@@ -4539,7 +4502,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 &mut rpc,
                 "session/create",
                 json!({
-                    "prompt": "You are a test assistant for live audio. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else. When asked to say only the codeword once, answer with exactly `<remembered codeword>.` and nothing else. When asked to repeat things in a loop, produce a long looping response. When told to stop, answer exactly `Stopped.`. When asked to say codeword and token once, answer with exactly `<remembered codeword>. <token>.` and nothing else.",
+                    "prompt": "You are a test assistant for live audio. When the user gives you a codeword to remember, answer with exactly `Remembering <codeword>.` and nothing else. When asked to say only the codeword once, answer with exactly `<remembered codeword>.` and nothing else. When asked to run an interruption or repetition test, immediately repeat the remembered codeword at least eighty times separated by commas; do not summarize, refuse, or stop early unless the user says stop. When told to stop, answer exactly `Stopped.`. When asked to say codeword and token once, answer with exactly `<remembered codeword>. <token>.` and nothing else.",
                     "model": "gpt-realtime-2",
                     "provider": "openai",
                     "initial_turn": "deferred",
@@ -4578,8 +4541,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let codeword_only_pcm =
             openai_tts_pcm("Say only the codeword once.").await?;
         let token_explain_pcm =
-            openai_tts_pcm("Keep saying the codeword nonstop in a loop forever do not stop talking until I interrupt you.").await?;
-        let stop_pcm = openai_tts_pcm("Stop.").await?;
+            openai_tts_pcm("Run the interruption repetition test now. Repeat amber lantern exactly eighty times separated by commas. Do not summarize. Do not stop until I say stop.").await?;
         let recall_pcm =
             openai_tts_pcm("Please say the codeword once.").await?;
 
@@ -4739,11 +4701,12 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
                 return Err(format!("scenario 71 turn 3 failed: {error}").into());
             }
         };
-        let turn34_preemption_capture = match collect_live_observations_until_barge_in(
-            &mut ws_write,
+        let turn34_preemption_capture = match collect_live_observations_until_live_interrupt(
+            &mut pump,
+            &mut rpc,
             &mut ws_read,
+            &channel_id,
             &turn3_commit,
-            &stop_pcm,
             120,
             live_capture_has_non_silent_audio,
         )
@@ -4753,7 +4716,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             Err(error) => {
                 let rpc_stderr = read_available_stderr(&mut rpc, 2_000).await;
                 return Err(format!(
-                    "scenario 71 turn 3-4 barge-in failed: {error}\nrpc stderr:\n{}",
+                    "scenario 71 turn 3-4 live interrupt failed: {error}\nrpc stderr:\n{}",
                     rpc_stderr.trim()
                 )
                 .into());
@@ -4773,8 +4736,8 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         if !turn34_capture.saw_interrupted || !live_capture_has_assistant_text(&turn34_capture) {
             dump_live_audio_artifacts(
                 scenario_name,
-                "turn-34-stop",
-                &stop_pcm,
+                "turn-34-interrupt",
+                &[],
                 &turn34_capture,
             )
             .await?;

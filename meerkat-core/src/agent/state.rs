@@ -5874,7 +5874,7 @@ mod tests {
         assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            Some(crate::TurnTerminalOutcome::Failed)
         );
         assert_eq!(
             snapshot.terminal_cause_kind,

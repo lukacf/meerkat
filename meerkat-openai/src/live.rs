@@ -2738,8 +2738,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                     Err(_) => match self.response_nudge.on_wait_timeout() {
                         OpenAiResponseNudgeTimeoutAction::WaitAgain { attempt } => {
                             trace_openai_realtime_lifecycle(format!(
-                                "provider response acknowledged without progress; waiting again attempt={}",
-                                attempt
+                                "provider response acknowledged without progress; waiting again attempt={attempt}"
                             ));
                             continue;
                         }
@@ -2748,8 +2747,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                             duration_ms,
                         } => {
                             trace_openai_realtime_lifecycle(format!(
-                                "provider response nudge budget exhausted after {} attempts",
-                                attempts
+                                "provider response nudge budget exhausted after {attempts} attempts"
                             ));
                             return Err(LlmError::NetworkTimeout { duration_ms });
                         }
@@ -2768,8 +2766,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                                 Ok(()) => {
                                     let attempt = self.response_nudge.note_nudge_sent();
                                     trace_openai_realtime_lifecycle(format!(
-                                        "response.create nudge accepted by transport attempt={}",
-                                        attempt
+                                        "response.create nudge accepted by transport attempt={attempt}"
                                     ));
                                 }
                                 Err(LlmError::InvalidRequest { message })

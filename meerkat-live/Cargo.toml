@@ -25,6 +25,15 @@ tracing = { workspace = true }
 base64 = { workspace = true }
 thiserror = { workspace = true }
 indexmap = { version = "2", features = ["serde"] }
+bytes = { version = "1", optional = true }
+webrtc = { version = "0.14.0", optional = true }
+webrtc-media = { version = "0.11.0", optional = true }
+opus = { version = "0.3.1", optional = true }
+rubato = { version = "2.0.0", optional = true }
+
+[features]
+default = []
+webrtc = ["dep:bytes", "dep:webrtc", "dep:webrtc-media", "dep:opus", "dep:rubato"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

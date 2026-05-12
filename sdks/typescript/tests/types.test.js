@@ -23,6 +23,7 @@ import {
   Mob,
   Session,
   DeferredSession,
+  liveWebrtcMediaConstraints,
 } from "../dist/index.js";
 
 /**
@@ -70,6 +71,18 @@ describe("Contract Version", () => {
     );
 
     assert.match(generated, /export interface RuntimeStateResult \{\n  state: WireRuntimeState;\n\}/);
+  });
+
+  it("live WebRTC browser helper requests AEC noise suppression and AGC", () => {
+    const constraints = liveWebrtcMediaConstraints();
+    assert.deepEqual(constraints, {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
   });
 });
 
@@ -1182,6 +1195,8 @@ describe("Session wrappers", () => {
       additionalInstructions: ["be terse"],
       appContext: { tenant: "acme" },
       shellEnv: { FOO: "bar" },
+      enableSchedule: true,
+      enableWebSearch: true,
       externalTools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
     });
 
@@ -1193,6 +1208,8 @@ describe("Session wrappers", () => {
         additional_instructions: ["be terse"],
         app_context: { tenant: "acme" },
         shell_env: { FOO: "bar" },
+        enable_schedule: true,
+        enable_web_search: true,
         external_tools: [{ name: "x", description: "x", input_schema: { type: "object" } }],
       },
     });
@@ -2391,6 +2408,26 @@ describe("Mob decoder strictness", () => {
     );
   });
 
+  it("rejects missing mob snapshot status instead of fabricating unknown", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ mob_id: "mob-1", members: [] });
+
+    await assert.rejects(
+      () => client.mobSnapshot("mob-1"),
+      /missing status/,
+    );
+  });
+
+  it("rejects missing member status instead of fabricating unknown", async () => {
+    const client = new MeerkatClient();
+    client.request = async () => ({ tokens_used: 0, is_final: false });
+
+    await assert.rejects(
+      () => client.mobMemberStatus("mob-1", "lead"),
+      /missing status/,
+    );
+  });
+
   it("rejects malformed wait member snapshots instead of fabricating booleans", async () => {
     const client = new MeerkatClient();
     client.request = async () => ({
@@ -2406,6 +2443,23 @@ describe("Mob decoder strictness", () => {
     await assert.rejects(
       () => client.waitMobReady("mob-1"),
       /is_final must be boolean/,
+    );
+  });
+});
+
+describe("Session fork decoder strictness", () => {
+  it("rejects missing fork handles instead of fabricating empty strings", () => {
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ session_id: "fork", message_count: 1 }),
+      /missing source_session_id/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ source_session_id: "source", message_count: 1 }),
+      /missing session_id/,
+    );
+    assert.throws(
+      () => MeerkatClient.parseSessionForkResult({ source_session_id: "source", session_id: "fork" }),
+      /message_count must be number/,
     );
   });
 });

@@ -519,6 +519,9 @@ pub struct FactoryAgentBuilder {
     /// keeping runtime/service ownership in the surface.
     pub default_schedule_tools:
         Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
+    /// Default WorkGraph tools injected into all builds.
+    pub default_workgraph_tools:
+        Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
     /// Default blob store injected into all builds.
     pub default_blob_store: Option<Arc<dyn meerkat_core::BlobStore>>,
     /// Default image-generation executor injected into all builds.
@@ -540,6 +543,7 @@ impl FactoryAgentBuilder {
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
+            default_workgraph_tools: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_image_generation_executor: None,
         }
@@ -564,6 +568,7 @@ impl FactoryAgentBuilder {
             default_session_store: None,
             default_mob_tools: Arc::new(std::sync::RwLock::new(None)),
             default_schedule_tools: Arc::new(std::sync::RwLock::new(None)),
+            default_workgraph_tools: Arc::new(std::sync::RwLock::new(None)),
             default_blob_store: None,
             default_image_generation_executor: None,
         }
@@ -676,6 +681,16 @@ impl SessionAgentBuilder for FactoryAgentBuilder {
                 .clone()
         {
             build_config.schedule_tools = Some(schedule_dispatcher);
+        }
+
+        if build_config.workgraph_tools.is_none()
+            && let Some(workgraph_dispatcher) = self
+                .default_workgraph_tools
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        {
+            build_config.workgraph_tools = Some(workgraph_dispatcher);
         }
 
         if build_config.blob_store_override.is_none()

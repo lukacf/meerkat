@@ -420,11 +420,17 @@ mod tests {
                 }
             };
             *seen = Some(request.messages.clone());
-            Box::pin(stream::iter([Ok(LlmEvent::Done {
-                outcome: LlmDoneOutcome::Success {
-                    stop_reason: StopReason::EndTurn,
-                },
-            })]))
+            Box::pin(stream::iter([
+                Ok(LlmEvent::TextDelta {
+                    delta: "ok".to_string(),
+                    meta: None,
+                }),
+                Ok(LlmEvent::Done {
+                    outcome: LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
         }
 
         fn provider(&self) -> &'static str {

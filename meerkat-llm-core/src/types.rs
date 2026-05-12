@@ -12,6 +12,7 @@ use meerkat_core::image_generation::{
 };
 use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
+use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
     AssistantImageRef, MediaType, Message, OutputSchema, StopReason, ToolDef, Usage,
 };
@@ -85,6 +86,16 @@ pub trait ImageGenerationExecutor: Send + Sync {
         &self,
         request: ProviderImageGenerationRequest,
     ) -> Result<ProviderImageGenerationOutput, LlmError>;
+}
+
+/// Provider-neutral executor for the Meerkat-owned web-search fallback tool.
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait WebSearchExecutor: Send + Sync {
+    async fn execute_web_search(
+        &self,
+        request: WebSearchRequest,
+    ) -> Result<WebSearchResult, LlmError>;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -3022,7 +3022,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -3171,10 +3170,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -3950,9 +3945,11 @@
       "WireReasoningEffort": {
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
         "enum": [
+          "none",
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ],
         "type": "string"
       },
@@ -5317,7 +5314,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -5354,10 +5350,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -5940,9 +5932,11 @@
       "WireReasoningEffort": {
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
         "enum": [
+          "none",
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ],
         "type": "string"
       },
@@ -6084,7 +6078,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -6121,10 +6114,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -6707,9 +6696,11 @@
       "WireReasoningEffort": {
         "description": "Typed wire projection of [`meerkat_core::lifecycle::run_primitive::ReasoningEffort`].",
         "enum": [
+          "none",
           "low",
           "medium",
-          "high"
+          "high",
+          "xhigh"
         ],
         "type": "string"
       },
@@ -8019,7 +8010,6 @@
               "mcp": [],
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -8065,10 +8055,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },

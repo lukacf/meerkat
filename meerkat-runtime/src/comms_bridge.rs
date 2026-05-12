@@ -108,6 +108,10 @@ fn peer_input_from_ingress_fact(
 ) -> Result<Input, PeerIngressProjectionError> {
     let convention = map_ingress_convention(interaction.id, ingress, response_terminality)?;
     let durability = map_durability(&convention);
+    let handling_mode = match &convention {
+        PeerConvention::ResponseProgress { .. } => None,
+        _ => Some(interaction.handling_mode),
+    };
     let peer_id = ingress.canonical_peer_id_string().ok_or(
         PeerIngressProjectionError::MissingCanonicalPeerId {
             interaction_id: interaction.id,
@@ -141,10 +145,7 @@ fn peer_input_from_ingress_fact(
         body: peer_rendered_body(interaction),
         payload: peer_payload(interaction),
         blocks: peer_blocks(interaction),
-        handling_mode: match interaction.handling_mode {
-            meerkat_core::types::HandlingMode::Queue => None,
-            mode => Some(mode),
-        },
+        handling_mode,
     }))
 }
 
@@ -429,6 +430,11 @@ mod tests {
             assert!(matches!(p.convention, Some(PeerConvention::Message)));
             assert_eq!(p.body, "hello");
             assert_eq!(p.header.durability, InputDurability::Durable);
+            assert_eq!(
+                p.handling_mode,
+                Some(meerkat_core::types::HandlingMode::Queue),
+                "explicit queue must survive comms -> runtime projection so it can suppress running-turn interruption"
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -463,6 +469,11 @@ mod tests {
                 p.payload,
                 Some(serde_json::json!({"name": "agent-1"})),
                 "request params must remain structured on PeerInput so runtime prompt projection does not depend on pre-rendered comms prose"
+            );
+            assert_eq!(
+                p.handling_mode,
+                Some(meerkat_core::types::HandlingMode::Queue),
+                "explicit queue request semantics must not collapse to default policy"
             );
         } else {
             panic!("Expected PeerInput");
@@ -1219,6 +1230,10 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
+            assert!(
+                p.handling_mode.is_none(),
+                "ResponseProgress inputs must not carry handling_mode"
+            );
         } else {
             panic!("Expected PeerInput");
         }
@@ -1274,6 +1289,7 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
+            assert_eq!(p.handling_mode, None);
         } else {
             panic!("Expected PeerInput");
         }

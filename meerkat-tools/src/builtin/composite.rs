@@ -46,6 +46,12 @@ struct ImageGenerationToolBinding {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+struct WebSearchToolBinding {
+    executor: Arc<dyn meerkat_llm_core::WebSearchExecutor>,
+    visibility: ToolCategoryOverride,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 struct BlobToolBinding {
     blob_store: Arc<dyn BlobStore>,
 }
@@ -73,6 +79,8 @@ pub struct CompositeDispatcher {
     job_manager: Option<Arc<JobManager>>,
     #[cfg(not(target_arch = "wasm32"))]
     image_generation_runtime: Option<ImageGenerationToolBinding>,
+    #[cfg(not(target_arch = "wasm32"))]
+    web_search_runtime: Option<WebSearchToolBinding>,
     #[cfg(not(target_arch = "wasm32"))]
     blob_tools: Option<BlobToolBinding>,
     allowed_tools: HashSet<String>,
@@ -209,6 +217,7 @@ impl CompositeDispatcher {
             image_tool_results: _image_tool_results,
             job_manager,
             image_generation_runtime: None,
+            web_search_runtime: None,
             blob_tools: None,
             allowed_tools,
         })
@@ -259,6 +268,14 @@ impl CompositeDispatcher {
             task_store,
             session_id,
             image_tool_results: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            job_manager: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            image_generation_runtime: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            web_search_runtime: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            blob_tools: None,
             allowed_tools,
         })
     }
@@ -290,6 +307,30 @@ impl CompositeDispatcher {
         self.builtin_tools.push(tool);
         self.image_generation_runtime = Some(ImageGenerationToolBinding {
             runtime,
+            visibility,
+        });
+    }
+
+    /// Register the optional Meerkat-owned web-search fallback builtin.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn register_web_search_tool(
+        &mut self,
+        executor: Arc<dyn meerkat_llm_core::WebSearchExecutor>,
+        visibility: ToolCategoryOverride,
+    ) {
+        // Inherit is intentionally off. Models with native web search use
+        // provider-native tools; callers explicitly enable this fallback for
+        // models such as realtime live models.
+        if !visibility.resolve(false) {
+            return;
+        }
+        let tool = Arc::new(crate::builtin::web_search::WebSearchTool::new(Arc::clone(
+            &executor,
+        )));
+        self.allowed_tools.insert(tool.name().to_string());
+        self.builtin_tools.push(tool);
+        self.web_search_runtime = Some(WebSearchToolBinding {
+            executor,
             visibility,
         });
     }
@@ -676,6 +717,7 @@ impl AgentToolDispatcher for CompositeDispatcher {
             if owned.job_manager.is_none()
                 && rebound_external.is_none()
                 && owned.image_generation_runtime.is_none()
+                && owned.web_search_runtime.is_none()
                 && owned.blob_tools.is_none()
             {
                 return Err(OpsLifecycleBindError::Unsupported);
@@ -700,6 +742,9 @@ impl AgentToolDispatcher for CompositeDispatcher {
             }
             if let Some(binding) = owned.image_generation_runtime.take() {
                 rebound.register_image_generation_tool(binding.runtime, binding.visibility);
+            }
+            if let Some(binding) = owned.web_search_runtime.take() {
+                rebound.register_web_search_tool(binding.executor, binding.visibility);
             }
             if let Some(binding) = owned.blob_tools.take() {
                 rebound.register_blob_file_tools(binding.blob_store);

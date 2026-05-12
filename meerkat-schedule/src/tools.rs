@@ -4,11 +4,12 @@ use crate::{
 };
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
+use meerkat_core::types::SessionId;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use meerkat_core::{AgentToolDispatcher, ToolDispatchOutcome};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::sync::Arc;
 
 pub const INVALID_ARGUMENTS: i32 = -32602;
@@ -229,6 +230,70 @@ impl AgentToolDispatcher for ScheduleToolDispatcher {
     }
 }
 
+/// Session-scoped adapter for agent-facing schedule tools.
+///
+/// The durable schedule model intentionally stores concrete targets. This
+/// adapter is only an authoring convenience: it lets an agent say
+/// `current_session`, then rewrites that target to the known session id before
+/// forwarding to the underlying schedule dispatcher.
+pub struct CurrentSessionScheduleToolDispatcher {
+    inner: Arc<dyn AgentToolDispatcher>,
+    current_session_id: SessionId,
+    tool_defs: Arc<[Arc<ToolDef>]>,
+}
+
+impl CurrentSessionScheduleToolDispatcher {
+    pub fn new(inner: Arc<dyn AgentToolDispatcher>, current_session_id: SessionId) -> Self {
+        let tool_defs = inner
+            .tools()
+            .iter()
+            .map(|tool| Arc::new(current_session_tool_def(tool)))
+            .collect::<Vec<_>>()
+            .into();
+        Self {
+            inner,
+            current_session_id,
+            tool_defs,
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl AgentToolDispatcher for CurrentSessionScheduleToolDispatcher {
+    fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+        Arc::clone(&self.tool_defs)
+    }
+
+    async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+        if !self.tool_defs.iter().any(|tool| tool.name == call.name) {
+            return Err(ToolError::not_found(call.name));
+        }
+
+        if call.name != "meerkat_schedule_create" && call.name != "meerkat_schedule_update" {
+            return self.inner.dispatch(call).await;
+        }
+
+        let args: Value = serde_json::from_str(call.args.get())
+            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let rewritten = rewrite_current_session_target(args, &self.current_session_id);
+        let rewritten_raw = serde_json::value::RawValue::from_string(rewritten.to_string())
+            .map_err(|error| {
+                ToolError::invalid_arguments(
+                    call.name,
+                    format!("failed to encode rewritten schedule arguments: {error}"),
+                )
+            })?;
+        self.inner
+            .dispatch(ToolCallView {
+                id: call.id,
+                name: call.name,
+                args: &rewritten_raw,
+            })
+            .await
+    }
+}
+
 pub async fn handle_schedule_tools_call(
     service: &ScheduleService,
     name: &str,
@@ -379,6 +444,82 @@ fn tool_descriptor(name: &'static str, description: &'static str, input_schema: 
         "description": description,
         "inputSchema": input_schema,
     })
+}
+
+fn current_session_tool_def(tool: &ToolDef) -> ToolDef {
+    let mut rewritten = tool.clone();
+    if rewritten.name == "meerkat_schedule_create" || rewritten.name == "meerkat_schedule_update" {
+        rewritten.description.push_str(
+            "\n\nAgent-facing shortcut: session targets may also use type=\"current_session\". \
+             The tool host resolves it to this running session and persists the schedule as a \
+             concrete resumable_session target.",
+        );
+        add_current_session_to_schema(&mut rewritten.input_schema);
+    }
+    rewritten
+}
+
+fn add_current_session_to_schema(schema: &mut Value) {
+    let Some(target_schema) = schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("target"))
+    else {
+        return;
+    };
+    let Some(one_of) = target_schema.get_mut("oneOf").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(session_schema) = one_of.first_mut().and_then(Value::as_object_mut) else {
+        return;
+    };
+    let Some(type_values) = session_schema
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("type"))
+        .and_then(Value::as_object_mut)
+        .and_then(|type_schema| type_schema.get_mut("enum"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    if !type_values
+        .iter()
+        .any(|value| value.as_str() == Some("current_session"))
+    {
+        type_values.push(Value::String("current_session".into()));
+    }
+}
+
+fn rewrite_current_session_target(mut args: Value, current_session_id: &SessionId) -> Value {
+    let Some(target) = args
+        .as_object_mut()
+        .and_then(|object| object.get_mut("target"))
+        .and_then(Value::as_object_mut)
+    else {
+        return args;
+    };
+
+    rewrite_current_session_target_object(target, current_session_id);
+    args
+}
+
+fn rewrite_current_session_target_object(target: &mut Map<String, Value>, session_id: &SessionId) {
+    let is_current_session = target
+        .get("target_kind")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind == "session")
+        && target
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|target_type| target_type == "current_session");
+
+    if !is_current_session {
+        return;
+    }
+
+    target.insert("type".into(), Value::String("resumable_session".into()));
+    target.insert("session_id".into(), Value::String(session_id.to_string()));
 }
 
 fn empty_schema() -> Value {
@@ -994,6 +1135,143 @@ mod tests {
             .await
             .map_err(|error| format!("{error:?}"))?;
         assert_eq!(listed["schedules"].as_array().map(Vec::len), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_dispatcher_rewrites_create_target() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let current_session_id = SessionId::new();
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service.clone())),
+            current_session_id.clone(),
+        );
+        let tools = dispatcher.tools();
+        let create_tool = tools
+            .iter()
+            .find(|tool| tool.name == "meerkat_schedule_create")
+            .expect("create tool");
+        let target_types = &create_tool.input_schema["properties"]["target"]["oneOf"][0]["properties"]
+            ["type"]["enum"];
+        assert!(
+            target_types
+                .as_array()
+                .expect("target type enum")
+                .iter()
+                .any(|value| value.as_str() == Some("current_session")),
+            "session-scoped wrapper should advertise current_session"
+        );
+
+        let request = json!({
+            "name": "self-followup",
+            "trigger": {
+                "type": "interval",
+                "start_at_utc": (Utc::now() + Duration::minutes(1)).to_rfc3339(),
+                "every_seconds": 60
+            },
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "check this session"
+                }
+            },
+            "misfire_policy": { "type": "skip" },
+            "overlap_policy": "skip_if_running",
+            "missing_target_policy": "mark_misfired",
+            "planning_horizon_occurrences": 1
+        });
+        let raw = RawValue::from_string(request.to_string()).map_err(|error| error.to_string())?;
+        let outcome = dispatcher
+            .dispatch(tool_call(
+                "sched-current-create",
+                "meerkat_schedule_create",
+                raw.as_ref(),
+            ))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+
+        let created: Value = serde_json::from_str(&outcome.result.text_content())
+            .map_err(|error| error.to_string())?;
+        assert_eq!(
+            created["target"]["type"].as_str(),
+            Some("resumable_session")
+        );
+        assert_eq!(
+            created["target"]["session_id"].as_str(),
+            Some(current_session_id.to_string().as_str())
+        );
+
+        let listed = handle_schedule_tools_call(&service, "meerkat_schedule_list", &json!({}))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        assert_eq!(
+            listed["schedules"][0]["target"]["type"].as_str(),
+            Some("resumable_session")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn current_session_schedule_dispatcher_rewrites_update_target() -> Result<(), String> {
+        let service = ScheduleService::new(Arc::new(MemoryScheduleStore::default()));
+        let current_session_id = SessionId::new();
+        let dispatcher = CurrentSessionScheduleToolDispatcher::new(
+            Arc::new(ScheduleToolDispatcher::new(service)),
+            current_session_id.clone(),
+        );
+
+        let create_raw = RawValue::from_string(
+            serde_json::to_string(&schedule_request()).map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        let created = dispatcher
+            .dispatch(tool_call(
+                "sched-current-update-create",
+                "meerkat_schedule_create",
+                create_raw.as_ref(),
+            ))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let created: Value = serde_json::from_str(&created.result.text_content())
+            .map_err(|error| error.to_string())?;
+        let schedule_id = created["schedule_id"]
+            .as_str()
+            .ok_or_else(|| "missing schedule_id".to_string())?;
+
+        let update = json!({
+            "schedule_id": schedule_id,
+            "target": {
+                "target_kind": "session",
+                "type": "current_session",
+                "action": {
+                    "type": "prompt",
+                    "prompt": "updated self followup"
+                }
+            }
+        });
+        let update_raw =
+            RawValue::from_string(update.to_string()).map_err(|error| error.to_string())?;
+        let updated = dispatcher
+            .dispatch(tool_call(
+                "sched-current-update",
+                "meerkat_schedule_update",
+                update_raw.as_ref(),
+            ))
+            .await
+            .map_err(|error| format!("{error:?}"))?;
+        let updated: Value = serde_json::from_str(&updated.result.text_content())
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(
+            updated["target"]["type"].as_str(),
+            Some("resumable_session")
+        );
+        assert_eq!(
+            updated["target"]["session_id"].as_str(),
+            Some(current_session_id.to_string().as_str())
+        );
         Ok(())
     }
 

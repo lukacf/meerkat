@@ -16,6 +16,17 @@ pub fn set_default_schedule_tools(
         .unwrap_or_else(std::sync::PoisonError::into_inner) = default_schedule_tools;
 }
 
+/// Set the default WorkGraph tools on a factory-backed builder.
+pub fn set_default_workgraph_tools(
+    builder: &FactoryAgentBuilder,
+    default_workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
+) {
+    *builder
+        .default_workgraph_tools
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = default_workgraph_tools;
+}
+
 /// Build an embedded/ephemeral session service with optional default scheduler tools.
 pub fn build_embedded_service(
     factory: AgentFactory,

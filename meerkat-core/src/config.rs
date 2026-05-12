@@ -387,6 +387,9 @@ impl Config {
         if other.mob_enabled != defaults.mob_enabled {
             self.tools.mob_enabled = other.mob_enabled;
         }
+        if other.workgraph_enabled != defaults.workgraph_enabled {
+            self.tools.workgraph_enabled = other.workgraph_enabled;
+        }
     }
 
     fn merge_tools_from_toml_presence(&mut self, parsed: &toml::Value, layer: &ToolsConfig) {
@@ -416,6 +419,9 @@ impl Config {
         }
         if tools.contains_key("mob_enabled") {
             self.tools.mob_enabled = layer.mob_enabled;
+        }
+        if tools.contains_key("workgraph_enabled") {
+            self.tools.workgraph_enabled = layer.workgraph_enabled;
         }
     }
 
@@ -1468,6 +1474,8 @@ pub struct ToolsConfig {
     pub comms_enabled: bool,
     /// Mob (multi-agent orchestration) tools enabled
     pub mob_enabled: bool,
+    /// WorkGraph tools enabled
+    pub workgraph_enabled: bool,
 }
 
 impl Default for ToolsConfig {
@@ -1481,6 +1489,7 @@ impl Default for ToolsConfig {
             shell_enabled: false,
             comms_enabled: false,
             mob_enabled: false,
+            workgraph_enabled: false,
         }
     }
 }

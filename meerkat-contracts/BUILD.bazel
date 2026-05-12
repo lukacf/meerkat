@@ -43,7 +43,7 @@ rust_library(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
     proc_macro_deps = all_crate_deps(
@@ -76,7 +76,7 @@ rust_library(
         "//meerkat:__pkg__",
     ],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
     proc_macro_deps = all_crate_deps(
@@ -113,7 +113,7 @@ rust_test(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
     tags = [
@@ -157,7 +157,7 @@ rust_binary(
     srcs = glob(["src/**/*.rs"]),
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "emit-schemas",
         "CARGO_MANIFEST_DIR": "meerkat-contracts",
     },
@@ -198,7 +198,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "auth_binding_wire",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -251,7 +251,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "image_generation_wire",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -302,7 +302,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "live_audio_format",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -352,7 +352,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "live_barge_in",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -402,7 +402,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "live_deadline_and_jitter",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -452,7 +452,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "mob_wire",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -503,7 +503,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "regression_wire_types",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -554,7 +554,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "runtime_turn_metadata_wire_override",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -605,7 +605,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "session_accept_input_typed_round_trip",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },
@@ -656,7 +656,7 @@ rust_test(
     ],
     visibility = ["//visibility:public"],
     rustc_env = {
-        "CARGO_PKG_VERSION": "0.6.5",
+        "CARGO_PKG_VERSION": "0.6.6",
         "CARGO_BIN_NAME": "skill_ref_wire_no_legacy",
         "CARGO_MANIFEST_DIR": "./meerkat-contracts",
     },

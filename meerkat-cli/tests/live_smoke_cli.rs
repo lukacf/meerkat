@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 use tokio::process::Command;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, sleep, timeout};
 
 use meerkat::Config;
 use tempfile::TempDir;
@@ -153,6 +153,39 @@ async fn write_smoke_config(
     let config_toml = toml::to_string_pretty(&config)?;
     tokio::fs::write(rkat_dir.join("config.toml"), config_toml).await?;
     Ok(())
+}
+
+const CLI_GENERATE_IMAGE_FAILURE_MARKERS: &[&str] = &[
+    "unsupported_target",
+    "guard rejected",
+    "invalid_arguments",
+    "execution_failed",
+    "internal image operation state error",
+    "currently unavailable",
+    "don't currently have access",
+    "isn't currently available",
+    "couldn't create",
+    "failed in this session",
+    "\"terminal\":\"denied\"",
+    "\"terminal\": \"denied\"",
+];
+
+fn cli_generate_image_failure_marker(combined: &str) -> Option<&'static str> {
+    let lower = combined.to_ascii_lowercase();
+    CLI_GENERATE_IMAGE_FAILURE_MARKERS
+        .iter()
+        .copied()
+        .find(|failure| lower.contains(failure))
+}
+
+fn retryable_cli_generate_image_turn_failure(combined: &str) -> bool {
+    if cli_generate_image_failure_marker(combined).is_some() {
+        return false;
+    }
+    let lower = combined.to_ascii_lowercase();
+    lower.contains("llmfailure")
+        || lower.contains("turn abandoned")
+        || lower.contains("completed without user-visible text")
 }
 
 // ===========================================================================
@@ -450,43 +483,60 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
     write_smoke_config(&project_dir).await?;
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
-    let output = timeout(
-        Duration::from_secs(600),
-        Command::new(&rkat)
-            .current_dir(&project_dir)
-            .args([
-                "run",
-                "Check today's news and generate an infographic image with the top news. Save it to top-news-infographic.png",
-                "--yolo",
-                "-m",
-                "gpt-5.5",
-            ])
-            .output(),
-    )
-    .await??;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = format!("{stdout}\n{stderr}");
-    assert!(
-        output.status.success(),
-        "rkat generate_image run failed (exit {:?}): {combined}",
-        output.status.code()
+    let image_model =
+        std::env::var("SMOKE_IMAGE_MODEL_OPENAI").unwrap_or_else(|_| "gpt-image-2".to_string());
+    let prompt = format!(
+        r#"Use the generate_image tool exactly once. Pass request.provider="openai", request.model="{image_model}", request.intent="generate", request.prompt="A clean square PNG test card with CLI-IMAGE-73 written in large black letters", request.size="1024x1024", request.quality="low", request.format="png", request.count=1, and request.provider_params={{"background":"opaque","moderation":"low","action":"generate"}}. After generate_image returns, call blob_save_file exactly once with the returned blob_id, path "top-news-infographic.png", and overwrite=false. Then reply with CLI-IMAGE-73-DONE and no extra prose."#
     );
-    for failure in [
-        "unsupported_target",
-        "guard rejected",
-        "invalid_arguments",
-        "execution_failed",
-        "internal image operation state error",
-        "currently unavailable",
-        "don't currently have access",
-        "isn't currently available",
-        "couldn't create",
-        "failed in this session",
-        "\"terminal\":\"denied\"",
-        "\"terminal\": \"denied\"",
-    ] {
+    let mut combined = String::new();
+    for attempt in 1..=3 {
+        let output = timeout(
+            Duration::from_secs(600),
+            Command::new(&rkat)
+                .current_dir(&project_dir)
+                .args([
+                    "run",
+                    &prompt,
+                    "--allow-tool",
+                    "generate_image",
+                    "--allow-tool",
+                    "blob_save_file",
+                    "--no-web-search",
+                    "--max-tokens",
+                    "768",
+                    "-m",
+                    "gpt-5.5",
+                ])
+                .output(),
+        )
+        .await??;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let attempt_combined = format!("{stdout}\n{stderr}");
+        if output.status.success() {
+            combined = attempt_combined;
+            break;
+        }
+
+        if attempt < 3 && retryable_cli_generate_image_turn_failure(&attempt_combined) {
+            eprintln!(
+                "[scenario 73] retrying CLI generate_image smoke after transient model turn failure on attempt {attempt}"
+            );
+            sleep(Duration::from_secs(5 * attempt)).await;
+            continue;
+        }
+
+        panic!(
+            "rkat generate_image run failed (exit {:?}): {attempt_combined}",
+            output.status.code()
+        );
+    }
+    assert!(
+        !combined.is_empty(),
+        "rkat generate_image run exhausted retries without producing output"
+    );
+    for failure in CLI_GENERATE_IMAGE_FAILURE_MARKERS.iter().copied() {
         assert!(
             !combined.to_ascii_lowercase().contains(failure),
             "CLI generate_image smoke hit failure marker {failure:?}: {combined}"

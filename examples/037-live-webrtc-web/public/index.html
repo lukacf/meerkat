@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Meerkat Live WebRTC Smoke Test</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%231c1a17'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app">
+    <header class="rail">
+      <div class="brand">
+        <span class="brand__mark"></span>
+        <span>Meerkat</span>
+        <span class="brand__sep">/</span>
+        <span class="brand__sub">Live WebRTC Smoke</span>
+      </div>
+      <div id="status" class="status" data-state="idle">
+        <span class="status__dot"></span>
+        <span id="status-text">IDLE</span>
+      </div>
+      <div class="actions">
+        <button id="start" class="btn btn--primary">Start</button>
+        <button id="interrupt" class="btn" disabled>Interrupt</button>
+        <button id="refresh" class="btn" disabled>Refresh</button>
+        <button id="stop" class="btn" disabled>Stop</button>
+      </div>
+    </header>
+
+    <section class="config">
+      <label>
+        <span>Live model</span>
+        <input id="model" value="gpt-realtime-2" autocomplete="off">
+      </label>
+      <label>
+        <span>Worker model</span>
+        <input id="worker-model" value="gpt-5.5" autocomplete="off">
+      </label>
+      <label>
+        <span>Turning</span>
+        <select id="turning-mode">
+          <option value="provider_managed">provider managed</option>
+          <option value="explicit_commit">explicit commit</option>
+        </select>
+      </label>
+      <div class="facts">
+        <span>Session <strong id="session-id">-</strong></span>
+        <span>Channel <strong id="channel-id">-</strong></span>
+        <span>SDP <strong id="sdp-state">-</strong></span>
+      </div>
+    </section>
+
+    <main class="body">
+      <div class="workbench">
+        <section class="section stream">
+          <header class="section__head">
+            <span class="eyebrow">Transcript</span>
+            <span class="meta-mono section__count" id="turn-count">0 turns</span>
+          </header>
+          <div class="turns" id="turns">
+            <div class="empty" id="empty-turns">
+              <span class="label-mono">Manual live smoke test</span>
+              <div class="empty__title">Start, allow microphone, then create things by voice</div>
+              <div class="empty__body">
+                Say: "Create a mob that reviews whether we should ship today with a lead, skeptic, and release manager."
+                Then try: "Ask the skeptic to focus on rollback risk" or "save a note that Northstar is the release name."
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section text-pane">
+          <header class="section__head">
+            <span class="eyebrow">Text output</span>
+            <span class="meta-mono section__count" id="text-output-count">0</span>
+          </header>
+          <div class="text-output-list" id="text-output">
+            <div class="empty small">
+              <span class="label-mono">Waiting</span>
+              <div class="empty__body">Long file lists, tables, code, logs, and search summaries should appear here instead of being read aloud.</div>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <aside class="side">
+        <section class="panel">
+          <header class="panel__head">
+            <span class="eyebrow">Tool calls</span>
+            <span class="meta-mono panel__count" id="tool-count">0</span>
+          </header>
+          <div class="panel__body" id="tools">
+            <div class="empty small">
+              <span class="label-mono">Waiting</span>
+              <div class="empty__body">Live tools include note capture plus the real mob-mcp tool surface: mob_create, mob_spawn_member, mob_list, and friends.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head">
+            <span class="eyebrow">Mobs</span>
+            <span class="meta-mono panel__count" id="mob-count">0</span>
+          </header>
+          <div class="panel__body" id="mobs">
+            <div class="empty small">
+              <span class="label-mono">None yet</span>
+              <div class="empty__body">Ask the live agent to create a mob. This panel should update from real Meerkat state.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head">
+            <span class="eyebrow">Notes</span>
+            <span class="meta-mono panel__count" id="note-count">0</span>
+          </header>
+          <div class="panel__body" id="notes">
+            <div class="empty small">
+              <span class="label-mono">None yet</span>
+              <div class="empty__body">Ask the live agent to remember or save something.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <header class="panel__head">
+            <span class="eyebrow">Transport</span>
+            <span class="meta-mono panel__count" id="transport-count">0 obs</span>
+          </header>
+          <div class="panel__body transport">
+            <dl class="kv">
+              <dt>Peer</dt><dd id="peer-state">new</dd>
+              <dt>ICE</dt><dd id="ice-state">new</dd>
+              <dt>Signaling</dt><dd id="signaling-state">stable</dd>
+              <dt>Data</dt><dd id="dc-state">closed</dd>
+              <dt>Mic</dt><dd id="mic-state">idle</dd>
+            </dl>
+            <div id="events" class="events"></div>
+          </div>
+        </section>
+      </aside>
+    </main>
+
+    <footer class="composer" id="composer" data-live="false">
+      <div class="composer__left">
+        <span class="meter" id="meter"><span></span><span></span><span></span><span></span><span></span></span>
+        <span class="meta-mono" id="audio-state">microphone idle</span>
+      </div>
+      <form id="text-form" class="composer__center">
+        <input id="text-input" placeholder="Optional text chunk over data channel" autocomplete="off" disabled>
+        <button class="btn" id="send-text" disabled>Send text</button>
+        <button class="btn" id="commit-audio" type="button" disabled>Commit audio</button>
+        <button class="btn" id="commit-text" type="button" disabled>Commit text</button>
+      </form>
+      <div class="composer__right">
+        <input id="truncate-item" placeholder="item_id">
+        <input id="truncate-ms" placeholder="played_ms">
+        <button class="btn" id="truncate" disabled>Truncate</button>
+      </div>
+    </footer>
+
+    <audio id="remote" autoplay></audio>
+  </div>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

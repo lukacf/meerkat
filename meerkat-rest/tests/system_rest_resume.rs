@@ -59,6 +59,7 @@ async fn inner_test_rest_resume_metadata() {
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let runtime_adapter = persistence.runtime_adapter();
+    let workgraph_store = persistence.workgraph_store();
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(persistence.session_store())));
     #[cfg(feature = "mob")]
     let builder_mob_tools_slot = Arc::clone(&builder.default_mob_tools);
@@ -97,6 +98,11 @@ async fn inner_test_rest_resume_metadata() {
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
         )),
+        workgraph_service: meerkat::WorkGraphService::with_scope(
+            workgraph_store,
+            "test-realm",
+            meerkat::WorkNamespace::default(),
+        ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
         instance_id: None,
@@ -185,6 +191,7 @@ async fn inner_test_rest_resume_metadata() {
         Arc::new(meerkat_store::MemoryBlobStore::new()),
     );
     let runtime_adapter2 = persistence2.runtime_adapter();
+    let workgraph_store2 = persistence2.workgraph_store();
     builder2.default_session_store =
         Some(Arc::new(StoreAdapter::new(persistence2.session_store())));
     #[cfg(feature = "mob")]
@@ -230,6 +237,11 @@ async fn inner_test_rest_resume_metadata() {
         schedule_service: meerkat::ScheduleService::new(Arc::new(
             meerkat::MemoryScheduleStore::default(),
         )),
+        workgraph_service: meerkat::WorkGraphService::with_scope(
+            workgraph_store2,
+            "test-realm",
+            meerkat::WorkNamespace::default(),
+        ),
         webhook_auth: meerkat_rest::webhook::WebhookAuth::None,
         realm: meerkat_core::RealmId::parse("test-realm").expect("valid realm"),
         instance_id: None,

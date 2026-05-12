@@ -7,7 +7,6 @@ and a lead analyst synthesizes findings into a cohesive report.
 - Diverge/converge coordination pattern
 - Multiple specialized profiles (market, tech, user research)
 - Role wiring for cross-referencing between researchers
-- Task board for tracking research hypotheses
 - Evidence-based synthesis
 
 ## Profiles

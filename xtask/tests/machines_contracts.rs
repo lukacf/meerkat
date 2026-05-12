@@ -356,7 +356,7 @@ fn row22_kernel_public_api_contract_rejects_legacy_exports() {
 }
 
 #[test]
-fn kernel_generated_inventory_is_canonical_five_only() {
+fn kernel_generated_inventory_is_canonical_six_only() {
     require_live_workspace_runfiles();
     let root = repo_root().expect("repo root");
     let generated_mod = root.join("meerkat-machine-kernels/src/generated/mod.rs");
@@ -368,6 +368,7 @@ fn kernel_generated_inventory_is_canonical_five_only() {
         "mob",
         "occurrence_lifecycle",
         "schedule_lifecycle",
+        "work_graph_lifecycle",
     ] {
         assert!(
             contents.contains(&format!("pub mod {required};")),
@@ -808,14 +809,6 @@ async fn handle_cancel_flow(&mut self) -> Result<(), MobError> {
     Ok(())
 }
 
-async fn handle_task_create(&mut self) -> Result<TaskId, MobError> {
-    let task_id = self.task_board_service.create_task().await?;
-    if let Err(error) = self.apply_dsl_input(MobMachineInput::TaskCreate { task_id }, "handle_task_create") {
-        tracing::warn!(%error, "TaskCreate DSL input rejected; DSL and event-sourced task board may diverge");
-    }
-    Ok(task_id)
-}
-
 async fn handle_force_cancel(&mut self) -> Result<(), MobError> {
     self.cancel_runtime().await
 }
@@ -835,13 +828,7 @@ async fn dispatch(&mut self, command: MobCommand) {
 
     let mismatches = collect_mob_runtime_catalog_command_gate_mismatches(dir.path())
         .expect("catalog command gate mismatches");
-    for input in [
-        "RunFlow",
-        "CancelFlow",
-        "TaskCreate",
-        "SetSpawnPolicy",
-        "ForceCancel",
-    ] {
+    for input in ["RunFlow", "CancelFlow", "SetSpawnPolicy", "ForceCancel"] {
         assert!(
             mismatches.iter().any(|mismatch| {
                 mismatch.contains(&format!("MobCommand::{input}"))
@@ -870,18 +857,6 @@ async fn handle_run_flow(&mut self) -> Result<RunId, MobError> {
 async fn handle_cancel_flow(&mut self) -> Result<(), MobError> {
     self.apply_command_admission(MobMachineInput::CancelFlow, MobState::Running, "cancel_flow_input")?;
     Ok(())
-}
-
-async fn handle_task_create(&mut self) -> Result<TaskId, MobError> {
-    let task_id = TaskId::new();
-    let prepared = self.prepare_command_admission(
-        MobMachineInput::TaskCreate { task_id },
-        MobState::Running,
-        "handle_task_create",
-    )?;
-    self.task_board_service.create_task().await?;
-    self.commit_prepared_dsl_input(prepared);
-    Ok(task_id)
 }
 
 async fn handle_force_cancel(&mut self) -> Result<(), MobError> {

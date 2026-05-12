@@ -353,8 +353,9 @@ pub struct PeerInput {
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
     /// Optional handling-mode override for actionable peer inputs.
     /// When present on Message/Request/no-convention, overrides kind-based
-    /// policy defaults. Forbidden on ResponseProgress and ResponseTerminal
-    /// (enforced by [`validate_peer_handling_mode`]).
+    /// policy defaults. Forbidden on ResponseProgress; ResponseTerminal may
+    /// carry a typed override for requester reaction urgency (enforced by
+    /// [`validate_peer_handling_mode`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handling_mode: Option<HandlingMode>,
 }

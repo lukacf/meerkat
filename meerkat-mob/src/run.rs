@@ -141,10 +141,6 @@ macro_rules! non_flow_reducer_authority_mob_machine_inputs {
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
             | mob_dsl::MobMachineInput::Destroy
-            | mob_dsl::MobMachineInput::TaskCreate { .. }
-            | mob_dsl::MobMachineInput::TaskUpdate { .. }
-            | mob_dsl::MobMachineInput::TaskList
-            | mob_dsl::MobMachineInput::TaskGet
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring
@@ -1215,10 +1211,6 @@ impl FlowAuthorityInputRecord {
             | mob_dsl::MobMachineInput::Complete
             | mob_dsl::MobMachineInput::Reset
             | mob_dsl::MobMachineInput::Destroy
-            | mob_dsl::MobMachineInput::TaskCreate { .. }
-            | mob_dsl::MobMachineInput::TaskUpdate { .. }
-            | mob_dsl::MobMachineInput::TaskList
-            | mob_dsl::MobMachineInput::TaskGet
             | mob_dsl::MobMachineInput::RosterSnapshot
             | mob_dsl::MobMachineInput::ListMembers
             | mob_dsl::MobMachineInput::ListMembersIncludingRetiring

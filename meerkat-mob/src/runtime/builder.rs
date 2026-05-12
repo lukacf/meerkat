@@ -457,7 +457,6 @@ fn seed_mob_authority_restore_failures(
 
 struct RuntimeWiring {
     roster: Arc<RwLock<RosterAuthority>>,
-    task_board: Arc<RwLock<TaskBoard>>,
     /// Observable phase threaded from the builder's reconstruction logic into
     /// `start_runtime_with_components`. This can differ from the DSL authority
     /// phase after a retained `MobDestroying` marker: public authority is
@@ -741,7 +740,6 @@ impl MobBuilder {
         Ok(Self::start_runtime(
             definition,
             Roster::new(),
-            TaskBoard::default(),
             MobState::Running,
             storage.events.clone(),
             storage.runs.clone(),
@@ -936,11 +934,9 @@ impl MobBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
         let seeded_restore_diagnostics = HashMap::new();
-        let task_board = TaskBoard::project(&mob_events);
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
-        let task_board_state = Arc::new(RwLock::new(TaskBoard::default()));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
         let initial_dsl_authority = Box::new(seed_mob_authority(dsl_seed_state));
@@ -952,7 +948,6 @@ impl MobBuilder {
         let (_preview_phase_tx, preview_phase_rx) = tokio::sync::watch::channel(resumed_state);
         let mut wiring = RuntimeWiring {
             roster: roster_state.clone(),
-            task_board: task_board_state.clone(),
             public_phase: resumed_state,
             destroy_admitted,
             // Placeholder; the final authority is seeded below after
@@ -1022,7 +1017,6 @@ impl MobBuilder {
             .machine_state_watch_tx
             .send(wiring.dsl_authority.state.clone());
         *wiring.roster.write().await = RosterAuthority::from_roster(roster);
-        *wiring.task_board.write().await = task_board;
 
         Ok(Self::start_runtime_with_components(
             definition,
@@ -1598,7 +1592,6 @@ impl MobBuilder {
     fn start_runtime(
         definition: Arc<MobDefinition>,
         initial_roster: Roster,
-        initial_task_board: TaskBoard,
         initial_state: MobState,
         events: Arc<dyn MobEventStore>,
         run_store: Arc<dyn MobRunStore>,
@@ -1622,12 +1615,10 @@ impl MobBuilder {
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state.clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
-        let task_board = Arc::new(RwLock::new(initial_task_board));
         let (command_tx, command_rx) = mpsc::channel(64);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster,
-            task_board,
             public_phase: initial_state,
             destroy_admitted: initial_state == MobState::Destroyed,
             dsl_authority,
@@ -1671,7 +1662,6 @@ impl MobBuilder {
     ) -> MobHandle {
         let RuntimeWiring {
             roster,
-            task_board,
             public_phase: wiring_public_phase,
             destroy_admitted,
             dsl_authority,
@@ -1748,11 +1738,6 @@ impl MobBuilder {
             events.clone(),
             topology_service,
         );
-        let task_board_service = crate::tasks::MobTaskBoardService::new(
-            definition.id.clone(),
-            task_board.clone(),
-            events.clone(),
-        );
         let spawn_policy = Arc::new(super::spawn_policy::SpawnPolicyService::new());
 
         // Wave-c C-6c — flip the composition binding from `Standalone`
@@ -1778,7 +1763,6 @@ impl MobBuilder {
         let actor = MobActor {
             definition,
             roster,
-            task_board,
             events,
             run_store,
             provisioner,
@@ -1804,7 +1788,6 @@ impl MobBuilder {
             runtime_metadata,
             supervisor_bridge,
             pending_supervisor_rotation_fallback,
-            task_board_service,
             spawn_policy,
             dsl_authority: *dsl_authority,
             machine_state_watch_tx,

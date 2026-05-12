@@ -228,7 +228,6 @@ async function scenarioRawMob004({ wasm }) {
             comms: true,
             memory: false,
             mob: false,
-            mob_tasks: false,
           },
         },
       },

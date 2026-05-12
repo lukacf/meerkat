@@ -279,6 +279,19 @@ impl CoreExecutor for SessionRuntimeExecutor {
             ));
         }
 
+        if let Some(output) = self
+            .runtime
+            .try_forward_runtime_primitive_to_live_adapter(
+                &self.session_id,
+                run_id.clone(),
+                &primitive,
+            )
+            .await
+            .map_err(CoreExecutorError::apply_failed_runtime_context)?
+        {
+            return Ok(output);
+        }
+
         // Context-only staged primitives may land directly as runtime
         // system-context appends, but terminal peer responses carry a typed
         // apply intent that requires a requester reaction turn.

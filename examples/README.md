@@ -1,6 +1,6 @@
 # Meerkat Examples Library
 
-35 examples covering every Meerkat surface and feature,
+37 examples covering every Meerkat surface and feature,
 from "Hello World" to production multi-agent systems.
 
 ## Quick Start
@@ -64,7 +64,7 @@ below describes the expected local validation level.
 
 | Status | Examples |
 |--------|----------|
-| **Live when provider keys/services are available** | 001-003, 005-015, 017-028, 034-036 |
+| **Live when provider keys/services are available** | 001-003, 005-015, 017-028, 034-037 |
 | **Build-verified locally** | Registered Rust examples via `./scripts/repo-cargo check`; 031 and 032 via Vite builds; 033 via `sdks/web` WASM artifacts plus Vite |
 | **Syntax-checked / recipe-oriented** | 004, 010, 028-030 shell entrypoints and 036 audio setup when live provider/audio devices are unavailable |
 
@@ -128,6 +128,7 @@ below describes the expected local validation level.
 | 034 | [codemob-mcp](034-codemob-mcp/) | Rust (MCP) | Multi-agent MCP server — 7 mobpacks (advisor, review, architect, brainstorm, red-team, panel, rct) with flow and comms execution, progress notifications, multi-provider model diversity |
 | 035 | [mdm-tux-rs](035-mdm-tux-rs/) | Rust + TUI + Docker | Meerkat Device Manager: TUX terminal controller, kennel rendezvous, remote targets, hive coordination, peer comms, and scheduler wakeups |
 | 036 | [realtime-audio-py](036-realtime-audio-py/) | Python | Command-line OpenAI realtime audio app with live transcript, callback tools, inline mob skills, and helper sub-agents |
+| 037 | [live-webrtc-web](037-live-webrtc-web/) | Web + TypeScript | Browser WebRTC smoke-test cockpit for Meerkat Live, with AEC microphone capture, SDP signaling, data-channel observations, live controls, callback notes, and real mob-mcp tools |
 
 ## Examples by Feature
 
@@ -154,9 +155,9 @@ below describes the expected local validation level.
 | **Flow Engine** | 034 |
 | **Remote Computer Control** | 035 |
 | **Scheduling** | 035 |
-| **Realtime Audio** | 036 |
+| **Realtime Audio** | 036, 037 |
 | **REST API** | 022 |
-| **JSON-RPC** | 023, 035 |
+| **JSON-RPC** | 023, 035, 037 |
 | **Structured Output** | 008 |
 
 ## Examples by Surface
@@ -168,6 +169,7 @@ below describes the expected local validation level.
 | **TypeScript SDK** | 003, 008, 023, 027 |
 | **CLI (Shell)** | 004, 010, 028, 029, 030, 031 |
 | **WASM (Browser)** | 029, 030, 031, 032 |
+| **WebRTC (Browser)** | 037 |
 
 ## Prerequisites
 

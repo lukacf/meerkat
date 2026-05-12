@@ -59,11 +59,7 @@ impl DefaultPolicyTable {
         {
             let (wake_mode, drain_policy, routing_disposition) = match mode {
                 meerkat_core::types::HandlingMode::Queue => (
-                    if runtime_idle {
-                        WakeMode::WakeIfIdle
-                    } else {
-                        WakeMode::None
-                    },
+                    WakeMode::WakeIfIdle,
                     DrainPolicy::QueueNextTurn,
                     RoutingDisposition::Queue,
                 ),
@@ -704,6 +700,17 @@ mod tests {
         let decision = DefaultPolicyTable::resolve(&input, true);
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
+
+        let running_decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(
+            running_decision.routing_disposition,
+            RoutingDisposition::Queue
+        );
+        assert_eq!(
+            running_decision.wake_mode,
+            WakeMode::None,
+            "explicit queue means next boundary, not interrupt-yielding, while the target is running"
+        );
     }
 
     #[test]
@@ -801,6 +808,14 @@ mod tests {
         assert_eq!(decision.routing_disposition, RoutingDisposition::Queue);
         assert_eq!(decision.apply_mode, ApplyMode::StageRunStart);
         assert_eq!(decision.wake_mode, WakeMode::WakeIfIdle);
+
+        let running_decision = DefaultPolicyTable::resolve(&input, false);
+        assert_eq!(
+            running_decision.routing_disposition,
+            RoutingDisposition::Queue
+        );
+        assert_eq!(running_decision.apply_mode, ApplyMode::StageRunStart);
+        assert_eq!(running_decision.wake_mode, WakeMode::WakeIfIdle);
     }
 
     #[test]

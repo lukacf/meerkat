@@ -692,10 +692,10 @@ fn rkat_rpc_main_installs_default_live_tool_timeout() {
     // pin a one-line build-pattern invariant.
     let main_rs = include_str!("../src/main.rs");
     assert!(
-        main_rs.contains(".with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT)"),
-        "G6 regression: meerkat-rpc/src/main.rs must apply \
-         `.with_tool_timeout(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT)` on the \
-         production live host; without it, a stuck tool can hold the live \
-         provider's turn indefinitely."
+        main_rs.contains(".unwrap_or(meerkat_live::DEFAULT_LIVE_TOOL_TIMEOUT)")
+            && main_rs.contains(".with_tool_timeout(live_tool_timeout)"),
+        "G6 regression: meerkat-rpc/src/main.rs must apply a live tool timeout \
+         on the production live host, defaulting to DEFAULT_LIVE_TOOL_TIMEOUT; \
+         without it, a stuck tool can hold the live provider's turn indefinitely."
     );
 }

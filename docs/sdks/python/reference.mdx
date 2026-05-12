@@ -8,18 +8,19 @@ icon: "book"
 
 ```python
 from meerkat import CONTRACT_VERSION
-print(CONTRACT_VERSION)  # "0.6.2"
+print(CONTRACT_VERSION)  # "0.6.5"
 ```
 
 ## Primary handles
 
 ```python
-from meerkat import MeerkatClient, Session, DeferredSession, Mob
+from meerkat import MeerkatClient, Session, DeferredSession, LiveChannel, Mob
 ```
 
 - `MeerkatClient` owns the runtime process and transport.
 - `Session` is a live multi-turn handle.
 - `DeferredSession` is a created session that has not run its first turn yet.
+- `LiveChannel` is the session-bound wrapper for the `live/*` RPC surface.
 - `Mob` is a first-class mob control handle.
 
 ## Session result and metadata types
@@ -184,6 +185,41 @@ Types:
 - request is sent on `async with` entry
 - `events.result` is available after iteration
 - `BackgroundJobCompleted.terminal_status` carries background job completion semantics; `legacy_status` is only the optional wire `status` display mirror
+
+## Live channels
+
+`RealtimeChannel` and the old realtime convenience helpers are no longer public
+SDK handles. The current helper is `LiveChannel.session(client, session_id, ...)`,
+which binds a session id and stores the `channel_id` returned by `live/open`.
+
+```python
+from meerkat import LiveChannel, MeerkatClient
+
+client = MeerkatClient()
+await client.connect(live_ws=True)
+session = await client.create_session("Open a live channel")
+channel = LiveChannel.session(client, session.id, turning_mode="explicit_commit")
+opened = await channel.open()
+await channel.send_input_text("hello")
+await channel.commit_input(response_modality="text")
+await channel.refresh()
+await channel.close()
+await client.close()
+```
+
+Direct `MeerkatClient` helper names mirror the RPC methods:
+
+- `live_open(session_id, turning_mode=None)`
+- `live_status(channel_id)`
+- `live_close(channel_id)`
+- `live_send_input_text(channel_id, text)`
+- `live_send_input_audio(channel_id, data_base64, sample_rate_hz, channels)`
+- `live_send_input_image(channel_id, mime, data_base64)`
+- `live_send_input_video_frame(channel_id, codec, data_base64, timestamp_ms)`
+- `live_commit_input(channel_id, response_modality=None)`
+- `live_interrupt(channel_id)`
+- `live_truncate(channel_id, item_id, content_index, audio_played_ms)`
+- `live_refresh(channel_id)`
 
 ## Capability and error model
 

@@ -12,7 +12,7 @@ import type {
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
 
 /** Expected WASM runtime version — must match the compiled binary. */
-const EXPECTED_VERSION = '0.6.5';
+const EXPECTED_VERSION = '0.6.6';
 
 /**
  * Convert a camelCase config object to the snake_case expected by WASM.
@@ -21,13 +21,11 @@ const EXPECTED_VERSION = '0.6.5';
  */
 function toWasmConfig(config: RuntimeConfig): Record<string, unknown> {
   return {
-    api_key: config.apiKey,
     anthropic_api_key: config.anthropicApiKey,
     openai_api_key: config.openaiApiKey,
     gemini_api_key: config.geminiApiKey,
     model: config.model,
     max_sessions: config.maxSessions,
-    base_url: config.baseUrl,
     anthropic_base_url: config.anthropicBaseUrl,
     openai_base_url: config.openaiBaseUrl,
     gemini_base_url: config.geminiBaseUrl,

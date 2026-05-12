@@ -29,13 +29,17 @@ use meerkat::{
     StagedSessionRegistry, StagedSlot, encode_llm_client_override_for_service,
 };
 use meerkat_client::{LlmClient, realtime_session::RealtimeSessionOpenConfig};
+use meerkat_core::AgentToolDispatcher;
 #[cfg(all(test, feature = "mcp"))]
 use meerkat_core::ToolConfigChangedPayload;
+#[cfg(feature = "mcp")]
+use meerkat_core::ToolGateway;
 use meerkat_core::event::AgentEvent;
 use meerkat_core::lifecycle::core_executor::{CoreApplyOutput, CoreApplyTerminal};
 use meerkat_core::lifecycle::run_primitive::{
     ConversationContextAppend, CoreRenderable, RunApplyBoundary, RunPrimitive,
 };
+use meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt;
 use meerkat_core::service::{
     AppendSystemContextRequest, AppendSystemContextResult, CreateSessionRequest,
     DeferredPromptPolicy, InitialTurnPolicy, MobToolAuthorityContext, SessionControlError,
@@ -54,8 +58,6 @@ use meerkat_core::{
     SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
     SurfaceSessionRecoveryOverrides, SystemMessage, ToolScopeSnapshot, build_recovered_session,
 };
-#[cfg(feature = "mcp")]
-use meerkat_core::{AgentToolDispatcher, ToolGateway};
 use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
 use meerkat_runtime::{
     HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
@@ -184,6 +186,31 @@ impl RuntimePreAdmissionRestore for SessionRuntime {
     fn restore_or_release(&self, session_id: &SessionId, input_id: &InputId) {
         self.restore_or_release_runtime_pre_admission(session_id, input_id);
     }
+}
+
+fn workgraph_default_realm_id(persistence: &PersistenceBundle) -> String {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(manifest) = persistence.manifest() {
+        return manifest.realm.as_str().to_owned();
+    }
+
+    let _ = persistence;
+    "default".to_string()
+}
+
+fn set_default_workgraph_tools(
+    builder: &FactoryAgentBuilder,
+    store: Arc<dyn meerkat::WorkGraphStore>,
+    default_realm_id: String,
+) {
+    let service = meerkat::WorkGraphService::with_scope(
+        store,
+        default_realm_id,
+        meerkat::WorkNamespace::default(),
+    );
+    let dispatcher =
+        Arc::new(meerkat::WorkGraphToolSurface::new(service)) as Arc<dyn AgentToolDispatcher>;
+    meerkat::surface::set_default_workgraph_tools(builder, Some(dispatcher));
 }
 
 #[derive(Clone, Copy)]
@@ -1188,6 +1215,7 @@ pub struct SessionRuntime {
     factory: AgentFactory,
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
+    workgraph_store: Arc<dyn meerkat::WorkGraphStore>,
     artifact_store: Arc<dyn meerkat_core::ArtifactStore>,
     schedule_host: Mutex<Option<meerkat::surface::ScheduleHostHandle>>,
     /// Canonical staged-session authority (facade-owned). Holds sessions
@@ -1569,6 +1597,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder = FactoryAgentBuilder::new(factory, config);
@@ -1584,6 +1613,11 @@ impl SessionRuntime {
             Some(Arc::new(ScheduleToolDispatcher::new(
                 schedule_service.clone(),
             ))),
+        );
+        set_default_workgraph_tools(
+            &builder,
+            workgraph_store.clone(),
+            workgraph_default_realm_id(&persistence),
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
@@ -1639,6 +1673,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
@@ -1696,6 +1731,7 @@ impl SessionRuntime {
         notification_sink: crate::router::NotificationSink,
     ) -> Self {
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_store = persistence.workgraph_store();
         let artifact_store = persistence.artifact_store();
         let factory_clone = factory.clone();
         let builder =
@@ -1712,6 +1748,11 @@ impl SessionRuntime {
             Some(Arc::new(ScheduleToolDispatcher::new(
                 schedule_service.clone(),
             ))),
+        );
+        set_default_workgraph_tools(
+            &builder,
+            workgraph_store.clone(),
+            workgraph_default_realm_id(&persistence),
         );
         let approval_service = approval_service_from_persistence(&persistence);
         let (service, runtime_adapter) =
@@ -1767,6 +1808,7 @@ impl SessionRuntime {
             factory: factory_clone,
             service,
             schedule_service,
+            workgraph_store,
             artifact_store,
             schedule_host: Mutex::new(None),
             staged_sessions,
@@ -1860,7 +1902,7 @@ impl SessionRuntime {
     /// Writes through the shared slot to the `FactoryAgentBuilder` inside the
     /// session service — the builder that actually creates agents. The runtime's
     /// own `factory` clone is NOT used for session creation.
-    pub fn set_mob_tools(&mut self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
+    pub fn set_mob_tools(&self, factory: Arc<dyn meerkat_core::service::MobToolsFactory>) {
         *self
             .builder_mob_tools_slot
             .write()
@@ -2859,17 +2901,6 @@ impl SessionRuntime {
         )
     }
 
-    /// Build a callback-backed tool dispatcher for the live-adapter host.
-    ///
-    /// Returns `None` until `set_callback_channel` has been called (which the
-    /// `RpcServer` constructor does). Callers (`MethodRouter::with_live_ws`)
-    /// invoke this after server construction and pass the dispatcher to
-    /// `LiveAdapterHost::set_tool_dispatcher` so live provider tool calls
-    /// route through Meerkat's callback-tool authority (A4/A5).
-    pub fn live_tool_dispatcher(&self) -> Option<Arc<dyn meerkat_core::AgentToolDispatcher>> {
-        self.recovery_external_tools()
-    }
-
     /// Translate the surface-agnostic [`meerkat::session_runtime::errors::RecoveryError`]
     /// onto an RPC wire error. Stays in `meerkat-rpc` because the
     /// destination type (`RpcError`) is RPC-private.
@@ -2974,6 +3005,18 @@ impl SessionRuntime {
 
     pub fn schedule_service(&self) -> ScheduleService {
         self.schedule_service.clone()
+    }
+
+    pub fn workgraph_service(&self) -> meerkat::WorkGraphService {
+        let realm_id = self
+            .realm_id()
+            .map(|realm_id| realm_id.to_string())
+            .unwrap_or_else(|| "default".to_string());
+        meerkat::WorkGraphService::with_scope(
+            self.workgraph_store.clone(),
+            realm_id,
+            meerkat::WorkNamespace::default(),
+        )
     }
 
     pub fn blob_store(&self) -> Arc<dyn meerkat_core::BlobStore> {
@@ -3701,6 +3744,110 @@ impl SessionRuntime {
             .and_then(|guard| guard.clone())
     }
 
+    async fn active_live_channel_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Option<(
+        Arc<meerkat_live::LiveAdapterHost>,
+        meerkat_live::LiveChannelId,
+    )> {
+        let host = self.live_adapter_host()?;
+        for channel_id in host.active_channels().await {
+            if host
+                .channel_session(&channel_id)
+                .await
+                .is_ok_and(|bound| bound == *session_id)
+            {
+                return Some((host, channel_id));
+            }
+        }
+        None
+    }
+
+    fn live_text_from_runtime_primitive(primitive: &RunPrimitive) -> Option<String> {
+        let mut parts = Vec::new();
+        let prompt = primitive.extract_content_input().text_content();
+        if !prompt.trim().is_empty() {
+            parts.push(prompt);
+        }
+        if let RunPrimitive::StagedInput(staged) = primitive {
+            for append in &staged.context_appends {
+                let text = render_context_append_text(&append.content);
+                if !text.trim().is_empty() {
+                    parts.push(text);
+                }
+            }
+        }
+        let text = parts.join("\n\n").trim().to_string();
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// Project runtime-routed peer/external input into an active live adapter.
+    ///
+    /// A live-only session can receive peer ingress while the provider-hosted
+    /// realtime conversation is already open. In that case the runtime loop is
+    /// still the admission/receipt authority, but the apply side is the live
+    /// adapter, not a second vanilla LLM turn. The adapter will project the
+    /// resulting provider observations back into canonical session history.
+    pub(crate) async fn try_forward_runtime_primitive_to_live_adapter(
+        &self,
+        session_id: &SessionId,
+        run_id: RunId,
+        primitive: &RunPrimitive,
+    ) -> Result<Option<CoreApplyOutput>, String> {
+        if primitive.is_context_only_apply_without_turn() {
+            return Ok(None);
+        }
+
+        let Some((host, channel_id)) = self.active_live_channel_for_session(session_id).await
+        else {
+            return Ok(None);
+        };
+        let Some(text) = Self::live_text_from_runtime_primitive(primitive) else {
+            return Ok(None);
+        };
+
+        if primitive
+            .turn_metadata()
+            .and_then(|metadata| metadata.handling_mode)
+            == Some(meerkat_core::types::HandlingMode::Steer)
+        {
+            host.send_command(
+                &channel_id,
+                meerkat_core::live_adapter::LiveAdapterCommand::Interrupt,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        }
+
+        host.send_command(
+            &channel_id,
+            meerkat_core::live_adapter::LiveAdapterCommand::SendInput {
+                chunk: meerkat_core::live_adapter::LiveInputChunk::Text { text },
+            },
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+
+        let message_count = self
+            .load_persisted_session(session_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|session| session.messages().len())
+            .unwrap_or(0);
+
+        let receipt = RunBoundaryReceipt {
+            run_id,
+            boundary: primitive.apply_boundary(),
+            contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+            conversation_digest: None,
+            message_count,
+            sequence: 0,
+        };
+        Ok(Some(CoreApplyOutput::without_terminal(receipt, None)))
+    }
+
     /// Phase 4 R1: thin RPC shim — delegates to
     /// `LiveOrchestrator::propagate_config_to_live_channels`.
     ///
@@ -3795,6 +3942,70 @@ impl SessionRuntime {
         self.runtime_adapter
             .update_peer_ingress_context(session_id, true, Some(comms_runtime))
             .await;
+        Ok(())
+    }
+
+    /// Ensure a live controller session can receive ordinary peer ingress.
+    ///
+    /// `live/open` may be the first thing that materializes a deferred
+    /// keep-alive session. That path opens a provider-hosted session but does
+    /// not run a normal `turn/start`, so the usual turn-owned comms drain
+    /// reconciliation never fires. Keep this as runtime-owned wiring: live
+    /// transports only request an opened channel; MeerkatMachine remains the
+    /// peer-ingress lifecycle authority.
+    #[cfg(feature = "comms")]
+    pub async fn ensure_live_peer_ingress(
+        self: &Arc<Self>,
+        session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), RpcError> {
+        let keep_alive = self
+            .load_persisted_session(session_id)
+            .await?
+            .and_then(|session| session.session_metadata().map(|meta| meta.keep_alive))
+            .unwrap_or(false);
+        let peer_ingress_enabled = self
+            .preserve_existing_peer_ingress(session_id, keep_alive)
+            .await;
+        if !peer_ingress_enabled {
+            return Ok(());
+        }
+
+        let owner = self.runtime_adapter.peer_ingress_owner(session_id).await;
+        if owner.is_mob_owned() {
+            tracing::debug!(
+                %session_id,
+                ?owner,
+                "live/open: mob-owned peer ingress already owns the session; skipping session-owned drain reconfigure"
+            );
+            return Ok(());
+        }
+
+        let comms_rt = self.service.comms_runtime(session_id).await;
+        if keep_alive
+            && comms_rt.is_none()
+            && !self.runtime_adapter.session_has_comms(session_id).await
+        {
+            return Err(RpcError {
+                code: error::INVALID_PARAMS,
+                message: "keep_alive requires a session created with comms_name".to_string(),
+                data: None,
+            });
+        }
+
+        self.ensure_runtime_executor(session_id).await?;
+        if let Some(comms_rt) = comms_rt {
+            self.runtime_adapter
+                .update_peer_ingress_context(session_id, true, Some(comms_rt))
+                .await;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "comms"))]
+    pub async fn ensure_live_peer_ingress(
+        self: &Arc<Self>,
+        _session_id: &meerkat_core::types::SessionId,
+    ) -> Result<(), RpcError> {
         Ok(())
     }
 
@@ -12450,7 +12661,7 @@ mod tests {
         let factory = AgentFactory::new(temp.path().join("sessions"))
             .builtins(true)
             .mob(true);
-        let mut runtime = make_runtime(factory, 10);
+        let runtime = make_runtime(factory, 10);
 
         // Create a MobMcpState and set it via set_mob_tools.
         let mob_svc = runtime.session_service();

@@ -32,37 +32,72 @@ This page is intentionally browser/WASM-specific rather than a cross-surface tab
 
 ## Initialize runtime
 
-```javascript
-import init, { init_runtime } from './runtime.js';
+Use init-time credentials and provider base URLs to seed the browser runtime's
+realm config. The `@rkat/web` `RuntimeConfig` still exposes `apiKey`/`baseUrl`
+compatibility fields for older callers, but the current runtime contract is
+provider-specific: `anthropicApiKey`, `openaiApiKey`, `geminiApiKey`, and the
+matching provider base URL fields. `SessionConfig` does not accept per-session
+`apiKey` or `baseUrl`.
 
-await init();
+```typescript
+import { MeerkatRuntime } from "@rkat/web";
+import * as wasm from "@rkat/web/wasm/meerkat_web_runtime.js";
 
-init_runtime(
-  mobpackBytes,
-  JSON.stringify({
-    anthropic_api_key: "sk-ant-...",
-    model: "claude-sonnet-4-6",
-  })
-);
+const runtime = await MeerkatRuntime.initFromMobpack(wasm, mobpackBytes, {
+  anthropicApiKey: "sk-ant-...",
+  model: "claude-sonnet-4-6",
+});
+```
+
+For proxy deployments, pass a provider-specific dummy key and base URL. The
+proxy injects the real server-side credential.
+
+```typescript
+const runtime = await MeerkatRuntime.init(wasm, {
+  anthropicApiKey: "proxy",
+  anthropicBaseUrl: "http://localhost:3100/anthropic",
+  model: "claude-sonnet-4-6",
+});
 ```
 
 ## Create session and run turn
 
-```javascript
-const handle = create_session(mobpackBytes, JSON.stringify({
+```typescript
+const session = runtime.createSession({
   model: "claude-sonnet-4-6",
-}));
+});
 
-const result = JSON.parse(await start_turn(handle, "Hello", "{}"));
+const result = await session.turn("Hello");
 console.log(result.text);
+```
+
+For OAuth or host-owned cloud credentials, register an external auth resolver
+and bind the session to a structural auth binding. The selected realm binding
+must be configured to use the WASM external-resolver credential source.
+
+```typescript
+import { registerExternalAuthResolver, withAuthBinding } from "@rkat/web";
+
+registerExternalAuthResolver(wasm, async (authBinding) => {
+  const token = await hostAuth.freshAccessToken(authBinding);
+  return {
+    kind: "inline_secret",
+    secret: token.accessToken,
+    metadata: { account_id: token.accountId },
+    expires_at: token.expiresAt,
+  };
+});
+
+const bound = runtime.createSession(withAuthBinding(
+  { realm: "team-alpha", binding: "anthropic" },
+  { model: "claude-sonnet-4-6" },
+));
 ```
 
 ## Poll events
 
-```javascript
-const events = JSON.parse(poll_events(handle));
-
-for (const event of events) {
+```typescript
+for (const event of session.pollEvents()) {
   if (event.type === "text_delta") {
     document.body.innerText += event.delta;
   }
@@ -71,69 +106,68 @@ for (const event of events) {
 
 ## Mob lifecycle in browser
 
-```javascript
+```typescript
 // Create mob from definition
-const mobId = await mob_create(JSON.stringify({
+const mob = await runtime.createMob({
   id: "research-team",
-  orchestrator: "lead",
-  profiles: { lead: { model: "claude-sonnet-4-6" } },
-}));
+  orchestrator: { profile: "lead" },
+  profiles: {
+    lead: { model: "claude-sonnet-4-6" },
+    worker: { model: "claude-sonnet-4-6" },
+  },
+});
 
 // Spawn members
-await mob_spawn(mobId, JSON.stringify([
+await mob.spawn([
   { profile: "lead", agent_identity: "lead-1" },
   { profile: "worker", agent_identity: "worker-1" },
-]));
+]);
 
 // Wire peers
-await mob_wire(mobId, "lead-1", "worker-1");
+await mob.wire("lead-1", "worker-1");
 
-// Run a flow
-const runId = await mob_run_flow(mobId, "review", "{}");
-const status = JSON.parse(await mob_flow_status(mobId, runId));
+// Inspect runtime state
+const members = await mob.listMembers();
+const leadStatus = await mob.memberStatus("lead-1");
 ```
 
 ## Subscribe to member events
 
-```javascript
-const sub = await mob_member_subscribe(mobId, "lead-1");
+```typescript
+const sub = await mob.subscribeMemberEvents("lead-1");
 
-// Poll for events (non-blocking)
-const events = JSON.parse(poll_subscription(sub));
-for (const event of events) {
+for (const event of sub.poll()) {
   console.log(event.type, event);
 }
 
-// Clean up when done
-close_subscription(sub);
+sub.close();
 ```
 
 ## Cross-mob comms
 
-Wire ambassadors across mobs for inter-faction communication. The `wire_cross_mob` function establishes trust between members in different mobs so they can exchange messages via the comms system.
+Wire ambassadors across mobs for inter-faction communication. `MeerkatRuntime.wireCrossMob()` establishes trust between members in different mobs so they can exchange messages via the comms system.
 
-```javascript
+```typescript
 // Wire ambassadors between two mobs
-await wire_cross_mob(
-  mobIdNorth,
+await runtime.wireCrossMob(
+  northMob.mobId,
   "ambassador-north",
-  mobIdSouth,
+  southMob.mobId,
   "ambassador-south",
 );
 
 // Send work to a member through the canonical member path
-await mob_member_send(
-  mobIdNorth,
-  "ambassador-north",
-  JSON.stringify({
-    content: "Send a message to the south faction proposing an alliance on the eastern front.",
-    handling_mode: "queue"
-  })
-);
+await northMob
+  .member("ambassador-north")
+  .send("Send a message to the south faction proposing an alliance on the eastern front.");
 ```
 
 <Note>
-Direct `comms_send` and `comms_peers` functions are not yet exported as WASM bindings. Inter-agent messaging happens through member-directed turn submission and the comms tools available to agents during their turns (the `send_message`, `send_request`, `send_response`, and `peers` tools).
+Direct `comms_send` and `comms_peers` are reserved low-level placeholders rather
+than current wasm-bindgen exports or public `@rkat/web` wrapper methods.
+Inter-agent messaging happens through member-directed turn submission and the
+comms tools available to agents during their turns (`send_message`,
+`send_request`, `send_response`, and `peers`).
 </Note>
 
 ## What is available on wasm32

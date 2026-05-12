@@ -69,7 +69,7 @@ def test_unsupported_platform_rejected():
             MeerkatClient._platform_target()
 
 
-def test_default_connect_args_do_not_enable_live_ws():
+def test_default_connect_args_do_not_enable_live_transports():
     args = MeerkatClient._build_args(
         False,
         isolated=False,
@@ -80,9 +80,11 @@ def test_default_connect_args_do_not_enable_live_ws():
         context_root=None,
         user_config_root=None,
         live_ws=False,
+        live_webrtc=False,
     )
 
     assert "--live-ws" not in args
+    assert "--live-webrtc" not in args
 
 
 def test_live_ws_connect_args_are_opt_in():
@@ -96,6 +98,24 @@ def test_live_ws_connect_args_are_opt_in():
         context_root=None,
         user_config_root=None,
         live_ws=True,
+        live_webrtc=False,
     )
 
     assert args[:2] == ["--live-ws", "127.0.0.1:0"]
+
+
+def test_live_webrtc_connect_args_are_opt_in():
+    args = MeerkatClient._build_args(
+        False,
+        isolated=False,
+        realm_id=None,
+        instance_id=None,
+        realm_backend=None,
+        state_root=None,
+        context_root=None,
+        user_config_root=None,
+        live_ws=False,
+        live_webrtc=True,
+    )
+
+    assert args == ["--live-webrtc"]

@@ -6,8 +6,6 @@ import type { WireMobMemberStatus } from './generated/mob.js';
 
 /** Configuration for {@link MeerkatRuntime.init}. */
 export interface RuntimeConfig {
-  /** Backward-compat single API key (treated as Anthropic fallback). */
-  apiKey?: string;
   /** Anthropic API key. */
   anthropicApiKey?: string;
   /** OpenAI API key. */
@@ -18,8 +16,6 @@ export interface RuntimeConfig {
   model?: string;
   /** Maximum concurrent sessions. Default: 64. */
   maxSessions?: number;
-  /** Backward-compat single base URL (mapped to default model's provider). */
-  baseUrl?: string;
   /** Anthropic base URL (e.g. for proxy deployments). */
   anthropicBaseUrl?: string;
   /** OpenAI base URL. */
@@ -290,8 +286,6 @@ export interface ToolConfig {
   memory?: boolean;
   /** Enable mob management tools (spawn, retire, wire, unwire, list). */
   mob?: boolean;
-  /** Enable shared task list tools. */
-  mob_tasks?: boolean;
   /** MCP server names this profile connects to. */
   mcp?: string[];
 }

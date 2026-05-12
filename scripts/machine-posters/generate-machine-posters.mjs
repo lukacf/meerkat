@@ -9,9 +9,8 @@ const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, "..", "..");
 const outputDir = path.join(
   repoRoot,
-  "docs",
-  "architecture",
-  "posters",
+  "docs-internal",
+  "machine-posters",
 );
 
 const THEME = {
@@ -590,19 +589,15 @@ const MACHINE_SPECS = [
           ],
         },
         {
-          id: "tasks-events",
-          title: "Task + Event Surface",
-          note: "Query/control slab for tasks, rosters, streams, snapshots, and provenance recording.",
+          id: "event-surface",
+          title: "Event Surface",
+          note: "Query/control slab for rosters, streams, snapshots, and provenance recording.",
           x: 1380,
           y: 430,
           w: 460,
           columns: 2,
           anchors: ["Running"],
           triggers: [
-            "TaskCreate",
-            "TaskUpdate",
-            "TaskList",
-            "TaskGet",
             "McpServerStates",
             "RosterSnapshot",
             "ListMembers",

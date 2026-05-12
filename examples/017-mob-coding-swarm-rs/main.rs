@@ -1,7 +1,7 @@
 //! # 017 — Mob: Coding Swarm (Rust)
 //!
 //! A "mob" is a coordinated group of Meerkat agents with defined roles,
-//! wiring rules, and shared task boards. The `coding_swarm` prefab creates
+//! wiring rules, and agent roles. The `coding_swarm` prefab creates
 //! a lead orchestrator that spawns and manages worker agents for coding tasks.
 //!
 //! ## What you'll learn
@@ -42,7 +42,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.worker]
 model = "claude-sonnet-4-6"
@@ -54,7 +53,6 @@ external_addressable = false
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true
@@ -76,8 +74,6 @@ fn event_label(kind: &MobEventKind) -> &'static str {
         MobEventKind::MobReset => "MobReset",
         MobEventKind::MemberSpawned(..) => "MemberSpawned",
         MobEventKind::MemberRetired { .. } => "MemberRetired",
-        MobEventKind::TaskCreated { .. } => "TaskCreated",
-        MobEventKind::TaskUpdated { .. } => "TaskUpdated",
         MobEventKind::FlowStarted { .. } => "FlowStarted",
         MobEventKind::FlowCompleted { .. } => "FlowCompleted",
         MobEventKind::FlowFailed { .. } => "FlowFailed",
@@ -138,7 +134,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.frontend]
 model = "claude-sonnet-4-6"
@@ -149,7 +144,6 @@ peer_description = "React/TypeScript frontend developer"
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [profiles.backend]
 model = "claude-sonnet-4-6"
@@ -160,7 +154,6 @@ peer_description = "Rust backend developer"
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true

@@ -9,9 +9,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ToolDispatchContext;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
-use meerkat_core::{
-    ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry, ToolUnavailableReason,
-};
+use meerkat_core::{ToolCallability, ToolCatalogCapabilities, ToolCatalogEntry};
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::sync::Arc;
@@ -54,21 +52,9 @@ impl CommsToolSurface {
         }
     }
 
-    fn has_peers(&self) -> bool {
-        self.tool_context
-            .trusted_peers
-            .try_read()
-            .map(|peers| peers.has_peers())
-            .unwrap_or(false)
-    }
-
     fn callability_for_tool(&self, name: &str) -> ToolCallability {
-        if self.has_peers() {
-            comms_tool_unavailable_reason(&self.tool_context, name)
-                .map_or_else(ToolCallability::callable, ToolCallability::unavailable)
-        } else {
-            ToolCallability::unavailable(ToolUnavailableReason::NoPeersConfigured)
-        }
+        comms_tool_unavailable_reason(&self.tool_context, name)
+            .map_or_else(ToolCallability::callable, ToolCallability::unavailable)
     }
 
     /// Usage instructions for comms tools to be added to the system prompt
@@ -155,6 +141,7 @@ impl AgentToolDispatcher for CommsToolSurface {
 mod tests {
     use super::*;
     use meerkat_comms::{CommsConfig, Keypair, TrustedPeer, TrustedPeers};
+    use meerkat_core::ToolUnavailableReason;
 
     fn make_keypair() -> Keypair {
         Keypair::generate()
@@ -238,22 +225,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_comms_callability_false_without_trusted_peers() {
+    async fn test_comms_tools_remain_visible_without_trusted_peers() {
         let trusted_peers = Arc::new(RwLock::new(TrustedPeers::new()));
         let router = make_tool_context().0;
         let surface = CommsToolSurface::new(router, trusted_peers);
-        assert!(surface.tools().is_empty());
+        let tools = surface.tools();
+        let tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_str()).collect();
         assert!(
-            surface
-                .tool_catalog()
-                .iter()
-                .all(|entry| !entry.currently_callable())
+            tool_names.contains(&"send_message"),
+            "send_message must be advertised before peers appear so live providers can call it after later wiring: {tool_names:?}"
         );
+        assert!(
+            tool_names.contains(&"peers"),
+            "peers must be advertised before peers appear so live providers can discover later wiring: {tool_names:?}"
+        );
+        assert!(!tool_names.contains(&"send_request"));
+        assert!(!tool_names.contains(&"send_response"));
 
         let args_raw = serde_json::value::RawValue::from_string(Value::Null.to_string()).unwrap();
         let call = ToolCallView {
             id: "test-1",
-            name: surface.tool_defs[0].name.as_str(),
+            name: "send_request",
             args: &args_raw,
         };
         let result = surface.dispatch(call).await;

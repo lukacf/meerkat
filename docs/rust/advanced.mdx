@@ -122,7 +122,7 @@ Pass provider-specific options via `AgentBuildConfig`:
   </Tab>
   <Tab title="OpenAI">
     ```rust
-    let mut build_config = AgentBuildConfig::new("gpt-5.2".into());
+    let mut build_config = AgentBuildConfig::new("gpt-5.5".into());
     build_config.provider_params = Some(json!({"reasoning_effort": "high", "seed": 42}));
     ```
   </Tab>
@@ -301,7 +301,10 @@ async fn handle_chat(
 
 ```rust
 use meerkat::{AgentFactory, Config, build_ephemeral_service};
-use meerkat::{CreateSessionRequest, StartTurnRequest, SessionService};
+use meerkat::{
+    CreateSessionRequest, DeferredPromptPolicy, SessionService,
+    StartTurnRequest, StartTurnRuntimeSemantics,
+};
 use meerkat_core::service::InitialTurnPolicy;
 
 #[tokio::main]
@@ -319,6 +322,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_tx: None,
         skill_references: None,
         initial_turn: InitialTurnPolicy::RunImmediately,
+        deferred_prompt_policy: DeferredPromptPolicy::Discard,
         build: None,
         labels: None,
     }).await?;

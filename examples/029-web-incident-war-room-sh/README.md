@@ -2,8 +2,7 @@
 
 Build a browser-deployable incident-response workspace that feels like a real
 SEV war room, not just a packaging demo. The example produces a browser bundle
-containing a multi-role incident team that can coordinate via comms and a
-shared task board.
+containing a multi-role incident team that can coordinate via comms.
 
 ## What This Example Teaches
 - No local install for responders beyond browser access
@@ -15,7 +14,7 @@ shared task board.
 - `.mobpack` as universal deployment artifact
 - `rkat mob web build` for browser bundle output
 - browser-safe capability profile enforced at build time
-- role-specialized agents using `comms` and `mob_tasks`
+- role-specialized agents using `comms` and mob orchestration
 - `manifest.web.toml` as derived output that tells you what the browser build can do
 
 ## Team Design
@@ -91,9 +90,8 @@ After opening the app, paste the kickoff prompt from
 `prompts/incident-kickoff.md`. A good first turn is:
 
 ```text
-Run this as a SEV-1 war room. State severity and customer impact, create a
-task board, assign workstreams to each role, and tell me when the next update
-is due.
+Run this as a SEV-1 war room. State severity and customer impact, assign
+workstreams to each role, and tell me when the next update is due.
 ```
 
 Follow-up turns that make the example feel real:

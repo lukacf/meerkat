@@ -271,6 +271,8 @@ Use the host control plane when an application needs to deliver content directly
 ## Submit tracked work
 
 Use the work lane when you need a cancellable work reference rather than plain content delivery.
+The work lane uses the opaque `member_ref` returned by spawn, member list, or
+member send responses.
 
 <Tabs>
   <Tab title="JSON-RPC">
@@ -280,29 +282,35 @@ Use the work lane when you need a cancellable work reference rather than plain c
       "id": 8,
       "method": "mob/submit_work",
       "params": {
-        "mob_id": "release-triage",
-        "agent_identity": "lead-1",
-        "content": "Review the flaky test history and summarize the top failure modes."
+        "member_ref": "member_ref_from_spawn_or_members",
+        "content": "Review the flaky test history and summarize the top failure modes.",
+        "origin": "external"
       }
     }
     ```
   </Tab>
   <Tab title="Python">
     ```python
-    work = await client.submit_mob_work(
-        "release-triage",
-        "lead-1",
+    members = await mob.members()
+    lead_ref = next(m["member_ref"] for m in members if m["agent_identity"] == "lead-1")
+
+    work = await client.mob_submit_work(
+        lead_ref,
         "Review the flaky test history and summarize the top failure modes.",
     )
     ```
   </Tab>
   <Tab title="TypeScript">
     ```typescript
-    const work = await client.submitMobWork(
-      "release-triage",
-      "lead-1",
-      "Review the flaky test history and summarize the top failure modes.",
+    const lead = (await mob.listMembers()).find(
+      (member) => member.agentIdentity === "lead-1",
     );
+    if (!lead) throw new Error("lead-1 is not spawned");
+
+    const work = await client.mobSubmitWork({
+      memberRef: lead.memberRef,
+      content: "Review the flaky test history and summarize the top failure modes.",
+    });
     ```
   </Tab>
 </Tabs>

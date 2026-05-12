@@ -43,6 +43,8 @@ const DEFAULT_WASM_SYSTEM_PROMPT: &str = r"You are an autonomous agent. Your tas
 - When the task is complete, provide a clear summary of what was accomplished.
 - If the task cannot be completed, explain what blocked progress and what was attempted.";
 use meerkat_core::LocalToolVisibilityOwner;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::RuntimeBuildMode;
 #[cfg(any(not(feature = "memory-store"), not(target_arch = "wasm32")))]
 use meerkat_core::SessionId;
 #[cfg(not(feature = "memory-store"))]
@@ -295,6 +297,8 @@ pub struct AgentBuildConfig {
     /// Optional provider executor for the generated-image builtin.
     pub image_generation_executor_override:
         Option<Arc<dyn meerkat_llm_core::ImageGenerationExecutor>>,
+    /// Optional provider executor for the Meerkat-owned web-search fallback.
+    pub web_search_executor_override: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
     /// Per-build override for factory-level `enable_builtins`.
     /// `Inherit` defers to the factory default.
     pub override_builtins: ToolCategoryOverride,
@@ -310,16 +314,23 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_schedule`.
     /// `Inherit` defers to the factory default.
     pub override_schedule: ToolCategoryOverride,
+    /// Per-build override for factory-level `enable_workgraph`.
+    /// `Inherit` defers to the factory default.
+    pub override_workgraph: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: ToolCategoryOverride,
     /// Per-build override for assistant image generation visibility.
     pub override_image_generation: ToolCategoryOverride,
+    /// Per-build override for Meerkat-owned fallback web-search visibility.
+    pub override_web_search: ToolCategoryOverride,
     /// Agent-facing scheduler tools supplied by the embedding surface.
     ///
     /// Scheduler is a surface capability. This dispatcher only controls
     /// visibility/composition; schedule execution remains owned by the
     /// schedule service/host chosen by the embedding surface.
     pub schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Agent-facing WorkGraph tools supplied by the embedding surface.
+    pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Runtime-injected mob operator authority context.
     ///
     /// Tool visibility may depend on this context being present, but
@@ -417,6 +428,8 @@ pub struct AgentBuildConfig {
     pub initial_metadata_entries: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
+const INITIAL_TOOL_FILTER_METADATA_KEY: &str = "meerkat.initial_tool_filter_v1";
+
 impl std::fmt::Debug for AgentBuildConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AgentBuildConfig")
@@ -461,14 +474,21 @@ impl std::fmt::Debug for AgentBuildConfig {
                 "image_generation_executor_override",
                 &self.image_generation_executor_override.is_some(),
             )
+            .field(
+                "web_search_executor_override",
+                &self.web_search_executor_override.is_some(),
+            )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
             .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
+            .field("override_workgraph", &self.override_workgraph)
             .field("override_mob", &self.override_mob)
             .field("override_image_generation", &self.override_image_generation)
+            .field("override_web_search", &self.override_web_search)
             .field("schedule_tools", &self.schedule_tools.is_some())
+            .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
@@ -530,14 +550,18 @@ impl AgentBuildConfig {
             blob_store_override: None,
             image_generation_machine_override: None,
             image_generation_executor_override: None,
+            web_search_executor_override: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
             override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
+            override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
+            override_web_search: ToolCategoryOverride::Inherit,
             schedule_tools: None,
+            workgraph_tools: None,
             mob_tool_authority_context: None,
             mob_tools: None,
             preload_skills: None,
@@ -562,6 +586,19 @@ impl AgentBuildConfig {
             runtime_build_mode: meerkat_core::RuntimeBuildMode::StandaloneEphemeral,
             initial_metadata_entries: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// Stage a session-local tool filter to apply once the agent's tool
+    /// catalog is fully composed.
+    pub fn set_initial_tool_filter(
+        &mut self,
+        filter: meerkat_core::ToolFilter,
+    ) -> Result<(), serde_json::Error> {
+        self.initial_metadata_entries.insert(
+            INITIAL_TOOL_FILTER_METADATA_KEY.to_string(),
+            serde_json::to_value(filter)?,
+        );
+        Ok(())
     }
 
     /// Build config from a service `CreateSessionRequest` + event channel.
@@ -630,9 +667,12 @@ impl AgentBuildConfig {
         self.override_comms = build.override_comms;
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
+        self.override_workgraph = build.override_workgraph;
         self.override_mob = build.override_mob;
         self.override_image_generation = build.override_image_generation;
+        self.override_web_search = build.override_web_search;
         self.schedule_tools = build.schedule_tools.clone();
+        self.workgraph_tools = build.workgraph_tools.clone();
         self.mob_tool_authority_context = build.mob_tool_authority_context.clone();
         self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
@@ -649,6 +689,7 @@ impl AgentBuildConfig {
         self.max_inline_peer_notifications = build.max_inline_peer_notifications;
         self.app_context = build.app_context.clone();
         self.additional_instructions = build.additional_instructions.clone();
+        self.initial_metadata_entries = build.initial_metadata_entries.clone();
         self.shell_env = build.shell_env.clone();
         self.checkpointer = build.checkpointer.clone();
         self.call_timeout_override = build.call_timeout_override.clone();
@@ -682,9 +723,12 @@ impl AgentBuildConfig {
             override_comms: self.override_comms,
             override_memory: self.override_memory,
             override_schedule: self.override_schedule,
+            override_workgraph: self.override_workgraph,
             override_mob: self.override_mob,
             override_image_generation: self.override_image_generation,
+            override_web_search: self.override_web_search,
             schedule_tools: self.schedule_tools.clone(),
+            workgraph_tools: self.workgraph_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
@@ -698,6 +742,7 @@ impl AgentBuildConfig {
             max_inline_peer_notifications: self.max_inline_peer_notifications,
             app_context: self.app_context.clone(),
             additional_instructions: self.additional_instructions.clone(),
+            initial_metadata_entries: self.initial_metadata_entries.clone(),
             shell_env: self.shell_env.clone(),
             checkpointer: self.checkpointer.clone(),
             call_timeout_override: self.call_timeout_override.clone(),
@@ -786,6 +831,16 @@ fn provider_tool_defaults_for(
             Some(serde_json::json!({"google_search": {}}))
         }
         _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
+    match provider {
+        Provider::Anthropic => config.provider_tools.anthropic.web_search,
+        Provider::OpenAI => config.provider_tools.openai.web_search,
+        Provider::Gemini => config.provider_tools.gemini.google_search,
+        _ => false,
     }
 }
 
@@ -1131,6 +1186,7 @@ pub struct AgentFactory {
     pub enable_comms: bool,
     pub enable_memory: bool,
     pub enable_schedule: bool,
+    pub enable_workgraph: bool,
     pub enable_mob: bool,
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
@@ -1198,6 +1254,7 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_shell", &self.enable_shell)
             .field("enable_memory", &self.enable_memory)
             .field("enable_schedule", &self.enable_schedule)
+            .field("enable_workgraph", &self.enable_workgraph)
             .field("enable_mob", &self.enable_mob);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
@@ -1241,10 +1298,32 @@ impl AgentFactory {
         ))
     }
 
+    fn resolve_realm_binding_candidates_for_provider(
+        config: &Config,
+        provider: Provider,
+        auth_binding: Option<&AuthBindingRef>,
+        preferred_realm: Option<&str>,
+    ) -> Result<Vec<meerkat_core::ResolvedConnectionTarget>, String> {
+        let preferred_realm = preferred_realm
+            .map(RealmId::parse)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        meerkat_core::resolve_auth_binding_candidates_for_provider(
+            config,
+            provider,
+            auth_binding,
+            preferred_realm.as_ref(),
+            true,
+        )
+        .map_err(|e| e.to_string())
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
-    fn selected_image_binding_id_for_provider(
+    fn selected_binding_id_for_provider(
         realm: &RealmConnectionSet,
         provider: Provider,
+        purpose: &str,
+        default_label: &str,
     ) -> Result<String, String> {
         let mut provider_bindings = Vec::new();
         for (binding_id, binding) in &realm.bindings {
@@ -1253,7 +1332,7 @@ impl AgentFactory {
                 .get(&binding.backend_profile)
                 .ok_or_else(|| {
                     format!(
-                        "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown backend '{}'",
+                        "{purpose} for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown backend '{}'",
                         provider.as_str(),
                         realm.realm_id,
                         realm.realm_id,
@@ -1266,7 +1345,7 @@ impl AgentFactory {
                 .get(&binding.auth_profile)
                 .ok_or_else(|| {
                     format!(
-                        "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown auth '{}'",
+                        "{purpose} for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' references unknown auth '{}'",
                         provider.as_str(),
                         realm.realm_id,
                         realm.realm_id,
@@ -1299,7 +1378,7 @@ impl AgentFactory {
                 if let Some(default_binding) = realm.default_binding.as_deref() {
                     match realm.lookup_binding(default_binding) {
                         Ok((_binding, backend, auth)) => Err(format!(
-                            "image credential binding for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' resolves backend={:?} auth={:?}, expected provider {:?}",
+                            "{purpose} for provider '{}' is unavailable in selected realm '{}': binding '{}:{}' resolves backend={:?} auth={:?}, expected provider {:?}",
                             provider.as_str(),
                             realm.realm_id,
                             realm.realm_id,
@@ -1309,7 +1388,7 @@ impl AgentFactory {
                             provider,
                         )),
                         Err(source) => Err(format!(
-                            "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm default binding '{}' is invalid: {source}",
+                            "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm default binding '{}' is invalid: {source}",
                             provider.as_str(),
                             realm.realm_id,
                             default_binding,
@@ -1317,7 +1396,7 @@ impl AgentFactory {
                     }
                 } else {
                     Err(format!(
-                        "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm has no default binding and no binding for provider '{}'",
+                        "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm has no default binding and no binding for provider '{}'",
                         provider.as_str(),
                         realm.realm_id,
                         provider.as_str(),
@@ -1325,7 +1404,7 @@ impl AgentFactory {
                 }
             }
             many => Err(format!(
-                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm has multiple bindings for provider '{}' ({}) and no unambiguous image default",
+                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm has multiple bindings for provider '{}' ({}) and no unambiguous {default_label} default",
                 provider.as_str(),
                 realm.realm_id,
                 provider.as_str(),
@@ -1335,30 +1414,53 @@ impl AgentFactory {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn resolve_selected_image_binding_for_provider(
+    fn selected_image_binding_id_for_provider(
+        realm: &RealmConnectionSet,
+        provider: Provider,
+    ) -> Result<String, String> {
+        Self::selected_binding_id_for_provider(realm, provider, "image credential binding", "image")
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn selected_web_search_binding_id_for_provider(
+        realm: &RealmConnectionSet,
+        provider: Provider,
+    ) -> Result<String, String> {
+        Self::selected_binding_id_for_provider(
+            realm,
+            provider,
+            "web_search credential binding",
+            "web_search",
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_selected_binding_for_provider(
         config: &Config,
         provider: Provider,
         selected_realm: RealmId,
+        purpose: &str,
+        select_binding_id: fn(&RealmConnectionSet, Provider) -> Result<String, String>,
     ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
         let selected_realm_id = selected_realm.as_str();
         let section = config.realm.get(selected_realm_id).ok_or_else(|| {
             format!(
-                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm not found in config.realm",
+                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm not found in config.realm",
                 provider.as_str(),
                 selected_realm_id,
             )
         })?;
         let realm = RealmConnectionSet::from_config(selected_realm_id, section).map_err(|e| {
             format!(
-                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected realm config invalid: {e}",
+                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected realm config invalid: {e}",
                 provider.as_str(),
                 selected_realm_id,
             )
         })?;
-        let binding_id = Self::selected_image_binding_id_for_provider(&realm, provider)?;
+        let binding_id = select_binding_id(&realm, provider)?;
         let binding = meerkat_core::BindingId::parse(binding_id.clone()).map_err(|e| {
             format!(
-                "image credential binding for provider '{}' is unavailable in selected realm '{}': selected binding id '{}' is invalid: {e}",
+                "{purpose} for provider '{}' is unavailable in selected realm '{}': selected binding id '{}' is invalid: {e}",
                 provider.as_str(),
                 selected_realm_id,
                 binding_id,
@@ -1370,6 +1472,36 @@ impl AgentFactory {
             profile: None,
         };
         Ok((realm, binding_id, auth_binding))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_selected_image_binding_for_provider(
+        config: &Config,
+        provider: Provider,
+        selected_realm: RealmId,
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+        Self::resolve_selected_binding_for_provider(
+            config,
+            provider,
+            selected_realm,
+            "image credential binding",
+            Self::selected_image_binding_id_for_provider,
+        )
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_selected_web_search_binding_for_provider(
+        config: &Config,
+        provider: Provider,
+        selected_realm: RealmId,
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+        Self::resolve_selected_binding_for_provider(
+            config,
+            provider,
+            selected_realm,
+            "web_search credential binding",
+            Self::selected_web_search_binding_id_for_provider,
+        )
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1394,6 +1526,30 @@ impl AgentFactory {
             );
         }
         Self::resolve_selected_image_binding_for_provider(config, provider, selected_realm)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolve_web_search_binding_for_provider(
+        config: &Config,
+        provider: Provider,
+        selected_realm: Option<&str>,
+    ) -> Result<(RealmConnectionSet, String, AuthBindingRef), String> {
+        let Some(selected_realm) = selected_realm else {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        };
+        if selected_realm == "env_default" {
+            return Self::resolve_realm_binding_for_provider(config, provider, None, None);
+        }
+        let selected_realm = RealmId::parse(selected_realm).map_err(|e| e.to_string())?;
+        if !config.realm.contains_key(selected_realm.as_str()) {
+            return Self::resolve_realm_binding_for_provider(
+                config,
+                provider,
+                None,
+                Some(selected_realm.as_str()),
+            );
+        }
+        Self::resolve_selected_web_search_binding_for_provider(config, provider, selected_realm)
     }
 
     #[cfg(all(
@@ -1436,6 +1592,85 @@ impl AgentFactory {
         )
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn build_web_search_executor(
+        &self,
+        config: &Config,
+        registry: &ModelRegistry,
+        search_provider: Provider,
+        selected_realm: Option<&str>,
+        runtime_build_mode: &RuntimeBuildMode,
+    ) -> Result<Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>, BuildAgentError> {
+        if !provider_web_search_enabled(config, search_provider) {
+            return Ok(None);
+        }
+        let Some(model) = registry.default_model(search_provider).map(str::to_string) else {
+            return Ok(None);
+        };
+        let Some(profile) = registry.profile_for_provider(search_provider, &model) else {
+            return Ok(None);
+        };
+        if !profile.supports_web_search {
+            return Ok(None);
+        }
+
+        let Ok((realm, _binding_id, auth_binding)) =
+            Self::resolve_web_search_binding_for_provider(config, search_provider, selected_realm)
+        else {
+            return Ok(None);
+        };
+        let mut env = meerkat_providers::ResolverEnvironment::with_process_env();
+        if let Some(store) = self.token_store.clone() {
+            env = env.with_token_store(store);
+        }
+        if let Some(coord) = self.refresh_coord.clone() {
+            env = env.with_refresh_coordinator(coord);
+        }
+        if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
+            && !auth_binding.is_env_default()
+        {
+            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+        }
+        for (handle, resolver) in &self.external_auth_resolvers {
+            env = env.with_external_resolver(handle.clone(), resolver.clone());
+        }
+        let Ok(connection) = self
+            .provider_registry
+            .resolve(&realm, &auth_binding, &env)
+            .await
+        else {
+            return Ok(None);
+        };
+        if let RuntimeBuildMode::SessionOwned(bindings) = runtime_build_mode
+            && !auth_binding.is_env_default()
+        {
+            Self::publish_auth_lease(bindings.auth_lease(), &auth_binding, &connection)
+                .map_err(BuildAgentError::LlmClient)?;
+        }
+        let Ok(client) = self.provider_registry.build_client(connection) else {
+            return Ok(None);
+        };
+        let adapted: Arc<dyn AgentLlmClient> =
+            Arc::new(LlmClientAdapter::new(client, model.clone()));
+
+        let executor: Arc<dyn meerkat_llm_core::WebSearchExecutor> = match search_provider {
+            #[cfg(feature = "openai")]
+            Provider::OpenAI => {
+                Arc::new(meerkat_openai::OpenAiWebSearchExecutor::new(model, adapted))
+            }
+            #[cfg(feature = "gemini")]
+            Provider::Gemini => {
+                Arc::new(meerkat_gemini::GeminiWebSearchExecutor::new(model, adapted))
+            }
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic => Arc::new(meerkat_anthropic::AnthropicWebSearchExecutor::new(
+                model, adapted,
+            )),
+            _ => return Ok(None),
+        };
+        Ok(Some(executor))
+    }
+
     /// Create a minimal factory for environments without filesystem access (e.g. wasm32).
     ///
     /// All agent resources must be provided via `AgentBuildConfig` overrides
@@ -1454,6 +1689,7 @@ impl AgentFactory {
             enable_comms: false,
             enable_memory: false,
             enable_schedule: false,
+            enable_workgraph: false,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -1496,6 +1732,7 @@ impl AgentFactory {
             enable_comms: false,
             enable_memory: false,
             enable_schedule: false,
+            enable_workgraph: false,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -1631,6 +1868,12 @@ impl AgentFactory {
         self
     }
 
+    /// Enable or disable WorkGraph tools.
+    pub fn workgraph(mut self, enabled: bool) -> Self {
+        self.enable_workgraph = enabled;
+        self
+    }
+
     /// Enable or disable mob (multi-agent orchestration) tools.
     pub fn mob(mut self, enabled: bool) -> Self {
         self.enable_mob = enabled;
@@ -1706,6 +1949,13 @@ impl AgentFactory {
             .unwrap_or(self.enable_memory);
         if !memory_enabled {
             capabilities.remove(&meerkat_contracts::CapabilityId::MemoryStore);
+        }
+
+        let workgraph_enabled = build_config
+            .map(|build| build.override_workgraph.resolve(self.enable_workgraph))
+            .unwrap_or(self.enable_workgraph);
+        if !workgraph_enabled {
+            capabilities.remove(&meerkat_contracts::CapabilityId::WorkGraph);
         }
 
         #[cfg(feature = "comms")]
@@ -1892,6 +2142,9 @@ impl AgentFactory {
         }
         if !mask.override_image_generation {
             build_config.override_image_generation = metadata.tooling.image_generation;
+        }
+        if !mask.override_web_search {
+            build_config.override_web_search = metadata.tooling.web_search;
         }
         if !mask.preload_skills {
             build_config.preload_skills = metadata.tooling.active_skills.clone();
@@ -2656,6 +2909,8 @@ impl AgentFactory {
             None,
             None,
             ToolCategoryOverride::Inherit,
+            None,
+            ToolCategoryOverride::Inherit,
         )
         .await
     }
@@ -2683,6 +2938,8 @@ impl AgentFactory {
         image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
         image_generation_visibility: ToolCategoryOverride,
+        web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
+        web_search_visibility: ToolCategoryOverride,
     ) -> Result<Arc<dyn AgentToolDispatcher>, CompositeDispatcherError> {
         let BuiltinDispatcherConfig {
             store,
@@ -2726,6 +2983,10 @@ impl AgentFactory {
 
         if let Some(blob_store) = image_generation_blob_store.clone() {
             composite.register_blob_file_tools(blob_store);
+        }
+
+        if let Some(executor) = web_search_executor {
+            composite.register_web_search_tool(executor, web_search_visibility);
         }
 
         if let (Some(session_id), Some(machine), Some(executor), Some(planner), Some(blob_store)) = (
@@ -2775,10 +3036,18 @@ impl AgentFactory {
             !matches!(build_config.override_comms, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_memory |=
             !matches!(build_config.override_memory, ToolCategoryOverride::Inherit);
+        build_config.resume_override_mask.override_workgraph |= !matches!(
+            build_config.override_workgraph,
+            ToolCategoryOverride::Inherit
+        );
         build_config.resume_override_mask.override_mob |=
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_image_generation |= !matches!(
             build_config.override_image_generation,
+            ToolCategoryOverride::Inherit
+        );
+        build_config.resume_override_mask.override_web_search |= !matches!(
+            build_config.override_web_search,
             ToolCategoryOverride::Inherit
         );
 
@@ -2828,7 +3097,7 @@ impl AgentFactory {
         let resumed_self_hosted_server_id = resumed_session_metadata
             .as_ref()
             .and_then(|metadata| metadata.self_hosted_server_id.clone());
-        let (mut provider, resolved_self_hosted_server_id) =
+        let (provider, resolved_self_hosted_server_id) =
             self.resolve_provider_from_registry(&registry, &build_config)?;
         let self_hosted_server_id = if matches!(provider, Provider::SelfHosted) {
             build_config
@@ -2887,28 +3156,6 @@ impl AgentFactory {
                         build_config.auth_binding = resolved.durable_auth_binding;
                         resolved.client
                     } else {
-                        let (realm, _binding_id, resolved_auth_binding) =
-                            Self::resolve_realm_binding_for_provider(
-                                config,
-                                provider,
-                                build_config.auth_binding.as_ref(),
-                                build_config.realm_id.as_deref(),
-                            )
-                            .map_err(BuildAgentError::ConnectionResolution)?;
-                        let lease_auth_binding = if resolved_auth_binding.is_env_default()
-                            && build_config
-                                .auth_binding
-                                .as_ref()
-                                .map(AuthBindingRef::is_env_default)
-                                .unwrap_or(true)
-                        {
-                            build_config.auth_binding = None;
-                            None
-                        } else {
-                            build_config.auth_binding = Some(resolved_auth_binding.clone());
-                            Some(resolved_auth_binding.clone())
-                        };
-
                         // Provider-runtime registry needs the OAuth-backed
                         // TokenStore attached so persisted tokens (written by
                         // `rkat auth login`, server-side OAuth completion, etc.)
@@ -2924,21 +3171,89 @@ impl AgentFactory {
                                 env = env.with_refresh_coordinator(coord);
                             }
                         }
-                        if let RuntimeBuildMode::SessionOwned(bindings) =
-                            &build_config.runtime_build_mode
-                            && lease_auth_binding.is_some()
-                        {
-                            env = env.with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
-                        }
                         for (handle, resolver) in &self.external_auth_resolvers {
                             env = env.with_external_resolver(handle.clone(), resolver.clone());
                         }
+                        let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
-                        let connection = provider_registry
-                            .resolve(&realm, &resolved_auth_binding, &env)
-                            .await
-                            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
-                        provider = connection.provider;
+                        let mut first_resolution_error: Option<String> = None;
+                        let mut resolved = None;
+                        let candidates = Self::resolve_realm_binding_candidates_for_provider(
+                            config,
+                            provider,
+                            build_config.auth_binding.as_ref(),
+                            build_config.realm_id.as_deref(),
+                        )
+                        .map_err(BuildAgentError::ConnectionResolution)?;
+                        for target in candidates {
+                            let resolved_auth_binding = target.auth_binding.clone();
+                            let lease_auth_binding = if resolved_auth_binding.is_env_default()
+                                && !explicit_auth_binding
+                            {
+                                None
+                            } else {
+                                Some(resolved_auth_binding.clone())
+                            };
+                            let mut candidate_env = env.clone();
+                            if let RuntimeBuildMode::SessionOwned(bindings) =
+                                &build_config.runtime_build_mode
+                                && lease_auth_binding.is_some()
+                            {
+                                candidate_env = candidate_env
+                                    .with_auth_lease_handle(Arc::clone(bindings.auth_lease()));
+                            }
+                            match provider_registry
+                                .resolve(&target.realm, &resolved_auth_binding, &candidate_env)
+                                .await
+                            {
+                                Ok(connection) => {
+                                    if connection.provider != provider {
+                                        return Err(BuildAgentError::ConnectionResolution(
+                                            format!(
+                                                "auth binding for provider '{}' resolved connection for provider '{}'",
+                                                provider.as_str(),
+                                                connection.provider.as_str()
+                                            ),
+                                        ));
+                                    }
+                                    let resolved_model = if build_config.resume_override_mask.model
+                                    {
+                                        build_config.model.clone()
+                                    } else {
+                                        target
+                                            .binding
+                                            .default_model
+                                            .clone()
+                                            .unwrap_or_else(|| build_config.model.clone())
+                                    };
+                                    resolved = Some((
+                                        connection,
+                                        resolved_auth_binding,
+                                        lease_auth_binding,
+                                        resolved_model,
+                                    ));
+                                    break;
+                                }
+                                Err(err) => {
+                                    first_resolution_error.get_or_insert_with(|| err.to_string());
+                                    if explicit_auth_binding {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
+                            resolved.ok_or_else(|| {
+                                BuildAgentError::ConnectionResolution(
+                                    first_resolution_error.unwrap_or_else(|| {
+                                        format!(
+                                            "no auth binding candidates resolved for provider '{}'",
+                                            provider.as_str()
+                                        )
+                                    }),
+                                )
+                            })?;
+                        build_config.model = resolved_model;
 
                         // Publish immediately after resolve. Provider resolution can refresh and
                         // persist OAuth token bytes; AuthMachine must observe the returned lease
@@ -2975,6 +3290,12 @@ impl AgentFactory {
                                     "skipping image executor reuse for LLM connection outside selected realm"
                                 );
                             }
+                        }
+
+                        if lease_auth_binding.is_some() {
+                            build_config.auth_binding = Some(resolved_auth_binding);
+                        } else {
+                            build_config.auth_binding = None;
                         }
 
                         // Realtime-capable OpenAI models (e.g. gpt-realtime-2)
@@ -3095,6 +3416,30 @@ impl AgentFactory {
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
         let model_profile = registry.profile_for_provider(provider, &model);
+        #[cfg(not(target_arch = "wasm32"))]
+        let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
+            let active_model_has_native_search = model_profile
+                .as_ref()
+                .is_some_and(|profile| profile.supports_web_search);
+            if build_config.web_search_executor_override.is_none()
+                && !active_model_has_native_search
+                && matches!(
+                    build_config.override_web_search,
+                    ToolCategoryOverride::Enable
+                )
+            {
+                self.build_web_search_executor(
+                    config,
+                    &registry,
+                    provider,
+                    build_config.realm_id.as_deref(),
+                    &build_config.runtime_build_mode,
+                )
+                .await?
+            } else {
+                None
+            }
+        };
         if let meerkat_core::RuntimeBuildMode::SessionOwned(bindings) =
             &build_config.runtime_build_mode
         {
@@ -3250,12 +3595,24 @@ impl AgentFactory {
             ToolCategoryOverride::Disable => false,
         };
         let mut session = build_config.resume_session.clone().unwrap_or_default();
+        let initial_tool_filter = match build_config
+            .initial_metadata_entries
+            .remove(INITIAL_TOOL_FILTER_METADATA_KEY)
+        {
+            Some(value) => Some(
+                serde_json::from_value::<meerkat_core::ToolFilter>(value).map_err(|err| {
+                    BuildAgentError::Config(format!("invalid initial tool filter: {err}"))
+                })?,
+            ),
+            None => None,
+        };
         // Inject pre-resolved metadata entries before the builder reads metadata
         // for early-stage recovery, such as canonical inherited visibility state.
+        let is_resumed_session = build_config.resume_session.is_some();
         Self::apply_initial_metadata_entries(
             &mut session,
             &build_config.initial_metadata_entries,
-            build_config.resume_session.is_some(),
+            is_resumed_session,
         )?;
         let _session_id = session.id().to_string();
         use meerkat_core::runtime_epoch::RuntimeBuildMode;
@@ -3451,7 +3808,7 @@ impl AgentFactory {
                 {
                     self.build_tool_dispatcher_for_agent_with_overrides(
                         config,
-                        build_config.external_tools,
+                        build_config.external_tools.take(),
                         effective_builtins,
                         effective_shell,
                         skill_engine.clone(),
@@ -3476,6 +3833,18 @@ impl AgentFactory {
                         image_generation_planner.clone(),
                         build_config.blob_store_override.clone(),
                         build_config.override_image_generation,
+                        build_config
+                            .web_search_executor_override
+                            .clone()
+                            .or_else(|| auto_web_search_executor.clone()),
+                        if model_profile
+                            .as_ref()
+                            .is_some_and(|profile| profile.supports_web_search)
+                        {
+                            ToolCategoryOverride::Disable
+                        } else {
+                            build_config.override_web_search
+                        },
                     )
                     .await?
                 }
@@ -3568,6 +3937,11 @@ impl AgentFactory {
         let effective_schedule = build_config.override_schedule.resolve(self.enable_schedule);
         if effective_schedule && let Some(schedule_dispatcher) = build_config.schedule_tools.take()
         {
+            let schedule_dispatcher =
+                Arc::new(meerkat_schedule::CurrentSessionScheduleToolDispatcher::new(
+                    schedule_dispatcher,
+                    session.id().clone(),
+                )) as Arc<dyn AgentToolDispatcher>;
             let schedule_usage = render_tool_usage_instructions(schedule_dispatcher.as_ref());
             tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
                 tools,
@@ -3587,7 +3961,69 @@ impl AgentFactory {
             "tool composition: after scheduler gateway"
         );
 
-        // 9c. Compose tools with mob surface (after comms and scheduler, so mob
+        // 9c. Compose tools with WorkGraph surface (after scheduler, before mob).
+        let effective_workgraph = build_config
+            .override_workgraph
+            .resolve(self.enable_workgraph);
+        if effective_workgraph {
+            let workgraph_dispatcher = match build_config.workgraph_tools.take() {
+                Some(dispatcher) => dispatcher,
+                None => {
+                    let default_realm_id = build_config
+                        .realm_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let root = self.realm_scope_root(&build_config);
+                        let store = Arc::new(
+                            meerkat_workgraph::SqliteWorkGraphStore::open(
+                                root.join("workgraph.sqlite3"),
+                            )
+                            .map_err(|err| {
+                                BuildAgentError::Config(format!("WorkGraph store: {err}"))
+                            })?,
+                        );
+                        meerkat_workgraph::wire_workgraph_tools(
+                            meerkat_workgraph::WorkGraphService::with_scope(
+                                store,
+                                default_realm_id,
+                                meerkat_workgraph::WorkNamespace::default(),
+                            ),
+                        )
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        meerkat_workgraph::wire_workgraph_tools(
+                            meerkat_workgraph::WorkGraphService::with_scope(
+                                Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+                                default_realm_id,
+                                meerkat_workgraph::WorkNamespace::default(),
+                            ),
+                        )
+                    }
+                }
+            };
+            let workgraph_usage = render_tool_usage_instructions(workgraph_dispatcher.as_ref());
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                workgraph_dispatcher,
+            ]));
+            if !workgraph_usage.is_empty() {
+                if !tool_usage_instructions.is_empty() {
+                    tool_usage_instructions.push_str("\n\n");
+                }
+                tool_usage_instructions.push_str(&workgraph_usage);
+            }
+        }
+
+        tracing::debug!(
+            tool_count_after_workgraph = tools.tools().len(),
+            effective_workgraph,
+            "tool composition: after workgraph gateway"
+        );
+
+        // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
         // gateway wraps the already-composed base capability stack).
         let effective_mob = build_config.override_mob.resolve(self.enable_mob)
             || build_config.mob_tool_authority_context.is_some();
@@ -3964,6 +4400,7 @@ impl AgentFactory {
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
             metadata.tooling.image_generation = build_config.override_image_generation;
+            metadata.tooling.web_search = build_config.override_web_search;
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
                 metadata.tooling.active_skills = active_skill_ids.clone();
             }
@@ -3992,6 +4429,7 @@ impl AgentFactory {
                     mob: build_config.override_mob,
                     memory: build_config.override_memory,
                     image_generation: build_config.override_image_generation,
+                    web_search: build_config.override_web_search,
                     active_skills: active_skill_ids.clone(),
                 },
                 keep_alive: build_config.keep_alive,
@@ -4214,6 +4652,20 @@ impl AgentFactory {
 
         if let Some(provider) = hoisted_control_visibility_provider {
             provider.set_scope(agent.tool_scope().clone());
+        }
+
+        if let Some(filter) = initial_tool_filter {
+            agent
+                .stage_external_tool_filter(filter)
+                .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+            let base_tools = agent
+                .tool_scope()
+                .base_tools_snapshot()
+                .map_err(|err| BuildAgentError::Config(err.to_string()))?;
+            agent
+                .tool_scope()
+                .apply_staged(base_tools)
+                .map_err(|err| BuildAgentError::Config(err.to_string()))?;
         }
 
         // Wire mob authority handle into agent for session-effect application.
@@ -5122,6 +5574,269 @@ mod tests {
         assert_eq!(binding_id, "default_anthropic");
         assert_eq!(auth_binding.realm.as_str(), "dev");
         assert_eq!(auth_binding.binding.as_str(), "default_anthropic");
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn build_agent_without_auth_binding_scans_configured_realms_before_env_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_oauth".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                default_model: Some("gpt-5.4".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.realm_id = Some("missing".to_string());
+        assert!(build.auth_binding.is_none());
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("configured realm binding should beat env fallback");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+
+        assert_eq!(metadata.provider, Provider::OpenAI);
+        assert_eq!(
+            metadata.auth_binding.as_ref().map(|auth_binding| {
+                (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string(),
+                )
+            }),
+            Some(("dev".to_string(), "openai_oauth".to_string()))
+        );
+    }
+
+    #[cfg(all(feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn explicit_model_beats_binding_default_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "openai_api".to_string(),
+            BackendProfileConfig {
+                provider: "openai".to_string(),
+                backend_kind: "openai_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "openai_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "openai".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-test-openai".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "openai_oauth".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "openai_api".to_string(),
+                auth_profile: "openai_key".to_string(),
+                default_model: Some("gpt-5.4".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.5");
+        build.provider = Some(Provider::OpenAI);
+        build.auth_binding = Some(AuthBindingRef {
+            realm: meerkat_core::RealmId::parse("dev").unwrap(),
+            binding: meerkat_core::BindingId::parse("openai_oauth").unwrap(),
+            profile: None,
+        });
+        build.resume_override_mask.model = true;
+
+        let agent = factory
+            .build_agent(build, &config)
+            .await
+            .expect("explicit model should resolve through explicit binding");
+        let metadata = agent
+            .session()
+            .session_metadata()
+            .expect("metadata written");
+
+        assert_eq!(metadata.provider, Provider::OpenAI);
+        assert_eq!(metadata.model, "gpt-5.5");
+        assert_eq!(
+            metadata.auth_binding.as_ref().map(|auth_binding| {
+                (
+                    auth_binding.realm.as_str().to_string(),
+                    auth_binding.binding.as_str().to_string(),
+                )
+            }),
+            Some(("dev".to_string(), "openai_oauth".to_string()))
+        );
+    }
+
+    #[cfg(all(feature = "anthropic", feature = "openai", not(target_arch = "wasm32")))]
+    #[tokio::test]
+    async fn build_agent_without_provider_or_auth_binding_does_not_probe_other_providers() {
+        use async_trait::async_trait;
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, StaticLease, ValidatedBinding,
+        };
+
+        struct FailingOpenAiRuntime;
+
+        #[async_trait]
+        impl ProviderRuntime for FailingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                _binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Err(ProviderAuthError::Auth(
+                    meerkat_core::AuthError::MissingSecret,
+                ))
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("failing runtime never resolves")
+            }
+        }
+
+        struct SucceedingAnthropicRuntime;
+
+        #[async_trait]
+        impl ProviderRuntime for SucceedingAnthropicRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::Anthropic
+            }
+
+            async fn resolve_binding(
+                &self,
+                binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Ok(ResolvedConnection {
+                    provider: Provider::Anthropic,
+                    backend: binding.backend(),
+                    backend_profile: Arc::clone(binding.backend_profile()),
+                    auth_lease: Arc::new(StaticLease::inline_secret(
+                        "sk-ant-test".to_string(),
+                        meerkat_core::AuthMetadata::default(),
+                        None,
+                        "anthropic:test",
+                    )),
+                })
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                Ok(Arc::new(meerkat_client::TestClient::default()))
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions"));
+        factory.provider_registry = Arc::new(
+            ProviderRuntimeRegistry::empty()
+                .with_runtime(Arc::new(FailingOpenAiRuntime))
+                .with_runtime(Arc::new(SucceedingAnthropicRuntime)),
+        );
+        let mut config = Config::default();
+        let mut section = RealmConfigSection::default();
+        section.backend.insert(
+            "anthropic_api".to_string(),
+            BackendProfileConfig {
+                provider: "anthropic".to_string(),
+                backend_kind: "anthropic_api".to_string(),
+                base_url: None,
+                options: serde_json::Value::Null,
+            },
+        );
+        section.auth.insert(
+            "anthropic_key".to_string(),
+            meerkat_core::AuthProfileConfig {
+                provider: "anthropic".to_string(),
+                auth_method: "api_key".to_string(),
+                source: CredentialSourceSpec::InlineSecret {
+                    secret: "sk-ant-test".to_string(),
+                },
+                constraints: Default::default(),
+                metadata_defaults: Default::default(),
+            },
+        );
+        section.binding.insert(
+            "default_anthropic".to_string(),
+            ProviderBindingConfig {
+                backend_profile: "anthropic_api".to_string(),
+                auth_profile: "anthropic_key".to_string(),
+                default_model: Some("claude-sonnet-4-6".to_string()),
+                policy: Default::default(),
+            },
+        );
+        config.realm.insert("dev".to_string(), section);
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.realm_id = Some("missing".to_string());
+        assert!(build.provider.is_none());
+        assert!(build.auth_binding.is_none());
+
+        let err = match factory.build_agent(build, &config).await {
+            Ok(_) => {
+                panic!("OpenAI model resolution must not silently probe Anthropic credentials")
+            }
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("openai")
+                || err.to_string().contains("OpenAI")
+                || err.to_string().contains("missing secret"),
+            "error should stay on selected OpenAI path, not switch providers: {err}"
+        );
     }
 
     #[test]
@@ -7476,6 +8191,8 @@ mod tests {
                 None,
                 Some(blob_store.clone()),
                 ToolCategoryOverride::Inherit,
+                None,
+                ToolCategoryOverride::Inherit,
             )
             .await
             .expect("dispatcher should build with blob store");
@@ -7538,6 +8255,8 @@ mod tests {
                 None,
                 None,
                 ToolCategoryOverride::Inherit,
+                None,
+                ToolCategoryOverride::Inherit,
             )
             .await
             .expect("dispatcher should build without blob store");
@@ -7581,6 +8300,8 @@ impl AgentFactory {
         image_generation_planner: Option<Arc<dyn meerkat_core::ImageGenerationPlanner>>,
         image_generation_blob_store: Option<Arc<dyn BlobStore>>,
         image_generation_visibility: ToolCategoryOverride,
+        web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>>,
+        web_search_visibility: ToolCategoryOverride,
     ) -> Result<(Arc<dyn AgentToolDispatcher>, String), BuildAgentError> {
         if !effective_builtins {
             // No builtins — return the external tools if provided, otherwise empty.
@@ -7650,6 +8371,8 @@ impl AgentFactory {
                 image_generation_planner,
                 image_generation_blob_store,
                 image_generation_visibility,
+                web_search_executor,
+                web_search_visibility,
             )
             .await?;
 

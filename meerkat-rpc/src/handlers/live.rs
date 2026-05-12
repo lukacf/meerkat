@@ -12,14 +12,17 @@ use meerkat_client::realtime_session::RealtimeSessionFactory;
 use meerkat_client::realtime_session::RealtimeSessionOpenConfig;
 use meerkat_contracts::{
     LiveChannelParams, LiveCommitInputParams, LiveInputChunkWire, LiveOpenParams, LiveOpenResult,
-    LiveRefreshResult, LiveSendInputParams, LiveStatusResult, LiveTruncateParams,
-    RealtimeTurningMode, WireLiveAdapterStatus,
+    LiveOpenTransport, LiveRefreshResult, LiveSendInputParams, LiveStatusResult,
+    LiveTruncateParams, LiveWebrtcAnswerParams, LiveWebrtcAnswerResult, RealtimeTurningMode,
+    WireLiveAdapterStatus,
 };
 use meerkat_core::live_adapter::{
     LiveAdapterCommand, LiveChannelCapabilities, LiveContinuityMode, LiveInputChunk,
     LiveProjectionSnapshot, LiveTransportBootstrap,
 };
 use meerkat_core::types::{Message, SessionId};
+#[cfg(feature = "live-webrtc")]
+use meerkat_live::{LIVE_WEBRTC_ANSWER_METHOD, LiveWebrtcState};
 use meerkat_live::{LiveAdapterHost, LiveAdapterHostError, LiveChannelId, LiveWsState};
 use serde::{Deserialize, Serialize};
 
@@ -149,15 +152,30 @@ fn continuity_from_snapshot(snapshot: &LiveProjectionSnapshot) -> LiveContinuity
     }
 }
 
+pub struct LiveOpenHandlerContext<'a> {
+    pub host: &'a LiveAdapterHost,
+    pub live_ws: Option<&'a LiveWsState>,
+    pub live_ws_base_url: Option<&'a str>,
+    #[cfg(feature = "live-webrtc")]
+    pub live_webrtc: Option<&'a LiveWebrtcState>,
+    pub runtime: &'a Arc<SessionRuntime>,
+    pub session_factory: Option<&'a dyn RealtimeSessionFactory>,
+}
+
 pub async fn handle_live_open(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
-    host: &LiveAdapterHost,
-    live_ws: Option<&LiveWsState>,
-    live_ws_base_url: Option<&str>,
-    runtime: &Arc<SessionRuntime>,
-    session_factory: Option<&dyn RealtimeSessionFactory>,
+    ctx: LiveOpenHandlerContext<'_>,
 ) -> RpcResponse {
+    let LiveOpenHandlerContext {
+        host,
+        live_ws,
+        live_ws_base_url,
+        #[cfg(feature = "live-webrtc")]
+        live_webrtc,
+        runtime,
+        session_factory,
+    } = ctx;
     let parsed: LiveOpenParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
@@ -341,45 +359,97 @@ pub async fn handle_live_open(
         }
     }
 
-    // B16: with router-level refusal of `live/*` when `with_live_ws` was not
-    // called, both `live_ws` and `live_ws_base_url` are guaranteed `Some` by
-    // the time the handler runs. The previous empty-URL/token fallback was
-    // dead code that masked the unreachable case as a falsehood; treat it as
-    // an internal invariant violation instead.
-    let (ws_state, base_url) = match (live_ws, live_ws_base_url) {
-        (Some(ws), Some(url)) => (ws, url),
-        _ => {
+    if let Err(err) = runtime.ensure_live_peer_ingress(&session_id).await {
+        let _ = host.close_channel(&channel_id).await;
+        return RpcResponse::error(id, err.code, err.message);
+    }
+
+    #[cfg(feature = "live-webrtc")]
+    let webrtc_configured = live_webrtc.is_some();
+    #[cfg(not(feature = "live-webrtc"))]
+    let webrtc_configured = false;
+
+    let requested_transport = match parsed.transport {
+        Some(transport) => transport,
+        None if live_ws.is_some() => LiveOpenTransport::Websocket,
+        None if webrtc_configured => LiveOpenTransport::Webrtc,
+        None => {
             let _ = host.close_channel(&channel_id).await;
             return RpcResponse::error(
                 id,
                 error::INTERNAL_ERROR,
-                "live/open reached handler without live WS state; router gate is broken"
-                    .to_string(),
+                "live/open reached handler without configured live transport".to_string(),
             );
         }
     };
-    let token = ws_state.mint_token(channel_id.clone()).await;
-    let token_str = token.to_string();
-    // G38: pin the bearer token to the channel via a `channel` query param so
-    // a leaked token cannot be replayed against a different channel. The WS
-    // upgrade handler validates equality via `LiveWsState::consume_token`.
-    // Channel ids are URL-safe (G41: v4 UUID) so direct interpolation is
-    // sound; if a future channel-id shape ever introduces non-URL-safe bytes
-    // this `format!` must percent-encode.
-    // P1#4: append `&format=...` so the WS server can negotiate binary-frame
-    // encoding at upgrade time. Without this, `meerkat-live::transport`
-    // accepts the WS upgrade but rejects every binary audio frame as
-    // `binary_format_unnegotiated`. The format value is `LIVE_WS_DEFAULT_AUDIO_FORMAT`
-    // (pinned to the OpenAI provider default for now). Channel ids and the
-    // token string are URL-safe by construction, so direct interpolation is
-    // sound; the format constant is also URL-safe.
-    let transport = LiveTransportBootstrap::Websocket {
-        url: format!(
-            "{base_url}{path}?token={token_str}&channel={channel_id}&format={format}",
-            path = meerkat_live::LIVE_WS_PATH,
-            format = LIVE_WS_DEFAULT_AUDIO_FORMAT,
-        ),
-        token: token_str,
+
+    let transport = match requested_transport {
+        LiveOpenTransport::Websocket => {
+            // B16 updated: WebSocket is no longer the only live transport,
+            // but requesting it still requires the WS state/base URL pair.
+            let (ws_state, base_url) = match (live_ws, live_ws_base_url) {
+                (Some(ws), Some(url)) => (ws, url),
+                _ => {
+                    let _ = host.close_channel(&channel_id).await;
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        "live transport websocket is not configured".to_string(),
+                    );
+                }
+            };
+            let token = ws_state.mint_token(channel_id.clone()).await;
+            let token_str = token.to_string();
+            // G38: pin the bearer token to the channel via a `channel` query
+            // param so a leaked token cannot be replayed against a different
+            // channel. P1#4: append `&format=...` so binary audio frames are
+            // negotiated as provider-default PCM 24 kHz mono.
+            LiveTransportBootstrap::Websocket {
+                url: format!(
+                    "{base_url}{path}?token={token_str}&channel={channel_id}&format={format}",
+                    path = meerkat_live::LIVE_WS_PATH,
+                    format = LIVE_WS_DEFAULT_AUDIO_FORMAT,
+                ),
+                token: token_str,
+            }
+        }
+        LiveOpenTransport::Webrtc => {
+            #[cfg(feature = "live-webrtc")]
+            {
+                let Some(webrtc_state) = live_webrtc else {
+                    let _ = host.close_channel(&channel_id).await;
+                    return RpcResponse::error(
+                        id,
+                        error::INVALID_PARAMS,
+                        "live transport webrtc is not configured".to_string(),
+                    );
+                };
+                let token = webrtc_state.mint_token(channel_id.clone()).await;
+                LiveTransportBootstrap::Webrtc {
+                    token: token.to_string(),
+                    answer_method: LIVE_WEBRTC_ANSWER_METHOD.to_string(),
+                    http_url: None,
+                }
+            }
+            #[cfg(not(feature = "live-webrtc"))]
+            {
+                let _ = host.close_channel(&channel_id).await;
+                return RpcResponse::error(
+                    id,
+                    error::INVALID_PARAMS,
+                    "live transport webrtc is not compiled into this build".to_string(),
+                );
+            }
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            let _ = host.close_channel(&channel_id).await;
+            return RpcResponse::error(
+                id,
+                error::INVALID_PARAMS,
+                "unsupported live transport".to_string(),
+            );
+        }
     };
     // G8 (P2): project the core typed transport into the wire mirror at
     // the boundary so SDK codegen sees a typed discriminated union instead
@@ -418,6 +488,51 @@ pub async fn handle_live_open(
             id,
             error::INTERNAL_ERROR,
             format!("failed to serialize LiveOpenResult: {err}"),
+        ),
+    }
+}
+
+#[cfg(feature = "live-webrtc")]
+pub async fn handle_live_webrtc_answer(
+    id: Option<RpcId>,
+    params: Option<&serde_json::value::RawValue>,
+    live_webrtc: &LiveWebrtcState,
+) -> RpcResponse {
+    let parsed: LiveWebrtcAnswerParams = match super::parse_params(params) {
+        Ok(p) => p,
+        Err(resp) => return resp,
+    };
+    let channel_id = LiveChannelId::new(parsed.channel_id.clone());
+
+    match live_webrtc
+        .answer_offer(channel_id, &parsed.token, parsed.offer_sdp)
+        .await
+    {
+        Ok(answer_sdp) => match serde_json::to_value(LiveWebrtcAnswerResult { answer_sdp }) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(err) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("failed to serialize LiveWebrtcAnswerResult: {err}"),
+            ),
+        },
+        Err(meerkat_live::LiveWebrtcError::InvalidToken(err)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("invalid WebRTC live token: {err}"),
+        ),
+        Err(meerkat_live::LiveWebrtcError::ChannelNotFound(channel)) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("channel {channel} not found"),
+        ),
+        Err(meerkat_live::LiveWebrtcError::Json(err)) => {
+            RpcResponse::error(id, error::INVALID_PARAMS, err.to_string())
+        }
+        Err(err) => RpcResponse::error(
+            id,
+            error::INVALID_PARAMS,
+            format!("failed to answer WebRTC offer: {err}"),
         ),
     }
 }
@@ -797,12 +912,17 @@ pub async fn handle_live_interrupt(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    #[cfg(feature = "live-webrtc")] webrtc_state: Option<&meerkat_live::LiveWebrtcState>,
 ) -> RpcResponse {
     let parsed: LiveChannelParams = match super::parse_params(params) {
         Ok(p) => p,
         Err(resp) => return resp,
     };
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+    #[cfg(feature = "live-webrtc")]
+    if let Some(state) = webrtc_state {
+        state.discard_output_audio(&channel_id).await;
+    }
 
     match host
         .send_command(&channel_id, LiveAdapterCommand::Interrupt)
@@ -829,6 +949,7 @@ pub async fn handle_live_truncate(
     id: Option<RpcId>,
     params: Option<&serde_json::value::RawValue>,
     host: &LiveAdapterHost,
+    #[cfg(feature = "live-webrtc")] webrtc_state: Option<&meerkat_live::LiveWebrtcState>,
 ) -> RpcResponse {
     let parsed: LiveTruncateParams = match super::parse_params(params) {
         Ok(p) => p,
@@ -847,6 +968,10 @@ pub async fn handle_live_truncate(
     }
 
     let channel_id = LiveChannelId::new(&parsed.channel_id);
+    #[cfg(feature = "live-webrtc")]
+    if let Some(state) = webrtc_state {
+        state.discard_output_audio(&channel_id).await;
+    }
     let command = LiveAdapterCommand::TruncateAssistantOutput {
         item_id: parsed.item_id.clone(),
         content_index: parsed.content_index,
@@ -964,6 +1089,7 @@ mod tests {
         let v = LiveOpenParams {
             session_id: "sess-123".into(),
             turning_mode: None,
+            transport: None,
         };
         assert_eq!(round_trip(&v), v);
     }
@@ -975,6 +1101,7 @@ mod tests {
         let v = LiveOpenParams {
             session_id: "sess-123".into(),
             turning_mode: Some(RealtimeTurningMode::ExplicitCommit),
+            transport: None,
         };
         assert_eq!(round_trip(&v), v);
     }

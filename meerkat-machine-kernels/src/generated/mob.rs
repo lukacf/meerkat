@@ -1307,34 +1307,6 @@ impl std::fmt::Display for MobMemberState {
         f.write_str(self.as_str())
     }
 }
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct MobTask(pub String);
-impl From<String> for MobTask {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for MobTask {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for MobTask {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 #[allow(non_camel_case_types)]
 #[derive(
     Debug,
@@ -1575,92 +1547,6 @@ impl std::convert::TryFrom<String> for StepRunStatus {
     }
 }
 impl std::fmt::Display for StepRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-#[derive(
-    Debug,
-    Clone,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub struct TaskId(pub String);
-impl From<String> for TaskId {
-    fn from(value: String) -> Self {
-        Self(value)
-    }
-}
-impl From<&str> for TaskId {
-    fn from(value: &str) -> Self {
-        Self(value.to_owned())
-    }
-}
-impl std::fmt::Display for TaskId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-#[allow(non_camel_case_types)]
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    serde::Serialize,
-    serde::Deserialize,
-)]
-pub enum TaskStatus {
-    #[default]
-    #[serde(rename = "Pending")]
-    Pending,
-    #[serde(rename = "InProgress")]
-    InProgress,
-    #[serde(rename = "Completed")]
-    Completed,
-    #[serde(rename = "Cancelled")]
-    Cancelled,
-}
-impl TaskStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Pending => "Pending",
-            Self::InProgress => "InProgress",
-            Self::Completed => "Completed",
-            Self::Cancelled => "Cancelled",
-        }
-    }
-}
-impl std::convert::TryFrom<&str> for TaskStatus {
-    type Error = String;
-    fn try_from(value: &str) -> Result<Self, Self::Error> {
-        match value {
-            "Pending" => Ok(Self::Pending),
-            "InProgress" => Ok(Self::InProgress),
-            "Completed" => Ok(Self::Completed),
-            "Cancelled" => Ok(Self::Cancelled),
-            other => Err(format!("invalid TaskStatus value `{other}`")),
-        }
-    }
-}
-impl std::convert::TryFrom<String> for TaskStatus {
-    type Error = String;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::try_from(value.as_str())
-    }
-}
-impl std::fmt::Display for TaskStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1964,9 +1850,6 @@ pub struct State {
     pub wiring_edges: std::collections::BTreeSet<WiringEdge>,
     pub external_peer_edges: std::collections::BTreeSet<ExternalPeerEdge>,
     pub identity_to_runtime: std::collections::BTreeMap<AgentIdentity, AgentRuntimeId>,
-    pub tasks: std::collections::BTreeMap<TaskId, MobTask>,
-    pub in_progress_task_ids: std::collections::BTreeSet<TaskId>,
-    pub completed_task_ids: std::collections::BTreeSet<TaskId>,
     pub member_session_bindings: std::collections::BTreeMap<AgentIdentity, SessionId>,
     pub pending_session_ingress_detach_runtime_ids: std::collections::BTreeSet<AgentRuntimeId>,
     pub topology_epoch: u64,
@@ -2178,20 +2061,6 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Destroy {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TaskCreate {
-        pub task_id: TaskId,
-        pub task_payload: MobTask,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TaskUpdate {
-        pub task_id: TaskId,
-        pub new_status: TaskStatus,
-    }
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TaskList {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct TaskGet {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RosterSnapshot {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ListMembers {}
@@ -2291,10 +2160,6 @@ pub enum Input {
     Complete(inputs::Complete),
     Reset(inputs::Reset),
     Destroy(inputs::Destroy),
-    TaskCreate(inputs::TaskCreate),
-    TaskUpdate(inputs::TaskUpdate),
-    TaskList(inputs::TaskList),
-    TaskGet(inputs::TaskGet),
     RosterSnapshot(inputs::RosterSnapshot),
     ListMembers(inputs::ListMembers),
     ListMembersIncludingRetiring(inputs::ListMembersIncludingRetiring),
@@ -2362,10 +2227,6 @@ impl Input {
             Self::Complete(_) => InputKind::Complete,
             Self::Reset(_) => InputKind::Reset,
             Self::Destroy(_) => InputKind::Destroy,
-            Self::TaskCreate(_) => InputKind::TaskCreate,
-            Self::TaskUpdate(_) => InputKind::TaskUpdate,
-            Self::TaskList(_) => InputKind::TaskList,
-            Self::TaskGet(_) => InputKind::TaskGet,
             Self::RosterSnapshot(_) => InputKind::RosterSnapshot,
             Self::ListMembers(_) => InputKind::ListMembers,
             Self::ListMembersIncludingRetiring(_) => InputKind::ListMembersIncludingRetiring,
@@ -2426,10 +2287,6 @@ pub enum InputKind {
     Complete,
     Reset,
     Destroy,
-    TaskCreate,
-    TaskUpdate,
-    TaskList,
-    TaskGet,
     RosterSnapshot,
     ListMembers,
     ListMembersIncludingRetiring,
@@ -2703,8 +2560,6 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct EmitProgressNote {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-    pub struct EmitTaskNotice {}
-    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PersistKickoffUpdate {
         pub member_id: String,
         pub phase: KickoffPhase,
@@ -2761,7 +2616,6 @@ pub enum Effect {
     EmitMemberTerminalNotice(effects::EmitMemberTerminalNotice),
     AdmitPeerInput(effects::AdmitPeerInput),
     EmitProgressNote(effects::EmitProgressNote),
-    EmitTaskNotice(effects::EmitTaskNotice),
     PersistKickoffUpdate(effects::PersistKickoffUpdate),
     PersistKickoffFailureUpdate(effects::PersistKickoffFailureUpdate),
     EmitKickoffLifecycleNotice(effects::EmitKickoffLifecycleNotice),
@@ -2788,7 +2642,6 @@ pub enum EffectKind {
     EmitMemberTerminalNotice,
     AdmitPeerInput,
     EmitProgressNote,
-    EmitTaskNotice,
     PersistKickoffUpdate,
     PersistKickoffFailureUpdate,
     EmitKickoffLifecycleNotice,
@@ -2858,11 +2711,6 @@ pub enum TransitionId {
     UnwireMembersRunning,
     WireExternalPeerRunning,
     UnwireExternalPeerRunning,
-    TaskCreateRunning,
-    TaskUpdateRunningPending,
-    TaskUpdateRunningInProgress,
-    TaskUpdateRunningCompleted,
-    TaskUpdateRunningCancelled,
     ForceCancelRunning,
     SubscribeAgentEventsRunning,
     SubscribeAgentEventsStopped,
@@ -3136,9 +2984,6 @@ pub fn initial_state() -> State {
         wiring_edges: Default::default(),
         external_peer_edges: Default::default(),
         identity_to_runtime: Default::default(),
-        tasks: Default::default(),
-        in_progress_task_ids: Default::default(),
-        completed_task_ids: Default::default(),
         member_session_bindings: Default::default(),
         pending_session_ingress_detach_runtime_ids: Default::default(),
         topology_epoch: 0,

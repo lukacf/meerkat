@@ -34,7 +34,7 @@ fn mob_realm_id(mob_id: &MobId) -> Result<RealmId, MobError> {
 
 /// Derive the effective `(override_mob, authority)` for a profile.
 ///
-/// `profile.tools.mob || profile.tools.mob_tasks` is the policy declaration.
+/// `profile.tools.mob` is the policy declaration.
 /// The canonical resolver `resolve_mob_operator_access` synthesizes a typed
 /// `MobToolAuthorityContext` (defaulting to a generated create-only shape) when
 /// the profile says enable and no persisted authority is supplied. This is the
@@ -44,9 +44,26 @@ pub(crate) fn resolve_profile_mob_operator_access(
     profile: &Profile,
     persisted_authority: Option<MobToolAuthorityContext>,
 ) -> (ToolCategoryOverride, Option<MobToolAuthorityContext>) {
-    let enable_mob =
-        ToolCategoryOverride::from_effective(profile.tools.mob || profile.tools.mob_tasks);
+    let enable_mob = ToolCategoryOverride::from_effective(profile.tools.mob);
     resolve_mob_operator_access(enable_mob, persisted_authority)
+}
+
+/// Open profile tool categories for an already-witnessed inherited filter.
+///
+/// `SpawnTooling::InheritParent` and `SpawnTooling::Minimal` derive the actual
+/// child-visible tool set from the parent's ToolScope snapshot. In that mode,
+/// the selected mob profile still contributes model/skills/runtime metadata,
+/// but its category booleans must not pre-disable tools before the inherited
+/// allow-list is applied.
+pub(crate) fn open_profile_tool_categories_for_inherited_filter(profile: &mut Profile) {
+    profile.tools.builtins = true;
+    profile.tools.shell = true;
+    profile.tools.comms = true;
+    profile.tools.memory = true;
+    profile.tools.mob = true;
+    profile.tools.schedule = true;
+    profile.tools.image_generation = true;
+    profile.tools.mcp.clear();
 }
 
 /// Parameters for building an agent config from a mob profile.
@@ -432,7 +449,6 @@ mod tests {
                     comms: true,
                     memory: false,
                     mob: true,
-                    mob_tasks: true,
                     schedule: false,
                     image_generation: true,
                     mcp: vec![],
@@ -458,7 +474,6 @@ mod tests {
                     comms: true,
                     memory: false,
                     mob: false,
-                    mob_tasks: false,
                     schedule: false,
                     image_generation: false,
                     mcp: vec![],
@@ -552,6 +567,7 @@ mod tests {
                     mob: meerkat_core::session::ToolCategoryOverride::Enable,
                     memory: meerkat_core::session::ToolCategoryOverride::Disable,
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
+                    web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
                     active_skills: None,
                 },
                 keep_alive: false,
@@ -777,6 +793,68 @@ mod tests {
         assert_eq!(
             config.override_mob,
             meerkat_core::ToolCategoryOverride::Disable
+        );
+    }
+
+    #[tokio::test]
+    async fn test_inherited_tooling_opens_profile_category_caps() {
+        let def = sample_definition();
+        let mut profile = def.profiles[&ProfileName::from("worker")]
+            .as_inline()
+            .unwrap()
+            .clone();
+        profile.tools.mcp = vec!["narrow-mcp-source".to_string()];
+
+        open_profile_tool_categories_for_inherited_filter(&mut profile);
+        assert_eq!(
+            profile.tools.mcp,
+            Vec::<String>::new(),
+            "inherited tooling should not keep profile-level MCP source caps"
+        );
+
+        let inherited_filter = meerkat_core::tool_scope::ToolFilter::Allow(
+            ["bash".to_string(), "mob_spawn_member".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let inherited_authority =
+            witnessed_filter(inherited_filter.clone(), &["bash", "mob_spawn_member"]);
+        let config = build_agent_config(BuildAgentConfigParams {
+            mob_id: &def.id,
+            profile_name: &ProfileName::from("worker"),
+            agent_identity: &MeerkatId::from("w-inherit"),
+            profile: &profile,
+            definition: &def,
+            external_tools: None,
+            context: None,
+            labels: None,
+            additional_instructions: None,
+            shell_env: None,
+            mob_tool_authority_context: None,
+            inherited_tool_filter: Some(inherited_authority),
+        })
+        .await
+        .expect("build_agent_config");
+
+        assert_eq!(
+            config.override_builtins,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_shell,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_memory,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_image_generation,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
+        assert_eq!(
+            config.override_mob,
+            meerkat_core::ToolCategoryOverride::Enable
         );
     }
 

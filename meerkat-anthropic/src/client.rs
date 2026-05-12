@@ -2319,6 +2319,23 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_body_effort_max_remains_anthropic_specific()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+
+        let request = LlmRequest::new(
+            "claude-opus-4-7",
+            vec![Message::User(UserMessage::text("test".to_string()))],
+        )
+        .with_anthropic_tag_merge(|t| t.effort = Some(AnthropicEffort::Max));
+
+        let body = client.build_request_body(&request)?;
+
+        assert_eq!(body["output_config"]["effort"], "max");
+        Ok(())
+    }
+
+    #[test]
     fn test_build_request_body_effort_with_structured_output()
     -> Result<(), Box<dyn std::error::Error>> {
         let client = AnthropicClient::new("test-key".to_string())?;

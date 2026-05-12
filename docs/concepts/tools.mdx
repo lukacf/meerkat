@@ -29,10 +29,10 @@ struct MathTools;
 #[async_trait]
 impl AgentToolDispatcher for MathTools {
     fn tools(&self) -> Arc<[Arc<ToolDef>]> {
-        vec![Arc::new(ToolDef {
-            name: "add".into(),
-            description: "Add two numbers".to_string(),
-            input_schema: json!({
+        vec![Arc::new(ToolDef::new(
+            "add",
+            "Add two numbers",
+            json!({
                 "type": "object",
                 "properties": {
                     "a": {"type": "number"},
@@ -40,7 +40,7 @@ impl AgentToolDispatcher for MathTools {
                 },
                 "required": ["a", "b"]
             }),
-        })].into()
+        ))].into()
     }
 
     async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {

@@ -24,6 +24,7 @@ meerkat-anthropic = { workspace = true, optional = true, default-features = fals
 meerkat-openai = { workspace = true, optional = true, default-features = false }
 meerkat-gemini = { workspace = true, optional = true, default-features = false }
 meerkat-schedule = { workspace = true }
+meerkat-workgraph = { workspace = true }
 meerkat-store = { workspace = true }
 meerkat-runtime = { workspace = true }
 meerkat-tools = { workspace = true }
@@ -105,6 +106,7 @@ memory-store-session = ["dep:meerkat-memory"]
 comms = ["dep:meerkat-comms", "dep:parking_lot", "meerkat-tools/comms"]
 mcp = ["dep:meerkat-mcp", "meerkat-tools/mcp"]
 schedule = []
+workgraph = []
 skills = ["dep:meerkat-skills", "meerkat-skills/skills-http", "meerkat-tools/skills"]
 # Live-channel orchestration (LiveAdapterHost wiring + realtime open/refresh
 # helpers shared by RPC, Rust SDK, REST, etc.). Pulls in `meerkat-live`.

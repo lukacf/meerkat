@@ -78,7 +78,7 @@ env:
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_GB || '1000' }}
   MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CACHE_DISK_TYPE || 'pd-ssd' }}
   MEERKAT_GCP_BUILDBUDDY_DOWN_MODE: ${{ vars.MEERKAT_GCP_BUILDBUDDY_DOWN_MODE || 'stopped' }}
-  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
+  MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '900' }}
   MEERKAT_BUILDBUDDY_EXECUTOR_POOL: ${{ vars.MEERKAT_BUILDBUDDY_EXECUTOR_POOL || 'meerkat-ci' }}
   MEERKAT_BUILDBUDDY_CI_IMAGE: ${{ vars.MEERKAT_BUILDBUDDY_CI_IMAGE || 'europe-west1-docker.pkg.dev/king-dnn-training-dev/meerkat-ci/meerkat-ci-rust:1.94.0' }}
   MEERKAT_HOST_CARGO_HOME: /usr/local/cargo
@@ -610,7 +610,7 @@ jobs:
         shell: bash
         env:
           CI_STARTED_AT_EPOCH: ${{ needs.control-plane-up.outputs.started_at_epoch }}
-          MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '600' }}
+          MAX_SECONDS: ${{ vars.MEERKAT_GCP_BUILDBUDDY_CI_MAX_SECONDS || '900' }}
         run: |
           if ! [[ "${CI_STARTED_AT_EPOCH}" =~ ^[0-9]+$ ]]; then
             echo "::error::Missing or invalid GCP BuildBuddy CI start timestamp: '${CI_STARTED_AT_EPOCH}'"

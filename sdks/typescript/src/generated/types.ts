@@ -1,7 +1,7 @@
 // Generated wire types for Meerkat SDK
-// Contract version: 0.6.5
+// Contract version: 0.6.6
 
-export const CONTRACT_VERSION = "0.6.5";
+export const CONTRACT_VERSION = "0.6.6";
 
 export interface WireUsage {
   input_tokens: number;
@@ -271,7 +271,6 @@ export interface WireMobToolConfig {
   mcp?: string[];
   memory?: boolean;
   mob?: boolean;
-  mob_tasks?: boolean;
   schedule?: boolean;
   shell?: boolean;
 }
@@ -725,7 +724,6 @@ export interface MobToolConfigInput {
   mcp?: string[];
   memory?: boolean;
   mob?: boolean;
-  mob_tasks?: boolean;
   schedule?: boolean;
   shell?: boolean;
 }
@@ -1670,6 +1668,7 @@ export interface RealtimeVideoChunk {
 
 export interface LiveOpenParams {
   session_id: string;
+  transport?: "websocket" | "webrtc";
   turning_mode?: RealtimeTurningMode;
 }
 
@@ -1715,18 +1714,35 @@ export interface WireLiveTransportBootstrapWebsocket {
   url: string;
 }
 
+export interface WireLiveTransportBootstrapWebrtc {
+  answer_method: string;
+  http_url?: string;
+  token: string;
+  transport: "webrtc";
+}
+
 export interface WireLiveTransportBootstrapUnknown {
   debug: string;
   transport: "unknown";
 }
 
-export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapUnknown;
+export type WireLiveTransportBootstrap = WireLiveTransportBootstrapWebsocket | WireLiveTransportBootstrapWebrtc | WireLiveTransportBootstrapUnknown;
 
 export interface LiveOpenResult {
   capabilities: WireLiveChannelCapabilities;
   channel_id: string;
   continuity: WireLiveContinuityMode;
   transport: WireLiveTransportBootstrap;
+}
+
+export interface LiveWebrtcAnswerParams {
+  channel_id: string;
+  offer_sdp: string;
+  token: string;
+}
+
+export interface LiveWebrtcAnswerResult {
+  answer_sdp: string;
 }
 
 export interface LiveChannelParams {

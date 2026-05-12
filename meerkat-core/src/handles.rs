@@ -17,7 +17,9 @@
 //! reserved for opaque identifiers (surface ids, binding keys, error
 //! messages).
 //!
-//! Return type is `Result<(), DslTransitionError>`. The DSL decides legality;
+//! Most single-input methods return `Result<(), DslTransitionError>`. The
+//! aggregate `TurnStateHandle::apply_turn_input` returns the accepted
+//! transition plus authority-owned effects. The DSL decides legality;
 //! phase/field reads happen elsewhere (direct DSL state accessors, not via
 //! these traits).
 
@@ -42,8 +44,10 @@ use crate::tool_scope::{
     ExternalToolSurfaceStagedOp,
 };
 use crate::turn_execution_authority::{
-    ContentShape, TurnFailureReason, TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind,
-    TurnTerminalOutcome,
+    ContentShape, StructuredOutputFailureReason, TurnExecutionEffectAuthority,
+    TurnExecutionEffectProjection, TurnExecutionInput, TurnExecutionTransition, TurnFailureReason,
+    TurnPhase, TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
+    terminal_outcome_for_budget_exceeded,
 };
 use crate::types::SessionId;
 
@@ -589,6 +593,128 @@ pub struct TurnStateSnapshot {
 
 /// Turn-execution DSL handle.
 pub trait TurnStateHandle: Send + Sync {
+    /// Apply one typed turn input and return the transition effects accepted by
+    /// the turn-state authority.
+    ///
+    /// Runtime-backed implementations override this to return effects emitted
+    /// by the MeerkatMachine DSL transition. The default path is a
+    /// compatibility projection for test/core-only handles that implement the
+    /// per-input methods below.
+    fn apply_turn_input(
+        &self,
+        input: &TurnExecutionInput,
+    ) -> Result<TurnExecutionTransition, DslTransitionError> {
+        let before = self.snapshot();
+        let result = match input {
+            TurnExecutionInput::StartConversationRun { run_id }
+                if before.active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartConversationRun { run_id } => self.start_conversation_run(
+                run_id.clone(),
+                TurnPrimitiveKind::ConversationTurn,
+                ContentShape::Conversation,
+                false,
+                false,
+                0,
+            ),
+            TurnExecutionInput::StartImmediateAppend { run_id }
+                if before.active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartImmediateAppend { run_id } => {
+                self.start_immediate_append(run_id.clone())
+            }
+            TurnExecutionInput::StartImmediateContext { run_id }
+                if before.active_run_id.as_ref() == Some(run_id) =>
+            {
+                Ok(())
+            }
+            TurnExecutionInput::StartImmediateContext { run_id } => {
+                self.start_immediate_context(run_id.clone())
+            }
+            TurnExecutionInput::PrimitiveApplied { .. } => self.primitive_applied(),
+            TurnExecutionInput::LlmReturnedToolCalls { tool_count, .. } => {
+                self.llm_returned_tool_calls(u64::from(*tool_count))
+            }
+            TurnExecutionInput::LlmReturnedTerminal { .. } => self.llm_returned_terminal(),
+            TurnExecutionInput::RegisterPendingOps {
+                op_refs,
+                barrier_operation_ids,
+                ..
+            } => self.register_pending_ops(
+                op_refs.iter().cloned().collect(),
+                barrier_operation_ids.iter().cloned().collect(),
+            ),
+            TurnExecutionInput::ToolCallsResolved { .. } => self.tool_calls_resolved(),
+            TurnExecutionInput::OpsBarrierSatisfied { operation_ids, .. } => {
+                self.ops_barrier_satisfied(operation_ids.iter().cloned().collect())
+            }
+            TurnExecutionInput::BoundaryContinue { .. } => self.boundary_continue(),
+            TurnExecutionInput::BoundaryComplete { .. } => self.boundary_complete(),
+            TurnExecutionInput::RecoverableFailure { retry, .. } => {
+                self.recoverable_failure(retry.clone())
+            }
+            TurnExecutionInput::FatalFailure { reason, .. } => self.fatal_failure(reason.clone()),
+            TurnExecutionInput::RetryRequested { retry_attempt, .. } => {
+                self.retry_requested(*retry_attempt)
+            }
+            TurnExecutionInput::CancelNow { .. } => self.cancel_now(),
+            TurnExecutionInput::CancelAfterBoundary { .. } => self.request_cancel_after_boundary(),
+            TurnExecutionInput::CancellationObserved { .. } => self.cancellation_observed(),
+            TurnExecutionInput::AcknowledgeTerminal { .. } => self
+                .acknowledge_terminal(before.terminal_outcome.unwrap_or(TurnTerminalOutcome::None)),
+            TurnExecutionInput::TurnLimitReached { .. } => self.turn_limit_reached(),
+            TurnExecutionInput::BudgetExhausted { .. } => self.budget_exhausted(),
+            TurnExecutionInput::TimeBudgetExceeded { .. } => self.time_budget_exceeded(),
+            TurnExecutionInput::BudgetLimitExceeded { exceeded, .. } => {
+                match terminal_outcome_for_budget_exceeded(*exceeded) {
+                    TurnTerminalOutcome::TimeBudgetExceeded => self.time_budget_exceeded(),
+                    TurnTerminalOutcome::BudgetExhausted => self.budget_exhausted(),
+                    _ => unreachable!("budget exceeded maps only to budget terminal outcomes"),
+                }
+            }
+            TurnExecutionInput::EnterExtraction { max_retries, .. } => {
+                self.enter_extraction(*max_retries)
+            }
+            TurnExecutionInput::ExtractionValidationPassed { .. } => {
+                self.extraction_validation_passed()
+            }
+            TurnExecutionInput::ExtractionValidationFailed { failure, .. } => {
+                self.extraction_validation_failed(failure.clone())
+            }
+            TurnExecutionInput::ExtractionFailed { failure, .. } => {
+                self.extraction_failed(failure.clone())
+            }
+            TurnExecutionInput::ExtractionStart { .. } => self.extraction_start(),
+            TurnExecutionInput::ForceCancelNoRun => self.force_cancel_no_run(),
+        };
+        result?;
+
+        let after = self.snapshot();
+        let effects = TurnExecutionEffectAuthority::effects_for_accepted_projection(
+            TurnExecutionEffectProjection {
+                input,
+                prev_phase: before.turn_phase,
+                next_phase: after.turn_phase,
+                boundary_sequence: after.boundary_count,
+                terminal_outcome: after.terminal_outcome.unwrap_or(TurnTerminalOutcome::None),
+                terminal_cause_kind: after.terminal_cause_kind,
+            },
+        )
+        .map_err(|err| {
+            DslTransitionError::no_matching("TurnStateHandle::apply_turn_input", err.to_string())
+        })?;
+
+        Ok(TurnExecutionTransition {
+            prev_phase: before.turn_phase,
+            next_phase: after.turn_phase,
+            effects,
+        })
+    }
+
     fn start_conversation_run(
         &self,
         run_id: RunId,
@@ -632,9 +758,15 @@ pub trait TurnStateHandle: Send + Sync {
 
     fn extraction_validation_passed(&self) -> Result<(), DslTransitionError>;
 
-    fn extraction_validation_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_validation_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
-    fn extraction_failed(&self, error: String) -> Result<(), DslTransitionError>;
+    fn extraction_failed(
+        &self,
+        failure: StructuredOutputFailureReason,
+    ) -> Result<(), DslTransitionError>;
 
     fn recoverable_failure(&self, retry: LlmRetrySchedule) -> Result<(), DslTransitionError>;
 
@@ -894,9 +1026,9 @@ pub trait ExternalToolSurfaceHandle: Send + Sync {
 /// Runtime-backed comms ingress hands parsed transport facts to this handle
 /// and receives the complete typed admission/classification facts back. A
 /// rejection is authoritative and callers fail closed. Standalone comms
-/// runtimes may have no session DSL handle; those retain a local
-/// `PeerIngressMachinePolicy` adapter for wire-compatible operation without a
-/// session authority.
+/// runtimes may have no session DSL handle; those use the explicit
+/// `PeerIngressCompatibilityAuthority` seam for wire-compatible operation
+/// without a session authority.
 pub trait PeerCommsHandle: Send + Sync {
     /// Fire the `ClassifyExternalEnvelope` signal and return machine-owned
     /// admission facts for the parsed envelope.

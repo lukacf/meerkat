@@ -1103,37 +1103,103 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ### `PrepareBindingsInitializing`
 - From: `Initializing`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
+- To: `Initializing`
+
+### `PrepareBindingsInitializingIdempotent`
+- From: `Initializing`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
 - To: `Initializing`
 
 ### `PrepareBindingsIdle`
 - From: `Idle`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
 - To: `Attached`
+
+### `PrepareBindingsIdleIdempotent`
+- From: `Idle`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
+- To: `Idle`
 
 ### `PrepareBindingsAttached`
 - From: `Attached`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
+- To: `Attached`
+
+### `PrepareBindingsAttachedIdempotent`
+- From: `Attached`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
 - To: `Attached`
 
 ### `PrepareBindingsRunning`
 - From: `Running`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
+- To: `Running`
+
+### `PrepareBindingsRunningIdempotent`
+- From: `Running`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
 - To: `Running`
 
 ### `PrepareBindingsRetired`
 - From: `Retired`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
+- To: `Retired`
+
+### `PrepareBindingsRetiredIdempotent`
+- From: `Retired`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
 - To: `Retired`
 
 ### `PrepareBindingsStopped`
 - From: `Stopped`
 - On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_unbound`
 - Emits: `RuntimeBound`
+- To: `Stopped`
+
+### `PrepareBindingsStoppedIdempotent`
+- From: `Stopped`
+- On: `PrepareBindings`(agent_runtime_id, fence_token, generation, session_id)
+- Guards:
+  - `session_matches_current`
+  - `runtime_binding_idempotent`
 - To: `Stopped`
 
 ### `SetPeerIngressContextIdle`

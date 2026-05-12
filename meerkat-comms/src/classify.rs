@@ -9,8 +9,8 @@ use crate::types::{InboxItem, MessageKind};
 use meerkat_core::{
     InteractionId, PeerIngressAdmission, PeerIngressAuthDecision, PeerIngressConvention,
     PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
-    PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts, PeerInputClass,
-    TerminalityClass, handles::PeerCommsHandle,
+    PeerIngressKind, PeerIngressPlainEventFacts, PeerInputClass, TerminalityClass,
+    handles::PeerCommsHandle,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,7 +25,7 @@ pub(crate) type PeerCommsHandleSlot = Arc<parking_lot::RwLock<Option<Arc<dyn Pee
 pub(crate) struct IngressClassificationContext {
     pub(crate) require_peer_auth: bool,
     pub(crate) trusted_peers: Arc<parking_lot::RwLock<TrustedPeers>>,
-    pub(crate) ingress_policy: Arc<PeerIngressMachinePolicy>,
+    pub(crate) standalone_ingress: Arc<meerkat_core::PeerIngressCompatibilityAuthority>,
     pub(crate) peer_comms_handle: PeerCommsHandleSlot,
     pub(crate) require_machine_authority: Arc<AtomicBool>,
     pub(crate) inproc_namespace: Option<String>,
@@ -101,7 +101,7 @@ impl IngressClassificationContext {
                 );
                 return None;
             }
-            return Some(self.ingress_policy.classify_external_envelope(&facts));
+            return Some(self.standalone_ingress.admit_external_envelope(&facts));
         };
 
         match handle.classify_external_envelope(facts) {
@@ -128,7 +128,7 @@ impl IngressClassificationContext {
                 );
                 return None;
             }
-            return Some(self.ingress_policy.classify_plain_event_facts(&facts));
+            return Some(self.standalone_ingress.admit_plain_event(&facts));
         };
 
         match handle.classify_plain_event(facts) {
@@ -156,7 +156,7 @@ impl IngressClassificationContext {
     /// Runtime-backed inboxes hand parsed transport facts to the
     /// MeerkatMachine DSL handle and enqueue the returned machine admission
     /// facts. Standalone comms runtimes leave `peer_comms_handle` unset and
-    /// use the core compatibility policy only while
+    /// use the core compatibility authority only while
     /// `require_machine_authority` is false.
     pub(crate) fn prepare(&self, item: InboxItem) -> Option<PreparedIngressItem> {
         match item {
@@ -177,8 +177,12 @@ impl IngressClassificationContext {
                     from_peer: from_name.clone(),
                     from_peer_id,
                     kind: match &envelope.kind {
-                        MessageKind::Message { body, .. } => {
-                            PeerIngressEnvelopeKind::Message { body: body.clone() }
+                        MessageKind::Message { body, blocks, .. } => {
+                            let body = meerkat_core::comms::CommsContentAuthority::text_projection(
+                                body,
+                                blocks.as_deref(),
+                            );
+                            PeerIngressEnvelopeKind::Message { body }
                         }
                         MessageKind::Request { intent, params, .. } => {
                             PeerIngressEnvelopeKind::Request {
@@ -293,6 +297,10 @@ impl IngressClassificationContext {
                 render_metadata,
             } => {
                 let interaction_id = interaction_id.unwrap_or_else(Uuid::new_v4);
+                let (body, blocks) =
+                    meerkat_core::comms::CommsContentAuthority::canonical_text_and_blocks(
+                        body, blocks,
+                    );
                 let facts = PeerIngressPlainEventFacts {
                     source_name: source.to_string(),
                     body: body.clone(),
@@ -368,6 +376,7 @@ mod tests {
     use crate::identity::{Keypair, PubKey, Signature};
     use crate::trust::TrustedPeer;
     use crate::types::Envelope;
+    use meerkat_core::PeerIngressMachinePolicy;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
@@ -550,9 +559,11 @@ mod tests {
         IngressClassificationContext {
             require_peer_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted_peers)),
-            ingress_policy: Arc::new(PeerIngressMachinePolicy::from_silent_intents(
-                silent_intents,
-            )),
+            standalone_ingress: Arc::new(
+                meerkat_core::PeerIngressCompatibilityAuthority::from_silent_intents(
+                    silent_intents,
+                ),
+            ),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
             require_machine_authority: Arc::new(AtomicBool::new(false)),
             inproc_namespace,
@@ -586,8 +597,12 @@ mod tests {
             from_peer: from_peer.to_string(),
             from_peer_id: envelope.from.to_peer_id(),
             kind: match &envelope.kind {
-                MessageKind::Message { body, .. } => {
-                    PeerIngressEnvelopeKind::Message { body: body.clone() }
+                MessageKind::Message { body, blocks, .. } => {
+                    let body = meerkat_core::comms::CommsContentAuthority::text_projection(
+                        body,
+                        blocks.as_deref(),
+                    );
+                    PeerIngressEnvelopeKind::Message { body }
                 }
                 MessageKind::Request { intent, params, .. } => PeerIngressEnvelopeKind::Request {
                     intent: intent.clone(),

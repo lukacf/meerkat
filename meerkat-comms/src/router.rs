@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::identity::Keypair;
 use crate::inbox::InboxSender;
 use crate::inproc::{InprocRegistry, InprocSendError};
+use crate::peer_directory_visibility_authority::PeerDirectoryVisibilityAuthority;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::transport::codec::{EnvelopeFrame, TransportCodec};
 use crate::transport::{PeerAddr, TransportError};
@@ -100,12 +101,10 @@ pub struct Router {
     /// `trusted_peers_shared()`. Uses `parking_lot::RwLock` so ingress
     /// classification can read synchronously.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
-    /// Directory-filter side-channel for private (control-plane) trust
-    /// edges. Membership here is additive to `trusted_peers`: the peer
-    /// is still admitted AND send-resolvable, but `resolve_peer_directory()`
-    /// filters it out of the `comms.peers` REST/RPC/MCP surface. Used e.g.
-    /// for the supervisor bridge in session-backed mob members.
-    private_peer_ids: Arc<RwLock<std::collections::HashSet<PeerId>>>,
+    /// Authority for app-facing peer-directory visibility. Trust remains
+    /// owned by `trusted_peers`; this authority owns whether a trusted peer
+    /// is public or private on user-facing directory surfaces.
+    directory_visibility: Arc<RwLock<PeerDirectoryVisibilityAuthority>>,
     config: CommsConfig,
     require_peer_auth: bool,
     inbox_sender: InboxSender,
@@ -130,7 +129,7 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers: Arc::new(RwLock::new(trusted_peers)),
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            directory_visibility: Arc::new(RwLock::new(PeerDirectoryVisibilityAuthority::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -149,7 +148,7 @@ impl Router {
         Self {
             keypair: Arc::new(keypair),
             trusted_peers,
-            private_peer_ids: Arc::new(RwLock::new(std::collections::HashSet::new())),
+            directory_visibility: Arc::new(RwLock::new(PeerDirectoryVisibilityAuthority::new())),
             config,
             require_peer_auth,
             inbox_sender,
@@ -157,35 +156,24 @@ impl Router {
         }
     }
 
-    /// Mark a peer as private (hidden from `resolve_peer_directory`).
-    pub fn mark_private(&self, pubkey: crate::identity::PubKey) {
-        self.mark_private_peer_id(self.peer_id_for_pubkey(&pubkey));
-    }
-
-    /// Mark a peer as private by canonical `PeerId`.
-    pub(crate) fn mark_private_peer_id(&self, peer_id: PeerId) {
-        self.private_peer_ids.write().insert(peer_id);
-    }
-
     /// Remove the private marker for a peer. Returns `true` if the marker
     /// was present and removed.
-    pub fn unmark_private(&self, peer_id: &PeerId) -> bool {
-        self.private_peer_ids.write().remove(peer_id)
+    pub(crate) fn unmark_private(&self, peer_id: &PeerId) -> bool {
+        self.directory_visibility.write().unmark_private(peer_id)
     }
 
     /// Returns `true` if the peer is currently marked private.
     pub fn is_private(&self, pubkey: &crate::identity::PubKey) -> bool {
-        self.private_peer_ids
+        self.directory_visibility
             .read()
-            .contains(&peer_id_from_pubkey(pubkey))
+            .is_private(&peer_id_from_pubkey(pubkey))
     }
 
-    pub(crate) fn private_peer_ids(&self) -> std::collections::HashSet<PeerId> {
-        self.private_peer_ids.read().clone()
-    }
-
-    pub(crate) fn peer_id_for_pubkey(&self, pubkey: &crate::identity::PubKey) -> PeerId {
-        peer_id_from_pubkey(pubkey)
+    pub(crate) fn is_peer_directory_visible(&self, peer_id: &PeerId) -> bool {
+        self.directory_visibility
+            .read()
+            .visibility_for(peer_id)
+            .is_visible()
     }
 
     /// Scope in-process routing to a namespace.
@@ -223,6 +211,22 @@ impl Router {
         Ok(())
     }
 
+    pub(crate) fn add_private_trusted_peer(&self, peer: TrustedPeer) -> Result<PeerId, TrustError> {
+        let peer_id = peer_id_from_pubkey(&peer.pubkey);
+        self.add_private_trusted_peer_with_peer_id(peer_id, peer)?;
+        Ok(peer_id)
+    }
+
+    pub(crate) fn add_private_trusted_peer_with_peer_id(
+        &self,
+        peer_id: PeerId,
+        peer: TrustedPeer,
+    ) -> Result<(), TrustError> {
+        self.add_trusted_peer_with_peer_id(peer_id, peer)?;
+        self.directory_visibility.write().mark_private(peer_id);
+        Ok(())
+    }
+
     pub fn remove_trusted_peer(&self, peer_id: &PeerId) -> bool {
         if self
             .trusted_peers
@@ -232,7 +236,7 @@ impl Router {
         {
             return false;
         }
-        self.private_peer_ids.write().remove(peer_id);
+        self.directory_visibility.write().unmark_private(peer_id);
         true
     }
 

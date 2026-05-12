@@ -401,6 +401,11 @@ where
         Arc::clone(&self.cancel_after_boundary_requested)
     }
 
+    /// Runtime turn-state authority for boundary-only cancellation requests.
+    pub fn turn_state_handle(&self) -> Option<Arc<dyn crate::TurnStateHandle>> {
+        self.turn_state_handle.as_ref().map(Arc::clone)
+    }
+
     /// Persist the currently committed visible tool set into canonical session metadata.
     pub(crate) fn publish_committed_visible_set(&mut self) -> Result<(), AgentError> {
         // Session metadata is a durable projection/export of the canonical
@@ -905,7 +910,7 @@ where
         self.require_runtime_execution_kind()?;
 
         // Reset state for new run (allows multi-turn on same agent).
-        self.extraction_state.reset();
+        self.extraction_authority.reset();
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 
@@ -1018,7 +1023,7 @@ where
         self.require_runtime_execution_kind()?;
 
         // Reset state for new run (allows multi-turn on same agent).
-        self.extraction_state.reset();
+        self.extraction_authority.reset();
         self.run_completed_hooks_applied = false;
         self.run_completed_event_emitted = false;
 

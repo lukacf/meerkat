@@ -159,11 +159,11 @@ pub use config_store::{
 pub use error::{AgentError, ToolError};
 pub use event::{
     AgentErrorClass, AgentErrorReport, AgentEvent, AssistantImageEvent, BudgetType, EventEnvelope,
-    EventSourceIdentity, ExternalToolDelta, ExternalToolDeltaPhase, ScopedAgentEvent,
-    SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments, ToolCallArgumentsError,
-    ToolConfigChangeOperation, ToolConfigChangeStatus, ToolConfigChangedPayload, TurnErrorMetadata,
-    VerboseEventConfig, agent_event_type, compare_event_envelopes, format_verbose_event,
-    format_verbose_event_with_config,
+    EventSourceIdentity, ExternalToolDelta, ExternalToolDeltaPhase, LlmRetryEvent,
+    ScopedAgentEvent, SkillResolutionFailureReason, StreamScopeFrame, ToolCallArguments,
+    ToolCallArgumentsError, ToolConfigChangeOperation, ToolConfigChangeStatus,
+    ToolConfigChangedPayload, TurnErrorMetadata, VerboseEventConfig, agent_event_type,
+    compare_event_envelopes, format_verbose_event, format_verbose_event_with_config,
 };
 pub use event_injector::{EventInjector, EventInjectorError};
 pub use event_tap::{
@@ -196,9 +196,9 @@ pub use interaction::{
     ClassifiedInboxInteraction, InboxInteraction, InteractionContent, InteractionId,
     PeerIngressAdmission, PeerIngressAdmissionDiagnostic, PeerIngressAuthDecision,
     PeerIngressAuthExemption, PeerIngressAuthorityPhase, PeerIngressClassification,
-    PeerIngressConvention, PeerIngressDiagnosticDisplay, PeerIngressEntrySnapshot,
-    PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind, PeerIngressFact, PeerIngressIdentity,
-    PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts,
+    PeerIngressCompatibilityAuthority, PeerIngressConvention, PeerIngressDiagnosticDisplay,
+    PeerIngressEntrySnapshot, PeerIngressEnvelopeFacts, PeerIngressEnvelopeKind, PeerIngressFact,
+    PeerIngressIdentity, PeerIngressKind, PeerIngressMachinePolicy, PeerIngressPlainEventFacts,
     PeerIngressQueueSnapshot, PeerIngressRuntimeSnapshot, PeerInputClass, ResponseStatus,
     SendResponseCallProjection, TerminalDisposition, TerminalityClass,
     classify_response_terminality, format_external_event_projection, format_peer_ack_projection,
@@ -232,8 +232,8 @@ pub use realtime_transcript::{
     RealtimeTranscriptRole, SESSION_REALTIME_TRANSCRIPT_STATE_KEY,
 };
 pub use retry::{
-    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, RetryPolicy,
-    select_retry_delay,
+    LlmRetryFailure, LlmRetryFailureKind, LlmRetryLifecycle, LlmRetryLifecycleAuthority,
+    LlmRetryPlan, LlmRetrySchedule, RetryPolicy, select_retry_delay,
 };
 pub use runtime_bootstrap::{
     ContextConfig, RealmConfig, RealmLocator, RealmSelection, RuntimeBootstrap,
@@ -253,7 +253,9 @@ pub use service::{
     SessionInfo, SessionQuery, SessionService, SessionServiceCommsExt, SessionServiceControlExt,
     SessionServiceHistoryExt, SessionServiceTranscriptEditExt, SessionSummary, SessionUsage,
     SessionView, StageToolResultsRequest, StageToolResultsResult, StartTurnRequest,
-    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptReplacement, TurnToolOverlay,
+    TranscriptEditAdmissionError, TranscriptEditAdmissionRequest, TranscriptEditAuthority,
+    TranscriptEditError, TranscriptEditRunningBehavior, TranscriptEditSourceLifecycle,
+    TranscriptReplacement, TurnToolOverlay,
 };
 pub use session::{
     DeferredFirstTurnPhase, DeferredToolLoadAuthority, PendingDeferredPrompt,

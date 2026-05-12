@@ -338,10 +338,10 @@ mod orchestrator_e2e {
     use meerkat::surface::build_runtime_backed_service_with_capacities;
     use meerkat::{
         AgentBuildConfig, AgentFactory, Config, FactoryAgentBuilder, PersistenceBundle,
-        StagedPhase, StagedSessionRegistry, StagedSlot,
+        StagedPhase, StagedSessionMachineClaim, StagedSessionRegistry, StagedSlot,
     };
-    use meerkat_core::SessionLlmIdentity;
     use meerkat_core::types::SessionId;
+    use meerkat_core::{RuntimeBuildMode, SessionLlmIdentity, SessionRuntimeBindings};
     use meerkat_runtime::{
         HydratedSessionLlmState, MeerkatMachine, ResolvedSessionLlmReconfigure, RuntimeDriverError,
         SessionLlmReconfigureHost, SessionLlmReconfigureRequest,
@@ -468,11 +468,18 @@ mod orchestrator_e2e {
             .unwrap_or(0)
     }
 
-    fn staged_slot(model: &str, provider: meerkat_core::Provider) -> StagedSlot {
+    fn staged_slot(
+        model: &str,
+        provider: meerkat_core::Provider,
+        bindings: SessionRuntimeBindings,
+    ) -> StagedSlot {
         let mut build_config = AgentBuildConfig::new(model.to_string());
         build_config.provider = Some(provider);
+        let machine_claim = StagedSessionMachineClaim::from_runtime_bindings(&bindings);
+        build_config.runtime_build_mode = RuntimeBuildMode::SessionOwned(bindings);
         let now = now_secs();
         StagedSlot {
+            machine_claim,
             phase: StagedPhase::Staged {
                 build_config: Box::new(build_config),
             },
@@ -514,7 +521,16 @@ mod orchestrator_e2e {
         let orch = orchestrator(&fx);
 
         let session_id = SessionId::new();
-        let slot = staged_slot("claude-opus-4-7", meerkat_core::Provider::Anthropic);
+        let bindings = fx
+            .runtime_adapter
+            .prepare_bindings(session_id.clone())
+            .await
+            .expect("prepare staged runtime bindings");
+        let slot = staged_slot(
+            "claude-opus-4-7",
+            meerkat_core::Provider::Anthropic,
+            bindings,
+        );
         fx.staged_sessions
             .stage(session_id.clone(), slot)
             .await

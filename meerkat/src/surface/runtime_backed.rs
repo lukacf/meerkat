@@ -111,21 +111,7 @@ pub fn split_runtime_backed_eager_create_request(
         return (request, None);
     }
 
-    let mut turn_metadata = request
-        .build
-        .as_mut()
-        .and_then(|build| build.initial_turn_metadata.take())
-        .unwrap_or_default();
-    if turn_metadata.render_metadata.is_none() {
-        turn_metadata.render_metadata = request.render_metadata.take();
-    } else {
-        request.render_metadata = None;
-    }
-    if turn_metadata.skill_references.is_none() {
-        turn_metadata.skill_references = request.skill_references.take();
-    } else {
-        request.skill_references = None;
-    }
+    let turn_metadata = request.take_initial_runtime_metadata().unwrap_or_default();
 
     let prompt = std::mem::replace(
         &mut request.prompt,
@@ -154,17 +140,7 @@ fn start_turn_request_from_initial_turn(
         prompt: initial_turn.prompt,
         system_prompt: None,
         event_tx: initial_turn.event_tx,
-        runtime: StartTurnRuntimeSemantics::new(
-            None,
-            initial_turn
-                .turn_metadata
-                .handling_mode
-                .unwrap_or(HandlingMode::Queue),
-            None,
-            None,
-            Vec::new(),
-            Some(initial_turn.turn_metadata),
-        ),
+        runtime: StartTurnRuntimeSemantics::runtime_metadata(initial_turn.turn_metadata),
     }
 }
 

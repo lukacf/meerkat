@@ -131,6 +131,13 @@ fn normalize_runtime_mode_for_binding(
 fn admit_bridge_session_for_spawn(
     req: &mut meerkat_core::service::CreateSessionRequest,
 ) -> SessionId {
+    admit_bridge_session_for_spawn_with(req, None)
+}
+
+fn admit_bridge_session_for_spawn_with(
+    req: &mut meerkat_core::service::CreateSessionRequest,
+    admitted_session_id: Option<SessionId>,
+) -> SessionId {
     if req.build.is_none() {
         req.build = Some(meerkat_core::service::SessionBuildOptions::default());
     }
@@ -141,7 +148,7 @@ fn admit_bridge_session_for_spawn(
     if let Some(session) = build.resume_session.as_ref() {
         return session.id().clone();
     }
-    let session_id = SessionId::new();
+    let session_id = admitted_session_id.unwrap_or_default();
     build.resume_session = Some(meerkat_core::session::Session::with_id(session_id.clone()));
     session_id
 }
@@ -2334,13 +2341,6 @@ impl MobActor {
         .map_err(|_| self.invalid_transition_to(MobState::Running))
     }
 
-    fn preview_spawn_command_admission(&self, agent_identity: &MeerkatId) -> Result<(), MobError> {
-        // This is only the command-admission barrier; the real spawn payload is
-        // previewed again after profile resolution and before provisioning.
-        let placeholder_bridge_session_id = SessionId::new();
-        self.preview_spawn_admission(agent_identity, false, &placeholder_bridge_session_id)
-    }
-
     fn preview_run_flow_command_admission(&self, run_id: &RunId) -> Result<(), MobError> {
         self.prepare_command_admission(
             mob_dsl::MobMachineInput::RunFlow {
@@ -2398,6 +2398,7 @@ impl MobActor {
         &self,
         agent_identity: &MeerkatId,
         external_addressable: bool,
+        bridge_session_id: &SessionId,
         work_ref: &WorkRef,
         origin: WorkOrigin,
     ) -> Result<(), MobError> {
@@ -2421,7 +2422,7 @@ impl MobActor {
             fence_token: dsl_fence_token,
             generation: mob_dsl::Generation::from_domain(crate::ids::Generation::INITIAL),
             external_addressable,
-            bridge_session_id: mob_dsl::SessionId::default(),
+            bridge_session_id: mob_dsl::SessionId::from_domain(bridge_session_id),
             replacing,
         };
         let transition = mob_dsl::MobMachineMutator::apply(&mut authority, spawn)
@@ -3168,23 +3169,7 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
-                        Ok(()) => {
-                            let canceled = self.cancel_pending_spawns_for_member(
-                                &agent_identity,
-                                "retire command received",
-                            );
-                            if canceled > 0 {
-                                tracing::info!(
-                                    agent_identity = %agent_identity,
-                                    canceled,
-                                    "retire canceled pending spawn lineage before roster retirement"
-                                );
-                            }
-                            self.handle_retire(agent_identity).await
-                        }
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_retire(agent_identity).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Respawn {
@@ -3197,7 +3182,11 @@ impl MobActor {
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::RetireAll { reply_tx } => {
-                    let result = match self.require_state(&[MobState::Running, MobState::Stopped]) {
+                    let result = match self.probe_command_admission(
+                        mob_dsl::MobMachineInput::RetireAll,
+                        MobState::Running,
+                        "retire_all_command_admission",
+                    ) {
                         Ok(()) => self.retire_all_members("retire_all").await,
                         Err(error) => Err(error),
                     };
@@ -3677,10 +3666,7 @@ impl MobActor {
                     agent_identity,
                     reply_tx,
                 } => {
-                    let result = match self.require_state(&[MobState::Running]) {
-                        Ok(()) => self.handle_force_cancel(agent_identity).await,
-                        Err(error) => Err(error),
-                    };
+                    let result = self.handle_force_cancel(agent_identity).await;
                     let _ = reply_tx.send(result);
                 }
                 MobCommand::Wire {
@@ -4011,12 +3997,19 @@ impl MobActor {
             auth_binding,
         } = spec;
         let agent_identity = MeerkatId::from(identity.as_str());
-        if let Err(error) = self.preview_spawn_command_admission(&agent_identity) {
+        // Normalize launch-mode resume/fork details for the provisioning path.
+        let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
+        let command_admission_bridge_session_id = resume_bridge_session_id
+            .clone()
+            .unwrap_or_else(SessionId::new);
+        if let Err(error) = self.preview_spawn_admission(
+            &agent_identity,
+            false,
+            &command_admission_bridge_session_id,
+        ) {
             let _ = reply_tx.send(Err(error));
             return;
         }
-        // Normalize launch-mode resume/fork details for the provisioning path.
-        let resume_bridge_session_id = launch_mode.resume_bridge_session_id().cloned();
         let fork_spec = match launch_mode {
             crate::launch::MemberLaunchMode::Fork {
                 source_member_id,
@@ -4149,6 +4142,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        command_admission_bridge_session_id.clone(),
                     ));
                 }
 
@@ -4195,7 +4189,11 @@ impl MobActor {
                     let prompt = initial_message.clone().unwrap_or_else(|| {
                         ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
                     });
-                    let req = build::to_create_session_request(&config, prompt.clone());
+                    let mut req = build::to_create_session_request(&config, prompt.clone());
+                    admit_bridge_session_for_spawn_with(
+                        &mut req,
+                        Some(command_admission_bridge_session_id.clone()),
+                    );
                     let selected_binding = resolve_binding(
                         binding.clone(),
                         backend,
@@ -4226,6 +4224,7 @@ impl MobActor {
                         owner_bridge_session_id.clone(),
                         auto_wire_parent,
                         effective_profile_override.clone(),
+                        command_admission_bridge_session_id.clone(),
                     ));
                 }
 
@@ -4335,7 +4334,11 @@ impl MobActor {
             } else {
                 base_prompt
             };
-            let req = build::to_create_session_request(&config, prompt.clone());
+            let mut req = build::to_create_session_request(&config, prompt.clone());
+            admit_bridge_session_for_spawn_with(
+                &mut req,
+                Some(command_admission_bridge_session_id.clone()),
+            );
             let selected_binding = resolve_binding(
                 binding,
                 backend,
@@ -4366,6 +4369,7 @@ impl MobActor {
                 owner_bridge_session_id.clone(),
                 auto_wire_parent,
                 effective_profile_override,
+                command_admission_bridge_session_id,
             ))
         }
         .await;
@@ -4382,6 +4386,7 @@ impl MobActor {
             spawn_owner_bridge_session_id,
             auto_wire_parent,
             effective_profile_override,
+            command_admission_bridge_session_id,
         ) = match prepare_result {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -4465,8 +4470,10 @@ impl MobActor {
             )));
             return;
         };
-        let admitted_bridge_session_id =
-            admit_bridge_session_for_spawn(&mut provision_request.create_session);
+        let admitted_bridge_session_id = admit_bridge_session_for_spawn_with(
+            &mut provision_request.create_session,
+            Some(command_admission_bridge_session_id),
+        );
 
         if let Err(error) = self.preview_spawn_admission(
             &agent_identity,
@@ -4643,7 +4650,7 @@ impl MobActor {
             let PendingSpawn {
                 profile_name,
                 agent_identity,
-                admitted_bridge_session_id: _,
+                admitted_bridge_session_id,
                 prompt,
                 runtime_mode,
                 labels,
@@ -4661,7 +4668,21 @@ impl MobActor {
                         agent_identity.clone(),
                         self.provisioner.clone(),
                     );
-                    if let Err(error) = self.require_state(&[MobState::Running]) {
+                    let preview_external_addressable =
+                        if let Some(profile) = effective_profile_override.as_ref() {
+                            profile.external_addressable
+                        } else {
+                            self.definition
+                                .resolve_profile(&profile_name, self.realm_profile_store.as_ref())
+                                .await
+                                .map(|profile| profile.external_addressable)
+                                .unwrap_or(false)
+                        };
+                    if let Err(error) = self.preview_spawn_admission(
+                        &agent_identity,
+                        preview_external_addressable,
+                        &admitted_bridge_session_id,
+                    ) {
                         if let Err(retire_error) = provision.rollback().await {
                             Err(MobError::Internal(format!(
                                 "spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
@@ -4709,6 +4730,7 @@ impl MobActor {
         &mut self,
         agent_identity: &MeerkatId,
         spawn_spec: super::spawn_policy::SpawnSpec,
+        command_admission_bridge_session_id: SessionId,
     ) -> Result<super::handle::MemberSpawnReceipt, MobError> {
         self.ensure_pending_spawn_alignment("spawn_from_policy_inline preflight")?;
 
@@ -4783,8 +4805,10 @@ impl MobActor {
             owner_bridge_session_id: None,
             ops_registry: None,
         };
-        let admitted_bridge_session_id =
-            admit_bridge_session_for_spawn(&mut provision_request.create_session);
+        let admitted_bridge_session_id = admit_bridge_session_for_spawn_with(
+            &mut provision_request.create_session,
+            Some(command_admission_bridge_session_id),
+        );
 
         let spawn_ticket = self.next_spawn_ticket;
         self.next_spawn_ticket = self.next_spawn_ticket.wrapping_add(1);
@@ -4793,7 +4817,7 @@ impl MobActor {
         let pending = PendingSpawn {
             profile_name: profile_name.clone(),
             agent_identity: agent_identity.clone(),
-            admitted_bridge_session_id,
+            admitted_bridge_session_id: admitted_bridge_session_id.clone(),
             prompt: prompt.clone(),
             runtime_mode,
             labels: labels.clone(),
@@ -4850,7 +4874,11 @@ impl MobActor {
                 agent_identity.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running]) {
+            if let Err(error) = self.preview_spawn_admission(
+                agent_identity,
+                profile.external_addressable,
+                &admitted_bridge_session_id,
+            ) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobError::Internal(format!(
                         "policy spawn completed while mob state changed for '{agent_identity}': {error}; cleanup retire failed: {retire_error}"
@@ -5494,6 +5522,11 @@ impl MobActor {
     /// Does NOT retire the member — the member remains in the roster and can
     /// receive new turns. Use [`handle_retire`] to fully remove a member.
     async fn handle_force_cancel(&mut self, agent_identity: MeerkatId) -> Result<(), MobError> {
+        let prepared = self.prepare_command_admission(
+            mob_dsl::MobMachineInput::ForceCancel,
+            MobState::Running,
+            "force_cancel_command_admission",
+        )?;
         let roster = self.roster.read().await;
         let entry = roster
             .get(&agent_identity)
@@ -5501,9 +5534,8 @@ impl MobActor {
         let member_ref = entry.member_ref.clone();
         drop(roster);
 
-        self.preview_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
         self.provisioner.interrupt_member(&member_ref).await?;
-        self.apply_dsl_input(mob_dsl::MobMachineInput::ForceCancel, "force_cancel")?;
+        self.commit_prepared_dsl_input(prepared);
         Ok(())
     }
 
@@ -7271,6 +7303,21 @@ impl MobActor {
                     agent_identity = %agent_identity,
                     "retire requested for unknown meerkat id"
                 );
+                self.probe_command_admission(
+                    mob_dsl::MobMachineInput::RetireAll,
+                    MobState::Running,
+                    "handle_retire_absent_admission",
+                )?;
+                drop(roster);
+                let canceled = self
+                    .cancel_pending_spawns_for_member(agent_identity, "retire command received");
+                if canceled > 0 {
+                    tracing::info!(
+                        agent_identity = %agent_identity,
+                        canceled,
+                        "retire canceled pending spawn lineage for absent roster member"
+                    );
+                }
                 return Ok(());
             };
             entry
@@ -7316,10 +7363,26 @@ impl MobActor {
             session_id: session_id_for_route,
         };
 
-        // MobMachine admits the command before the event projection records
-        // retirement. The actual transition is still applied after the durable
-        // event append so crash recovery keeps its event-first ordering.
-        self.preview_dsl_input(retire_input.clone(), "handle_retire_inner_admission")?;
+        // MobMachine admits the command before shell mechanics cancel pending
+        // spawn work or the event projection records retirement. The prepared
+        // transition is committed only after the durable event append so crash
+        // recovery keeps its event-first ordering without re-checking guards
+        // against shell-mutated state.
+        let prepared_retire = self.prepare_command_admission(
+            retire_input,
+            MobState::Running,
+            "handle_retire_inner_admission",
+        )?;
+
+        let canceled =
+            self.cancel_pending_spawns_for_member(agent_identity, "retire command received");
+        if canceled > 0 {
+            tracing::info!(
+                agent_identity = %agent_identity,
+                canceled,
+                "retire canceled pending spawn lineage before roster retirement"
+            );
+        }
 
         // Append retire event (event-first for crash recovery).
         let retire_event_already_present = self
@@ -7330,8 +7393,8 @@ impl MobActor {
                 .await?;
         }
 
-        let effects = self
-            .apply_dsl_input_collect_effects(retire_input, "handle_retire_inner_mark_retiring")?;
+        let effects = prepared_retire.effects.clone();
+        self.commit_prepared_dsl_input(prepared_retire);
         let mut detach_obligations =
             crate::generated::protocol_mob_destroying_session_ingress::extract_obligations(
                 &effects,
@@ -7636,7 +7699,7 @@ impl MobActor {
         let respawn_pending = PendingSpawn {
             profile_name: snapshot.profile_name.clone(),
             agent_identity: agent_identity.clone(),
-            admitted_bridge_session_id,
+            admitted_bridge_session_id: admitted_bridge_session_id.clone(),
             prompt: prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
@@ -7713,7 +7776,11 @@ impl MobActor {
                 agent_identity.clone(),
                 self.provisioner.clone(),
             );
-            if let Err(error) = self.require_state(&[MobState::Running]) {
+            if let Err(error) = self.preview_spawn_admission(
+                &agent_identity,
+                profile.external_addressable,
+                &admitted_bridge_session_id,
+            ) {
                 if let Err(retire_error) = provision.rollback().await {
                     return Err(MobRespawnError::SpawnAfterRetire {
                         identity: AgentIdentity::from(agent_identity.as_str()),
@@ -10001,19 +10068,23 @@ impl MobActor {
                         .definition
                         .resolve_profile(&spec.profile, self.realm_profile_store.as_ref())
                         .await?;
+                    let command_admission_bridge_session_id = SessionId::new();
                     self.preview_policy_spawn_submit_work_admission(
                         &identity,
                         profile.external_addressable,
+                        &command_admission_bridge_session_id,
                         &work_ref,
                         origin,
                     )?;
-                    Box::pin(self.spawn_from_policy_inline(&identity, spec))
-                        .await
-                        .map_err(|error| {
-                            MobError::Internal(format!(
-                                "auto-spawn failed for '{identity}': {error}"
-                            ))
-                        })?;
+                    Box::pin(self.spawn_from_policy_inline(
+                        &identity,
+                        spec,
+                        command_admission_bridge_session_id,
+                    ))
+                    .await
+                    .map_err(|error| {
+                        MobError::Internal(format!("auto-spawn failed for '{identity}': {error}"))
+                    })?;
                     let spawned_entry = {
                         let roster = self.roster.read().await;
                         roster.get(&identity).cloned()

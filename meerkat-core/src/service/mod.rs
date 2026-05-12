@@ -200,6 +200,51 @@ impl CreateSessionRequest {
                 .and_then(|build| build.app_context.clone()),
         )
     }
+
+    /// Build the canonical runtime metadata carrier for this request's first
+    /// turn without mutating the request.
+    ///
+    /// Legacy create-session fields (`render_metadata`, `skill_references`)
+    /// are compatibility inputs only. The returned [`RuntimeTurnMetadata`] is
+    /// the single semantic carrier consumed by session/runtime first-turn
+    /// paths.
+    #[must_use]
+    pub fn initial_runtime_metadata(&self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self
+            .build
+            .as_ref()
+            .and_then(|build| build.initial_turn_metadata.clone())
+            .unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.clone();
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.clone();
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    /// Take the canonical first-turn runtime metadata carrier, clearing any
+    /// compatibility fields it absorbs from the request.
+    #[must_use]
+    pub fn take_initial_runtime_metadata(&mut self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self
+            .build
+            .as_mut()
+            .and_then(|build| build.initial_turn_metadata.take())
+            .unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.take();
+        } else {
+            self.render_metadata = None;
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.take();
+        } else {
+            self.skill_references = None;
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
 }
 
 /// Optional build-time options used by factory-backed session builders.
@@ -235,6 +280,8 @@ pub struct SessionBuildOptions {
     // Use runtime_build_mode instead.
     pub override_builtins: ToolCategoryOverride,
     pub override_shell: ToolCategoryOverride,
+    /// Per-build override for the factory-level comms capability.
+    pub override_comms: ToolCategoryOverride,
     pub override_memory: ToolCategoryOverride,
     /// Per-build override for the factory-level scheduler capability.
     pub override_schedule: ToolCategoryOverride,
@@ -631,6 +678,7 @@ pub struct ResumeOverrideMask {
     pub auth_binding: bool,
     pub override_builtins: bool,
     pub override_shell: bool,
+    pub override_comms: bool,
     pub override_memory: bool,
     pub override_workgraph: bool,
     pub override_mob: bool,
@@ -695,6 +743,7 @@ impl Default for SessionBuildOptions {
             agent_llm_client_decorator: None,
             override_builtins: ToolCategoryOverride::Inherit,
             override_shell: ToolCategoryOverride::Inherit,
+            override_comms: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
             override_workgraph: ToolCategoryOverride::Inherit,
@@ -749,6 +798,7 @@ impl std::fmt::Debug for SessionBuildOptions {
             )
             .field("override_builtins", &self.override_builtins)
             .field("override_shell", &self.override_shell)
+            .field("override_comms", &self.override_comms)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
             .field("override_workgraph", &self.override_workgraph)
@@ -831,6 +881,17 @@ impl Default for StartTurnRuntimeSemantics {
     }
 }
 
+/// Effective runtime/session fields consumed by a start-turn task after
+/// canonical metadata projection.
+pub type StartTurnEffectiveParts = (
+    Option<RenderMetadata>,
+    HandlingMode,
+    Option<Vec<crate::skills::SkillKey>>,
+    Option<TurnToolOverlay>,
+    Vec<PendingSystemContextAppend>,
+    Option<RuntimeTurnMetadata>,
+);
+
 impl StartTurnRuntimeSemantics {
     #[must_use]
     pub fn new(
@@ -857,6 +918,55 @@ impl StartTurnRuntimeSemantics {
             turn_metadata: Some(turn_metadata),
             ..Self::default()
         }
+    }
+
+    /// Return the canonical per-turn metadata carrier, folding legacy split
+    /// compatibility fields into a cloned [`RuntimeTurnMetadata`].
+    #[must_use]
+    pub fn canonical_turn_metadata(&self) -> Option<RuntimeTurnMetadata> {
+        let mut metadata = self.turn_metadata.clone().unwrap_or_default();
+        if metadata.render_metadata.is_none() {
+            metadata.render_metadata = self.render_metadata.clone();
+        }
+        if metadata.handling_mode.is_none() && self.handling_mode != HandlingMode::Queue {
+            metadata.handling_mode = Some(self.handling_mode);
+        }
+        if metadata.skill_references.is_none() {
+            metadata.skill_references = self.skill_references.clone();
+        }
+        if metadata.flow_tool_overlay.is_none() {
+            metadata.flow_tool_overlay = self.flow_tool_overlay.clone();
+        }
+        (!metadata.is_empty()).then_some(metadata)
+    }
+
+    /// Consume this carrier into the effective fields needed by the session
+    /// task. Semantic fields are derived from [`RuntimeTurnMetadata`]; the
+    /// public split fields exist only as compatibility inputs.
+    #[must_use]
+    pub fn into_effective_parts(self) -> StartTurnEffectiveParts {
+        let metadata = self.canonical_turn_metadata();
+        let render_metadata = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.render_metadata.clone());
+        let handling_mode = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.handling_mode)
+            .unwrap_or(HandlingMode::Queue);
+        let skill_references = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.skill_references.clone());
+        let flow_tool_overlay = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.flow_tool_overlay.clone());
+        (
+            render_metadata,
+            handling_mode,
+            skill_references,
+            flow_tool_overlay,
+            self.pre_turn_context_appends,
+            metadata,
+        )
     }
 }
 
@@ -1043,6 +1153,95 @@ pub enum TranscriptEditRunningBehavior {
     /// Reject the request while the source session is active.
     #[default]
     Reject,
+}
+
+/// Machine/seam-owned lifecycle classification for transcript fork/edit
+/// admission. Callers may observe mechanics, but the admission decision lives
+/// behind [`TranscriptEditAuthority`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranscriptEditSourceLifecycle {
+    /// The source is materialized and has no machine-owned active work.
+    MaterializedIdle,
+    /// The source is materialized but has active work, so reject-mode edits
+    /// must not fork an unstable transcript.
+    MaterializedActive,
+    /// The source is not a materialized session and cannot be transcript-edited.
+    NotMaterialized,
+}
+
+/// Typed admission request for transcript fork/edit operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEditAdmissionRequest {
+    pub session_id: SessionId,
+    pub running_behavior: TranscriptEditRunningBehavior,
+    pub lifecycle: TranscriptEditSourceLifecycle,
+}
+
+/// Typed transcript-edit admission failure.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TranscriptEditAdmissionError {
+    #[error("session {session_id} is active; transcript fork uses running_behavior=reject")]
+    SourceActive { session_id: SessionId },
+    #[error(
+        "session {session_id} is not materialized; transcript fork is available only for idle materialized sessions"
+    )]
+    SourceNotMaterialized { session_id: SessionId },
+}
+
+impl TranscriptEditAdmissionError {
+    /// Convert admission failures into the existing session-service error
+    /// surface without letting callers re-decide transcript-edit legality.
+    pub fn into_session_error(self) -> SessionError {
+        match self {
+            Self::SourceActive { session_id } | Self::SourceNotMaterialized { session_id } => {
+                SessionError::Busy { id: session_id }
+            }
+        }
+    }
+}
+
+/// Named owner for transcript fork/edit admission and branch construction.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TranscriptEditAuthority;
+
+impl TranscriptEditAuthority {
+    pub fn admit(
+        request: TranscriptEditAdmissionRequest,
+    ) -> Result<(), TranscriptEditAdmissionError> {
+        match request.lifecycle {
+            TranscriptEditSourceLifecycle::MaterializedIdle => Ok(()),
+            TranscriptEditSourceLifecycle::MaterializedActive => match request.running_behavior {
+                TranscriptEditRunningBehavior::Reject => {
+                    Err(TranscriptEditAdmissionError::SourceActive {
+                        session_id: request.session_id,
+                    })
+                }
+            },
+            TranscriptEditSourceLifecycle::NotMaterialized => {
+                Err(TranscriptEditAdmissionError::SourceNotMaterialized {
+                    session_id: request.session_id,
+                })
+            }
+        }
+    }
+
+    pub fn fork_at(source: &Session, message_index: usize) -> Result<Session, TranscriptEditError> {
+        if message_index > source.messages().len() {
+            return Err(TranscriptEditError::MessageIndexOutOfBounds {
+                message_index,
+                message_count: source.messages().len(),
+            });
+        }
+        Ok(source.fork_at(message_index))
+    }
+
+    pub fn fork_replace(
+        source: &Session,
+        message_index: usize,
+        replacement: TranscriptReplacement,
+    ) -> Result<Session, TranscriptEditError> {
+        source.fork_replacing(message_index, replacement)
+    }
 }
 
 /// Request to fork a session at a transcript message index.
@@ -1419,6 +1618,51 @@ mod tests {
     }
 
     #[test]
+    fn transcript_edit_authority_rejects_non_idle_sources() {
+        let active_id = SessionId::new();
+        let active = TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+            session_id: active_id.clone(),
+            running_behavior: TranscriptEditRunningBehavior::Reject,
+            lifecycle: TranscriptEditSourceLifecycle::MaterializedActive,
+        });
+        assert!(matches!(
+            active,
+            Err(TranscriptEditAdmissionError::SourceActive { session_id })
+                if session_id == active_id
+        ));
+
+        let staged_id = SessionId::new();
+        let staged = TranscriptEditAuthority::admit(TranscriptEditAdmissionRequest {
+            session_id: staged_id.clone(),
+            running_behavior: TranscriptEditRunningBehavior::Reject,
+            lifecycle: TranscriptEditSourceLifecycle::NotMaterialized,
+        });
+        assert!(matches!(
+            staged,
+            Err(TranscriptEditAdmissionError::SourceNotMaterialized { session_id })
+                if session_id == staged_id
+        ));
+    }
+
+    #[test]
+    fn transcript_edit_authority_owns_fork_bounds() {
+        let session = Session::new();
+        let forked = TranscriptEditAuthority::fork_at(&session, 0).expect("empty fork");
+        assert_ne!(forked.id(), session.id());
+        assert_eq!(forked.messages().len(), 0);
+
+        let err = TranscriptEditAuthority::fork_at(&session, 1)
+            .expect_err("authority must reject out-of-bounds fork");
+        assert!(matches!(
+            err,
+            TranscriptEditError::MessageIndexOutOfBounds {
+                message_index: 1,
+                message_count: 0,
+            }
+        ));
+    }
+
+    #[test]
     fn grant_manage_mob_in_place_adds_mob_id() {
         let mut ctx = MobToolAuthorityContext::create_only_generated();
         ctx.grant_manage_mob_in_place("mob-1".into());
@@ -1441,6 +1685,81 @@ mod tests {
         assert!(ctx.managed_mob_scope.contains("mob-1"));
         assert!(ctx.managed_mob_scope.contains("mob-2"));
         assert_eq!(ctx.managed_mob_scope.len(), 2);
+    }
+
+    #[test]
+    fn create_session_runtime_metadata_absorbs_legacy_split_fields() {
+        let split_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("split-create-skill").expect("valid skill"),
+        );
+        let render_metadata = RenderMetadata {
+            class: crate::types::RenderClass::UserPrompt,
+            salience: crate::types::RenderSalience::Important,
+        };
+        let mut req = CreateSessionRequest {
+            model: "model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            render_metadata: Some(render_metadata.clone()),
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: Some(vec![split_skill.clone()]),
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions::default()),
+            labels: None,
+        };
+
+        let metadata = req
+            .take_initial_runtime_metadata()
+            .expect("split fields should materialize runtime metadata");
+
+        assert_eq!(metadata.render_metadata, Some(render_metadata));
+        assert_eq!(metadata.skill_references, Some(vec![split_skill]));
+        assert!(req.render_metadata.is_none());
+        assert!(req.skill_references.is_none());
+    }
+
+    #[test]
+    fn create_session_runtime_metadata_prefers_canonical_build_carrier() {
+        let split_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("stale-create-skill").expect("valid skill"),
+        );
+        let canonical_skill = crate::skills::SkillKey::builtin(
+            crate::skills::SkillName::parse("canonical-create-skill").expect("valid skill"),
+        );
+        let mut req = CreateSessionRequest {
+            model: "model".to_string(),
+            prompt: ContentInput::Text("hello".to_string()),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            skill_references: Some(vec![split_skill]),
+            initial_turn: InitialTurnPolicy::RunImmediately,
+            deferred_prompt_policy: DeferredPromptPolicy::Discard,
+            build: Some(SessionBuildOptions {
+                initial_turn_metadata: Some(RuntimeTurnMetadata {
+                    skill_references: Some(vec![canonical_skill.clone()]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            labels: None,
+        };
+
+        let metadata = req
+            .take_initial_runtime_metadata()
+            .expect("build metadata should remain the first-turn carrier");
+
+        assert_eq!(metadata.skill_references, Some(vec![canonical_skill]));
+        assert!(req.skill_references.is_none());
+        assert!(
+            req.build
+                .as_ref()
+                .and_then(|build| build.initial_turn_metadata.as_ref())
+                .is_none()
+        );
     }
 
     struct MockSnapshotProvider {

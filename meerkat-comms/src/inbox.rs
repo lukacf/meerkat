@@ -15,7 +15,7 @@ use tokio::sync::{Notify, mpsc};
 
 use crate::classify::IngressClassificationContext;
 use crate::classify::PreparedIngressItem;
-use crate::peer_types::PeerIngressState;
+use crate::peer_types::{PeerIngressQueueAuthority, PeerIngressState};
 use crate::trust::TrustedPeers;
 use crate::types::{Envelope, InboxItem};
 use meerkat_core::{
@@ -131,7 +131,7 @@ struct ClassifiedInboxQueue {
     /// classification (T0) and admission (T2) cannot admit an envelope
     /// that was no longer trusted at T2 — see C-H3.
     trusted_peers: Arc<RwLock<TrustedPeers>>,
-    phase: PeerIngressState,
+    ingress_authority: PeerIngressQueueAuthority,
     dropped_count: Arc<AtomicU64>,
 }
 
@@ -143,7 +143,7 @@ impl ClassifiedInboxQueue {
             entries: VecDeque::new(),
             auth_required,
             trusted_peers,
-            phase: PeerIngressState::Absent,
+            ingress_authority: PeerIngressQueueAuthority::new(),
             dropped_count: Arc::new(AtomicU64::new(0)),
         }
     }
@@ -202,17 +202,13 @@ impl ClassifiedInboxQueue {
         let had_queued_work = !self.entries.is_empty();
 
         if admitted {
-            self.phase = PeerIngressState::Received;
+            self.ingress_authority.external_received();
             AdmissionDecision {
                 outcome: AdmissionOutcome::Admitted,
                 admission_diagnostic: Some(PeerIngressAdmissionDiagnostic::from_trusted(trusted)),
             }
         } else {
-            if had_queued_work {
-                self.phase = PeerIngressState::Received;
-            } else {
-                self.phase = PeerIngressState::Dropped;
-            }
+            self.ingress_authority.external_dropped(had_queued_work);
             AdmissionDecision {
                 outcome: AdmissionOutcome::Dropped {
                     reason: DropReason::UntrustedSender,
@@ -235,11 +231,8 @@ impl ClassifiedInboxQueue {
         let InboxItem::External { .. } = &entry.item else {
             return;
         };
-        if self.entries.is_empty() {
-            self.phase = PeerIngressState::Delivered;
-        } else {
-            self.phase = PeerIngressState::Received;
-        }
+        self.ingress_authority
+            .external_submitted(!self.entries.is_empty());
     }
 
     fn try_push(&mut self, entry: ClassifiedInboxEntry) -> Result<(), InboxError> {
@@ -326,7 +319,7 @@ impl ClassifiedInboxQueue {
 
     fn runtime_snapshot(&self) -> (PeerIngressQueueSnapshot, PeerIngressState, usize) {
         let queue_len = self.entries.len();
-        (self.snapshot(), self.phase, queue_len)
+        (self.snapshot(), self.ingress_authority.phase(), queue_len)
     }
 }
 
@@ -500,7 +493,7 @@ impl Inbox {
     pub(crate) fn peer_authority_test_snapshot(&self) -> Option<(PeerIngressState, usize)> {
         self.classified_queue.as_ref().map(|queue| {
             let queue = queue.lock();
-            (queue.phase, queue.entries.len())
+            (queue.ingress_authority.phase(), queue.entries.len())
         })
     }
 
@@ -1090,7 +1083,7 @@ mod tests {
 
     use crate::classify::IngressClassificationContext;
     use crate::trust::{TrustedPeer, TrustedPeers};
-    use meerkat_core::PeerIngressMachinePolicy;
+    use meerkat_core::{PeerIngressCompatibilityAuthority, PeerIngressMachinePolicy};
     use std::sync::atomic::AtomicUsize;
 
     fn make_classification_context(
@@ -1108,7 +1101,7 @@ mod tests {
         Arc::new(IngressClassificationContext {
             require_peer_auth: require_auth,
             trusted_peers: Arc::new(parking_lot::RwLock::new(trusted)),
-            ingress_policy: Arc::new(PeerIngressMachinePolicy::default()),
+            standalone_ingress: Arc::new(PeerIngressCompatibilityAuthority::default()),
             peer_comms_handle: Arc::new(parking_lot::RwLock::new(peer_comms_handle)),
             require_machine_authority: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inproc_namespace: None,

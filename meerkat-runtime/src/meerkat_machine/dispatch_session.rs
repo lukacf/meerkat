@@ -84,9 +84,19 @@ impl MeerkatMachine {
         session_id: SessionId,
         preparation: SessionBindingPreparation,
     ) -> Result<MeerkatMachineCommandResult, RuntimeDriverError> {
-        let existing_state = self.existing_session_runtime_state(&session_id).await;
-        if matches!(existing_state, Some(RuntimeState::Destroyed)) {
-            return Err(RuntimeDriverError::Destroyed);
+        match self.existing_session_runtime_state(&session_id).await {
+            Some(RuntimeState::Destroyed) => return Err(RuntimeDriverError::Destroyed),
+            Some(_) => {}
+            None => {
+                let runtime_id = Self::logical_runtime_id(&session_id);
+                if matches!(
+                    self.durable_runtime_state_for_registration(&runtime_id)
+                        .await?,
+                    Some(RuntimeState::Destroyed)
+                ) {
+                    return Err(RuntimeDriverError::Destroyed);
+                }
+            }
         }
         let inserted_by_call = self.register_session_inner(session_id.clone()).await?;
         let (
@@ -119,83 +129,74 @@ impl MeerkatMachine {
             };
             let agent_runtime_id =
                 crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(&runtime_id);
-            let existing_runtime_id = {
+            let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
+                agent_runtime_id: agent_runtime_id.clone(),
+                fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
+                generation: crate::meerkat_machine::dsl::Generation::from(0),
+                session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
+            };
+            let staged = match self
+                .stage_session_dsl_transition(&session_id, dsl_input, "PrepareBindings")
+                .await
+            {
+                Ok(staged) => staged,
+                Err(reason) => {
+                    if inserted_by_call {
+                        self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                            .await;
+                    }
+                    let existing_runtime_id = {
+                        let authority = dsl_authority_shared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        authority.state.active_runtime_id.clone()
+                    };
+                    if let Some(existing_runtime_id) = existing_runtime_id
+                        && existing_runtime_id != agent_runtime_id
+                    {
+                        return Err(RuntimeDriverError::ValidationFailed {
+                            reason: format!(
+                                "session {session_id} already has authoritative runtime binding `{}`; \
+                                 refusing session-owned prepare_bindings for `{}`",
+                                existing_runtime_id.0, agent_runtime_id.0
+                            ),
+                        });
+                    }
+                    return Err(RuntimeDriverError::ValidationFailed { reason });
+                }
+            };
+            let accepted_phase = {
                 let authority = dsl_authority_shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                authority.state.active_runtime_id.clone()
+                authority.state.lifecycle_phase
             };
-            if let Some(existing_runtime_id) = existing_runtime_id {
-                if existing_runtime_id != agent_runtime_id {
+            {
+                let mut driver = driver_handle.lock().await;
+                if let Err(err) = machine_prepare_bindings_projection(&mut driver, accepted_phase) {
+                    drop(driver);
+                    self.restore_session_dsl_state(&session_id, staged.previous_state)
+                        .await;
                     if inserted_by_call {
                         self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
                             .await;
                     }
-                    return Err(RuntimeDriverError::ValidationFailed {
-                        reason: format!(
-                            "session {session_id} already has authoritative runtime binding `{}`; \
-                             refusing session-owned prepare_bindings for `{}`",
-                            existing_runtime_id.0, agent_runtime_id.0
-                        ),
-                    });
+                    return Err(err);
                 }
-                {
-                    let mut driver = driver_handle.lock().await;
-                    if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
-                        }
-                        return Err(err);
-                    }
-                }
-            } else {
-                let dsl_input = crate::meerkat_machine::dsl::MeerkatMachineInput::PrepareBindings {
-                    agent_runtime_id,
-                    fence_token: crate::meerkat_machine::dsl::FenceToken::from(0),
-                    generation: crate::meerkat_machine::dsl::Generation::from(0),
-                    session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
-                };
-                let staged = match self
-                    .stage_session_dsl_transition(&session_id, dsl_input, "PrepareBindings")
+            }
+            if let Err(reason) = self
+                .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")
+                .await
+            {
+                driver_handle
+                    .lock()
                     .await
-                {
-                    Ok(staged) => staged,
-                    Err(reason) => {
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
-                        }
-                        return Err(RuntimeDriverError::ValidationFailed { reason });
-                    }
-                };
-                {
-                    let mut driver = driver_handle.lock().await;
-                    if let Err(err) = machine_prepare_bindings_projection(&mut driver) {
-                        drop(driver);
-                        self.restore_session_dsl_state(&session_id, staged.previous_state)
-                            .await;
-                        if inserted_by_call {
-                            self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                                .await;
-                        }
-                        return Err(err);
-                    }
+                    .sync_control_projection_from_dsl_authority();
+                if inserted_by_call {
+                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                        .await;
                 }
-                if let Err(reason) = self
-                    .commit_session_dsl_transition(&session_id, staged, "PrepareBindings")
-                    .await
-                {
-                    driver_handle
-                        .lock()
-                        .await
-                        .sync_control_projection_from_dsl_authority();
-                    if inserted_by_call {
-                        self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
-                            .await;
-                    }
-                    return Err(RuntimeDriverError::Internal(reason));
-                }
+                return Err(RuntimeDriverError::Internal(reason));
             }
         }
         // Share ONE HandleDslAuthority across all 5 handles so their
@@ -507,6 +508,42 @@ impl MeerkatMachine {
                 let driver = driver.lock().await;
                 Ok(MeerkatMachineCommandResult::ActiveInputs(
                     driver.as_driver().active_input_ids(),
+                ))
+            }
+            MeerkatMachineCommand::AdmitTranscriptEdit {
+                session_id,
+                running_behavior,
+            } => {
+                let driver = {
+                    let sessions = self.sessions.read().await;
+                    sessions.get(&session_id).map(|entry| entry.driver.clone())
+                };
+                let lifecycle = if let Some(driver) = driver {
+                    let state = self
+                        .existing_session_visible_runtime_state(&session_id)
+                        .await
+                        .unwrap_or(RuntimeState::Destroyed);
+                    let has_active_inputs = {
+                        let driver = driver.lock().await;
+                        !driver.as_driver().active_input_ids().is_empty()
+                    };
+                    if matches!(state, RuntimeState::Running) || has_active_inputs {
+                        meerkat_core::TranscriptEditSourceLifecycle::MaterializedActive
+                    } else {
+                        meerkat_core::TranscriptEditSourceLifecycle::MaterializedIdle
+                    }
+                } else {
+                    meerkat_core::TranscriptEditSourceLifecycle::NotMaterialized
+                };
+
+                Ok(MeerkatMachineCommandResult::TranscriptEditAdmission(
+                    meerkat_core::TranscriptEditAuthority::admit(
+                        meerkat_core::TranscriptEditAdmissionRequest {
+                            session_id,
+                            running_behavior,
+                            lifecycle,
+                        },
+                    ),
                 ))
             }
             MeerkatMachineCommand::ReconfigureSessionLlmIdentity {

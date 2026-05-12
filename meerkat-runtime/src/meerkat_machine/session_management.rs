@@ -81,7 +81,7 @@ fn spawn_ops_lifecycle_persistence_worker(
 }
 
 impl MeerkatMachine {
-    async fn durable_runtime_state_for_registration(
+    pub(super) async fn durable_runtime_state_for_registration(
         &self,
         runtime_id: &LogicalRuntimeId,
     ) -> Result<Option<RuntimeState>, RuntimeDriverError> {
@@ -689,6 +689,47 @@ impl MeerkatMachine {
                 false
             }
             Err(_) => false,
+        }
+    }
+
+    /// Route transcript fork/edit admission through the runtime machine
+    /// authority so RPC shells do not reconstruct activity from projected
+    /// phase and input-list facts.
+    pub async fn admit_transcript_edit(
+        &self,
+        session_id: &SessionId,
+        running_behavior: meerkat_core::TranscriptEditRunningBehavior,
+    ) -> Result<(), meerkat_core::TranscriptEditAdmissionError> {
+        match self
+            .execute_meerkat_machine_command(
+                None,
+                MeerkatMachineCommand::AdmitTranscriptEdit {
+                    session_id: session_id.clone(),
+                    running_behavior,
+                },
+            )
+            .await
+        {
+            Ok(MeerkatMachineCommandResult::TranscriptEditAdmission(result)) => result,
+            Ok(other) => {
+                tracing::error!(
+                    ?other,
+                    "admit_transcript_edit: unexpected command result variant"
+                );
+                Err(
+                    meerkat_core::TranscriptEditAdmissionError::SourceNotMaterialized {
+                        session_id: session_id.clone(),
+                    },
+                )
+            }
+            Err(error) => {
+                tracing::error!(?error, "admit_transcript_edit command failed");
+                Err(
+                    meerkat_core::TranscriptEditAdmissionError::SourceNotMaterialized {
+                        session_id: session_id.clone(),
+                    },
+                )
+            }
         }
     }
 

@@ -247,6 +247,32 @@ impl TurnFailureReason {
     }
 }
 
+/// Typed reason carried across the structured-output extraction authority seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredOutputFailureReason {
+    message: String,
+}
+
+impl StructuredOutputFailureReason {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_message(self) -> String {
+        self.message
+    }
+
+    pub fn turn_failure_reason(&self) -> TurnFailureReason {
+        TurnFailureReason::new(AgentErrorClass::StructuredOutput, self.message.clone())
+    }
+}
+
 /// Content shape admitted by the turn primitive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ContentShape {
@@ -413,16 +439,89 @@ pub enum TurnExecutionInput {
     },
     ExtractionValidationFailed {
         run_id: RunId,
-        error: String,
+        failure: StructuredOutputFailureReason,
     },
     ExtractionFailed {
         run_id: RunId,
-        error: String,
+        failure: StructuredOutputFailureReason,
     },
     ExtractionStart {
         run_id: RunId,
     },
     ForceCancelNoRun,
+}
+
+impl TurnExecutionInput {
+    pub fn run_id(&self) -> Option<&RunId> {
+        match self {
+            Self::StartConversationRun { run_id }
+            | Self::StartImmediateAppend { run_id }
+            | Self::StartImmediateContext { run_id }
+            | Self::PrimitiveApplied { run_id, .. }
+            | Self::LlmReturnedToolCalls { run_id, .. }
+            | Self::LlmReturnedTerminal { run_id }
+            | Self::RegisterPendingOps { run_id, .. }
+            | Self::ToolCallsResolved { run_id }
+            | Self::OpsBarrierSatisfied { run_id, .. }
+            | Self::BoundaryContinue { run_id }
+            | Self::BoundaryComplete { run_id }
+            | Self::RecoverableFailure { run_id, .. }
+            | Self::FatalFailure { run_id, .. }
+            | Self::RetryRequested { run_id, .. }
+            | Self::CancelNow { run_id }
+            | Self::CancelAfterBoundary { run_id }
+            | Self::CancellationObserved { run_id }
+            | Self::AcknowledgeTerminal { run_id }
+            | Self::TurnLimitReached { run_id }
+            | Self::BudgetExhausted { run_id }
+            | Self::TimeBudgetExceeded { run_id }
+            | Self::BudgetLimitExceeded { run_id, .. }
+            | Self::EnterExtraction { run_id, .. }
+            | Self::ExtractionValidationPassed { run_id }
+            | Self::ExtractionValidationFailed { run_id, .. }
+            | Self::ExtractionFailed { run_id, .. }
+            | Self::ExtractionStart { run_id } => Some(run_id),
+            Self::ForceCancelNoRun => None,
+        }
+    }
+
+    pub fn explicit_failure_reason(&self) -> Option<TurnFailureReason> {
+        match self {
+            Self::FatalFailure { reason, .. } => Some(reason.clone()),
+            Self::TurnLimitReached { .. } => Some(TurnFailureReason::new(
+                crate::event::AgentErrorClass::MaxTurns,
+                "turn limit reached",
+            )),
+            Self::BudgetExhausted { .. } => Some(TurnFailureReason::with_cause(
+                crate::TurnTerminalCauseKind::BudgetExhausted,
+                crate::event::AgentErrorClass::Budget,
+                "budget exhausted",
+            )),
+            Self::TimeBudgetExceeded { .. } => Some(TurnFailureReason::with_cause(
+                crate::TurnTerminalCauseKind::TimeBudgetExceeded,
+                crate::event::AgentErrorClass::Budget,
+                "time budget exceeded",
+            )),
+            Self::BudgetLimitExceeded { exceeded, .. } => {
+                Some(TurnFailureReason::budget_exceeded(*exceeded))
+            }
+            Self::ExtractionValidationFailed { failure, .. }
+            | Self::ExtractionFailed { failure, .. } => Some(failure.turn_failure_reason()),
+            _ => None,
+        }
+    }
+
+    pub fn validate_explicit_failure_reason(&self) -> Result<(), AgentError> {
+        if let Some(reason) = self.explicit_failure_reason()
+            && !reason.cause_kind.is_specific_failure_cause()
+        {
+            return Err(AgentError::InternalError(format!(
+                "turn failure input {self:?} carried non-specific terminal cause {:?}",
+                reason.cause_kind
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Side effects emitted by turn transitions.
@@ -454,6 +553,192 @@ pub struct TurnExecutionTransition {
     pub prev_phase: TurnPhase,
     pub next_phase: TurnPhase,
     pub effects: Vec<TurnExecutionEffect>,
+}
+
+pub struct TurnExecutionEffectProjection<'a> {
+    pub input: &'a TurnExecutionInput,
+    pub prev_phase: TurnPhase,
+    pub next_phase: TurnPhase,
+    pub boundary_sequence: u64,
+    pub terminal_outcome: TurnTerminalOutcome,
+    pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct TurnExecutionEffectProjectionError {
+    message: String,
+}
+
+impl TurnExecutionEffectProjectionError {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// Named owner for projecting accepted turn transitions into core effects.
+///
+/// Runtime-backed handles should prefer direct DSL-emitted effects. This
+/// projection exists for core-only/test handles that implement the same turn
+/// contract without importing the runtime DSL crate.
+pub struct TurnExecutionEffectAuthority;
+
+impl TurnExecutionEffectAuthority {
+    pub fn effects_for_accepted_projection(
+        projection: TurnExecutionEffectProjection<'_>,
+    ) -> Result<Vec<TurnExecutionEffect>, TurnExecutionEffectProjectionError> {
+        let mut effects = Vec::new();
+        let Some(run_id) = projection.input.run_id().cloned() else {
+            return Ok(effects);
+        };
+
+        match projection.input {
+            TurnExecutionInput::StartConversationRun { .. }
+            | TurnExecutionInput::StartImmediateAppend { .. }
+            | TurnExecutionInput::StartImmediateContext { .. } => {
+                if projection.prev_phase != TurnPhase::ApplyingPrimitive
+                    && projection.next_phase == TurnPhase::ApplyingPrimitive
+                {
+                    effects.push(TurnExecutionEffect::RunStarted { run_id });
+                }
+            }
+            TurnExecutionInput::PrimitiveApplied { .. } => {
+                if projection.next_phase == TurnPhase::CallingLlm {
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                } else if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        boundary_sequence: projection.boundary_sequence,
+                    });
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                }
+            }
+            TurnExecutionInput::BoundaryContinue { .. } => {
+                if projection.next_phase == TurnPhase::CallingLlm {
+                    effects.push(TurnExecutionEffect::BoundaryApplied {
+                        run_id,
+                        boundary_sequence: projection.boundary_sequence,
+                    });
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                }
+            }
+            TurnExecutionInput::BoundaryComplete { .. } => {
+                if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::BoundaryApplied {
+                        run_id: run_id.clone(),
+                        boundary_sequence: projection.boundary_sequence,
+                    });
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                }
+            }
+            TurnExecutionInput::ExtractionValidationPassed { .. } => {
+                if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                }
+            }
+            TurnExecutionInput::ExtractionValidationFailed { .. } => {
+                if projection.next_phase == TurnPhase::CallingLlm {
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                } else if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                }
+            }
+            TurnExecutionInput::ExtractionFailed { .. } => {
+                if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                }
+            }
+            TurnExecutionInput::RetryRequested { .. } => {
+                if projection.next_phase == TurnPhase::CallingLlm {
+                    effects.push(TurnExecutionEffect::CheckCompaction);
+                }
+            }
+            TurnExecutionInput::FatalFailure { .. }
+            | TurnExecutionInput::TurnLimitReached { .. } => {
+                if projection.next_phase == TurnPhase::Failed {
+                    effects.push(TurnExecutionEffect::RunFailed {
+                        run_id,
+                        reason: failure_reason_for_projection(&projection)?,
+                    });
+                }
+            }
+            TurnExecutionInput::BudgetExhausted { .. }
+            | TurnExecutionInput::TimeBudgetExceeded { .. }
+            | TurnExecutionInput::BudgetLimitExceeded { .. } => {
+                if projection.next_phase == TurnPhase::Completed {
+                    effects.push(TurnExecutionEffect::RunCompleted { run_id });
+                } else if projection.next_phase == TurnPhase::Failed {
+                    effects.push(TurnExecutionEffect::RunFailed {
+                        run_id,
+                        reason: failure_reason_for_projection(&projection)?,
+                    });
+                }
+            }
+            TurnExecutionInput::CancellationObserved { .. } => {
+                if projection.next_phase == TurnPhase::Cancelled {
+                    effects.push(TurnExecutionEffect::RunCancelled { run_id });
+                }
+            }
+            _ => {}
+        }
+
+        if effects.is_empty() && projection.prev_phase != projection.next_phase {
+            match projection.next_phase {
+                TurnPhase::Completed => {
+                    return Err(TurnExecutionEffectProjectionError::new(format!(
+                        "completed turn transition for input {:?} had no owner-emitted RunCompleted effect",
+                        projection.input
+                    )));
+                }
+                TurnPhase::Failed => {
+                    let _ = failure_reason_for_projection(&projection)?;
+                    return Err(TurnExecutionEffectProjectionError::new(format!(
+                        "failed turn transition for input {:?} had no owner-emitted RunFailed effect",
+                        projection.input
+                    )));
+                }
+                TurnPhase::Cancelled => {
+                    return Err(TurnExecutionEffectProjectionError::new(format!(
+                        "cancelled turn transition for input {:?} had no owner-emitted RunCancelled effect",
+                        projection.input
+                    )));
+                }
+                _ => {}
+            }
+        }
+
+        Ok(effects)
+    }
+}
+
+fn failure_reason_for_projection(
+    projection: &TurnExecutionEffectProjection<'_>,
+) -> Result<TurnFailureReason, TurnExecutionEffectProjectionError> {
+    if let Some(reason) = projection.input.explicit_failure_reason() {
+        return Ok(reason);
+    }
+    let cause_kind = projection.terminal_cause_kind.ok_or_else(|| {
+        TurnExecutionEffectProjectionError::new(format!(
+            "failed turn transition for input {:?} missing machine-owned terminal_cause_kind",
+            projection.input
+        ))
+    })?;
+    if !cause_kind.is_specific_failure_cause() {
+        return Err(TurnExecutionEffectProjectionError::new(format!(
+            "failed turn transition for input {:?} has unknown machine-owned terminal_cause_kind",
+            projection.input
+        )));
+    }
+    Ok(TurnFailureReason::with_cause(
+        cause_kind,
+        cause_kind.agent_error_class(),
+        cause_kind.default_message(projection.terminal_outcome),
+    ))
 }
 
 pub fn terminal_outcome_for_budget_exceeded(exceeded: BudgetExceeded) -> TurnTerminalOutcome {
@@ -588,5 +873,26 @@ mod tests {
         assert_eq!(reason.cause_kind, TurnTerminalCauseKind::RetryExhausted);
         assert_ne!(reason.cause_kind, TurnTerminalCauseKind::LlmFailure);
         assert_eq!(reason.message, error.to_string());
+    }
+
+    #[test]
+    fn turn_effect_projection_follows_input_authority_not_phase_delta() {
+        let run_id = RunId::new();
+        let effects = TurnExecutionEffectAuthority::effects_for_accepted_projection(
+            TurnExecutionEffectProjection {
+                input: &TurnExecutionInput::ToolCallsResolved { run_id },
+                prev_phase: TurnPhase::WaitingForOps,
+                next_phase: TurnPhase::CallingLlm,
+                boundary_sequence: 0,
+                terminal_outcome: TurnTerminalOutcome::None,
+                terminal_cause_kind: None,
+            },
+        )
+        .expect("projection should accept non-terminal transition");
+
+        assert!(
+            effects.is_empty(),
+            "ToolCallsResolved entering CallingLlm must not synthesize CheckCompaction from phase delta"
+        );
     }
 }

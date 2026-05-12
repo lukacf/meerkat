@@ -8,8 +8,9 @@ use crate::agent::types::CommsMessage;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::handle_connection;
 use crate::peer_directory_reachability_authority::{
-    PeerDirectoryReachabilityAuthority, ReachabilityKey,
+    PeerDirectoryReachabilityAuthority, PeerDirectoryReachabilityInput, ReachabilityKey,
 };
+use crate::peer_response_routing_authority::PeerResponseRoutingAuthority;
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
 use crate::{InprocRegistry, Keypair, PubKey, Router, TrustedPeer, TrustedPeers};
@@ -18,9 +19,10 @@ use futures::Stream;
 use futures::task::{Context, Poll};
 use meerkat_core::agent::CommsRuntime as CoreCommsRuntime;
 use meerkat_core::comms::{
-    CommsCommand, EventStream, InputStreamMode, PeerAddress, PeerCapabilitySet, PeerDirectoryEntry,
-    PeerDirectorySource, PeerId, PeerName, PeerReachabilityReason, PeerRoute, PeerSendability,
-    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope, TrustedPeerDescriptor,
+    CommsCommand, CommsContentAuthority, EventStream, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectorySource, PeerId, PeerName,
+    PeerReachabilityReason, PeerRoute, PeerSendability, SendAndStreamError, SendError, SendReceipt,
+    StreamError, StreamScope, TrustedPeerDescriptor,
 };
 use meerkat_core::config::PlainEventSource;
 #[cfg(not(target_arch = "wasm32"))]
@@ -497,6 +499,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
                 // Self-input guard: when allow_self_session is false, this runtime's
                 // inbox is the target, which is a self-loop. Reject unless explicitly
                 // opted in. MCP never exposes this flag.
@@ -544,8 +547,9 @@ impl CoreCommsRuntime for CommsRuntime {
                 body,
                 blocks,
                 handling_mode,
-            } => self
-                .send_peer_command(
+            } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                self.send_peer_command(
                     &to,
                     crate::types::MessageKind::Message {
                         body,
@@ -557,7 +561,8 @@ impl CoreCommsRuntime for CommsRuntime {
                 .map(|envelope_id| SendReceipt::PeerMessageSent {
                     envelope_id,
                     acked: false,
-                }),
+                })
+            }
             CommsCommand::PeerLifecycle { to, kind, params } => self
                 .send_peer_command(&to, crate::types::MessageKind::Lifecycle { kind, params })
                 .await
@@ -570,6 +575,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
                 stream,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
@@ -643,6 +649,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 let (peer_handle, _stream_authority) =
                     self.require_peer_request_response_authority("PeerResponse")?;
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(in_reply_to.0);
@@ -661,16 +668,10 @@ impl CoreCommsRuntime for CommsRuntime {
                     core_status,
                     meerkat_core::ResponseStatus::Completed | meerkat_core::ResponseStatus::Failed
                 );
-                let effective_handling_mode = handling_mode.or_else(|| {
-                    is_terminal_reply
-                        .then(|| {
-                            self.inbound_request_handling_modes
-                                .lock()
-                                .get(&corr_id)
-                                .copied()
-                        })
-                        .flatten()
-                });
+                let effective_handling_mode = self
+                    .peer_response_routing
+                    .lock()
+                    .response_handling_mode(corr_id, core_status, handling_mode);
                 let envelope_id = self
                     .send_peer_command(
                         &to,
@@ -698,7 +699,9 @@ impl CoreCommsRuntime for CommsRuntime {
                     )));
                 }
                 if is_terminal_reply {
-                    self.inbound_request_handling_modes.lock().remove(&corr_id);
+                    self.peer_response_routing
+                        .lock()
+                        .terminal_response_sent(corr_id);
                 }
 
                 Ok(SendReceipt::PeerResponseSent {
@@ -723,6 +726,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 blocks,
                 handling_mode,
             } => {
+                let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
                 if !allow_self_session {
                     return Err(SendAndStreamError::Send(SendError::Validation(
                         "self-session input rejected: set allow_self_session=true to override"
@@ -759,6 +763,7 @@ impl CoreCommsRuntime for CommsRuntime {
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
             } => {
+                let blocks = CommsContentAuthority::normalize_blocks(blocks);
                 // Reserve under the canonical request envelope id so the same
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
@@ -987,7 +992,11 @@ impl CoreCommsRuntime for CommsRuntime {
                                 body,
                                 blocks,
                                 handling_mode: _,
-                            } => meerkat_core::InteractionContent::Message { body, blocks },
+                            } => {
+                                let (body, blocks) =
+                                    CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                                meerkat_core::InteractionContent::Message { body, blocks }
+                            }
                             MessageKind::Request {
                                 intent,
                                 params,
@@ -998,7 +1007,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                 meerkat_core::InteractionContent::Request {
                                     intent: typed_intent.to_string(),
                                     params,
-                                    blocks,
+                                    blocks: CommsContentAuthority::normalize_blocks(blocks),
                                 }
                             }
                             MessageKind::Lifecycle { kind, params } => {
@@ -1030,7 +1039,7 @@ impl CoreCommsRuntime for CommsRuntime {
                                     in_reply_to: meerkat_core::InteractionId(in_reply_to),
                                     status: core_status,
                                     result,
-                                    blocks,
+                                    blocks: CommsContentAuthority::normalize_blocks(blocks),
                                 }
                             }
                             MessageKind::Ack { .. } => {
@@ -1040,7 +1049,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         };
 
                         if is_peer_request_envelope {
-                            self.inbound_request_handling_modes.lock().insert(
+                            self.peer_response_routing.lock().record_inbound_request(
                                 meerkat_core::PeerCorrelationId::from_uuid(envelope.id),
                                 envelope_handling_mode,
                             );
@@ -1069,22 +1078,26 @@ impl CoreCommsRuntime for CommsRuntime {
                         blocks,
                         render_metadata,
                         ..
-                    } => Some(meerkat_core::ClassifiedInboxInteraction {
-                        interaction: meerkat_core::InboxInteraction {
-                            id: meerkat_core::InteractionId(
-                                interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
-                            ),
-                            from_route: None,
-                            from: format!("event:{source}"),
-                            content: meerkat_core::InteractionContent::Message { body, blocks },
-                            rendered_text,
-                            handling_mode,
-                            render_metadata,
-                        },
-                        ingress,
-                        lifecycle_peer,
-                        response_terminality: entry.response_terminality,
-                    }),
+                    } => {
+                        let (body, blocks) =
+                            CommsContentAuthority::canonical_text_and_blocks(body, blocks);
+                        Some(meerkat_core::ClassifiedInboxInteraction {
+                            interaction: meerkat_core::InboxInteraction {
+                                id: meerkat_core::InteractionId(
+                                    interaction_id.unwrap_or_else(uuid::Uuid::new_v4),
+                                ),
+                                from_route: None,
+                                from: format!("event:{source}"),
+                                content: meerkat_core::InteractionContent::Message { body, blocks },
+                                rendered_text,
+                                handling_mode,
+                                render_metadata,
+                            },
+                            ingress,
+                            lifecycle_peer,
+                            response_terminality: entry.response_terminality,
+                        })
+                    }
                 }
             })
             .collect())
@@ -1262,7 +1275,7 @@ pub struct CommsRuntime {
     interaction_stream_registry: InteractionStreamRegistry,
     peer_directory_reachability: Arc<Mutex<PeerDirectoryReachabilityAuthority>>,
     #[allow(dead_code)] // Kept for runtime inspection symmetry with IngressClassificationContext.
-    ingress_policy: Arc<meerkat_core::PeerIngressMachinePolicy>,
+    standalone_ingress: Arc<meerkat_core::PeerIngressCompatibilityAuthority>,
     peer_comms_handle: crate::classify::PeerCommsHandleSlot,
     require_peer_comms_machine_authority: Arc<AtomicBool>,
     /// Narrow notify that fires only for actionable peer input (messages/requests).
@@ -1287,21 +1300,23 @@ pub struct CommsRuntime {
     /// require this handle.
     interaction_stream_handle:
         parking_lot::RwLock<Option<Arc<dyn meerkat_core::handles::InteractionStreamHandle>>>,
-    /// Transport-owned projection of the handling mode carried by inbound
-    /// peer requests. `send_response` uses this only when the caller omits an
-    /// explicit response override, matching the tool contract that responses
-    /// default to the original request's delivery mode.
-    inbound_request_handling_modes:
-        Arc<Mutex<HashMap<meerkat_core::PeerCorrelationId, meerkat_core::types::HandlingMode>>>,
+    /// Narrow authority for terminal peer-response routing inheritance.
+    ///
+    /// The runtime records the handling mode carried by inbound peer requests,
+    /// and `send_response` asks this seam for the effective response mode when
+    /// the caller omits an explicit override.
+    peer_response_routing: Arc<Mutex<PeerResponseRoutingAuthority>>,
 }
 
 impl CommsRuntime {
-    fn ingress_policy_from_silent_intents(
+    fn standalone_ingress_from_silent_intents(
         silent_intents: &Arc<HashSet<String>>,
-    ) -> Arc<meerkat_core::PeerIngressMachinePolicy> {
-        Arc::new(meerkat_core::PeerIngressMachinePolicy::from_silent_intents(
-            silent_intents.iter().cloned(),
-        ))
+    ) -> Arc<meerkat_core::PeerIngressCompatibilityAuthority> {
+        Arc::new(
+            meerkat_core::PeerIngressCompatibilityAuthority::from_silent_intents(
+                silent_intents.iter().cloned(),
+            ),
+        )
     }
 
     fn derive_bridge_bootstrap_token(keypair: &Keypair) -> String {
@@ -1363,7 +1378,7 @@ impl CommsRuntime {
         // Single source of truth for trust state — shared by the Router,
         // IngressClassificationContext, and callers of trusted_peers_shared().
         let trusted_peers = Arc::new(parking_lot::RwLock::new(trusted_peers));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         // Build classified inbox using the same trusted_peers Arc
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
@@ -1372,7 +1387,7 @@ impl CommsRuntime {
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: config.require_peer_auth,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: config.inproc_namespace.clone(),
@@ -1406,11 +1421,11 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1457,14 +1472,14 @@ impl CommsRuntime {
         let public_key = keypair.public_key();
         // Single source of truth — same Arc shared by Router, classification, and callers.
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(false));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
@@ -1522,11 +1537,11 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1594,14 +1609,14 @@ impl CommsRuntime {
             .map_err(|e| CommsRuntimeError::IdentityError(e.to_string()))?;
         let public_key = keypair.public_key();
         let trusted_peers = Arc::new(parking_lot::RwLock::new(TrustedPeers::new()));
-        let ingress_policy = Self::ingress_policy_from_silent_intents(&silent_intents);
+        let standalone_ingress = Self::standalone_ingress_from_silent_intents(&silent_intents);
 
         let peer_comms_handle = Arc::new(parking_lot::RwLock::new(None));
         let require_peer_comms_machine_authority = Arc::new(AtomicBool::new(true));
         let classification_context = Arc::new(crate::classify::IngressClassificationContext {
             require_peer_auth: true,
             trusted_peers: trusted_peers.clone(),
-            ingress_policy: ingress_policy.clone(),
+            standalone_ingress: standalone_ingress.clone(),
             peer_comms_handle: peer_comms_handle.clone(),
             require_machine_authority: require_peer_comms_machine_authority.clone(),
             inproc_namespace: namespace.clone(),
@@ -1650,11 +1665,11 @@ impl CommsRuntime {
             dismiss_flag: AtomicBool::new(false),
             subscriber_registry: crate::event_injector::new_subscriber_registry(),
             interaction_stream_registry: Arc::new(Mutex::new(HashMap::new())),
-            inbound_request_handling_modes: Arc::new(Mutex::new(HashMap::new())),
+            peer_response_routing: Arc::new(Mutex::new(PeerResponseRoutingAuthority::new())),
             peer_directory_reachability: Arc::new(Mutex::new(
                 PeerDirectoryReachabilityAuthority::new(),
             )),
-            ingress_policy,
+            standalone_ingress,
             peer_comms_handle,
             require_peer_comms_machine_authority,
             actionable_notify,
@@ -1708,7 +1723,7 @@ impl CommsRuntime {
 
     /// Require runtime-backed peer ingress to use the installed machine
     /// authority. When enabled, a missing `PeerCommsHandle` fails closed
-    /// instead of using the standalone compatibility policy.
+    /// instead of using the standalone compatibility authority.
     pub fn require_peer_comms_machine_authority(&self) {
         self.require_peer_comms_machine_authority
             .store(true, Ordering::SeqCst);
@@ -1851,9 +1866,11 @@ impl CommsRuntime {
             } => {
                 self.hydrate_blocks_for_transport(&mut blocks, "comms message")
                     .await?;
+                let (body, blocks) =
+                    CommsContentAuthority::canonical_text_and_blocks(body, Some(blocks));
                 Ok(crate::types::MessageKind::Message {
                     body,
-                    blocks: Some(blocks),
+                    blocks,
                     handling_mode,
                 })
             }
@@ -1868,7 +1885,7 @@ impl CommsRuntime {
                 Ok(crate::types::MessageKind::Request {
                     intent,
                     params,
-                    blocks: Some(blocks),
+                    blocks: CommsContentAuthority::normalize_blocks(Some(blocks)),
                     handling_mode,
                 })
             }
@@ -1885,7 +1902,7 @@ impl CommsRuntime {
                     in_reply_to,
                     status,
                     result,
-                    blocks: Some(blocks),
+                    blocks: CommsContentAuthority::normalize_blocks(Some(blocks)),
                     handling_mode,
                 })
             }
@@ -2061,8 +2078,8 @@ impl CommsRuntime {
     ///
     /// The peer goes through the same router + classified-inbox sync as
     /// [`register_trusted_peer`](Self::register_trusted_peer) — admission
-    /// and send-resolution behave identically — but its pubkey is added
-    /// to the router's private peer-id directory filter so
+    /// and send-resolution behave identically — but the router records the
+    /// app-facing directory visibility through its visibility authority so
     /// `resolve_peer_directory()` (and downstream `comms.peers`
     /// REST/RPC/MCP handlers) filter it out. Intended for control-plane
     /// edges such as the supervisor→member lifecycle channel for
@@ -2076,11 +2093,9 @@ impl CommsRuntime {
         peer.addr = parse_peer_address(&peer.addr)
             .map_err(SendError::Validation)?
             .to_string();
-        let pubkey = peer.pubkey;
         self.router
-            .add_trusted_peer(peer)
+            .add_private_trusted_peer(peer)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private(pubkey);
         Ok(())
     }
 
@@ -2091,9 +2106,8 @@ impl CommsRuntime {
         let peer_id = descriptor.peer_id;
         let peer = descriptor_to_trusted_peer(descriptor)?;
         self.router
-            .add_trusted_peer_with_peer_id(peer_id, peer)
+            .add_private_trusted_peer_with_peer_id(peer_id, peer)
             .map_err(|err| SendError::Validation(err.to_string()))?;
-        self.router.mark_private_peer_id(peer_id);
         Ok(())
     }
 
@@ -2171,9 +2185,11 @@ impl CommsRuntime {
     }
 
     fn reconcile_peer_directory(&self, peers: &[ResolvedPeer]) {
-        self.peer_directory_reachability
-            .lock()
-            .reconcile_resolved_directory(peers.iter().map(ResolvedPeer::reachability_key));
+        self.peer_directory_reachability.lock().apply(
+            PeerDirectoryReachabilityInput::DirectoryResolved {
+                keys: peers.iter().map(ResolvedPeer::reachability_key).collect(),
+            },
+        );
     }
 
     async fn for_each_resolved_peer<F>(&self, mut on_peer: F) -> usize
@@ -2188,7 +2204,6 @@ impl CommsRuntime {
                 .map(|p| (p.name.clone(), p.pubkey))
                 .collect();
         let participant_name = self.participant_name().to_string();
-        let private_peer_ids = self.router.private_peer_ids();
         let mut trusted_names = HashSet::new();
         let mut trusted_pubkeys = HashSet::new();
         let mut emitted = 0usize;
@@ -2219,7 +2234,7 @@ impl CommsRuntime {
                 }
                 trusted_names.insert(entry.name.as_string());
                 trusted_pubkeys.insert(entry.pubkey);
-                if private_peer_ids.contains(&entry.peer_id) {
+                if !self.router.is_peer_directory_visible(&entry.peer_id) {
                     continue;
                 }
                 let source = if inproc_by_name
@@ -2258,7 +2273,7 @@ impl CommsRuntime {
                 );
                 continue;
             }
-            if private_peer_ids.contains(&peer_id) {
+            if !self.router.is_peer_directory_visible(&peer_id) {
                 continue;
             }
             let name = match PeerName::new(inproc.name.clone()) {
@@ -2326,26 +2341,32 @@ impl CommsRuntime {
         match result {
             Ok(envelope_id) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability
-                        .lock()
-                        .record_send_succeeded(&peer.reachability_key());
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendSucceeded {
+                            key: peer.reachability_key(),
+                        },
+                    );
                 }
                 Ok(envelope_id)
             }
             Err(crate::router::SendError::PeerNotFound(peer_id)) => {
                 if let Some(resolved_peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &resolved_peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: resolved_peer.reachability_key(),
+                            reason: PeerReachabilityReason::OfflineOrNoAck,
+                        },
                     );
                 }
                 Err(SendError::PeerNotFound(peer_id.to_string()))
             }
             Err(crate::router::SendError::PeerOffline) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::OfflineOrNoAck,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::OfflineOrNoAck,
+                        },
                     );
                 }
                 Err(SendError::PeerOffline)
@@ -2359,9 +2380,11 @@ impl CommsRuntime {
                 // at the transport layer, so we record `AdmissionDropped`
                 // rather than `OfflineOrNoAck`.
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::AdmissionDropped,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::AdmissionDropped,
+                        },
                     );
                 }
                 Err(SendError::AdmissionDropped {
@@ -2372,9 +2395,11 @@ impl CommsRuntime {
                 error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
             ) => {
                 if let Some(peer) = resolved_peer.as_ref() {
-                    self.peer_directory_reachability.lock().record_send_failed(
-                        &peer.reachability_key(),
-                        PeerReachabilityReason::TransportError,
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::TransportError,
+                        },
                     );
                 }
                 Err(SendError::Internal(error.to_string()))
@@ -2390,9 +2415,9 @@ impl CommsRuntime {
     /// Callers that want the stream-lifecycle CAS (Reserved/Attached gate)
     /// should use [`mark_interaction_complete`].
     fn drop_peer_interaction_projection(&self, interaction_id: Uuid) {
-        self.inbound_request_handling_modes
+        self.peer_response_routing
             .lock()
-            .remove(&meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
+            .clear(meerkat_core::PeerCorrelationId::from_uuid(interaction_id));
         let removed_sender = self.subscriber_registry.lock().remove(&interaction_id);
         let removed_stream = self
             .interaction_stream_registry
@@ -2554,6 +2579,7 @@ impl CommsRuntime {
         source: meerkat_core::InputSource,
         handling_mode: meerkat_core::types::HandlingMode,
     ) -> Result<(), SendError> {
+        let (body, blocks) = CommsContentAuthority::canonical_text_and_blocks(body, blocks);
         let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
         self.reserve_interaction_stream_channels(
             corr_id,
@@ -3580,15 +3606,124 @@ mod tests {
         ));
         assert!(
             !runtime
-                .inbound_request_handling_modes
+                .peer_response_routing
                 .lock()
-                .contains_key(&meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(lifecycle_id)),
             "lifecycle projections are request-shaped but are not responseable peer requests"
         );
     }
 
     #[tokio::test]
-    async fn test_drain_inbox_interactions_multimodal_message_keeps_body_as_projection() {
+    async fn terminal_peer_response_inherits_request_mode_through_routing_authority() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let requester_name = format!("routing-requester-{suffix}");
+        let responder_name = format!("routing-responder-{suffix}");
+
+        let requester = Arc::new(CommsRuntime::inproc_only(&requester_name).unwrap());
+        let responder = Arc::new(CommsRuntime::inproc_only(&responder_name).unwrap());
+        install_test_peer_request_response_authority(&requester);
+        let responder_peer_handle = Arc::new(TestPeerInteractionHandle::default());
+        responder.install_peer_request_response_authority(PeerRequestResponseAuthority::new(
+            responder_peer_handle.clone(),
+            Arc::new(TestInteractionStreamHandle::default()),
+        ));
+
+        CoreCommsRuntime::add_trusted_peer(
+            requester.as_ref(),
+            trusted_descriptor(
+                &responder_name,
+                responder.public_key(),
+                &format!("inproc://{responder_name}"),
+            ),
+        )
+        .await
+        .expect("requester should trust responder");
+        CoreCommsRuntime::add_trusted_peer(
+            responder.as_ref(),
+            trusted_descriptor(
+                &requester_name,
+                requester.public_key(),
+                &format!("inproc://{requester_name}"),
+            ),
+        )
+        .await
+        .expect("responder should trust requester");
+
+        let request_receipt = CoreCommsRuntime::send(
+            requester.as_ref(),
+            CommsCommand::PeerRequest {
+                to: peer_route(&responder_name, responder.public_key()),
+                intent: "route-mode".to_string(),
+                params: serde_json::json!({"expect": "steer"}),
+                blocks: None,
+                handling_mode: meerkat_core::types::HandlingMode::Steer,
+                stream: InputStreamMode::None,
+            },
+        )
+        .await
+        .expect("request should send");
+        let interaction_id = match request_receipt {
+            SendReceipt::PeerRequestSent { envelope_id, .. } => InteractionId(envelope_id),
+            other => panic!("expected PeerRequestSent, got {other:?}"),
+        };
+
+        let responder_interactions =
+            CoreCommsRuntime::drain_inbox_interactions(responder.as_ref()).await;
+        assert_eq!(responder_interactions.len(), 1);
+        assert_eq!(
+            responder_interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Steer
+        );
+        assert!(
+            responder
+                .peer_response_routing
+                .lock()
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(
+                    interaction_id.0
+                )),
+            "draining the inbound peer request should record routing inheritance"
+        );
+        meerkat_core::handles::PeerInteractionHandle::request_received(
+            responder_peer_handle.as_ref(),
+            meerkat_core::PeerCorrelationId::from_uuid(interaction_id.0),
+        )
+        .expect("test authority should seed inbound request state");
+
+        CoreCommsRuntime::send(
+            responder.as_ref(),
+            CommsCommand::PeerResponse {
+                to: peer_route(&requester_name, requester.public_key()),
+                in_reply_to: interaction_id,
+                status: meerkat_core::ResponseStatus::Completed,
+                result: serde_json::json!({"ok": true}),
+                blocks: None,
+                handling_mode: None,
+            },
+        )
+        .await
+        .expect("terminal response should send without explicit mode");
+
+        let requester_interactions =
+            CoreCommsRuntime::drain_inbox_interactions(requester.as_ref()).await;
+        assert_eq!(requester_interactions.len(), 1);
+        assert_eq!(
+            requester_interactions[0].handling_mode,
+            meerkat_core::types::HandlingMode::Steer,
+            "terminal response should inherit request mode via routing authority"
+        );
+        assert!(
+            !responder
+                .peer_response_routing
+                .lock()
+                .contains_inbound_request(meerkat_core::PeerCorrelationId::from_uuid(
+                    interaction_id.0
+                )),
+            "terminal send should clear inherited routing state"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_drain_inbox_interactions_multimodal_message_blocks_own_projection() {
         let tmp = tempfile::TempDir::new().unwrap();
         let config = test_runtime_config("multimodal-body-projection", &tmp);
         let runtime = CommsRuntime::new(config).await.unwrap();
@@ -3614,7 +3749,7 @@ mod tests {
             &sender,
             runtime.public_key(),
             MessageKind::Message {
-                body: "please inspect this".to_string(),
+                body: "stale helper text".to_string(),
                 blocks: Some(blocks.clone()),
                 handling_mode: None,
             },
@@ -3630,16 +3765,17 @@ mod tests {
         let interactions = CoreCommsRuntime::drain_inbox_interactions(&runtime).await;
         assert_eq!(interactions.len(), 1);
         let interaction = &interactions[0];
+        let canonical_body = meerkat_core::types::text_content(&blocks);
         assert_eq!(
             interaction.rendered_text,
-            "[COMMS MESSAGE from sender]\nplease inspect this"
+            format!("[COMMS MESSAGE from sender]\n{canonical_body}")
         );
         match &interaction.content {
             meerkat_core::InteractionContent::Message {
                 body,
                 blocks: got_blocks,
             } => {
-                assert_eq!(body, "please inspect this");
+                assert_eq!(body, &canonical_body);
                 assert_eq!(got_blocks.as_ref(), Some(&blocks));
             }
             other => panic!("expected message content, got {other:?}"),
@@ -6682,6 +6818,59 @@ mod tests {
             .await
             .expect("remove after rejected private add should still validate peer id");
         assert!(!removed, "rejected private peer must not enter trust");
+    }
+
+    #[tokio::test]
+    async fn test_private_trusted_peer_visibility_is_authority_owned() {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let sender_name = format!("private-vis-sender-{suffix}");
+        let receiver_name = format!("private-vis-receiver-{suffix}");
+        let sender = CommsRuntime::inproc_only(&sender_name).unwrap();
+        let receiver = CommsRuntime::inproc_only(&receiver_name).unwrap();
+        let receiver_id = receiver.public_key().to_peer_id();
+
+        CoreCommsRuntime::add_private_trusted_peer(
+            &sender,
+            trusted_descriptor(
+                &receiver_name,
+                receiver.public_key(),
+                &format!("inproc://{receiver_name}"),
+            ),
+        )
+        .await
+        .expect("private trust should register through router authority");
+
+        assert!(
+            sender
+                .trusted_peers
+                .read()
+                .peers
+                .iter()
+                .any(|peer| peer.name == receiver_name),
+            "private peer must remain trusted and send-resolvable"
+        );
+        assert!(
+            sender.router().is_private(&receiver.public_key()),
+            "directory visibility authority must own the private marker"
+        );
+        assert!(
+            CoreCommsRuntime::peers(&sender)
+                .await
+                .iter()
+                .all(|peer| peer.peer_id != receiver_id),
+            "private trust must not leak into the public peer directory"
+        );
+
+        assert!(
+            CoreCommsRuntime::remove_private_trusted_peer(&sender, &receiver_id.to_string())
+                .await
+                .expect("remove private peer should validate id"),
+            "private peer should be removable by canonical peer id"
+        );
+        assert!(
+            !sender.router().is_private(&receiver.public_key()),
+            "removing private trust must also clear the visibility fact"
+        );
     }
 
     #[tokio::test]

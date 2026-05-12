@@ -172,6 +172,10 @@ fn trace_server_event_json(event: &ServerEvent) -> Option<String> {
             "{{\"type\":\"response.output_audio.delta\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
             delta.len()
         )),
+        ServerEvent::SessionOutputAudioDelta { delta, .. } => Some(format!(
+            "{{\"type\":\"session.output_audio.delta\",\"audio_redacted\":true,\"audio_b64_len\":{}}}",
+            delta.len()
+        )),
         other => serde_json::to_string(other).ok(),
     }
 }
@@ -1100,7 +1104,7 @@ const OPENAI_REALTIME_AUDIO_MIME_TYPE: &str = "audio/pcm";
 pub(crate) const OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ: u32 = 24_000;
 /// Channel count OpenAI Realtime negotiates for PCM audio (mono).
 pub(crate) const OPENAI_REALTIME_AUDIO_CHANNELS: u8 = 1;
-const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 750;
+const OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS: u64 = 1_500;
 const OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS: u8 = 3;
 
 fn openai_realtime_client_event_id(prefix: &str) -> String {
@@ -1124,38 +1128,284 @@ fn openai_response_cancel_no_active_response_message(message: &str) -> bool {
     message.contains("cancellation failed") && message.contains("no active response found")
 }
 
-fn should_suppress_openai_active_response_error(
-    message: &str,
-    provider_response_nudge_inflight: bool,
-    response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-) -> bool {
-    // R3-5 (P2): `response_output_active` is the OR of the audio + text
-    // bits — the OpenAI realtime "active response in progress" guard is
-    // about a server-side response of *any* modality being active, so the
-    // suppression decision composes both bits at the call site.
-    openai_response_already_active_message(message)
-        && (provider_response_nudge_inflight
-            || response_output_active
-            || awaiting_provider_response_after_commit
-            || provider_response_acknowledged_without_progress)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenAiResponseNudgeSnapshot {
+    awaiting_after_commit: bool,
+    acknowledged_without_progress: bool,
+    nudge_attempts: u8,
+    nudge_inflight: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAiResponseNudgeTimeoutAction {
+    WaitAgain { attempt: u8 },
+    SendNudge,
+    Exhausted { attempts: u8, duration_ms: u64 },
+}
+
+/// Provider-owned compatibility authority for OpenAI response-start recovery.
+///
+/// OpenAI can acknowledge a committed input turn without promptly surfacing
+/// response progress on reconstructed realtime sessions. This authority owns
+/// the adapter's bounded recovery lifecycle: waiting, recovery nudges,
+/// acknowledgement-only states, active-response suppression, and timeout
+/// terminalization. The session loop only performs transport mechanics.
+#[derive(Debug, Clone, Default)]
+struct OpenAiResponseNudgeAuthority {
+    awaiting_after_commit: bool,
+    acknowledged_without_progress: bool,
+    nudge_attempts: u8,
+    nudge_inflight: bool,
+    timeout_ms: Option<u64>,
+    max_attempts: Option<u8>,
+}
+
+impl OpenAiResponseNudgeAuthority {
+    fn set_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
+        self.timeout_ms = timeout_ms;
+        self.max_attempts = max_attempts;
+    }
+
+    fn timeout_ms(&self) -> u64 {
+        self.timeout_ms
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
+    }
+
+    fn max_attempts(&self) -> u8 {
+        self.max_attempts
+            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS)
+    }
+
+    fn snapshot(&self) -> OpenAiResponseNudgeSnapshot {
+        OpenAiResponseNudgeSnapshot {
+            awaiting_after_commit: self.awaiting_after_commit,
+            acknowledged_without_progress: self.acknowledged_without_progress,
+            nudge_attempts: self.nudge_attempts,
+            nudge_inflight: self.nudge_inflight,
+        }
+    }
+
+    fn awaiting_after_commit(&self) -> bool {
+        self.awaiting_after_commit
+    }
+
+    fn waiting_for_progress(&self) -> bool {
+        self.awaiting_after_commit || self.acknowledged_without_progress
+    }
+
+    fn begin_wait_after_commit(&mut self, should_wait: bool) {
+        self.awaiting_after_commit = should_wait;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn note_provider_response_acknowledged(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = true;
+        self.nudge_inflight = false;
+    }
+
+    fn note_provider_response_progressed(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn reset(&mut self) {
+        self.awaiting_after_commit = false;
+        self.acknowledged_without_progress = false;
+        self.nudge_attempts = 0;
+        self.nudge_inflight = false;
+    }
+
+    fn should_suppress_active_response_error(
+        &self,
+        message: &str,
+        response_output_active: bool,
+    ) -> bool {
+        // R3-5 (P2): `response_output_active` is the OR of the audio + text
+        // bits — the OpenAI realtime "active response in progress" guard is
+        // about a server-side response of any modality being active, so the
+        // suppression decision composes both bits at the call site.
+        openai_response_already_active_message(message)
+            && (self.nudge_inflight
+                || response_output_active
+                || self.awaiting_after_commit
+                || self.acknowledged_without_progress)
+    }
+
+    fn on_wait_timeout(&mut self) -> OpenAiResponseNudgeTimeoutAction {
+        let max_attempts = self.max_attempts();
+        if self.acknowledged_without_progress {
+            if self.nudge_attempts >= max_attempts {
+                return OpenAiResponseNudgeTimeoutAction::Exhausted {
+                    attempts: self.nudge_attempts,
+                    duration_ms: self.timeout_error_duration_ms(),
+                };
+            }
+            self.nudge_attempts += 1;
+            return OpenAiResponseNudgeTimeoutAction::WaitAgain {
+                attempt: self.nudge_attempts,
+            };
+        }
+        if self.nudge_attempts >= max_attempts {
+            return OpenAiResponseNudgeTimeoutAction::Exhausted {
+                attempts: self.nudge_attempts,
+                duration_ms: self.timeout_error_duration_ms(),
+            };
+        }
+        OpenAiResponseNudgeTimeoutAction::SendNudge
+    }
+
+    fn note_nudge_sent(&mut self) -> u8 {
+        self.nudge_attempts += 1;
+        self.nudge_inflight = true;
+        self.nudge_attempts
+    }
+
+    fn timeout_error_duration_ms(&self) -> u64 {
+        self.timeout_ms() * u64::from(self.max_attempts())
+    }
+
+    #[cfg(test)]
+    fn force_state_for_test(
+        &mut self,
+        awaiting_after_commit: bool,
+        acknowledged_without_progress: bool,
+        nudge_attempts: u8,
+        nudge_inflight: bool,
+    ) {
+        self.awaiting_after_commit = awaiting_after_commit;
+        self.acknowledged_without_progress = acknowledged_without_progress;
+        self.nudge_attempts = nudge_attempts;
+        self.nudge_inflight = nudge_inflight;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OpenAiStagedTextTurn {
+    item_id: String,
+    text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenAiUserTurnCommitPlan {
+    commit_audio: bool,
+}
+
+/// Provider-owned authority for OpenAI user-turn staging.
+///
+/// The session adapter sends provider transport events. This authority owns
+/// the semantic staging facts that decide whether a turn can be committed,
+/// whether an audio-buffer commit is required, and how staged text items become
+/// canonical realtime user-turn observations.
+#[derive(Debug, Clone, Default)]
+struct OpenAiUserTurnStagingAuthority {
+    has_staged_input: bool,
+    has_staged_audio: bool,
+    explicit_commit_text_turns: Vec<OpenAiStagedTextTurn>,
+}
+
+impl OpenAiUserTurnStagingAuthority {
+    fn stage_audio_chunk(&mut self) {
+        self.has_staged_input = true;
+        self.has_staged_audio = true;
+    }
+
+    fn record_provider_managed_text_input(
+        &mut self,
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        item_id: &str,
+        text: &str,
+    ) {
+        self.has_staged_input = true;
+        Self::push_text_turn_observations(pending_events, item_id, text);
+    }
+
+    fn complete_provider_managed_text_response(&mut self) {
+        self.has_staged_input = false;
+    }
+
+    fn stage_explicit_commit_text_input(&mut self, item_id: String, text: String) {
+        self.has_staged_input = true;
+        self.explicit_commit_text_turns
+            .push(OpenAiStagedTextTurn { item_id, text });
+    }
+
+    fn admit_explicit_commit(&self) -> Result<OpenAiUserTurnCommitPlan, LlmError> {
+        if !self.has_staged_input {
+            return Err(LlmError::InvalidRequest {
+                message: "realtime commit_turn requires staged input".to_string(),
+            });
+        }
+        Ok(OpenAiUserTurnCommitPlan {
+            commit_audio: self.has_staged_audio,
+        })
+    }
+
+    fn project_explicit_commit_text_inputs(
+        &mut self,
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+    ) {
+        for turn in self.explicit_commit_text_turns.drain(..) {
+            Self::push_text_turn_observations(pending_events, &turn.item_id, &turn.text);
+        }
+    }
+
+    fn clear_after_commit(&mut self) {
+        self.has_staged_input = false;
+        self.has_staged_audio = false;
+    }
+
+    fn clear(&mut self) {
+        self.has_staged_input = false;
+        self.has_staged_audio = false;
+        self.explicit_commit_text_turns.clear();
+    }
+
+    /// R4-1 (P1): shared canonical-history synthesis for a single text
+    /// turn. Pushes the four observations a text turn must surface:
+    /// `TurnStarted`, `InputTranscriptPartial`,
+    /// `InputTranscriptFinalForItem`, `TurnCommitted`.
+    fn push_text_turn_observations(
+        pending_events: &mut VecDeque<RealtimeSessionEvent>,
+        item_id: &str,
+        text: &str,
+    ) {
+        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
+            item_id: item_id.to_string(),
+            previous_item_id: None,
+            content_index: 0,
+            text: text.to_string(),
+        });
+        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
+    }
 }
 
 fn trace_openai_active_response_error(
     source: &str,
     message: &str,
-    provider_response_nudge_inflight: bool,
+    snapshot: OpenAiResponseNudgeSnapshot,
     response_output_active: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
     suppressed: bool,
 ) {
     if std::env::var_os("RKAT_OPENAI_REALTIME_TRACE_ACTIVE_RESPONSE").is_none() {
         return;
     }
+    let OpenAiResponseNudgeSnapshot {
+        awaiting_after_commit,
+        acknowledged_without_progress,
+        nudge_attempts,
+        nudge_inflight,
+    } = snapshot;
     eprintln!(
-        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={provider_response_nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_provider_response_after_commit} ack_without_progress={provider_response_acknowledged_without_progress} message={message}",
+        "[openai-realtime-active-response] source={source} suppressed={suppressed} nudge_inflight={nudge_inflight} output_active={response_output_active} awaiting_after_commit={awaiting_after_commit} ack_without_progress={acknowledged_without_progress} attempts={nudge_attempts} message={message}",
     );
 }
 
@@ -1194,21 +1444,7 @@ pub struct OpenAiRealtimeSession {
     raw: Option<Box<dyn OpenAiLiveSession>>,
     capabilities: RealtimeCapabilities,
     turning_mode: RealtimeTurningMode,
-    has_staged_input: bool,
-    has_staged_audio: bool,
-    /// R4-1 (P1): text items staged via `send_input` while
-    /// `turning_mode == ExplicitCommit`, awaiting `commit_turn_with_modality`.
-    /// Each entry is the `(synthetic_item_id, text)` pair sent to the
-    /// provider via `ConversationItemCreate`. On commit the canonical
-    /// user-turn synthesis path drains this and emits the same
-    /// `TurnStarted` / `InputTranscriptPartial` / `InputTranscriptFinalForItem`
-    /// / `TurnCommitted` sequence the `ProviderManaged` text-input path
-    /// emits inline — so explicit-commit text turns enter canonical
-    /// history, just like `ProviderManaged` text turns. The only
-    /// semantic difference between the two modes for text input is when
-    /// `response.create` fires (caller-driven vs server-driven), not
-    /// whether the user turn is recorded.
-    pending_explicit_commit_text_items: Vec<(String, String)>,
+    turn_staging: OpenAiUserTurnStagingAuthority,
     pending_events: VecDeque<RealtimeSessionEvent>,
     pending_mcp_calls: BTreeMap<String, PendingMcpCall>,
     item_previous: BTreeMap<String, Option<String>>,
@@ -1239,16 +1475,7 @@ pub struct OpenAiRealtimeSession {
     text_output_active: bool,
     response_interrupt_emitted: bool,
     response_tool_call_observed: bool,
-    awaiting_provider_response_after_commit: bool,
-    provider_response_acknowledged_without_progress: bool,
-    provider_response_nudge_attempts: u8,
-    provider_response_nudge_inflight: bool,
-    /// Per-session override for the provider-nudge timeout (milliseconds).
-    /// None falls back to `OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS`.
-    response_nudge_timeout_ms: Option<u64>,
-    /// Per-session override for the provider-nudge max attempts. None falls
-    /// back to `OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS`.
-    response_nudge_max_attempts: Option<u8>,
+    response_nudge: OpenAiResponseNudgeAuthority,
     /// item_id → audio_played_ms captured when the client called
     /// [`truncate_assistant_output`]. Used to correlate the server's
     /// `conversation.item.truncated` with the playback cursor when emitting
@@ -1284,9 +1511,7 @@ impl OpenAiRealtimeSession {
             raw: Some(raw),
             capabilities: openai_realtime_capabilities(),
             turning_mode,
-            has_staged_input: false,
-            has_staged_audio: false,
-            pending_explicit_commit_text_items: Vec::new(),
+            turn_staging: OpenAiUserTurnStagingAuthority::default(),
             pending_events: VecDeque::new(),
             pending_mcp_calls: BTreeMap::new(),
             item_previous: BTreeMap::new(),
@@ -1301,12 +1526,7 @@ impl OpenAiRealtimeSession {
             text_output_active: false,
             response_interrupt_emitted: false,
             response_tool_call_observed: false,
-            awaiting_provider_response_after_commit: false,
-            provider_response_acknowledged_without_progress: false,
-            provider_response_nudge_attempts: 0,
-            provider_response_nudge_inflight: false,
-            response_nudge_timeout_ms: None,
-            response_nudge_max_attempts: None,
+            response_nudge: OpenAiResponseNudgeAuthority::default(),
             pending_truncations: BTreeMap::new(),
             current_model_id: None,
             current_provider_id: None,
@@ -1316,8 +1536,7 @@ impl OpenAiRealtimeSession {
     /// Apply per-session overrides for the provider nudge timings. `None`
     /// values inherit the adapter's compile-time defaults.
     pub fn set_response_nudge_config(&mut self, timeout_ms: Option<u64>, max_attempts: Option<u8>) {
-        self.response_nudge_timeout_ms = timeout_ms;
-        self.response_nudge_max_attempts = max_attempts;
+        self.response_nudge.set_config(timeout_ms, max_attempts);
     }
 
     /// R1: stamp the model + provider identity this session was opened
@@ -1334,16 +1553,6 @@ impl OpenAiRealtimeSession {
     ) {
         self.current_model_id = Some(model_id.into());
         self.current_provider_id = Some(provider_id.into());
-    }
-
-    fn effective_nudge_timeout_ms(&self) -> u64 {
-        self.response_nudge_timeout_ms
-            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_TIMEOUT_MS)
-    }
-
-    fn effective_nudge_max_attempts(&self) -> u8 {
-        self.response_nudge_max_attempts
-            .unwrap_or(OPENAI_REALTIME_RESPONSE_NUDGE_MAX_ATTEMPTS)
     }
 
     fn raw_mut(&mut self) -> Result<&mut (dyn OpenAiLiveSession + '_), LlmError> {
@@ -1486,6 +1695,21 @@ impl OpenAiRealtimeSession {
         }
         self.pending_response_cancel_event_ids.remove(event_id);
         true
+    }
+
+    fn should_suppress_active_response_error(&self, source: &str, message: &str) -> bool {
+        let response_output_active = self.any_response_output_active();
+        let suppress = self
+            .response_nudge
+            .should_suppress_active_response_error(message, response_output_active);
+        trace_openai_active_response_error(
+            source,
+            message,
+            self.response_nudge.snapshot(),
+            response_output_active,
+            suppress,
+        );
+        suppress
     }
 
     fn response_id_for_item(&self, item_id: &str) -> Option<String> {
@@ -1642,21 +1866,15 @@ impl OpenAiRealtimeSession {
     }
 
     fn waiting_for_provider_progress(&self) -> bool {
-        self.awaiting_provider_response_after_commit
-            || self.provider_response_acknowledged_without_progress
+        self.response_nudge.waiting_for_progress()
     }
 
     fn note_provider_response_acknowledged(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = true;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.note_provider_response_acknowledged();
     }
 
     fn note_provider_response_progressed(&mut self) {
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.note_provider_response_progressed();
     }
 
     fn note_output_audio_transcript_done(
@@ -1789,14 +2007,12 @@ impl OpenAiRealtimeSession {
                     return Ok(None);
                 }
                 self.note_previous_for_item(&item_id, previous_item_id);
-                self.awaiting_provider_response_after_commit =
-                    self.turning_mode == RealtimeTurningMode::ProviderManaged;
-                self.provider_response_acknowledged_without_progress = false;
-                self.provider_response_nudge_attempts = 0;
-                self.provider_response_nudge_inflight = false;
+                self.response_nudge.begin_wait_after_commit(
+                    self.turning_mode == RealtimeTurningMode::ProviderManaged,
+                );
                 trace_openai_realtime_lifecycle(format!(
                     "input_audio_buffer.committed awaiting_after_commit={}",
-                    self.awaiting_provider_response_after_commit
+                    self.response_nudge.awaiting_after_commit()
                 ));
                 if self.audio_output_active && !self.response_interrupt_emitted {
                     let response_id = self.active_response_id.clone();
@@ -1836,7 +2052,7 @@ impl OpenAiRealtimeSession {
                 None
             }
             ServerEvent::ResponseDone { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_nudge.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle(format!(
                         "response.done suppressed_while_awaiting status={:?}",
                         response.status
@@ -1895,7 +2111,7 @@ impl OpenAiRealtimeSession {
                 }
             }
             ServerEvent::ResponseCancelled { response, .. } => {
-                if self.awaiting_provider_response_after_commit {
+                if self.response_nudge.awaiting_after_commit() {
                     trace_openai_realtime_lifecycle("response.cancelled suppressed_while_awaiting");
                     self.clear_response_output_active();
                     self.response_tool_call_observed = false;
@@ -2065,6 +2281,21 @@ impl OpenAiRealtimeSession {
                     None => Some(final_event),
                 }
             }
+            ServerEvent::SessionOutputAudioDelta { delta, .. } => {
+                self.note_provider_response_progressed();
+                self.mark_audio_output_active();
+                Some(RealtimeSessionEvent::OutputAudioChunk {
+                    chunk: RealtimeAudioChunk {
+                        mime_type: OPENAI_REALTIME_AUDIO_MIME_TYPE.to_string(),
+                        sample_rate_hz: OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ,
+                        channels: OPENAI_REALTIME_AUDIO_CHANNELS,
+                        data: delta,
+                    },
+                    response_id: self.active_response_id.clone(),
+                    item_id: None,
+                    content_index: None,
+                })
+            }
             ServerEvent::ResponseOutputAudioDelta {
                 response_id,
                 item_id,
@@ -2157,23 +2388,7 @@ impl OpenAiRealtimeSession {
                     ));
                     return Ok(None);
                 }
-                let suppress = should_suppress_openai_active_response_error(
-                    &error.message,
-                    self.provider_response_nudge_inflight,
-                    self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
-                );
-                trace_openai_active_response_error(
-                    "server_event",
-                    &error.message,
-                    self.provider_response_nudge_inflight,
-                    self.any_response_output_active(),
-                    self.awaiting_provider_response_after_commit,
-                    self.provider_response_acknowledged_without_progress,
-                    suppress,
-                );
-                if suppress {
+                if self.should_suppress_active_response_error("server_event", &error.message) {
                     // Provider-specific compatibility path:
                     // the one-shot `response.create` recovery nudge can race
                     // with an OpenAI-managed response that already exists even
@@ -2282,31 +2497,14 @@ impl OpenAiRealtimeSession {
                     .to_string(),
             });
         }
-        if !self.has_staged_input {
-            return Err(LlmError::InvalidRequest {
-                message: "realtime commit_turn requires staged input".to_string(),
-            });
-        }
-        if self.has_staged_audio {
+        let commit_plan = self.turn_staging.admit_explicit_commit()?;
+        if commit_plan.commit_audio {
             self.raw_mut()?
                 .send_raw(ClientEvent::InputAudioBufferCommit { event_id: None })
                 .await?;
         }
-        // R4-1 (P1): drain text items staged via `send_input` while the
-        // turn was open and synthesize the canonical user-turn
-        // observation sequence BEFORE clearing staged input. Each text
-        // item gets its own TurnStarted / InputTranscriptPartial /
-        // InputTranscriptFinalForItem / TurnCommitted block — same shape
-        // ProviderManaged emits inline per text chunk — so explicit-commit
-        // text turns are projected into canonical history identically
-        // to provider-managed text turns. Audio commits do not need this
-        // synthesis: OpenAI's `input_audio_buffer.committed` server event
-        // drives the TurnCommitted observation through the normal mapping
-        // path (see `map_server_event`).
-        let pending_text_items = std::mem::take(&mut self.pending_explicit_commit_text_items);
-        for (item_id, text) in &pending_text_items {
-            Self::synthesize_text_turn_observations(&mut self.pending_events, item_id, text);
-        }
+        self.turn_staging
+            .project_explicit_commit_text_inputs(&mut self.pending_events);
         // `LiveResponseModality` is `#[non_exhaustive]`; future variants
         // the OpenAI realtime adapter does not yet honor must surface a
         // typed `InvalidRequest` rejection rather than silently dropping
@@ -2328,40 +2526,8 @@ impl OpenAiRealtimeSession {
                 response: Some(Box::new(response_config)),
             })
             .await?;
-        self.has_staged_input = false;
-        self.has_staged_audio = false;
+        self.turn_staging.clear_after_commit();
         Ok(())
-    }
-
-    /// R4-1 (P1): shared canonical-history synthesis for a single text
-    /// turn. Pushes the four observations a text turn must surface —
-    /// `TurnStarted`, `InputTranscriptPartial`,
-    /// `InputTranscriptFinalForItem`, `TurnCommitted` — into
-    /// `pending_events` in order. The synthetic item id is the same one
-    /// sent to the provider via `ConversationItemCreate`, so canonical
-    /// session append stays keyed and idempotent across modes.
-    ///
-    /// Used by the `ProviderManaged` text-input path (synthesis fires
-    /// inline on `send_input`) AND the `ExplicitCommit` text-input path
-    /// (synthesis fires on `commit_turn_with_modality`, draining the
-    /// staged queue). Both modes produce equivalent canonical
-    /// projection for text input.
-    fn synthesize_text_turn_observations(
-        pending_events: &mut VecDeque<RealtimeSessionEvent>,
-        item_id: &str,
-        text: &str,
-    ) {
-        pending_events.push_back(RealtimeSessionEvent::TurnStarted);
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptPartial {
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::InputTranscriptFinalForItem {
-            item_id: item_id.to_string(),
-            previous_item_id: None,
-            content_index: 0,
-            text: text.to_string(),
-        });
-        pending_events.push_back(RealtimeSessionEvent::TurnCommitted);
     }
 }
 
@@ -2392,8 +2558,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         audio: chunk.data,
                     })
                     .await?;
-                self.has_staged_input = true;
-                self.has_staged_audio = true;
+                self.turn_staging.stage_audio_chunk();
                 Ok(())
             }
             RealtimeInputChunk::TextChunk(chunk) => {
@@ -2412,7 +2577,6 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         }),
                     })
                     .await?;
-                self.has_staged_input = true;
                 // Text turns in provider-managed mode have no server-VAD commit
                 // analogue: OpenAI only emits `input_audio_buffer.committed`
                 // (which drives TurnCommitted) for audio turns. Mirror the audio
@@ -2425,7 +2589,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // session append remains keyed and idempotent.
                 match self.turning_mode {
                     RealtimeTurningMode::ProviderManaged => {
-                        Self::synthesize_text_turn_observations(
+                        self.turn_staging.record_provider_managed_text_input(
                             &mut self.pending_events,
                             &synthetic_item_id,
                             &text,
@@ -2436,8 +2600,8 @@ impl RealtimeSession for OpenAiRealtimeSession {
                                 response: Some(Box::new(openai_audio_response_config())),
                             })
                             .await?;
-                        self.has_staged_input = false;
-                        self.awaiting_provider_response_after_commit = true;
+                        self.turn_staging.complete_provider_managed_text_response();
+                        self.response_nudge.begin_wait_after_commit(true);
                     }
                     RealtimeTurningMode::ExplicitCommit => {
                         // R4-1 (P1): defer canonical-history synthesis until
@@ -2448,8 +2612,8 @@ impl RealtimeSession for OpenAiRealtimeSession {
                         // queue and emit the same observation sequence
                         // ProviderManaged emits inline so explicit-commit
                         // text turns reach canonical history.
-                        self.pending_explicit_commit_text_items
-                            .push((synthetic_item_id, text));
+                        self.turn_staging
+                            .stage_explicit_commit_text_input(synthetic_item_id, text);
                     }
                 }
                 Ok(())
@@ -2552,8 +2716,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
                 // owns this one-shot recovery nudge rather than exposing a new
                 // product semantic. Keep this narrow and easy to delete once
                 // the upstream/provider session behavior is fully understood.
-                let nudge_timeout_ms = self.effective_nudge_timeout_ms();
-                let nudge_max_attempts = self.effective_nudge_max_attempts();
+                let nudge_timeout_ms = self.response_nudge.timeout_ms();
                 match tokio::time::timeout(
                     Duration::from_millis(nudge_timeout_ms),
                     self.raw_mut()?.next_event(),
@@ -2563,132 +2726,77 @@ impl RealtimeSession for OpenAiRealtimeSession {
                     Ok(result) => match result {
                         Ok(event) => event,
                         Err(LlmError::InvalidRequest { message })
-                            if {
-                                let suppress = should_suppress_openai_active_response_error(
-                                    &message,
-                                    self.provider_response_nudge_inflight,
-                                    self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
-                                );
-                                trace_openai_active_response_error(
-                                    "raw_timeout_branch",
-                                    &message,
-                                    self.provider_response_nudge_inflight,
-                                    self.any_response_output_active(),
-                                    self.awaiting_provider_response_after_commit,
-                                    self.provider_response_acknowledged_without_progress,
-                                    suppress,
-                                );
-                                suppress
-                            } =>
+                            if self.should_suppress_active_response_error(
+                                "raw_timeout_branch",
+                                &message,
+                            ) =>
                         {
                             self.note_provider_response_acknowledged();
                             continue;
                         }
                         Err(error) => return Err(error),
                     },
-                    Err(_) => {
-                        if self.provider_response_acknowledged_without_progress {
-                            if self.provider_response_nudge_attempts >= nudge_max_attempts {
-                                trace_openai_realtime_lifecycle(format!(
-                                    "provider response acknowledged but stalled after {} wait windows",
-                                    self.provider_response_nudge_attempts
-                                ));
-                                return Err(LlmError::NetworkTimeout {
-                                    duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
-                                });
-                            }
-                            self.provider_response_nudge_attempts += 1;
+                    Err(_) => match self.response_nudge.on_wait_timeout() {
+                        OpenAiResponseNudgeTimeoutAction::WaitAgain { attempt } => {
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response acknowledged without progress; waiting again attempt={}",
-                                self.provider_response_nudge_attempts
+                                attempt
                             ));
                             continue;
                         }
-                        if self.provider_response_nudge_attempts >= nudge_max_attempts {
+                        OpenAiResponseNudgeTimeoutAction::Exhausted {
+                            attempts,
+                            duration_ms,
+                        } => {
                             trace_openai_realtime_lifecycle(format!(
                                 "provider response nudge budget exhausted after {} attempts",
-                                self.provider_response_nudge_attempts
+                                attempts
                             ));
-                            return Err(LlmError::NetworkTimeout {
-                                duration_ms: nudge_timeout_ms * u64::from(nudge_max_attempts),
-                            });
+                            return Err(LlmError::NetworkTimeout { duration_ms });
                         }
-                        trace_openai_realtime_lifecycle(
-                            "provider response nudge timeout expired; sending response.create",
-                        );
-                        match self
-                            .raw_mut()?
-                            .send_raw(ClientEvent::ResponseCreate {
-                                event_id: None,
-                                response: Some(Box::new(openai_audio_response_config())),
-                            })
-                            .await
-                        {
-                            Ok(()) => {
-                                self.provider_response_nudge_attempts += 1;
-                                self.provider_response_nudge_inflight = true;
-                                trace_openai_realtime_lifecycle(format!(
-                                    "response.create nudge accepted by transport attempt={}",
-                                    self.provider_response_nudge_attempts
-                                ));
-                            }
-                            Err(LlmError::InvalidRequest { message })
-                                if {
-                                    let suppress = should_suppress_openai_active_response_error(
-                                        &message,
-                                        self.provider_response_nudge_inflight,
-                                        self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
-                                    );
-                                    trace_openai_active_response_error(
+                        OpenAiResponseNudgeTimeoutAction::SendNudge => {
+                            trace_openai_realtime_lifecycle(
+                                "provider response nudge timeout expired; sending response.create",
+                            );
+                            match self
+                                .raw_mut()?
+                                .send_raw(ClientEvent::ResponseCreate {
+                                    event_id: None,
+                                    response: Some(Box::new(openai_audio_response_config())),
+                                })
+                                .await
+                            {
+                                Ok(()) => {
+                                    let attempt = self.response_nudge.note_nudge_sent();
+                                    trace_openai_realtime_lifecycle(format!(
+                                        "response.create nudge accepted by transport attempt={}",
+                                        attempt
+                                    ));
+                                }
+                                Err(LlmError::InvalidRequest { message })
+                                    if self.should_suppress_active_response_error(
                                         "response_create",
                                         &message,
-                                        self.provider_response_nudge_inflight,
-                                        self.any_response_output_active(),
-                                        self.awaiting_provider_response_after_commit,
-                                        self.provider_response_acknowledged_without_progress,
-                                        suppress,
-                                    );
-                                    suppress
-                                } =>
-                            {
-                                // Same reasoning as the server-error branch
-                                // above: keep the nudge guard open until a
-                                // real provider lifecycle event proves the
-                                // active response has advanced or terminated.
-                                self.note_provider_response_acknowledged();
+                                    ) =>
+                                {
+                                    // Same reasoning as the server-error branch
+                                    // above: keep the nudge guard open until a
+                                    // real provider lifecycle event proves the
+                                    // active response has advanced or terminated.
+                                    self.note_provider_response_acknowledged();
+                                }
+                                Err(error) => return Err(error),
                             }
-                            Err(error) => return Err(error),
+                            continue;
                         }
-                        continue;
-                    }
+                    },
                 }
             } else {
                 match self.raw_mut()?.next_event().await {
                     Ok(event) => event,
                     Err(LlmError::InvalidRequest { message })
-                        if {
-                            let suppress = should_suppress_openai_active_response_error(
-                                &message,
-                                self.provider_response_nudge_inflight,
-                                self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
-                            );
-                            trace_openai_active_response_error(
-                                "raw_next_event",
-                                &message,
-                                self.provider_response_nudge_inflight,
-                                self.any_response_output_active(),
-                                self.awaiting_provider_response_after_commit,
-                                self.provider_response_acknowledged_without_progress,
-                                suppress,
-                            );
-                            suppress
-                        } =>
+                        if self
+                            .should_suppress_active_response_error("raw_next_event", &message) =>
                     {
                         self.note_provider_response_acknowledged();
                         continue;
@@ -2710,9 +2818,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
 
     async fn close(&mut self) -> Result<(), LlmError> {
         self.raw.take();
-        self.has_staged_input = false;
-        self.has_staged_audio = false;
-        self.pending_explicit_commit_text_items.clear();
+        self.turn_staging.clear();
         self.pending_events.clear();
         self.pending_mcp_calls.clear();
         self.pending_text_suppressions.clear();
@@ -2722,10 +2828,7 @@ impl RealtimeSession for OpenAiRealtimeSession {
         self.clear_response_output_active();
         self.response_interrupt_emitted = false;
         self.response_tool_call_observed = false;
-        self.awaiting_provider_response_after_commit = false;
-        self.provider_response_acknowledged_without_progress = false;
-        self.provider_response_nudge_attempts = 0;
-        self.provider_response_nudge_inflight = false;
+        self.response_nudge.reset();
         Ok(())
     }
 }
@@ -5830,6 +5933,103 @@ mod tests {
     }
 
     #[test]
+    fn user_turn_staging_authority_owns_explicit_commit_text_projection() {
+        let mut authority = OpenAiUserTurnStagingAuthority::default();
+        assert!(matches!(
+            authority.admit_explicit_commit(),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        authority.stage_explicit_commit_text_input("item_text".to_string(), "hello".to_string());
+        let commit_plan = authority
+            .admit_explicit_commit()
+            .expect("text input admits explicit commit");
+        assert!(
+            !commit_plan.commit_audio,
+            "text-only explicit commit must not flush the audio buffer"
+        );
+
+        let mut pending_events = VecDeque::new();
+        authority.project_explicit_commit_text_inputs(&mut pending_events);
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::TurnStarted)
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::InputTranscriptPartial { text }) if text == "hello"
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::InputTranscriptFinalForItem {
+                item_id,
+                previous_item_id: None,
+                content_index: 0,
+                text,
+            }) if item_id == "item_text" && text == "hello"
+        ));
+        assert!(matches!(
+            pending_events.pop_front(),
+            Some(RealtimeSessionEvent::TurnCommitted)
+        ));
+        assert!(pending_events.is_empty());
+
+        authority.clear_after_commit();
+        assert!(matches!(
+            authority.admit_explicit_commit(),
+            Err(LlmError::InvalidRequest { .. })
+        ));
+
+        authority.stage_audio_chunk();
+        let commit_plan = authority
+            .admit_explicit_commit()
+            .expect("audio input admits explicit commit");
+        assert!(
+            commit_plan.commit_audio,
+            "audio input requires an OpenAI audio-buffer commit"
+        );
+    }
+
+    #[test]
+    fn response_nudge_authority_owns_suppression_budget_and_timeout_terminalization() {
+        let mut authority = OpenAiResponseNudgeAuthority::default();
+        authority.set_config(Some(5), Some(2));
+
+        authority.begin_wait_after_commit(true);
+        assert!(authority.waiting_for_progress());
+        assert!(authority.should_suppress_active_response_error(
+            "Conversation already has an active response in progress",
+            false,
+        ));
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::SendNudge
+        );
+        assert_eq!(authority.note_nudge_sent(), 1);
+        assert!(authority.snapshot().nudge_inflight);
+
+        authority.note_provider_response_acknowledged();
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::WaitAgain { attempt: 2 }
+        );
+        assert_eq!(
+            authority.on_wait_timeout(),
+            OpenAiResponseNudgeTimeoutAction::Exhausted {
+                attempts: 2,
+                duration_ms: 10,
+            }
+        );
+
+        authority.note_provider_response_progressed();
+        assert!(!authority.waiting_for_progress());
+        assert!(!authority.should_suppress_active_response_error(
+            "Conversation already has an active response in progress",
+            false,
+        ));
+    }
+
+    #[test]
     fn response_created_keeps_provider_in_bounded_wait_state_until_real_progress() {
         let mut session = OpenAiRealtimeSession::new(
             Box::new(FakeOpenAiLiveSession {
@@ -5850,8 +6050,9 @@ mod tests {
             committed,
             Some(RealtimeSessionEvent::TurnCommitted)
         ));
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.awaiting_provider_response_after_commit,
+            snapshot.awaiting_after_commit,
             "provider-managed commit should wait for provider response start"
         );
 
@@ -5865,16 +6066,17 @@ mod tests {
             created.is_none(),
             "response.created is an internal lifecycle acknowledgement, not a public event"
         );
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            !session.awaiting_provider_response_after_commit,
+            !snapshot.awaiting_after_commit,
             "response.created proves a response exists, so the pre-ack wait window should close"
         );
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "response.created should keep the adapter waiting for real provider progress"
         );
         assert!(
-            session.provider_response_nudge_attempts == 0,
+            snapshot.nudge_attempts == 0,
             "response.created should preserve the existing recovery budget when no nudge has fired yet"
         );
     }
@@ -5888,9 +6090,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let mapped = session
             .map_server_event(ServerEvent::Error {
@@ -5910,19 +6112,20 @@ mod tests {
             "provider acknowledgement errors should stay internal to the adapter"
         );
         assert!(
-            !session.awaiting_provider_response_after_commit,
+            !session.response_nudge.snapshot().awaiting_after_commit,
             "the adapter should treat the provider error as proof that a response already exists"
         );
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "active-response acknowledgements should keep the adapter waiting for actual provider progress"
         );
         assert!(
-            session.provider_response_nudge_attempts == 1,
+            snapshot.nudge_attempts == 1,
             "the recovery budget should stay consumed until real provider progress arrives"
         );
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "once the provider acknowledges the active response, the outstanding nudge itself is no longer inflight"
         );
     }
@@ -5936,9 +6139,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -5976,9 +6179,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 0;
-        session.provider_response_nudge_inflight = false;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 0, false);
 
         let _ = session
             .map_server_event(ServerEvent::ResponseOutputTextDelta {
@@ -6016,9 +6219,9 @@ mod tests {
             }),
             RealtimeTurningMode::ProviderManaged,
         );
-        session.awaiting_provider_response_after_commit = true;
-        session.provider_response_nudge_attempts = 1;
-        session.provider_response_nudge_inflight = true;
+        session
+            .response_nudge
+            .force_state_for_test(true, false, 1, true);
 
         let first = session
             .map_server_event(ServerEvent::Error {
@@ -6054,12 +6257,13 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::InProgress),
             })
             .expect("response.created should map");
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            session.provider_response_acknowledged_without_progress,
+            snapshot.acknowledged_without_progress,
             "response.created should leave the adapter waiting for actual provider progress"
         );
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "response.created should close the outstanding nudge transport guard once the provider has acknowledged the response"
         );
 
@@ -6069,12 +6273,13 @@ mod tests {
                 response: fake_response("resp_123", ResponseStatus::Completed),
             })
             .expect("response.done should map");
+        let snapshot = session.response_nudge.snapshot();
         assert!(
-            !session.provider_response_nudge_inflight,
+            !snapshot.nudge_inflight,
             "the terminal provider boundary should close the nudge guard"
         );
         assert!(
-            !session.provider_response_acknowledged_without_progress,
+            !snapshot.acknowledged_without_progress,
             "terminal provider progress should clear the acknowledgement-only waiting state"
         );
     }
@@ -8944,6 +9149,39 @@ mod tests {
             }
             other => {
                 panic!("ResponseOutputAudioDelta must map to AssistantAudioChunk, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn mapping_routes_session_output_audio_delta_to_audio_chunk_without_item_identity() {
+        let mut session = empty_fake_session();
+        session.active_response_id = Some("resp_session_audio".to_string());
+        let mapped = session
+            .map_server_event(ServerEvent::SessionOutputAudioDelta {
+                event_id: Some("evt_session_audio".to_string()),
+                delta: "AAEC".to_string(),
+            })
+            .expect("session audio delta must map cleanly")
+            .expect("session audio delta must produce a realtime event");
+        let obs = translate_realtime_event(mapped);
+        match obs {
+            LiveAdapterObservation::AssistantAudioChunk {
+                sample_rate_hz,
+                channels,
+                response_id,
+                item_id,
+                content_index,
+                ..
+            } => {
+                assert_eq!(sample_rate_hz, OPENAI_REALTIME_AUDIO_SAMPLE_RATE_HZ);
+                assert_eq!(channels, u16::from(OPENAI_REALTIME_AUDIO_CHANNELS));
+                assert_eq!(response_id.as_deref(), Some("resp_session_audio"));
+                assert!(item_id.is_none());
+                assert!(content_index.is_none());
+            }
+            other => {
+                panic!("SessionOutputAudioDelta must map to AssistantAudioChunk, got {other:?}")
             }
         }
     }

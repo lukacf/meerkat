@@ -337,6 +337,10 @@ impl SessionAgent for FactoryAgent {
         Some(self.agent.cancel_after_boundary_handle())
     }
 
+    fn turn_state_handle(&self) -> Option<Arc<dyn meerkat_core::TurnStateHandle>> {
+        self.agent.turn_state_handle()
+    }
+
     fn session_context_handle(
         &self,
     ) -> Option<Arc<dyn meerkat_core::handles::SessionContextHandle>> {

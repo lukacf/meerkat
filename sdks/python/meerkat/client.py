@@ -2280,7 +2280,7 @@ class MeerkatClient:
         if status not in _APPEND_SYSTEM_CONTEXT_STATUSES:
             raise MeerkatError(
                 "INVALID_RESPONSE",
-                "Invalid mob/append_system_context response: invalid status",
+                "Invalid mob/append_system_context response: unknown status",
             )
         return {
             "mob_id": str(result.get("mob_id", mob_id)),

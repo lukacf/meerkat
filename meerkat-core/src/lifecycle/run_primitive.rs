@@ -1839,41 +1839,8 @@ fn append_content_blocks(
         CoreRenderable::Blocks { blocks } => {
             all_blocks.extend(blocks.iter().cloned());
         }
-        CoreRenderable::SystemNotice { kind, body, blocks } => {
-            append_system_notice_projection_blocks(kind, body.as_deref(), blocks, all_blocks);
-        }
+        CoreRenderable::SystemNotice { .. } => {}
         _ => {}
-    }
-}
-
-fn append_system_notice_projection_blocks(
-    kind: &SystemNoticeKind,
-    body: Option<&str>,
-    blocks: &[SystemNoticeBlock],
-    all_blocks: &mut Vec<crate::types::ContentBlock>,
-) {
-    let notice = crate::types::SystemNoticeMessage::with_blocks(
-        *kind,
-        body.map(ToOwned::to_owned),
-        blocks.to_vec(),
-    );
-    let projection = notice.model_projection_text();
-    if !projection.trim().is_empty() {
-        all_blocks.push(crate::types::ContentBlock::Text { text: projection });
-    }
-
-    for block in blocks {
-        let content = match block {
-            SystemNoticeBlock::Comms { content, .. }
-            | SystemNoticeBlock::ExternalEvent { content, .. } => content,
-            _ => continue,
-        };
-        all_blocks.extend(content.iter().filter_map(|block| match block {
-            crate::types::ContentBlock::Image { .. } | crate::types::ContentBlock::Video { .. } => {
-                Some(block.clone())
-            }
-            crate::types::ContentBlock::Text { .. } => None,
-        }));
     }
 }
 
@@ -2005,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn system_notice_append_projects_to_provider_prompt_text() {
+    fn system_notice_append_does_not_leak_projection_into_operator_prompt() {
         let append = ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
@@ -2032,15 +1999,14 @@ mod tests {
         let p = make_staged(vec![append.clone()]);
 
         assert_eq!(p.typed_turn_appends(), vec![append]);
-        let prompt = p.extract_content_input().text_content();
-        assert!(prompt.contains("Peer request: checksum_token"));
-        assert!(prompt.contains("Peer request from peer_id"));
-        assert!(prompt.contains("What is the token?"));
-        assert!(prompt.contains("send_response"));
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
+        );
     }
 
     #[test]
-    fn system_notice_append_preserves_media_prompt_blocks_with_text_projection() {
+    fn system_notice_media_remains_typed_notice_not_operator_prompt() {
         let image = crate::types::ContentBlock::Image {
             media_type: "image/png".to_string(),
             data: crate::types::ImageData::Inline {
@@ -2062,18 +2028,15 @@ mod tests {
                         crate::types::ContentBlock::Text {
                             text: "Do not inject this text".to_string(),
                         },
-                        image.clone(),
+                        image,
                     ],
                 }],
             },
         }]);
 
-        let result = p.extract_content_input();
-        assert!(
-            matches!(&result, crate::types::ContentInput::Blocks(blocks)
-                if matches!(blocks.as_slice(), [crate::types::ContentBlock::Text { text }, got_image]
-                    if text.contains("External event via webhook") && got_image == &image)),
-            "expected projected text plus media prompt blocks, got {result:?}"
+        assert_eq!(
+            p.extract_content_input(),
+            crate::types::ContentInput::Text(String::new())
         );
     }
 
@@ -2091,7 +2054,7 @@ mod tests {
         assert!(p.typed_turn_appends().is_empty());
         assert_eq!(
             p.extract_content_input(),
-            crate::types::ContentInput::Text("context".to_string())
+            crate::types::ContentInput::Text(String::new())
         );
     }
 

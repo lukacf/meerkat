@@ -1259,9 +1259,9 @@ mod tests {
     }
 
     #[test]
-    fn test_skill_name_slug_validation() {
+    fn test_skill_name_slug_validation() -> Result<(), SkillError> {
         assert!(SkillName::parse("email-extractor").is_ok());
-        let nested = SkillName::parse("collection/email-extractor").unwrap();
+        let nested = SkillName::parse("collection/email-extractor")?;
         assert_eq!(nested.leaf_slug(), "email-extractor");
         assert!(SkillName::parse("EmailExtractor").is_err());
         assert!(SkillName::parse("email_extractor").is_err());
@@ -1272,6 +1272,7 @@ mod tests {
         assert!(SkillName::parse("trailing/").is_err());
         assert!(SkillName::parse("empty//segment").is_err());
         assert!(SkillName::parse("").is_err());
+        Ok(())
     }
 
     #[test]

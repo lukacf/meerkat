@@ -280,15 +280,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn invalid_remote_skill_name_quarantine_has_no_fabricated_key() {
-        let source_uuid = SourceUuid::parse("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb").unwrap();
+    fn invalid_remote_skill_name_quarantine_has_no_fabricated_key() -> Result<(), SkillError> {
+        let source_uuid = SourceUuid::parse("fe52aa61-1111-4a22-9999-bbbbbbbbbbbb")?;
         let parsed = parse_remote_catalog(
             r#"[{"name":"Bad Skill","description":"bad"}]"#,
             &source_uuid,
             SkillScope::Project,
             "memory://remote",
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(parsed.quarantined.len(), 1);
         assert_eq!(parsed.quarantined[0].key, None);
@@ -302,5 +301,6 @@ mod tests {
                 .identity_hint
                 .contains("invalid-skill")
         );
+        Ok(())
     }
 }

@@ -11,7 +11,6 @@
 //!
 //! Note: Uses `build_ephemeral_service` (in-memory substrate) for simplicity.
 //! Production pipelines use the runtime-backed path.
-//! - Task board for tracking stage results
 //!
 //! ## Run
 //! ```bash
@@ -41,7 +40,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.worker]
 model = "claude-sonnet-4-6"
@@ -53,7 +51,6 @@ external_addressable = false
 builtins = true
 shell = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true
@@ -120,8 +117,6 @@ fn event_label(kind: &MobEventKind) -> &'static str {
         MobEventKind::MobReset => "MobReset",
         MobEventKind::MemberSpawned(..) => "MemberSpawned",
         MobEventKind::MemberRetired { .. } => "MemberRetired",
-        MobEventKind::TaskCreated { .. } => "TaskCreated",
-        MobEventKind::TaskUpdated { .. } => "TaskUpdated",
         MobEventKind::FlowStarted { .. } => "FlowStarted",
         MobEventKind::FlowCompleted { .. } => "FlowCompleted",
         MobEventKind::FlowFailed { .. } => "FlowFailed",
@@ -159,7 +154,6 @@ external_addressable = true
 builtins = true
 comms = true
 mob = true
-mob_tasks = true
 
 [profiles.linter]
 model = "claude-sonnet-4-6"
@@ -169,7 +163,6 @@ peer_description = "Stage 1: Code linting and style checks"
 [profiles.linter.tools]
 builtins = true
 comms = true
-mob_tasks = true
 
 [profiles.tester]
 model = "claude-sonnet-4-6"
@@ -179,7 +172,6 @@ peer_description = "Stage 2: Test execution and coverage analysis"
 [profiles.tester.tools]
 builtins = true
 comms = true
-mob_tasks = true
 
 [profiles.deployer]
 model = "claude-sonnet-4-6"
@@ -189,7 +181,6 @@ peer_description = "Stage 3: Deployment and smoke testing"
 [profiles.deployer.tools]
 builtins = true
 comms = true
-mob_tasks = true
 
 [wiring]
 auto_wire_orchestrator = true

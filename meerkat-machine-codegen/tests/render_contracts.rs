@@ -10,6 +10,7 @@ use meerkat_machine_schema::catalog::dsl::{
     dsl_auth_machine as auth_machine, dsl_meerkat_machine as meerkat_machine,
     dsl_mob_machine as mob_machine, dsl_occurrence_lifecycle_machine as occurrence_lifecycle,
     dsl_schedule_lifecycle_machine as schedule_lifecycle,
+    dsl_workgraph_lifecycle_machine as workgraph_lifecycle,
 };
 use meerkat_machine_schema::catalog::{
     canonical_composition_coverage_manifests, canonical_machine_coverage_manifests,
@@ -584,12 +585,23 @@ fn generated_catalog_lifecycle_domains_use_string_enum_bindings() {
                     ],
                 ),
                 ("MobMemberState", vec!["Active", "Retiring"]),
-                (
-                    "TaskStatus",
-                    vec!["Pending", "InProgress", "Completed", "Cancelled"],
-                ),
                 ("WorkOrigin", vec!["External", "Internal", "Ingest"]),
             ],
+        ),
+        (
+            render_machine_kernel_module(&workgraph_lifecycle()),
+            vec![(
+                "WorkLifecycleState",
+                vec![
+                    "Absent",
+                    "Open",
+                    "InProgress",
+                    "Blocked",
+                    "Completed",
+                    "Cancelled",
+                    "Failed",
+                ],
+            )],
         ),
         (
             render_machine_kernel_module(&schedule_lifecycle()),

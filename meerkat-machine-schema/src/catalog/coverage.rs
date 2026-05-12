@@ -7,7 +7,7 @@ use super::{
     },
     dsl::{
         dsl_auth_machine, dsl_meerkat_machine, dsl_mob_machine, dsl_occurrence_lifecycle_machine,
-        dsl_schedule_lifecycle_machine,
+        dsl_schedule_lifecycle_machine, dsl_workgraph_lifecycle_machine,
     },
 };
 
@@ -138,7 +138,7 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 anchor(
                     "mob_actor_authority",
                     "meerkat-mob/src/runtime/actor.rs",
-                    "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, task, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding",
+                    "MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding",
                 ),
             ],
             &[
@@ -155,12 +155,12 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                     "wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices",
                 ),
                 scenario(
-                    "task-flow-and-run-lifecycle",
-                    "task create or update pending/in progress/completed/cancelled, run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work",
+                    "flow-and-run-lifecycle",
+                    "run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work",
                 ),
                 scenario(
                     "event-subscriptions-and-notices",
-                    "subscribe agent, all agent, and mob events; emit member, run, flow, progress, task, terminal, and wiring notices",
+                    "subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices",
                 ),
                 scenario(
                     "orchestrator-coordinator-cleanup",
@@ -246,6 +246,32 @@ pub fn canonical_machine_coverage_manifests() -> Vec<MachineCoverageManifest> {
                 scenario(
                     "oauth_device_flow_lifecycle",
                     "OAuth device flow admit, verify, begin poll, finish poll, consume, and expire operations stay under the per-binding AuthMachine lifecycle authority",
+                ),
+            ],
+        ),
+        machine_manifest_from_schema(
+            &dsl_workgraph_lifecycle_machine(),
+            &[anchor(
+                "workgraph_lifecycle",
+                "meerkat-workgraph/src/machine.rs",
+                "WorkGraphMachine domain-facing lifecycle transition seam over CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, ClaimOpen, ClaimExpiredInProgress, ReleaseInProgress, BlockOpen, BlockInProgress, BlockBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, ValidateLink, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed; effects Created, Updated, Claimed, Released, Blocked, LinkValidated, Closed, EvidenceAdded; invariants absent_has_zero_revision, live_has_positive_revision, terminal_has_terminal_time, claim_only_in_progress, blocked_has_no_claim, terminal_has_no_claim; revision, leases, due eligibility, unresolved blockers, and topology legality",
+            )],
+            &[
+                scenario(
+                    "workgraph_create_update_ready_claim",
+                    "CreateOpen, CreateBlocked, UpdateOpen, UpdateInProgress, UpdateBlocked, RefreshEligibilityOpen, RefreshEligibilityInProgress, RefreshEligibilityBlocked, Created, Updated, ClaimOpen, ClaimExpiredInProgress, Claimed, due eligibility, and CAS revision",
+                ),
+                scenario(
+                    "workgraph_claim_release_recovery",
+                    "only one active claim exists, ReleaseInProgress, Released, expired leases become recoverable through machine-approved claim, claim_only_in_progress, blocked_has_no_claim, and terminal_has_no_claim",
+                ),
+                scenario(
+                    "workgraph_block_close_evidence",
+                    "BlockOpen, BlockInProgress, BlockBlocked, Blocked, CloseOpenCompleted, CloseInProgressCompleted, CloseBlockedCompleted, CloseOpenCancelled, CloseInProgressCancelled, CloseBlockedCancelled, CloseOpenFailed, CloseInProgressFailed, CloseBlockedFailed, Closed, AddEvidenceOpen, AddEvidenceInProgress, AddEvidenceBlocked, AddEvidenceCompleted, AddEvidenceCancelled, AddEvidenceFailed, EvidenceAdded, absent_has_zero_revision, live_has_positive_revision, and terminal_has_terminal_time",
+                ),
+                scenario(
+                    "workgraph_topology_legality",
+                    "ValidateLink and LinkValidated reject missing endpoints, self edges, duplicate edges, and dependency cycles without adding a separate topology machine",
                 ),
             ],
         ),

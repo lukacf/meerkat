@@ -378,7 +378,6 @@ class WireMobToolConfig:
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
     mob: Optional[bool] = None
-    mob_tasks: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
 
@@ -988,7 +987,6 @@ class MobToolConfigInput:
     mcp: Optional[list[str]] = None
     memory: Optional[bool] = None
     mob: Optional[bool] = None
-    mob_tasks: Optional[bool] = None
     schedule: Optional[bool] = None
     shell: Optional[bool] = None
 

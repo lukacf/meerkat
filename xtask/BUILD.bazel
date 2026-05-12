@@ -455,6 +455,7 @@ rust_test(
         "//meerkat-store:package_runfiles",
         "//meerkat-tools:package_runfiles",
         "//meerkat-web-runtime:package_runfiles",
+        "//meerkat-workgraph:package_runfiles",
         "//meerkat:package_runfiles",
         "//test-fixtures/machine-dsl-tests:package_runfiles",
         "//test-fixtures/mcp-test-server:package_runfiles",

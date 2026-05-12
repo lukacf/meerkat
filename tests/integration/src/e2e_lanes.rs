@@ -200,6 +200,7 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s82_typescript_sdk_blob_image_roundtrip, 82);
             scenario(e2e_smoke_s83_comms_multimodal_mcp_roundtrip, 83);
             scenario(e2e_smoke_s84_mob_generated_image_comms_roundtrip, 84);
+            scenario(e2e_smoke_s85_workgraph_homecore_agent_spine, 85);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
@@ -3948,6 +3949,48 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        85 => Some(&Spec {
+            id: Some(85),
+            lane: Lane::Smoke,
+            title: "WorkGraph Homecore agent spine",
+            timeout_secs: 900,
+            required_env: &[&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"]],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[
+                (
+                    "RKAT_TEST_BIN_RKAT",
+                    "{cargo_target_dir}/e2e-bins/scenario-85/rkat",
+                ),
+                (
+                    "RKAT_TEST_BIN_RKAT_RPC",
+                    "{cargo_target_dir}/e2e-bins/scenario-85/rkat-rpc",
+                ),
+            ],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+                &["mkdir", "-p", "{cargo_target_dir}/e2e-bins/scenario-85"],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat",
+                    "{cargo_target_dir}/e2e-bins/scenario-85/rkat",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat-rpc",
+                    "{cargo_target_dir}/e2e-bins/scenario-85/rkat-rpc",
+                ],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "smoke_shared_realm",
+                test_name: "e2e_scenario_85_workgraph_homecore_agent_spine",
+                features: &[],
+                all_features: false,
+            },
+        }),
         _ => None,
     }
 }
@@ -4376,6 +4419,62 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 package: "meerkat-integration-tests",
                 test_target: "system_shared_realm",
                 test_name: "cli_rest_cli_default_sqlite_shared_realm_roundtrip",
+                features: &[],
+                all_features: false,
+            },
+        }),
+        "workgraph-shared-realm-observability" => Some(&Spec {
+            id: None,
+            lane: Lane::System,
+            title: "WorkGraph shared-realm observability across CLI/RPC/REST",
+            timeout_secs: 600,
+            required_env: &[],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[
+                (
+                    "RKAT_TEST_BIN_RKAT",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat",
+                ),
+                (
+                    "RKAT_TEST_BIN_RKAT_RPC",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat-rpc",
+                ),
+                (
+                    "RKAT_TEST_BIN_RKAT_REST",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat-rest",
+                ),
+            ],
+            cargo_bin_env: &[],
+            pre_commands: &[
+                &["cargo", "build", "-p", "rkat", "--bin", "rkat"],
+                &["cargo", "build", "-p", "meerkat-rpc", "--bin", "rkat-rpc"],
+                &["cargo", "build", "-p", "meerkat-rest", "--bin", "rkat-rest"],
+                &[
+                    "mkdir",
+                    "-p",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat-rpc",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat-rpc",
+                ],
+                &[
+                    "cp",
+                    "{cargo_target_dir}/debug/rkat-rest",
+                    "{cargo_target_dir}/e2e-bins/system-workgraph-observability/rkat-rest",
+                ],
+            ],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-integration-tests",
+                test_target: "system_shared_realm",
+                test_name: "workgraph_sqlite_shared_realm_observability_roundtrip",
                 features: &[],
                 all_features: false,
             },

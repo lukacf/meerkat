@@ -222,7 +222,6 @@ pub(super) fn compose_external_tools_for_profile(
         dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
             profile.tools.mob,
-            profile.tools.mob_tasks,
             authority_context,
         )));
     }
@@ -304,7 +303,6 @@ impl MobOperatorToolDispatcher {
     fn new(
         handle: MobHandle,
         enable_mob: bool,
-        enable_mob_tasks: bool,
         authority_context: MobToolAuthorityContext,
     ) -> Self {
         let mut defs: Vec<Arc<ToolDef>> = Vec::new();
@@ -483,59 +481,6 @@ impl MobOperatorToolDispatcher {
                 ToolSourceKind::Mob,
             ));
         }
-        if enable_mob_tasks {
-            defs.push(tool_def(
-                TOOL_MOB_TASK_CREATE,
-                "Create a shared mob task. Response includes generated task_id.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string"},
-                        "description": {"type": "string"},
-                        "blocked_by": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["subject", "description"]
-                }),
-                ToolSourceKind::MobTasks,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_TASK_LIST,
-                "List shared mob tasks",
-                json!({
-                    "type": "object",
-                    "properties": {}
-                }),
-                ToolSourceKind::MobTasks,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_TASK_UPDATE,
-                "Update task status and owner. If owner is set, status must be in_progress and blocked_by dependencies must be completed.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "task_id": {"type": "string"},
-                        "status": {
-                            "type": "string",
-                            "enum": ["open", "in_progress", "completed", "cancelled"]
-                        },
-                        "owner": {"type": "string", "description": "Optional. Only valid when status is in_progress."}
-                    },
-                    "required": ["task_id", "status"]
-                }),
-                ToolSourceKind::MobTasks,
-            ));
-            defs.push(tool_def(
-                TOOL_MOB_TASK_GET,
-                "Get a shared task by ID",
-                json!({
-                    "type": "object",
-                    "properties": {"task_id": {"type": "string"}},
-                    "required": ["task_id"]
-                }),
-                ToolSourceKind::MobTasks,
-            ));
-        }
-
         Self {
             handle,
             authority_context,
@@ -758,26 +703,6 @@ struct RetireMemberArgs {
 struct WireMembersArgs {
     member_id: String,
     peer_member_id: String,
-}
-
-#[derive(Deserialize)]
-struct TaskCreateArgs {
-    subject: String,
-    description: String,
-    #[serde(default)]
-    blocked_by: Vec<TaskId>,
-}
-
-#[derive(Deserialize)]
-struct TaskUpdateArgs {
-    task_id: TaskId,
-    status: TaskStatus,
-    owner: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct TaskGetArgs {
-    task_id: TaskId,
 }
 
 #[derive(Deserialize)]
@@ -1073,52 +998,6 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 self.record_successful_operator_action(call.name).await;
                 Self::encode_result(call, json!({"ok": true}))
             }
-            TOOL_MOB_TASK_CREATE => {
-                let args: TaskCreateArgs = call
-                    .parse_args()
-                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let task_id = self
-                    .handle
-                    .task_create(args.subject, args.description, args.blocked_by)
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                self.record_successful_operator_action(call.name).await;
-                Self::encode_result(call, json!({"ok": true, "task_id": task_id}))
-            }
-            TOOL_MOB_TASK_LIST => {
-                let tasks = self
-                    .handle
-                    .task_list()
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(call, json!({ "tasks": tasks }))
-            }
-            TOOL_MOB_TASK_UPDATE => {
-                let args: TaskUpdateArgs = call
-                    .parse_args()
-                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                self.handle
-                    .task_update(
-                        args.task_id,
-                        args.status,
-                        args.owner.map(AgentIdentity::from),
-                    )
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                self.record_successful_operator_action(call.name).await;
-                Self::encode_result(call, json!({"ok": true}))
-            }
-            TOOL_MOB_TASK_GET => {
-                let args: TaskGetArgs = call
-                    .parse_args()
-                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
-                let task = self
-                    .handle
-                    .task_get(&args.task_id)
-                    .await
-                    .map_err(|error| Self::map_mob_error(call, error))?;
-                Self::encode_result(call, json!({ "task": task }))
-            }
             TOOL_FORCE_CANCEL_MEMBER => {
                 let args: ForceCancelArgs = call
                     .parse_args()
@@ -1182,7 +1061,3 @@ const TOOL_MOB_LIST_FLOWS: &str = "mob_list_flows";
 const TOOL_MOB_RUN_FLOW: &str = "mob_run_flow";
 const TOOL_MOB_FLOW_STATUS: &str = "mob_flow_status";
 const TOOL_MOB_CANCEL_FLOW: &str = "mob_cancel_flow";
-const TOOL_MOB_TASK_CREATE: &str = "mob_task_create";
-const TOOL_MOB_TASK_LIST: &str = "mob_task_list";
-const TOOL_MOB_TASK_UPDATE: &str = "mob_task_update";
-const TOOL_MOB_TASK_GET: &str = "mob_task_get";

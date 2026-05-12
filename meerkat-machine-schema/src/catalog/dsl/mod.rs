@@ -37,6 +37,7 @@ pub mod meerkat_machine;
 pub mod mob_machine;
 pub mod occurrence_lifecycle;
 pub mod schedule_lifecycle;
+pub mod workgraph_lifecycle;
 
 use crate::identity::InputVariantId;
 use crate::{
@@ -74,6 +75,8 @@ pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const SCHEDULE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::schedule_lifecycle";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-schedule";
 pub const OCCURRENCE_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::occurrence_lifecycle";
+pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE: &str = "meerkat-workgraph";
+pub const WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE: &str = "machines::workgraph_lifecycle";
 
 fn with_production_rust_binding(
     mut schema: MachineSchema,
@@ -519,8 +522,8 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                     "Comms",
                     "Memory",
                     "Schedule",
+                    "WorkGraph",
                     "Mob",
-                    "MobTasks",
                     "Callback",
                     "Mcp",
                     "RustBundle",
@@ -920,7 +923,6 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
                 "MobPhase",
                 &["Running", "Stopped", "Completed", "Destroyed"],
             ),
-            NamedTypeBinding::string("MobTask"),
             NamedTypeBinding::string_enum(
                 "NodeRunStatus",
                 &[
@@ -940,11 +942,6 @@ pub fn mob_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "StepRunStatus",
                 &["Dispatched", "Completed", "Failed", "Skipped", "Canceled"],
-            ),
-            NamedTypeBinding::string("TaskId"),
-            NamedTypeBinding::string_enum(
-                "TaskStatus",
-                &["Pending", "InProgress", "Completed", "Cancelled"],
             ),
             NamedTypeBinding::string("WiringEdge"),
             NamedTypeBinding::string_enum("WiringLifecycleKind", &["Wired", "Unwired"]),
@@ -1064,6 +1061,44 @@ pub fn occurrence_lifecycle_schema_metadata() -> MachineSchemaMetadata {
                 ],
             ),
             NamedTypeBinding::string("ScheduleId"),
+        ],
+        vec![],
+    )
+}
+
+pub fn dsl_workgraph_lifecycle_machine() -> MachineSchema {
+    workgraph_lifecycle_schema_metadata()
+        .attach_to(workgraph_lifecycle::WorkGraphLifecycleMachineState::schema())
+}
+
+pub fn dsl_work_graph_lifecycle_machine() -> MachineSchema {
+    dsl_workgraph_lifecycle_machine()
+}
+
+pub fn dsl_workgraph_lifecycle_machine_production_schema() -> MachineSchema {
+    with_production_rust_binding(
+        dsl_workgraph_lifecycle_machine(),
+        WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_CRATE,
+        WORKGRAPH_LIFECYCLE_PRODUCTION_RUST_MODULE,
+    )
+}
+
+pub fn workgraph_lifecycle_schema_metadata() -> MachineSchemaMetadata {
+    machine_schema_metadata(
+        vec![
+            NamedTypeBinding::string_enum(
+                "WorkLifecycleState",
+                &[
+                    "Absent",
+                    "Open",
+                    "InProgress",
+                    "Blocked",
+                    "Completed",
+                    "Cancelled",
+                    "Failed",
+                ],
+            ),
+            NamedTypeBinding::string("WorkOwnerKey"),
         ],
         vec![],
     )

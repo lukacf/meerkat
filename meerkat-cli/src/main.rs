@@ -536,6 +536,7 @@ fn normalize_cli_args(
         "blob",
         "realm",
         "realms",
+        "workgraph",
         "mcp",
         "skill",
         "skills",
@@ -1058,6 +1059,13 @@ enum Commands {
         command: RealmCommands,
     },
 
+    /// WorkGraph observability and operator lookup
+    #[command(name = "workgraph")]
+    WorkGraph {
+        #[command(subcommand)]
+        command: WorkGraphCommands,
+    },
+
     #[cfg(feature = "mcp")]
     #[command(
         after_help = "Examples:\n  rkat mcp add filesystem -- npx -y @modelcontextprotocol/server-filesystem .\n  rkat mcp add linear --transport http --url https://mcp.example.com\n  rkat mcp list\n  rkat mcp get filesystem --scope project"
@@ -1374,6 +1382,99 @@ enum RealmCommands {
         /// Ignore active lease and legacy safety checks.
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkGraphStatusArg {
+    Open,
+    InProgress,
+    Blocked,
+    Completed,
+    Cancelled,
+    Failed,
+}
+
+impl From<WorkGraphStatusArg> for meerkat::WorkStatus {
+    fn from(value: WorkGraphStatusArg) -> Self {
+        match value {
+            WorkGraphStatusArg::Open => Self::Open,
+            WorkGraphStatusArg::InProgress => Self::InProgress,
+            WorkGraphStatusArg::Blocked => Self::Blocked,
+            WorkGraphStatusArg::Completed => Self::Completed,
+            WorkGraphStatusArg::Cancelled => Self::Cancelled,
+            WorkGraphStatusArg::Failed => Self::Failed,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum WorkGraphCommands {
+    /// List WorkGraph items
+    List {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        all_namespaces: bool,
+        #[arg(long = "status", value_enum)]
+        statuses: Vec<WorkGraphStatusArg>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long)]
+        include_terminal: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show one WorkGraph item
+    Show {
+        id: String,
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List ready WorkGraph items
+    Ready {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a graph snapshot
+    Snapshot {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        all_namespaces: bool,
+        #[arg(long = "status", value_enum)]
+        statuses: Vec<WorkGraphStatusArg>,
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        #[arg(long)]
+        include_terminal: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List WorkGraph events
+    Events {
+        #[arg(long)]
+        namespace: Option<String>,
+        #[arg(long)]
+        all_namespaces: bool,
+        #[arg(long)]
+        after_seq: Option<i64>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1878,6 +1979,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         },
         Commands::Blob { command } => handle_blob_command(command, &cli_scope).await,
         Commands::Realms { command } => handle_realm_command(command, &cli_scope).await,
+        Commands::WorkGraph { command } => handle_workgraph_command(command, &cli_scope).await,
         #[cfg(feature = "mcp")]
         Commands::Mcp { command } => handle_mcp_command(command).await,
         #[cfg(feature = "skills")]
@@ -4998,6 +5100,306 @@ async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> a
     }
 }
 
+async fn handle_workgraph_command(
+    command: WorkGraphCommands,
+    scope: &RuntimeScope,
+) -> anyhow::Result<()> {
+    let service = open_workgraph_service(scope).await?;
+    match command {
+        WorkGraphCommands::List {
+            namespace,
+            all_namespaces,
+            statuses,
+            labels,
+            include_terminal,
+            limit,
+            json,
+        } => {
+            let items = service
+                .list(meerkat::WorkItemFilter {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    all_namespaces,
+                    statuses: statuses.into_iter().map(Into::into).collect(),
+                    labels,
+                    include_terminal,
+                    limit,
+                })
+                .await?;
+            print_workgraph_items(items, json)
+        }
+        WorkGraphCommands::Show {
+            id,
+            namespace,
+            json,
+        } => {
+            let item = service
+                .get(
+                    None,
+                    parse_work_namespace(namespace)?,
+                    meerkat::WorkItemId::new(id)?,
+                )
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&item)?);
+            } else {
+                print_workgraph_item(&item);
+            }
+            Ok(())
+        }
+        WorkGraphCommands::Ready {
+            namespace,
+            labels,
+            limit,
+            json,
+        } => {
+            let items = service
+                .ready(meerkat::ReadyWorkFilter {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    labels,
+                    limit,
+                })
+                .await?;
+            print_workgraph_items(items, json)
+        }
+        WorkGraphCommands::Snapshot {
+            namespace,
+            all_namespaces,
+            statuses,
+            labels,
+            include_terminal,
+            limit,
+            json,
+        } => {
+            let snapshot = service
+                .snapshot(meerkat::WorkGraphSnapshotFilter {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    all_namespaces,
+                    statuses: statuses.into_iter().map(Into::into).collect(),
+                    labels,
+                    include_terminal,
+                    limit,
+                })
+                .await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&snapshot)?);
+            } else {
+                println!("Realm: {}", snapshot.realm_id);
+                if let Some(namespace) = &snapshot.namespace {
+                    println!("Namespace: {namespace}");
+                } else {
+                    println!("Namespace: all");
+                }
+                println!("Captured: {}", snapshot.captured_at);
+                println!(
+                    "Event high-water: {}",
+                    snapshot
+                        .event_high_water_mark
+                        .map(|seq| seq.to_string())
+                        .unwrap_or_else(|| "-".to_string())
+                );
+                println!("Items: {}", snapshot.items.len());
+                println!("Edges: {}", snapshot.edges.len());
+                println!("Ready: {}", snapshot.ready_item_ids.len());
+                if !snapshot.ready_item_ids.is_empty() {
+                    println!(
+                        "Ready IDs: {}",
+                        snapshot
+                            .ready_item_ids
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            Ok(())
+        }
+        WorkGraphCommands::Events {
+            namespace,
+            all_namespaces,
+            after_seq,
+            limit,
+            json,
+        } => {
+            let events = service
+                .events(meerkat::WorkGraphEventFilter {
+                    realm_id: None,
+                    namespace: parse_work_namespace(namespace)?,
+                    all_namespaces,
+                    after_seq,
+                    limit,
+                })
+                .await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "events": events }))?
+                );
+            } else {
+                print_workgraph_events(&events);
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn open_workgraph_service(scope: &RuntimeScope) -> anyhow::Result<meerkat::WorkGraphService> {
+    let (_manifest, persistence) = create_persistence_bundle(scope).await?;
+    Ok(meerkat::WorkGraphService::with_scope(
+        persistence.workgraph_store(),
+        scope.locator.realm.to_string(),
+        meerkat::WorkNamespace::default(),
+    ))
+}
+
+fn parse_work_namespace(
+    namespace: Option<String>,
+) -> anyhow::Result<Option<meerkat::WorkNamespace>> {
+    namespace
+        .map(meerkat::WorkNamespace::new)
+        .transpose()
+        .map_err(Into::into)
+}
+
+fn print_workgraph_items(items: Vec<meerkat::WorkItem>, json: bool) -> anyhow::Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({ "items": items }))?
+        );
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("No WorkGraph items found.");
+        return Ok(());
+    }
+    println!(
+        "{:<42} {:<12} {:<8} {:<18} TITLE",
+        "ID", "STATUS", "PRIORITY", "UPDATED"
+    );
+    println!("{}", "-".repeat(110));
+    for item in items {
+        println!(
+            "{:<42} {:<12} {:<8} {:<18} {}",
+            item.id,
+            work_status_label(item.status),
+            work_priority_label(item.priority),
+            item.updated_at.format("%Y-%m-%d %H:%M"),
+            item.title
+        );
+    }
+    Ok(())
+}
+
+fn print_workgraph_item(item: &meerkat::WorkItem) {
+    println!("id: {}", item.id);
+    println!("realm_id: {}", item.realm_id);
+    println!("namespace: {}", item.namespace);
+    println!("title: {}", item.title);
+    if let Some(description) = &item.description {
+        println!("description: {description}");
+    }
+    println!("status: {}", work_status_label(item.status));
+    println!("priority: {}", work_priority_label(item.priority));
+    println!("revision: {}", item.revision);
+    println!("created_at: {}", item.created_at);
+    println!("updated_at: {}", item.updated_at);
+    if let Some(due_at) = item.due_at {
+        println!("due_at: {due_at}");
+    }
+    if let Some(not_before) = item.not_before {
+        println!("not_before: {not_before}");
+    }
+    if let Some(snoozed_until) = item.snoozed_until {
+        println!("snoozed_until: {snoozed_until}");
+    }
+    if let Some(terminal_at) = item.terminal_at {
+        println!("terminal_at: {terminal_at}");
+    }
+    if !item.labels.is_empty() {
+        println!(
+            "labels: {}",
+            item.labels.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    if let Some(claim) = &item.claim {
+        println!("claimed_at: {}", claim.claimed_at);
+        if let Some(lease_expires_at) = claim.lease_expires_at {
+            println!("lease_expires_at: {lease_expires_at}");
+        }
+    }
+    if !item.external_refs.is_empty() {
+        println!("external_refs: {}", item.external_refs.len());
+    }
+    if !item.evidence_refs.is_empty() {
+        println!("evidence_refs: {}", item.evidence_refs.len());
+    }
+}
+
+fn print_workgraph_events(events: &[meerkat::WorkGraphEvent]) {
+    if events.is_empty() {
+        println!("No WorkGraph events found.");
+        return;
+    }
+    println!(
+        "{:<8} {:<16} {:<28} {:<18} ITEM",
+        "SEQ", "KIND", "NAMESPACE", "AT"
+    );
+    println!("{}", "-".repeat(110));
+    for event in events {
+        println!(
+            "{:<8} {:<16} {:<28} {:<18} {}",
+            event
+                .seq
+                .map(|seq| seq.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            work_event_kind_label(event.kind),
+            event.namespace,
+            event.at.format("%Y-%m-%d %H:%M"),
+            event
+                .item_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+}
+
+fn work_status_label(status: meerkat::WorkStatus) -> &'static str {
+    match status {
+        meerkat::WorkStatus::Open => "open",
+        meerkat::WorkStatus::InProgress => "in_progress",
+        meerkat::WorkStatus::Blocked => "blocked",
+        meerkat::WorkStatus::Completed => "completed",
+        meerkat::WorkStatus::Cancelled => "cancelled",
+        meerkat::WorkStatus::Failed => "failed",
+    }
+}
+
+fn work_priority_label(priority: meerkat::WorkPriority) -> &'static str {
+    match priority {
+        meerkat::WorkPriority::Low => "low",
+        meerkat::WorkPriority::Medium => "medium",
+        meerkat::WorkPriority::High => "high",
+    }
+}
+
+fn work_event_kind_label(kind: meerkat::WorkGraphEventKind) -> &'static str {
+    match kind {
+        meerkat::WorkGraphEventKind::Created => "created",
+        meerkat::WorkGraphEventKind::Updated => "updated",
+        meerkat::WorkGraphEventKind::Claimed => "claimed",
+        meerkat::WorkGraphEventKind::Released => "released",
+        meerkat::WorkGraphEventKind::Blocked => "blocked",
+        meerkat::WorkGraphEventKind::Closed => "closed",
+        meerkat::WorkGraphEventKind::Linked => "linked",
+        meerkat::WorkGraphEventKind::EvidenceAdded => "evidence_added",
+    }
+}
+
 async fn delete_realm(
     state_root: &std::path::Path,
     realm_id: &str,
@@ -6375,6 +6777,7 @@ async fn run_agent(
             .project_root(project_root)
             .builtins(enable_builtins)
             .shell(enable_shell)
+            .workgraph(config.tools.workgraph_enabled)
             .schedule(true);
         if let Some(context_root) = scope.context_root.clone() {
             factory = factory.context_root(context_root);
@@ -6494,10 +6897,14 @@ async fn run_agent(
             override_shell: meerkat_core::ToolCategoryOverride::from_effective(enable_shell),
             override_memory: meerkat_core::ToolCategoryOverride::from_effective(enable_memory),
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
+            override_workgraph: meerkat_core::ToolCategoryOverride::from_effective(
+                config.tools.workgraph_enabled,
+            ),
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
             override_web_search: meerkat_core::ToolCategoryOverride::Inherit,
             schedule_tools: None,
+            workgraph_tools: None,
             mob_tool_authority_context: None,
             preload_skills,
             realm_id: Some(scope.locator.realm.as_str().to_owned()),
@@ -7055,6 +7462,7 @@ async fn resume_session_with_llm_override(
             .project_root(project_root)
             .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
             .shell(tooling.shell.resolve(config.tools.shell_enabled))
+            .workgraph(config.tools.workgraph_enabled)
             .schedule(true);
         if let Some(context_root) = scope.context_root.clone() {
             factory = factory.context_root(context_root);
@@ -7466,6 +7874,7 @@ async fn get_or_create_cli_persistent_surface_from_bundle(
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
+        .workgraph(config.tools.workgraph_enabled)
         .schedule(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -10478,6 +10887,7 @@ where
         .project_root(project_root)
         .builtins(config.tools.builtins_enabled)
         .shell(config.tools.shell_enabled)
+        .workgraph(config.tools.workgraph_enabled)
         .memory(true);
     if let Some(context_root) = scope.context_root.clone() {
         factory = factory.context_root(context_root);
@@ -12903,6 +13313,32 @@ default_model = "gemma"
                 || err.to_string().contains("Found argument '--full'"),
             "unexpected parse error for --full: {err}"
         );
+    }
+
+    #[test]
+    fn test_workgraph_cli_surface_is_not_defaulted_to_run() {
+        let normalized = normalize_cli_args([
+            "rkat".into(),
+            "workgraph".into(),
+            "snapshot".into(),
+            "--json".into(),
+        ]);
+        assert_eq!(
+            normalized,
+            vec!["rkat", "workgraph", "snapshot", "--json"]
+                .into_iter()
+                .map(std::ffi::OsString::from)
+                .collect::<Vec<_>>()
+        );
+
+        let cli = Cli::try_parse_from(["rkat", "workgraph", "snapshot", "--json"])
+            .expect("workgraph snapshot should parse");
+        match cli.command {
+            Commands::WorkGraph {
+                command: WorkGraphCommands::Snapshot { json, .. },
+            } => assert!(json),
+            _ => unreachable!("expected workgraph snapshot command"),
+        }
     }
 
     #[test]

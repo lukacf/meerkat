@@ -1,5 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -192,6 +193,133 @@ fn output_ok_or_err(
 fn extract_json_string_field(payload: &str, field: &str) -> Option<String> {
     let value: Value = serde_json::from_str(payload).ok()?;
     find_first_string_field(&value, field)
+}
+
+struct SeededWorkGraph {
+    completed_id: String,
+    ready_id: String,
+}
+
+async fn seed_workgraph_commitments(
+    state_root: &Path,
+    realm_id: &str,
+) -> Result<SeededWorkGraph, Box<dyn std::error::Error>> {
+    let (_manifest, persistence) = meerkat::open_realm_persistence_in(
+        state_root,
+        realm_id,
+        Some(meerkat_store::RealmBackend::Sqlite),
+        Some(meerkat_store::RealmOrigin::Explicit),
+    )
+    .await?;
+    let service = meerkat::WorkGraphService::with_scope(
+        persistence.workgraph_store(),
+        realm_id,
+        meerkat::WorkNamespace::default(),
+    );
+    let labels = BTreeSet::from(["e2e-workgraph".to_string()]);
+    let blocker = service
+        .create(meerkat::CreateWorkItemRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Prepare WorkGraph e2e blocker".to_string(),
+            description: Some("Seeded by the system shared-realm e2e.".to_string()),
+            priority: meerkat::WorkPriority::High,
+            labels: labels.clone(),
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+        })
+        .await?;
+    let ready = service
+        .create(meerkat::CreateWorkItemRequest {
+            realm_id: None,
+            namespace: None,
+            title: "Observe WorkGraph e2e ready item".to_string(),
+            description: Some("Should become ready once the blocker closes.".to_string()),
+            priority: meerkat::WorkPriority::Medium,
+            labels,
+            due_at: None,
+            not_before: None,
+            snoozed_until: None,
+            external_refs: Vec::new(),
+            evidence_refs: Vec::new(),
+            status: None,
+        })
+        .await?;
+    service
+        .link(meerkat::LinkWorkItemsRequest {
+            realm_id: None,
+            namespace: None,
+            kind: meerkat::WorkEdgeKind::Blocks,
+            from_id: blocker.id.clone(),
+            to_id: ready.id.clone(),
+        })
+        .await?;
+    let claimed = service
+        .claim(meerkat::ClaimWorkItemRequest {
+            id: blocker.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: blocker.revision,
+            owner: meerkat::WorkOwner {
+                principal: Some("system-workgraph-e2e".to_string()),
+                ..meerkat::WorkOwner::default()
+            },
+            lease_seconds: Some(300),
+            lease_expires_at: None,
+        })
+        .await?;
+    let completed = service
+        .close(meerkat::CloseWorkItemRequest {
+            id: claimed.id,
+            realm_id: None,
+            namespace: None,
+            expected_revision: claimed.revision,
+            status: meerkat::WorkStatus::Completed,
+        })
+        .await?;
+
+    Ok(SeededWorkGraph {
+        completed_id: completed.id.to_string(),
+        ready_id: ready.id.to_string(),
+    })
+}
+
+fn assert_workgraph_snapshot(
+    snapshot: &Value,
+    realm_id: &str,
+    seeded: &SeededWorkGraph,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_eq!(snapshot["realm_id"].as_str(), Some(realm_id));
+    let item_ids = snapshot["items"]
+        .as_array()
+        .expect("snapshot items")
+        .iter()
+        .filter_map(|item| item["id"].as_str())
+        .collect::<BTreeSet<_>>();
+    assert!(item_ids.contains(seeded.completed_id.as_str()));
+    assert!(item_ids.contains(seeded.ready_id.as_str()));
+    assert_eq!(
+        snapshot["edges"].as_array().expect("snapshot edges").len(),
+        1
+    );
+    let ready_ids = snapshot["ready_item_ids"]
+        .as_array()
+        .expect("ready ids")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    assert!(ready_ids.contains(seeded.ready_id.as_str()));
+    assert!(
+        snapshot["event_high_water_mark"]
+            .as_i64()
+            .is_some_and(|seq| seq >= 5),
+        "expected seeded event high-water mark in {snapshot}"
+    );
+    Ok(())
 }
 
 fn find_first_string_field(value: &Value, field: &str) -> Option<String> {
@@ -420,6 +548,116 @@ async fn assert_default_sqlite_realm(
     assert_eq!(manifest.backend, meerkat_store::RealmBackend::Sqlite);
     let paths = meerkat_store::realm_paths_in(state_root, realm_id);
     assert!(paths.sessions_sqlite_path.exists());
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "lane:e2e-system"]
+async fn workgraph_sqlite_shared_realm_observability_roundtrip()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = sqlite_shared_realm_test_lock().lock().await;
+    let rkat = binary_path("rkat");
+    let rkat_rpc = binary_path("rkat-rpc");
+    let rkat_rest = binary_path("rkat-rest");
+
+    let temp = TempDir::new()?;
+    let project_dir = temp.path().join("project");
+    let state_root = temp.path().join("state");
+    tokio::fs::create_dir_all(project_dir.join("data")).await?;
+    tokio::fs::create_dir_all(&state_root).await?;
+    write_project_config(&project_dir).await?;
+
+    let realm_id = "sqlite-shared-workgraph";
+    let seeded = seed_workgraph_commitments(&state_root, realm_id).await?;
+    assert_default_sqlite_realm(&state_root, realm_id).await?;
+
+    let cli_args = [
+        "--state-root",
+        state_root.to_str().unwrap(),
+        "--realm",
+        realm_id,
+        "workgraph",
+        "snapshot",
+        "--all-namespaces",
+        "--include-terminal",
+        "--json",
+    ];
+    let cli_output = run_binary(&rkat, &project_dir, &cli_args).await?;
+    let cli_stdout =
+        output_ok_or_err(cli_output, "rkat", &cli_args).map_err(std::io::Error::other)?;
+    let cli_snapshot: Value = serde_json::from_str(&cli_stdout)?;
+    assert_workgraph_snapshot(&cli_snapshot, realm_id, &seeded)?;
+
+    let mut rpc = spawn_rpc(
+        &rkat_rpc,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--instance",
+            "rpc-workgraph",
+        ],
+    )
+    .await?;
+    let initialize = rpc_call(&mut rpc, 1, "initialize", json!({}), 20).await?;
+    let methods = initialize["methods"]
+        .as_array()
+        .expect("initialize methods");
+    assert!(
+        methods
+            .iter()
+            .filter_map(Value::as_str)
+            .all(|method| !method.contains("mob_task")),
+        "old mob_task methods should not be advertised: {methods:?}"
+    );
+    let rpc_snapshot = rpc_call(
+        &mut rpc,
+        2,
+        "workgraph/snapshot",
+        json!({
+            "all_namespaces": true,
+            "include_terminal": true,
+        }),
+        20,
+    )
+    .await?;
+    assert_workgraph_snapshot(&rpc_snapshot, realm_id, &seeded)?;
+
+    let port = allocate_port();
+    write_rest_config(&state_root, realm_id, port).await?;
+    let rest = spawn_rest(
+        &rkat_rest,
+        &project_dir,
+        &[
+            "--state-root",
+            state_root.to_str().unwrap(),
+            "--realm",
+            realm_id,
+            "--context-root",
+            project_dir.to_str().unwrap(),
+            "--instance",
+            "rest-workgraph",
+        ],
+        port,
+    )
+    .await?;
+    let client = reqwest::Client::new();
+    let rest_response = client
+        .get(format!(
+            "http://127.0.0.1:{port}/workgraph/snapshot?all_namespaces=true&include_terminal=true"
+        ))
+        .send()
+        .await?;
+    assert!(rest_response.status().is_success());
+    let rest_snapshot: Value = rest_response.json().await?;
+    assert_workgraph_snapshot(&rest_snapshot, realm_id, &seeded)?;
+
+    shutdown_child(rest).await?;
+    shutdown_rpc(rpc).await?;
     Ok(())
 }
 

@@ -3022,7 +3022,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -3171,10 +3170,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -5319,7 +5314,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -5356,10 +5350,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -6088,7 +6078,6 @@
               "image_generation": false,
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -6125,10 +6114,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },
@@ -8025,7 +8010,6 @@
               "mcp": [],
               "memory": false,
               "mob": false,
-              "mob_tasks": false,
               "schedule": false,
               "shell": false
             }
@@ -8071,10 +8055,6 @@
             "type": "boolean"
           },
           "mob": {
-            "default": false,
-            "type": "boolean"
-          },
-          "mob_tasks": {
             "default": false,
             "type": "boolean"
           },

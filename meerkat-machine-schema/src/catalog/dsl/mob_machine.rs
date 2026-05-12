@@ -119,13 +119,6 @@ macro_rules! mob_catalog_machine_dsl {
             // generation; respawn replaces the runtime id for the same
             // identity.
             identity_to_runtime: Map<AgentIdentity, AgentRuntimeId>,
-            // Task board: the full MobTask payload is opaque at DSL level;
-            // lifecycle fields below provide the guard-visible projection.
-            tasks: Map<TaskId, MobTask>,
-            // Projected status index: guards use these to reject unknown-id
-            // updates and illegal status transitions (e.g. Completed→Pending).
-            in_progress_task_ids: Set<TaskId>,
-            completed_task_ids: Set<TaskId>,
             member_session_bindings: Map<AgentIdentity, SessionId>,
             pending_session_ingress_detach_runtime_ids: Set<AgentRuntimeId>,
             topology_epoch: u64,
@@ -223,9 +216,6 @@ macro_rules! mob_catalog_machine_dsl {
             wiring_edges = EmptySet,
             external_peer_edges = EmptySet,
             identity_to_runtime = EmptyMap,
-            tasks = EmptyMap,
-            in_progress_task_ids = EmptySet,
-            completed_task_ids = EmptySet,
             member_session_bindings = EmptyMap,
             pending_session_ingress_detach_runtime_ids = EmptySet,
             topology_epoch = 0,
@@ -366,10 +356,6 @@ macro_rules! mob_catalog_machine_dsl {
             Complete,
             Reset,
             Destroy,
-            TaskCreate { task_id: TaskId, task_payload: MobTask },
-            TaskUpdate { task_id: TaskId, new_status: TaskStatus },
-            TaskList,
-            TaskGet,
             RosterSnapshot,
             ListMembers,
             ListMembersIncludingRetiring,
@@ -397,8 +383,6 @@ macro_rules! mob_catalog_machine_dsl {
 
         surface_only [
             FlowStatus,
-            TaskList,
-            TaskGet,
             RosterSnapshot,
             ListMembers,
             ListMembersIncludingRetiring,
@@ -458,7 +442,6 @@ macro_rules! mob_catalog_machine_dsl {
             EmitMemberTerminalNotice,
             AdmitPeerInput,
             EmitProgressNote,
-            EmitTaskNotice,
             PersistKickoffUpdate { member_id: String, phase: KickoffPhase },
             PersistKickoffFailureUpdate { member_id: String, phase: KickoffPhase, error: String },
             EmitKickoffLifecycleNotice { member_id: String, intent: Enum<KickoffIntent> },
@@ -508,7 +491,6 @@ macro_rules! mob_catalog_machine_dsl {
         disposition EmitMemberTerminalNotice => external,
         disposition AdmitPeerInput => external,
         disposition EmitProgressNote => external,
-        disposition EmitTaskNotice => external,
         disposition PersistKickoffUpdate => local,
         disposition PersistKickoffFailureUpdate => local,
         disposition EmitKickoffLifecycleNotice => external,
@@ -1150,80 +1132,6 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Unwired, edge: edge }
-        }
-
-        // TaskCreate: real mutator. Rejects duplicate task ids.
-        transition TaskCreateRunning {
-            on input TaskCreate { task_id, task_payload }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "task_id_unused" { self.tasks.contains_key(task_id) == false }
-            update {
-                self.tasks.insert(task_id, task_payload);
-            }
-            to Running
-            emit EmitTaskNotice
-        }
-
-        // TaskUpdate: status transition authority.
-        //
-        // Split into one transition per target status. Each enforces:
-        //   * task_id must refer to an existing task (unknown ids rejected)
-        //   * the source status is not a terminal one we disallow rolling
-        //     back from (Completed → Pending / InProgress is rejected).
-        //
-        // The status-projection sets (`in_progress_task_ids`,
-        // `completed_task_ids`) are the guard-visible truth; `tasks` carries
-        // the opaque payload for shell-side projection.
-        transition TaskUpdateRunningPending {
-            on input TaskUpdate { task_id, new_status }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "target_pending" { new_status == TaskStatus::Pending }
-            guard "task_known" { self.tasks.contains_key(task_id) == true }
-            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
-            update {
-                self.in_progress_task_ids.remove(task_id);
-            }
-            to Running
-            emit EmitTaskNotice
-        }
-
-        transition TaskUpdateRunningInProgress {
-            on input TaskUpdate { task_id, new_status }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "target_in_progress" { new_status == TaskStatus::InProgress }
-            guard "task_known" { self.tasks.contains_key(task_id) == true }
-            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
-            update {
-                self.in_progress_task_ids.insert(task_id);
-            }
-            to Running
-            emit EmitTaskNotice
-        }
-
-        transition TaskUpdateRunningCompleted {
-            on input TaskUpdate { task_id, new_status }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "target_completed" { new_status == TaskStatus::Completed }
-            guard "task_known" { self.tasks.contains_key(task_id) == true }
-            update {
-                self.in_progress_task_ids.remove(task_id);
-                self.completed_task_ids.insert(task_id);
-            }
-            to Running
-            emit EmitTaskNotice
-        }
-
-        transition TaskUpdateRunningCancelled {
-            on input TaskUpdate { task_id, new_status }
-            guard { self.lifecycle_phase == Phase::Running }
-            guard "target_cancelled" { new_status == TaskStatus::Cancelled }
-            guard "task_known" { self.tasks.contains_key(task_id) == true }
-            guard "not_completed" { self.completed_task_ids.contains(task_id) == false }
-            update {
-                self.in_progress_task_ids.remove(task_id);
-            }
-            to Running
-            emit EmitTaskNotice
         }
 
         transition ForceCancelRunning {
@@ -3348,16 +3256,6 @@ impl SessionId {
 // Projection helpers: domain types → bridging types
 // ---------------------------------------------------------------------------
 
-/// Bridging type for task identifier. Maps to a shell-side task reference.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskId(pub String);
-
-impl<T: Into<String>> From<T> for TaskId {
-    fn from(s: T) -> Self {
-        Self(s.into())
-    }
-}
-
 /// Kickoff lifecycle phase for a member's initial autonomous turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KickoffPhase {
@@ -3366,20 +3264,6 @@ pub enum KickoffPhase {
     CallbackPending,
     Started,
     Failed,
-    Cancelled,
-}
-
-/// Task lifecycle status. DSL guards enumerate these directly
-/// (`TaskStatus::Pending`, `TaskStatus::InProgress`,
-/// `TaskStatus::Completed`, `TaskStatus::Cancelled`). `Completed` and
-/// `Cancelled` are the two terminal statuses; neither may be transitioned
-/// away from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub enum TaskStatus {
-    #[default]
-    Pending,
-    InProgress,
-    Completed,
     Cancelled,
 }
 
@@ -3540,18 +3424,6 @@ pub enum LoopIterationReducerCommandKind {
     UntilConditionMet,
     UntilConditionFailed,
     CancelLoop,
-}
-
-/// Opaque task payload carried through the DSL. The full domain type is
-/// richer than what the DSL models; only `tasks.contains(id)` is observed in
-/// guards. Field projection lives in shell code consuming the DSL state.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct MobTask {
-    pub subject: String,
-    pub description: String,
-    pub status: TaskStatus,
-    pub owner: Option<AgentIdentity>,
-    pub blocked_by: Vec<TaskId>,
 }
 
 /// Per-runtime lifecycle marker tracking whether a member is actively serving

@@ -23,6 +23,7 @@ pub mod schedule;
 pub mod session;
 pub mod skills;
 pub mod turn;
+pub mod workgraph;
 
 use serde_json::value::RawValue;
 

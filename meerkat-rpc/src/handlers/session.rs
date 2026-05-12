@@ -117,6 +117,9 @@ pub struct CreateSessionParams {
     /// Optional session-local tool visibility filter.
     #[serde(default)]
     pub tool_filter: Option<ToolFilter>,
+    /// Enable WorkGraph tools. Omit to use runtime defaults.
+    #[serde(default)]
+    pub enable_workgraph: Option<bool>,
     /// Explicit budget limits for this session.
     #[serde(default)]
     pub budget_limits: Option<BudgetLimits>,
@@ -334,6 +337,7 @@ pub async fn handle_create(
     build_config.peer_meta = params.peer_meta;
     build_config.override_memory = ToolCategoryOverride::from_override(params.enable_memory);
     build_config.override_schedule = ToolCategoryOverride::from_override(params.enable_schedule);
+    build_config.override_workgraph = ToolCategoryOverride::from_override(params.enable_workgraph);
     build_config.apply_generated_create_only_mob_operator_access(
         ToolCategoryOverride::from_override(params.enable_mob),
     );

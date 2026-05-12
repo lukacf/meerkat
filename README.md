@@ -44,7 +44,7 @@ The library still comes first; surfaces come second. Pick the entry point that f
 | **Surfaces** | CLI, REST, JSON-RPC, MCP, Rust/Python/TS SDKs, Web SDK/WASM | CLI plus selected SDKs |
 | **Agent infra** | Hooks, skills, semantic memory, MCP, live tool scope, blobs, typed events, structured output | File/context tooling around one process |
 | **Automation** | Durable once/interval/calendar schedules for sessions and mobs | External cron/scheduler required |
-| **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, shared task boards | Single agent or ad hoc delegation |
+| **Multi-agent** | Session-backed mob members, peer comms, profile-driven teams, flows, and realm-scoped WorkGraph commitments | Single agent or ad hoc delegation |
 | **Portable deployment** | Signed `.mobpack` artifacts with `pack`, `inspect`, `validate`, `deploy`, and `mob web build` | No equivalent portable team artifact flow |
 | **Distribution** | Release binaries, Homebrew tap, SDK auto-runtime, crates, PyPI, npm | Runtime plus dependencies |
 
@@ -220,7 +220,7 @@ make release-preflight
 
 **Scheduling.** Durable schedules run sessions or mobs from once, interval, or calendar triggers. Occurrences survive process restarts and carry overlap, misfire, and missing-target policy. Host apps use REST/RPC schedule APIs; agents use the `meerkat_schedule_*` tools.
 
-**Multi-agent mobs.** Mobs are reusable teams built from definitions, profiles, profile stores, budgets, scoped tools, credentials, task boards, flows, and signed peer-to-peer wiring. Prefabs are no longer the model; define the team you need and launch members through the current `mob_*` tools and host APIs.
+**Multi-agent mobs.** Mobs are reusable teams built from definitions, profiles, profile stores, budgets, scoped tools, credentials, flows, and signed peer-to-peer wiring. Prefabs are no longer the model; define the team you need and launch members through the current `mob_*` tools and host APIs.
 
 **Comms.** Agents use `send_message` for ordinary collaboration and `send_request` / `send_response` for ask/reply workflows. Queue or steer handling controls when peers process messages, and host-side receipts and terminal peer responses remain typed events.
 
@@ -369,7 +369,7 @@ rkat run --tools full --realm prod \
    Keep shell access scoped to the analyst and return a prioritized remediation plan."
 ```
 
-The orchestrating agent creates the mob from the definition, launches profile-backed members, wires communication, and collects the final report. Use realm profile references or per-member `auth_binding` values when different roles need different credentials. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for flows, task boards, `mob_spawn_member`, and direct host APIs.
+The orchestrating agent creates the mob from the definition, launches profile-backed members, wires communication, and collects the final report. Use realm profile references or per-member `auth_binding` values when different roles need different credentials. See the [mobs guide](https://docs.rkat.ai/guides/mobs) for flows, `mob_spawn_member`, and direct host APIs.
 
 ### Browser runtime (Web/WASM)
 

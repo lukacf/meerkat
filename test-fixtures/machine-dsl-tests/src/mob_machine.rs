@@ -53,10 +53,6 @@ machine! {
             Complete,
             Reset,
             Destroy,
-            TaskCreate,
-            TaskUpdate,
-            TaskList,
-            TaskGet,
             McpServerStates,
             RosterSnapshot,
             ListMembers,
@@ -77,8 +73,6 @@ machine! {
 
         surface_only [
             FlowStatus,
-            TaskList,
-            TaskGet,
             McpServerStates,
             RosterSnapshot,
             ListMembers,
@@ -138,7 +132,6 @@ machine! {
             EmitMemberTerminalNotice,
             AdmitPeerInput,
             EmitProgressNote,
-            EmitTaskNotice,
         }
 
         disposition RequestRuntimeBinding => routed [MeerkatMachine],
@@ -156,7 +149,6 @@ machine! {
         disposition EmitMemberTerminalNotice => external,
         disposition AdmitPeerInput => external,
         disposition EmitProgressNote => external,
-        disposition EmitTaskNotice => external,
 
         // =====================================================================
         // Direct transitions
@@ -464,22 +456,6 @@ machine! {
             update {}
             to Running
             emit EmitProgressNote
-        }
-
-        transition TaskCreateRunning {
-            on input TaskCreate
-            guard { self.lifecycle_phase == Phase::Running }
-            update {}
-            to Running
-            emit EmitTaskNotice
-        }
-
-        transition TaskUpdateRunning {
-            on input TaskUpdate
-            guard { self.lifecycle_phase == Phase::Running }
-            update {}
-            to Running
-            emit EmitTaskNotice
         }
 
         transition ForceCancelRunning {

@@ -12,8 +12,7 @@
       "tools": {
         "builtins": true,
         "comms": true,
-        "mob": true,
-        "mob_tasks": true
+        "mob": true
       },
       "peer_description": "Incident commander who owns the room, assigns work, and keeps the team focused on business impact.",
       "external_addressable": true
@@ -25,8 +24,7 @@
       ],
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       },
       "peer_description": "Infrastructure lead who isolates blast radius, rollback options, and service recovery tactics.",
       "external_addressable": false
@@ -38,8 +36,7 @@
       ],
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       },
       "peer_description": "Application investigator focused on recent deploys, feature flags, dependencies, and failure signatures.",
       "external_addressable": false
@@ -51,8 +48,7 @@
       ],
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       },
       "peer_description": "Customer communications lead who drafts stakeholder updates and clarifies customer-facing risk.",
       "external_addressable": false
@@ -64,8 +60,7 @@
       ],
       "tools": {
         "builtins": true,
-        "comms": true,
-        "mob_tasks": true
+        "comms": true
       },
       "peer_description": "Scribe who maintains the incident timeline, open questions, and next-update commitments.",
       "external_addressable": false

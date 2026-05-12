@@ -1735,7 +1735,6 @@ mod content_block_tests {
             ToolSourceKind::Memory,
             ToolSourceKind::Schedule,
             ToolSourceKind::Mob,
-            ToolSourceKind::MobTasks,
             ToolSourceKind::Callback,
             ToolSourceKind::Mcp,
             ToolSourceKind::RustBundle,

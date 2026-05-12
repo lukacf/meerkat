@@ -850,6 +850,146 @@ export interface ScheduleToolCallRequest {
   readonly arguments?: unknown;
 }
 
+export type WorkGraphStatus =
+  | "open"
+  | "in_progress"
+  | "blocked"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+export type WorkGraphPriority = "low" | "medium" | "high";
+
+export type WorkGraphEdgeKind =
+  | "blocks"
+  | "parent"
+  | "related"
+  | "supersedes"
+  | "derived_from";
+
+export type WorkGraphEventKind =
+  | "created"
+  | "updated"
+  | "claimed"
+  | "released"
+  | "blocked"
+  | "closed"
+  | "linked"
+  | "evidence_added";
+
+export interface WorkGraphOwner {
+  readonly principal?: string;
+  readonly agent?: string;
+  readonly sessionId?: string;
+  readonly mobId?: string;
+  readonly label?: string;
+}
+
+export interface WorkGraphClaim {
+  readonly owner: WorkGraphOwner;
+  readonly claimedAt: string;
+  readonly leaseExpiresAt?: string;
+}
+
+export interface ExternalWorkRef {
+  readonly kind: string;
+  readonly id: string;
+  readonly url?: string;
+}
+
+export interface WorkEvidenceRef {
+  readonly kind: string;
+  readonly id: string;
+  readonly label?: string;
+  readonly summary?: string;
+}
+
+export interface WorkItem {
+  readonly id: string;
+  readonly realmId: string;
+  readonly namespace: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly status: WorkGraphStatus;
+  readonly priority: WorkGraphPriority;
+  readonly labels: readonly string[];
+  readonly owner?: WorkGraphOwner;
+  readonly claim?: WorkGraphClaim;
+  readonly revision: number;
+  readonly dueAt?: string;
+  readonly notBefore?: string;
+  readonly snoozedUntil?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly terminalAt?: string;
+  readonly externalRefs: readonly ExternalWorkRef[];
+  readonly evidenceRefs: readonly WorkEvidenceRef[];
+}
+
+export interface WorkGraphEdge {
+  readonly realmId: string;
+  readonly namespace: string;
+  readonly kind: WorkGraphEdgeKind;
+  readonly fromId: string;
+  readonly toId: string;
+  readonly createdAt: string;
+}
+
+export interface WorkGraphEvent {
+  readonly seq?: number;
+  readonly realmId: string;
+  readonly namespace: string;
+  readonly itemId?: string;
+  readonly kind: WorkGraphEventKind;
+  readonly at: string;
+  readonly payload?: unknown;
+}
+
+export interface WorkItemListResult {
+  readonly items: readonly WorkItem[];
+}
+
+export interface WorkGraphEventsResult {
+  readonly events: readonly WorkGraphEvent[];
+}
+
+export interface WorkGraphSnapshot {
+  readonly realmId: string;
+  readonly namespace?: string;
+  readonly allNamespaces: boolean;
+  readonly capturedAt: string;
+  readonly eventHighWaterMark?: number;
+  readonly items: readonly WorkItem[];
+  readonly edges: readonly WorkGraphEdge[];
+  readonly readyItemIds: readonly string[];
+}
+
+export interface WorkGraphItemLookupOptions {
+  readonly realmId?: string;
+  readonly namespace?: string;
+}
+
+export interface WorkGraphItemFilter extends WorkGraphItemLookupOptions {
+  readonly allNamespaces?: boolean;
+  readonly statuses?: readonly WorkGraphStatus[];
+  readonly labels?: readonly string[];
+  readonly includeTerminal?: boolean;
+  readonly limit?: number;
+}
+
+export interface WorkGraphReadyFilter extends WorkGraphItemLookupOptions {
+  readonly labels?: readonly string[];
+  readonly limit?: number;
+}
+
+export interface WorkGraphSnapshotFilter extends WorkGraphItemFilter {}
+
+export interface WorkGraphEventFilter extends WorkGraphItemLookupOptions {
+  readonly allNamespaces?: boolean;
+  readonly afterSeq?: number;
+  readonly limit?: number;
+}
+
 /** Options for creating a new session. */
 export interface SessionOptions {
   model?: string;

@@ -12,6 +12,7 @@ pub struct RpcMethodCatalogOptions {
     pub session_events_enabled: bool,
     pub session_streams_enabled: bool,
     pub schedule_enabled: bool,
+    pub workgraph_enabled: bool,
     pub skills_enabled: bool,
 }
 
@@ -26,6 +27,7 @@ impl RpcMethodCatalogOptions {
             session_events_enabled: true,
             session_streams_enabled: true,
             schedule_enabled: true,
+            workgraph_enabled: true,
             skills_enabled: true,
         }
     }
@@ -435,6 +437,41 @@ pub fn rpc_method_catalog(options: RpcMethodCatalogOptions) -> Vec<RpcMethodDesc
                 "Call a schedule transport tool",
                 "ScheduleToolCallParams",
                 "Value",
+            ),
+        ]);
+    }
+
+    if options.workgraph_enabled {
+        methods.extend([
+            RpcMethodDescriptor::typed(
+                "workgraph/get",
+                "Get one WorkGraph item",
+                "WorkGraphIdParams",
+                "WorkItem",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/list",
+                "List WorkGraph items",
+                "WorkItemFilter",
+                "WorkItemListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/ready",
+                "List ready WorkGraph items",
+                "ReadyWorkFilter",
+                "WorkItemListResult",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/snapshot",
+                "Read a WorkGraph snapshot",
+                "WorkGraphSnapshotFilter",
+                "WorkGraphSnapshot",
+            ),
+            RpcMethodDescriptor::typed(
+                "workgraph/events",
+                "List WorkGraph events",
+                "WorkGraphEventFilter",
+                "WorkGraphEventsResult",
             ),
         ]);
     }
@@ -1003,6 +1040,37 @@ mod tests {
             assert!(
                 !methods.iter().any(|m| m == retired),
                 "runtime/session control noun must not be advertised by public catalogs: {retired}"
+            );
+        }
+    }
+
+    #[test]
+    fn workgraph_rpc_surface_is_read_only_observability() {
+        let methods = rpc_method_names(RpcMethodCatalogOptions::documented_surface());
+        for supported in [
+            "workgraph/get",
+            "workgraph/list",
+            "workgraph/ready",
+            "workgraph/snapshot",
+            "workgraph/events",
+        ] {
+            assert!(
+                methods.iter().any(|m| m == supported),
+                "read-only WorkGraph RPC method must be advertised: {supported}"
+            );
+        }
+        for retired in [
+            "workgraph/create",
+            "workgraph/claim",
+            "workgraph/release",
+            "workgraph/update",
+            "workgraph/close",
+            "workgraph/link",
+            "workgraph/add_evidence",
+        ] {
+            assert!(
+                !methods.iter().any(|m| m == retired),
+                "mutating WorkGraph RPC method must not be advertised: {retired}"
             );
         }
     }

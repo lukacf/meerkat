@@ -98,9 +98,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `wiring_edges`: `Set<WiringEdge>`
 - `external_peer_edges`: `Set<ExternalPeerEdge>`
 - `identity_to_runtime`: `Map<AgentIdentity, AgentRuntimeId>`
-- `tasks`: `Map<TaskId, MobTask>`
-- `in_progress_task_ids`: `Set<TaskId>`
-- `completed_task_ids`: `Set<TaskId>`
 - `member_session_bindings`: `Map<AgentIdentity, SessionId>`
 - `pending_session_ingress_detach_runtime_ids`: `Set<AgentRuntimeId>`
 - `topology_epoch`: `u64`
@@ -138,10 +135,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `Complete`
 - `Reset`
 - `Destroy`
-- `TaskCreate`(task_id: TaskId, task_payload: MobTask)
-- `TaskUpdate`(task_id: TaskId, new_status: TaskStatus)
-- `TaskList`
-- `TaskGet`
 - `RosterSnapshot`
 - `ListMembers`
 - `ListMembersIncludingRetiring`
@@ -168,8 +161,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ## Surface-only Inputs
 - `FlowStatus`
-- `TaskList`
-- `TaskGet`
 - `RosterSnapshot`
 - `ListMembers`
 - `ListMembersIncludingRetiring`
@@ -227,7 +218,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `EmitMemberTerminalNotice`
 - `AdmitPeerInput`
 - `EmitProgressNote`
-- `EmitTaskNotice`
 - `PersistKickoffUpdate`(member_id: String, phase: KickoffPhase)
 - `PersistKickoffFailureUpdate`(member_id: String, phase: KickoffPhase, error: String)
 - `EmitKickoffLifecycleNotice`(member_id: String, intent: KickoffIntent)
@@ -655,53 +645,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `external_peer_currently_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
-- To: `Running`
-
-### `TaskCreateRunning`
-- From: `Running`
-- On: `TaskCreate`(task_id, task_payload)
-- Guards:
-  - `task_id_unused`
-- Emits: `EmitTaskNotice`
-- To: `Running`
-
-### `TaskUpdateRunningPending`
-- From: `Running`
-- On: `TaskUpdate`(task_id, new_status)
-- Guards:
-  - `target_pending`
-  - `task_known`
-  - `not_completed`
-- Emits: `EmitTaskNotice`
-- To: `Running`
-
-### `TaskUpdateRunningInProgress`
-- From: `Running`
-- On: `TaskUpdate`(task_id, new_status)
-- Guards:
-  - `target_in_progress`
-  - `task_known`
-  - `not_completed`
-- Emits: `EmitTaskNotice`
-- To: `Running`
-
-### `TaskUpdateRunningCompleted`
-- From: `Running`
-- On: `TaskUpdate`(task_id, new_status)
-- Guards:
-  - `target_completed`
-  - `task_known`
-- Emits: `EmitTaskNotice`
-- To: `Running`
-
-### `TaskUpdateRunningCancelled`
-- From: `Running`
-- On: `TaskUpdate`(task_id, new_status)
-- Guards:
-  - `target_cancelled`
-  - `task_known`
-  - `not_completed`
-- Emits: `EmitTaskNotice`
 - To: `Running`
 
 ### `ForceCancelRunning`
@@ -1744,13 +1687,13 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 ## Coverage
 ### Code Anchors
 - `meerkat-mob/src/runtime/handle.rs` — identity-first public MobMachine handle surface for ensure member, reconcile, and member command routing
-- `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, task, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
+- `meerkat-mob/src/runtime/actor.rs` — MobMachine actor authority and command execution for wire, unwire, spawn, ensure member, reconcile, observe runtime, submit work, retire, reset, respawn, complete, mark completed, stop/stopped, resume, force cancel, subscribe events, shutdown, destroy, terminalized member, record operator action provenance, flow, run, create frame seed, create loop seed, project frame phase, project loop state, orchestrator, coordinator, cleanup, append failure ledger, escalate supervisor, peer, progress, notices, kickoff resolve started/callback pending/failed/clear, wiring graph, and session binding
 
 ### Scenarios
 - `spawn-work-terminal` — member spawn, ensure member, reconcile, runtime-ready observation, work submission, and terminal work closure
 - `retire-respawn-destroy` — member retires, resets, respawns with a new runtime incarnation, stops/stopped, resumes, shuts down, destroys cleanly, and resets to running when reusable
 - `wiring-and-session-binding` — wire and unwire members, enforce known identity for session bindings, expose pending spawn, member session binding changed, and wiring lifecycle notices
-- `task-flow-and-run-lifecycle` — task create or update pending/in progress/completed/cancelled, run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
-- `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, task, terminal, and wiring notices
+- `flow-and-run-lifecycle` — run flow, start flow, create run, create frame seed, create loop seed, project frame phase, project loop state, start run, complete flow, finish run, mark completed, kickoff resolve started or failed, kickoff clear, flow terminalized, and force cancel running work
+- `event-subscriptions-and-notices` — subscribe agent, all agent, and mob events; emit member, run, flow, progress, terminal, and wiring notices
 - `orchestrator-coordinator-cleanup` — initialize, stop, resume, and destroy orchestrator; bind or unbind coordinator; begin and finish cleanup; notify coordinator and escalate supervisor
 - `operator-provenance-and-peer-input` — record operator action provenance, trust operation peer, admit peer input, append failure ledger, and surface peer-exposed member inputs

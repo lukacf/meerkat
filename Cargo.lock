@@ -2809,6 +2809,7 @@ dependencies = [
  "meerkat-skills",
  "meerkat-store",
  "meerkat-tools",
+ "meerkat-workgraph",
  "nix 0.29.0",
  "parking_lot",
  "schemars 1.2.1",
@@ -3128,6 +3129,7 @@ dependencies = [
  "meerkat-mob",
  "meerkat-runtime",
  "meerkat-schedule",
+ "meerkat-workgraph",
 ]
 
 [[package]]
@@ -3636,6 +3638,25 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
+]
+
+[[package]]
+name = "meerkat-workgraph"
+version = "0.6.6"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "indexmap",
+ "meerkat-core",
+ "meerkat-machine-schema",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio_with_wasm",
+ "uuid",
 ]
 
 [[package]]

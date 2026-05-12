@@ -698,6 +698,58 @@ fn known_classifications() -> Vec<(&'static str, &'static str, SeamClassificatio
         ),
         //
         // =========================================================================
+        // WorkGraphLifecycleMachine
+        // =========================================================================
+        (
+            "WorkGraphLifecycleMachine",
+            "Created",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph creation effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "Updated",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph update effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "Claimed",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph claim effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "Released",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph release effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "Blocked",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph block effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "LinkValidated",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph topology-validation effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "Closed",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph terminal effect retained inside the WorkGraph service projection path",
+        ),
+        (
+            "WorkGraphLifecycleMachine",
+            "EvidenceAdded",
+            SeamClassification::NoOwnerRealization,
+            "Local WorkGraph evidence-reference effect retained inside the WorkGraph service projection path",
+        ),
+        //
+        // =========================================================================
         // AuthMachine — per-binding auth lease lifecycle (dogma #43/#44 resolved)
         // =========================================================================
         (

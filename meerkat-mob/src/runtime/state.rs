@@ -111,12 +111,6 @@ pub(crate) struct MobDslT2Snapshot {
         crate::machines::mob_machine::AgentIdentity,
         crate::machines::mob_machine::AgentRuntimeId,
     >,
-    pub tasks: std::collections::BTreeMap<
-        crate::machines::mob_machine::TaskId,
-        crate::machines::mob_machine::MobTask,
-    >,
-    pub in_progress_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
-    pub completed_task_ids: std::collections::BTreeSet<crate::machines::mob_machine::TaskId>,
     pub member_restore_failures:
         std::collections::BTreeMap<crate::machines::mob_machine::AgentIdentity, String>,
     // W3-H-1: canonical identity→bridge-session binding map, projected from
@@ -326,25 +320,6 @@ pub(super) enum MobCommand {
     },
     Reset {
         reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    TaskCreate {
-        subject: String,
-        description: String,
-        blocked_by: Vec<TaskId>,
-        reply_tx: oneshot::Sender<Result<TaskId, MobError>>,
-    },
-    TaskUpdate {
-        task_id: TaskId,
-        status: TaskStatus,
-        owner: Option<AgentIdentity>,
-        reply_tx: oneshot::Sender<Result<(), MobError>>,
-    },
-    TaskList {
-        reply_tx: oneshot::Sender<Vec<MobTask>>,
-    },
-    TaskGet {
-        task_id: TaskId,
-        reply_tx: oneshot::Sender<Option<MobTask>>,
     },
     SubscribeAgentEvents {
         agent_identity: MeerkatId,

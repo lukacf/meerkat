@@ -123,6 +123,14 @@ from .types import (
     StoredMobProfile,
     TranscriptEditRunningBehavior,
     TranscriptReplacement,
+    WorkGraphEventFilter,
+    WorkGraphEventsResult,
+    WorkGraphItemFilter,
+    WorkGraphReadyFilter,
+    WorkGraphSnapshot,
+    WorkGraphSnapshotFilter,
+    WorkItem,
+    WorkItemListResult,
 )
 
 _MEERKAT_REPO = ("lukacf", "meerkat")
@@ -1122,6 +1130,50 @@ class MeerkatClient:
 
     async def call_schedule_tool(self, request: ScheduleToolCall) -> dict[str, Any]:
         return await self._request("schedule/call", dict(request))
+
+    async def get_workgraph_item(
+        self,
+        item_id: str,
+        *,
+        realm_id: str | None = None,
+        namespace: str | None = None,
+    ) -> WorkItem:
+        params: dict[str, Any] = {"id": item_id}
+        if realm_id is not None:
+            params["realm_id"] = realm_id
+        if namespace is not None:
+            params["namespace"] = namespace
+        return await self._request("workgraph/get", params)
+
+    async def list_workgraph_items(
+        self,
+        filter: WorkGraphItemFilter | None = None,
+    ) -> WorkItemListResult:
+        raw = await self._request("workgraph/list", dict(filter or {}))
+        items = raw.get("items", [])
+        return {"items": items if isinstance(items, list) else []}
+
+    async def list_ready_workgraph_items(
+        self,
+        filter: WorkGraphReadyFilter | None = None,
+    ) -> WorkItemListResult:
+        raw = await self._request("workgraph/ready", dict(filter or {}))
+        items = raw.get("items", [])
+        return {"items": items if isinstance(items, list) else []}
+
+    async def get_workgraph_snapshot(
+        self,
+        filter: WorkGraphSnapshotFilter | None = None,
+    ) -> WorkGraphSnapshot:
+        return await self._request("workgraph/snapshot", dict(filter or {}))
+
+    async def list_workgraph_events(
+        self,
+        filter: WorkGraphEventFilter | None = None,
+    ) -> WorkGraphEventsResult:
+        raw = await self._request("workgraph/events", dict(filter or {}))
+        events = raw.get("events", [])
+        return {"events": events if isinstance(events, list) else []}
 
     async def mcp_add(
         self,

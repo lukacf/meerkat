@@ -1230,7 +1230,10 @@ mod tests {
                 })
             ));
             assert_eq!(p.header.durability, InputDurability::Ephemeral);
-            assert_eq!(p.handling_mode, None);
+            assert!(
+                p.handling_mode.is_none(),
+                "ResponseProgress inputs must not carry handling_mode"
+            );
         } else {
             panic!("Expected PeerInput");
         }

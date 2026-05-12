@@ -310,6 +310,9 @@ pub struct AgentBuildConfig {
     /// Per-build override for factory-level `enable_schedule`.
     /// `Inherit` defers to the factory default.
     pub override_schedule: ToolCategoryOverride,
+    /// Per-build override for factory-level `enable_workgraph`.
+    /// `Inherit` defers to the factory default.
+    pub override_workgraph: ToolCategoryOverride,
     /// Per-build override for factory-level `enable_mob`.
     pub override_mob: ToolCategoryOverride,
     /// Per-build override for assistant image generation visibility.
@@ -322,6 +325,8 @@ pub struct AgentBuildConfig {
     /// visibility/composition; schedule execution remains owned by the
     /// schedule service/host chosen by the embedding surface.
     pub schedule_tools: Option<Arc<dyn AgentToolDispatcher>>,
+    /// Agent-facing WorkGraph tools supplied by the embedding surface.
+    pub workgraph_tools: Option<Arc<dyn AgentToolDispatcher>>,
     /// Runtime-injected mob operator authority context.
     ///
     /// Tool visibility may depend on this context being present, but
@@ -473,10 +478,12 @@ impl std::fmt::Debug for AgentBuildConfig {
             .field("override_shell", &self.override_shell)
             .field("override_memory", &self.override_memory)
             .field("override_schedule", &self.override_schedule)
+            .field("override_workgraph", &self.override_workgraph)
             .field("override_mob", &self.override_mob)
             .field("override_image_generation", &self.override_image_generation)
             .field("override_web_search", &self.override_web_search)
             .field("schedule_tools", &self.schedule_tools.is_some())
+            .field("workgraph_tools", &self.workgraph_tools.is_some())
             .field(
                 "mob_tool_authority_context",
                 &self.mob_tool_authority_context.is_some(),
@@ -543,10 +550,12 @@ impl AgentBuildConfig {
             override_shell: ToolCategoryOverride::Inherit,
             override_memory: ToolCategoryOverride::Inherit,
             override_schedule: ToolCategoryOverride::Inherit,
+            override_workgraph: ToolCategoryOverride::Inherit,
             override_mob: ToolCategoryOverride::Inherit,
             override_image_generation: ToolCategoryOverride::Inherit,
             override_web_search: ToolCategoryOverride::Inherit,
             schedule_tools: None,
+            workgraph_tools: None,
             mob_tool_authority_context: None,
             mob_tools: None,
             preload_skills: None,
@@ -651,10 +660,12 @@ impl AgentBuildConfig {
         self.override_shell = build.override_shell;
         self.override_memory = build.override_memory;
         self.override_schedule = build.override_schedule;
+        self.override_workgraph = build.override_workgraph;
         self.override_mob = build.override_mob;
         self.override_image_generation = build.override_image_generation;
         self.override_web_search = build.override_web_search;
         self.schedule_tools = build.schedule_tools.clone();
+        self.workgraph_tools = build.workgraph_tools.clone();
         self.mob_tool_authority_context = build.mob_tool_authority_context.clone();
         self.mob_tools = build.mob_tools.clone();
         self.preload_skills = build.preload_skills.clone();
@@ -704,10 +715,12 @@ impl AgentBuildConfig {
             override_shell: self.override_shell,
             override_memory: self.override_memory,
             override_schedule: self.override_schedule,
+            override_workgraph: self.override_workgraph,
             override_mob: self.override_mob,
             override_image_generation: self.override_image_generation,
             override_web_search: self.override_web_search,
             schedule_tools: self.schedule_tools.clone(),
+            workgraph_tools: self.workgraph_tools.clone(),
             mob_tool_authority_context: self.mob_tool_authority_context.clone(),
             mob_tools: self.mob_tools.clone(),
             preload_skills: self.preload_skills.clone(),
@@ -1165,6 +1178,7 @@ pub struct AgentFactory {
     pub enable_comms: bool,
     pub enable_memory: bool,
     pub enable_schedule: bool,
+    pub enable_workgraph: bool,
     pub enable_mob: bool,
     /// Optional skill source override. When set, bypasses config-driven
     /// repository resolution. For SDK users who wire sources programmatically.
@@ -1232,6 +1246,7 @@ impl std::fmt::Debug for AgentFactory {
             .field("enable_shell", &self.enable_shell)
             .field("enable_memory", &self.enable_memory)
             .field("enable_schedule", &self.enable_schedule)
+            .field("enable_workgraph", &self.enable_workgraph)
             .field("enable_mob", &self.enable_mob);
         #[cfg(feature = "comms")]
         d.field("enable_comms", &self.enable_comms);
@@ -1666,6 +1681,7 @@ impl AgentFactory {
             enable_comms: false,
             enable_memory: false,
             enable_schedule: false,
+            enable_workgraph: false,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -1708,6 +1724,7 @@ impl AgentFactory {
             enable_comms: false,
             enable_memory: false,
             enable_schedule: false,
+            enable_workgraph: false,
             enable_mob: false,
             #[cfg(feature = "skills")]
             skill_source: None,
@@ -1843,6 +1860,12 @@ impl AgentFactory {
         self
     }
 
+    /// Enable or disable WorkGraph tools.
+    pub fn workgraph(mut self, enabled: bool) -> Self {
+        self.enable_workgraph = enabled;
+        self
+    }
+
     /// Enable or disable mob (multi-agent orchestration) tools.
     pub fn mob(mut self, enabled: bool) -> Self {
         self.enable_mob = enabled;
@@ -1918,6 +1941,13 @@ impl AgentFactory {
             .unwrap_or(self.enable_memory);
         if !memory_enabled {
             capabilities.remove(&meerkat_contracts::CapabilityId::MemoryStore);
+        }
+
+        let workgraph_enabled = build_config
+            .map(|build| build.override_workgraph.resolve(self.enable_workgraph))
+            .unwrap_or(self.enable_workgraph);
+        if !workgraph_enabled {
+            capabilities.remove(&meerkat_contracts::CapabilityId::WorkGraph);
         }
 
         #[cfg(feature = "comms")]
@@ -2986,6 +3016,10 @@ impl AgentFactory {
             !matches!(build_config.override_shell, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_memory |=
             !matches!(build_config.override_memory, ToolCategoryOverride::Inherit);
+        build_config.resume_override_mask.override_workgraph |= !matches!(
+            build_config.override_workgraph,
+            ToolCategoryOverride::Inherit
+        );
         build_config.resume_override_mask.override_mob |=
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         build_config.resume_override_mask.override_image_generation |= !matches!(
@@ -3743,7 +3777,7 @@ impl AgentFactory {
                 {
                     self.build_tool_dispatcher_for_agent_with_overrides(
                         config,
-                        build_config.external_tools,
+                        build_config.external_tools.take(),
                         effective_builtins,
                         effective_shell,
                         skill_engine.clone(),
@@ -3896,7 +3930,69 @@ impl AgentFactory {
             "tool composition: after scheduler gateway"
         );
 
-        // 9c. Compose tools with mob surface (after comms and scheduler, so mob
+        // 9c. Compose tools with WorkGraph surface (after scheduler, before mob).
+        let effective_workgraph = build_config
+            .override_workgraph
+            .resolve(self.enable_workgraph);
+        if effective_workgraph {
+            let workgraph_dispatcher = match build_config.workgraph_tools.take() {
+                Some(dispatcher) => dispatcher,
+                None => {
+                    let default_realm_id = build_config
+                        .realm_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    #[cfg(not(target_arch = "wasm32"))]
+                    {
+                        let root = self.realm_scope_root(&build_config);
+                        let store = Arc::new(
+                            meerkat_workgraph::SqliteWorkGraphStore::open(
+                                root.join("workgraph.sqlite3"),
+                            )
+                            .map_err(|err| {
+                                BuildAgentError::Config(format!("WorkGraph store: {err}"))
+                            })?,
+                        );
+                        meerkat_workgraph::wire_workgraph_tools(
+                            meerkat_workgraph::WorkGraphService::with_scope(
+                                store,
+                                default_realm_id,
+                                meerkat_workgraph::WorkNamespace::default(),
+                            ),
+                        )
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        meerkat_workgraph::wire_workgraph_tools(
+                            meerkat_workgraph::WorkGraphService::with_scope(
+                                Arc::new(meerkat_workgraph::MemoryWorkGraphStore::new()),
+                                default_realm_id,
+                                meerkat_workgraph::WorkNamespace::default(),
+                            ),
+                        )
+                    }
+                }
+            };
+            let workgraph_usage = render_tool_usage_instructions(workgraph_dispatcher.as_ref());
+            tools = Arc::new(meerkat_core::DynamicToolComposite::new(vec![
+                tools,
+                workgraph_dispatcher,
+            ]));
+            if !workgraph_usage.is_empty() {
+                if !tool_usage_instructions.is_empty() {
+                    tool_usage_instructions.push_str("\n\n");
+                }
+                tool_usage_instructions.push_str(&workgraph_usage);
+            }
+        }
+
+        tracing::debug!(
+            tool_count_after_workgraph = tools.tools().len(),
+            effective_workgraph,
+            "tool composition: after workgraph gateway"
+        );
+
+        // 9d. Compose tools with mob surface (after comms/scheduler/WorkGraph, so mob
         // gateway wraps the already-composed base capability stack).
         let effective_mob = build_config.override_mob.resolve(self.enable_mob)
             || build_config.mob_tool_authority_context.is_some();

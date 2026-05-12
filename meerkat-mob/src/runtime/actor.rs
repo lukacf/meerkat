@@ -331,7 +331,6 @@ enum ExpectedRevokeCleanupFailure {
 pub(super) struct MobActor {
     pub(super) definition: Arc<MobDefinition>,
     pub(super) roster: Arc<RwLock<RosterAuthority>>,
-    pub(super) task_board: Arc<RwLock<TaskBoard>>,
     pub(super) events: Arc<dyn MobEventStore>,
     pub(super) run_store: Arc<dyn MobRunStore>,
     pub(super) provisioner: Arc<dyn MobProvisioner>,
@@ -369,7 +368,6 @@ pub(super) struct MobActor {
     /// current authority still stays at the pre-rotation epoch.
     pub(super) pending_supervisor_rotation_fallback:
         Arc<tokio::sync::RwLock<Option<crate::store::SupervisorPendingRotationRecord>>>,
-    pub(super) task_board_service: crate::tasks::MobTaskBoardService,
     pub(super) spawn_policy: Arc<super::spawn_policy::SpawnPolicyService>,
     pub(super) dsl_authority: mob_dsl::MobMachineAuthority,
     /// Read-only MobMachine state projection for handle-side status/list
@@ -1847,41 +1845,6 @@ impl MobActor {
             .await
             .get(agent_identity)
             .and_then(|entry| entry.kickoff.as_ref().map(|snapshot| snapshot.phase))
-    }
-
-    /// Project the shell-side [`TaskStatus`] onto the DSL bridging enum
-    /// consumed by `MobMachineInput::TaskUpdate` guards. Shell's `Open` is
-    /// the "not-started, accepting-claims" state; the DSL names that state
-    /// `Pending`.
-    fn task_status_to_dsl(status: crate::tasks::TaskStatus) -> mob_dsl::TaskStatus {
-        match status {
-            crate::tasks::TaskStatus::Open => mob_dsl::TaskStatus::Pending,
-            crate::tasks::TaskStatus::InProgress => mob_dsl::TaskStatus::InProgress,
-            crate::tasks::TaskStatus::Completed => mob_dsl::TaskStatus::Completed,
-            crate::tasks::TaskStatus::Cancelled => mob_dsl::TaskStatus::Cancelled,
-        }
-    }
-
-    /// Build the DSL's opaque [`MobTask`] payload from the shell-side
-    /// `subject` / `description` / `blocked_by` on a newly-created task.
-    /// The DSL only observes `tasks.contains_key(id)` in guards, so the
-    /// richer shell fields (`created_at`, `updated_at`, `id`) do not need
-    /// to survive projection.
-    fn task_payload_to_dsl(
-        subject: &str,
-        description: &str,
-        blocked_by: &[crate::ids::TaskId],
-    ) -> mob_dsl::MobTask {
-        mob_dsl::MobTask {
-            subject: subject.to_string(),
-            description: description.to_string(),
-            status: mob_dsl::TaskStatus::Pending,
-            owner: None,
-            blocked_by: blocked_by
-                .iter()
-                .map(|id| mob_dsl::TaskId::from(id.as_str()))
-                .collect(),
-        }
     }
 
     fn kickoff_phase_to_dsl(phase: crate::roster::MobMemberKickoffPhase) -> mob_dsl::KickoffPhase {
@@ -3374,9 +3337,6 @@ impl MobActor {
                         wiring_edges: dsl.wiring_edges.clone(),
                         external_peer_edges: dsl.external_peer_edges.clone(),
                         identity_to_runtime: dsl.identity_to_runtime.clone(),
-                        tasks: dsl.tasks.clone(),
-                        in_progress_task_ids: dsl.in_progress_task_ids.clone(),
-                        completed_task_ids: dsl.completed_task_ids.clone(),
                         member_restore_failures: dsl.member_restore_failures.clone(),
                         member_session_bindings: dsl.member_session_bindings.clone(),
                         pending_spawn_sessions: dsl.pending_spawn_sessions.clone(),
@@ -3578,34 +3538,6 @@ impl MobActor {
                     self.fail_all_pending_spawns("mob is resetting").await;
                     let result = self.handle_reset(prior_state).await;
                     let _ = reply_tx.send(result);
-                }
-                MobCommand::TaskCreate {
-                    subject,
-                    description,
-                    blocked_by,
-                    reply_tx,
-                } => {
-                    let result = self
-                        .handle_task_create(subject, description, blocked_by)
-                        .await;
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::TaskUpdate {
-                    task_id,
-                    status,
-                    owner,
-                    reply_tx,
-                } => {
-                    let result = self.handle_task_update(task_id, status, owner).await;
-                    let _ = reply_tx.send(result);
-                }
-                MobCommand::TaskList { reply_tx } => {
-                    let tasks = self.task_board.read().await.list().cloned().collect();
-                    let _ = reply_tx.send(tasks);
-                }
-                MobCommand::TaskGet { task_id, reply_tx } => {
-                    let task = self.task_board.read().await.get(&task_id).cloned();
-                    let _ = reply_tx.send(task);
                 }
                 MobCommand::SubscribeAgentEvents {
                     agent_identity,
@@ -9866,8 +9798,8 @@ impl MobActor {
         }
         // --- Event rewrite phase: append new epoch markers. ---
         // Append-only epoch model: MobCreated (for resume) + MobReset (epoch
-        // marker). Projections (roster, task board) clear on MobReset; resume
-        // uses the last MobCreated. No clear() needed -- crash-safe.
+        // marker). Projections clear on MobReset; resume uses the last
+        // MobCreated. No clear() needed -- crash-safe.
         // Batch append ensures both events land atomically.
         let mob_id = self.definition.id.clone();
         if let Err(error) = self
@@ -9895,7 +9827,6 @@ impl MobActor {
         // Clear in-memory projections.
         self.edge_locks.clear().await;
         self.retired_event_index.write().await.clear();
-        self.task_board_service.clear().await;
 
         // The command handler already checked Reset's live MobMachine phase
         // guard before destructive shell work began. Once side effects and
@@ -9965,66 +9896,6 @@ impl MobActor {
         self.handle_retire_inner(&id, true, false)
             .await
             .map_err(|error| (id, error))
-    }
-
-    async fn handle_task_create(
-        &mut self,
-        subject: String,
-        description: String,
-        blocked_by: Vec<TaskId>,
-    ) -> Result<TaskId, MobError> {
-        let task_id = TaskId::from(uuid::Uuid::new_v4().to_string());
-        let dsl_input = mob_dsl::MobMachineInput::TaskCreate {
-            task_id: mob_dsl::TaskId::from(task_id.as_str()),
-            task_payload: Self::task_payload_to_dsl(&subject, &description, &blocked_by),
-        };
-        // MobMachine is the admission authority. Allocate the id in the
-        // actor, prepare through the DSL, append/project the shell
-        // task-board event using the same id, then commit the prepared DSL
-        // state only after the board write succeeds.
-        let prepared =
-            self.prepare_command_admission(dsl_input, MobState::Running, "handle_task_create")?;
-        self.task_board_service
-            .create_task_with_id(task_id.clone(), subject, description, blocked_by)
-            .await?;
-        self.commit_prepared_dsl_input(prepared);
-        Ok(task_id)
-    }
-
-    async fn handle_task_update(
-        &mut self,
-        task_id: TaskId,
-        status: TaskStatus,
-        owner: Option<AgentIdentity>,
-    ) -> Result<(), MobError> {
-        let prepared = self.prepare_command_admission(
-            mob_dsl::MobMachineInput::TaskUpdate {
-                task_id: mob_dsl::TaskId::from(task_id.as_str()),
-                new_status: Self::task_status_to_dsl(status),
-            },
-            MobState::Running,
-            "handle_task_update",
-        )?;
-
-        // TLA+ TaskBindingInvariant: owner must be a known identity (roster member).
-        if let Some(ref owner_id) = owner {
-            let roster = self.roster.read().await;
-            let agent_identity = MeerkatId::from(owner_id.as_str());
-            if roster.get(&agent_identity).is_none() {
-                return Err(MobError::Internal(format!(
-                    "TaskBindingInvariant violated: task owner '{owner_id}' is not in the roster",
-                )));
-            }
-        }
-        // Gate the status transition through the DSL guard set before the
-        // shell-side event-sourced update, but commit only after the board
-        // write succeeds. Rolling back from a terminal status (Completed /
-        // Cancelled) is rejected here rather than by the event projection.
-        self.task_board_service
-            .update_task(task_id, status, owner)
-            .await?;
-        self.commit_prepared_dsl_input(prepared);
-        Ok(())
     }
 
     /// Unified work-lane entry.

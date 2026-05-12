@@ -47,6 +47,7 @@ pub enum CapabilityId {
     Shell,
     Comms,
     MemoryStore,
+    WorkGraph,
     SessionStore,
     SessionCompaction,
     Skills,

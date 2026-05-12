@@ -1591,10 +1591,7 @@ impl Session {
                     }
                     continue;
                 }
-            } else if state.applied.contains(append)
-                || new_appends.contains(append)
-                || current_system_prompt.contains(&rendered)
-            {
+            } else if new_appends.contains(append) || current_system_prompt.contains(&rendered) {
                 continue;
             }
             new_appends.push(append.clone());
@@ -3805,6 +3802,42 @@ mod tests {
         assert_eq!(
             state.seen["ctx-boundary"].state,
             SeenSystemContextState::Applied
+        );
+    }
+
+    #[test]
+    fn append_system_context_blocks_renders_pre_marked_context_without_idempotency_key() {
+        let accepted_at = SystemTime::UNIX_EPOCH;
+        let mut state = SessionSystemContextState::default();
+        state
+            .stage_append(
+                &AppendSystemContextRequest {
+                    text: "Apply this unkeyed staged context at the request boundary.".to_string(),
+                    source: Some("rpc/session_inject_context".to_string()),
+                    idempotency_key: None,
+                },
+                accepted_at,
+            )
+            .expect("append should stage");
+        let pending = state.pending.clone();
+        state.mark_pending_applied();
+        let mut session = Session::new();
+        session
+            .set_system_context_state(state)
+            .expect("state should serialize");
+
+        session.append_system_context_blocks(&pending);
+
+        let system_prompt = session
+            .messages()
+            .first()
+            .and_then(|message| match message {
+                Message::System(system) => Some(system.content.as_str()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        assert!(
+            system_prompt.contains("Apply this unkeyed staged context at the request boundary.")
         );
     }
 

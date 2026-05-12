@@ -5031,8 +5031,12 @@ impl SessionRuntime {
             } = slot;
             let mut build_config = *build_config;
             let mut runtime_prompt: ContentInput = prompt.clone();
+            let mut typed_turn_appends = primitive.typed_turn_appends();
             if let Some(deferred) = deferred_prompt {
                 runtime_prompt = merge_content_inputs(deferred, runtime_prompt);
+                // The merged deferred prompt must be the transcript boundary;
+                // current-turn primitive appends would otherwise replace it.
+                typed_turn_appends.clear();
             }
 
             let mut resolved_override_identity = None;
@@ -5156,7 +5160,7 @@ impl SessionRuntime {
                         pre_turn_context_appends.clone(),
                         primitive.turn_metadata().cloned(),
                     )
-                    .with_typed_turn_appends(primitive.typed_turn_appends()),
+                    .with_typed_turn_appends(typed_turn_appends),
                 },
                 match primitive {
                     RunPrimitive::StagedInput(staged) => staged.boundary,
@@ -8023,6 +8027,61 @@ mod tests {
             Box::pin(stream::iter(vec![
                 Ok(meerkat_client::LlmEvent::TextDelta {
                     delta: "Hello from mock".to_string(),
+                    meta: None,
+                }),
+                Ok(meerkat_client::LlmEvent::Done {
+                    outcome: meerkat_client::LlmDoneOutcome::Success {
+                        stop_reason: StopReason::EndTurn,
+                    },
+                }),
+            ]))
+        }
+
+        fn provider(&self) -> &'static str {
+            "mock"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMessagesLlmClient {
+        requests: StdMutex<Vec<Vec<meerkat_core::Message>>>,
+    }
+
+    impl RecordingMessagesLlmClient {
+        fn requests(&self) -> Vec<Vec<meerkat_core::Message>> {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl LlmClient for RecordingMessagesLlmClient {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat_client::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            request: &'a meerkat_client::LlmRequest,
+        ) -> Pin<
+            Box<dyn futures::Stream<Item = Result<meerkat_client::LlmEvent, LlmError>> + Send + 'a>,
+        > {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.messages.clone());
+            Box::pin(stream::iter(vec![
+                Ok(meerkat_client::LlmEvent::TextDelta {
+                    delta: "recorded".to_string(),
                     meta: None,
                 }),
                 Ok(meerkat_client::LlmEvent::Done {
@@ -12233,6 +12292,69 @@ mod tests {
         assert_eq!(
             duplicate.status,
             meerkat_core::AppendSystemContextStatus::Duplicate
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_routed_pending_first_turn_preserves_deferred_prompt_and_injected_context() {
+        let temp = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(RecordingMessagesLlmClient::default());
+        let build_config = AgentBuildConfig {
+            llm_client_override: Some(recorder.clone()),
+            ..AgentBuildConfig::new("claude-sonnet-4-5")
+        };
+        let runtime = Arc::new(make_runtime(temp_factory(&temp), 10));
+
+        let session_id = runtime
+            .create_session(
+                build_config,
+                None,
+                Some(ContentInput::Text(
+                    "Remember the codeword ORBIT-7 for later.".to_string(),
+                )),
+            )
+            .await
+            .expect("create deferred session");
+        runtime
+            .append_system_context(
+                &session_id,
+                AppendSystemContextRequest {
+                    text: "Always include the marker [TS-SDK-CTX] in your replies.".to_string(),
+                    source: Some("typescript-smoke".to_string()),
+                    idempotency_key: None,
+                },
+            )
+            .await
+            .expect("inject context");
+
+        let (event_tx, _event_rx) = mpsc::channel(100);
+        runtime
+            .start_turn_via_runtime(
+                &session_id,
+                "What is the codeword? Include any markers you were told about.".into(),
+                event_tx,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("runtime-routed first turn");
+
+        let requests = recorder.requests();
+        assert_eq!(requests.len(), 1, "expected one LLM request");
+        let request_dump = format!("{:?}", requests[0]);
+        assert!(
+            request_dump.contains("ORBIT-7"),
+            "deferred prompt missing from LLM request: {request_dump}"
+        );
+        assert!(
+            request_dump.contains("[TS-SDK-CTX]"),
+            "injected context missing from LLM request: {request_dump}"
+        );
+        assert!(
+            request_dump.contains("What is the codeword?"),
+            "first turn prompt missing from LLM request: {request_dump}"
         );
     }
 

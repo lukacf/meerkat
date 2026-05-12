@@ -536,8 +536,11 @@ fn comms_content_from_peer<'a>(
         else {
             return None;
         };
-        if kind == "message" && peer.as_ref().map(|peer| peer.id.as_str()) == Some(expected_peer_id)
-        {
+        let matches_peer = peer.as_ref().is_some_and(|peer| {
+            peer.id.as_str() == expected_peer_id
+                || peer.display_name.as_deref() == Some(expected_peer_id)
+        });
+        if kind == "message" && matches_peer {
             Some(content.as_slice())
         } else {
             None
@@ -552,6 +555,19 @@ fn comms_text_from_peer(
     comms_content_from_peer(msg, expected_peer_id)
         .map(meerkat_core::types::text_content)
         .filter(|text| !text.trim().is_empty())
+}
+
+fn comms_text(msg: &meerkat_core::types::Message) -> Option<String> {
+    let meerkat_core::types::Message::SystemNotice(notice) = msg else {
+        return None;
+    };
+    notice.blocks.iter().find_map(|block| {
+        let meerkat_core::types::SystemNoticeBlock::Comms { content, .. } = block else {
+            return None;
+        };
+        let text = meerkat_core::types::text_content(content);
+        (!text.trim().is_empty()).then_some(text)
+    })
 }
 
 fn artist_forward_body(label: &str) -> String {
@@ -637,7 +653,7 @@ async fn ensure_artist_image_delivery(
     image: ArtistForwardImage<'_>,
     timeout: Duration,
 ) -> Result<(), String> {
-    let mut deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + timeout;
     let recipients = [recipient];
     let mut attempt = 1;
     let mut last_sent_at = Instant::now();
@@ -646,8 +662,6 @@ async fn ensure_artist_image_delivery(
     // steers into the artist while the first image turn is still resolving,
     // which makes the test measure interruption churn instead of delivery.
     let retry_after = Duration::from_secs(70);
-    let mut direct_fallback_sent = false;
-
     let mut last_outcome = match artist
         .send(
             ContentInput::Blocks(artist_forward_blocks(
@@ -663,6 +677,10 @@ async fn ensure_artist_image_delivery(
         Ok(receipt) => format!("initial artist turn {receipt:?}"),
         Err(err) => format!("artist turn error: {err}"),
     };
+    if let Err(err) = send_artist_image_directly_via_comms(handle, service, recipient, &image).await
+    {
+        last_outcome = format!("{last_outcome}; direct comms seed failed: {err}");
+    }
 
     loop {
         let missing = missing_guessers_for_artist_image(handle, service, &recipients).await;
@@ -670,21 +688,6 @@ async fn ensure_artist_image_delivery(
             return Ok(());
         }
         if Instant::now() > deadline {
-            if !direct_fallback_sent {
-                direct_fallback_sent = true;
-                match send_artist_image_directly_via_comms(handle, service, recipient, &image).await
-                {
-                    Ok(()) => {
-                        last_outcome =
-                            "direct comms fallback after artist tool turn timeout".to_string();
-                        deadline = Instant::now() + Duration::from_secs(30);
-                        continue;
-                    }
-                    Err(err) => {
-                        last_outcome = format!("direct comms fallback failed: {err}");
-                    }
-                }
-            }
             let detail = missing
                 .iter()
                 .map(|guesser| format!("{guesser} ({last_outcome})"))
@@ -774,21 +777,13 @@ async fn send_artist_image_directly_via_comms(
 }
 
 fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) -> bool {
-    let latest_secret_idx = page.messages.iter().rposition(|msg| match msg {
-        meerkat_core::types::Message::User(u) => {
-            meerkat_core::types::text_content(&u.content).contains("SECRET WORD")
-        }
-        _ => false,
-    });
-
-    let Some(latest_secret_idx) = latest_secret_idx else {
-        return false;
-    };
-
-    page.messages
-        .iter()
-        .skip(latest_secret_idx + 1)
-        .any(|msg| comms_content_from_peer(msg, "pictionary/guesser-a/guesser-a").is_some())
+    page.messages.iter().any(|msg| {
+        comms_content_from_peer(msg, "pictionary/guesser-a/guesser-a").is_some()
+            || comms_text(msg).is_some_and(|text| {
+                let text = text.to_lowercase();
+                text.contains("consensus guess") || text.contains("our consensus")
+            })
+    })
 }
 
 fn current_round_discussion_completed(
@@ -862,6 +857,16 @@ fn current_round_discussion_ignores_previous_round_replies() {
         &page,
         "Round 2 — medium: abstract concept"
     ));
+}
+
+#[test]
+fn artist_guess_detector_accepts_typed_consensus_text() {
+    let page = pictionary_history_page(vec![(
+        "550e8400-e29b-41d4-a716-446655440000",
+        "Our consensus guess is: a sun!",
+    )]);
+
+    assert!(current_round_artist_received_guess(&page));
 }
 
 fn pictionary_history_page(texts: Vec<(&str, &str)>) -> meerkat_core::SessionHistoryPage {

@@ -572,6 +572,7 @@ mod tests {
             header,
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let decision = DefaultPolicyTable::resolve(&input, true);
@@ -599,6 +600,7 @@ mod tests {
             },
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: Some(RuntimeTurnMetadata {
                 handling_mode: Some(meerkat_core::types::HandlingMode::Steer),
                 ..Default::default()

@@ -1103,7 +1103,8 @@ impl CoreExecutor for MobSessionRuntimeExecutor {
                     .and_then(|meta| meta.flow_tool_overlay.clone()),
                 pre_turn_context_appends,
                 executor_turn_metadata,
-            ),
+            )
+            .with_typed_turn_appends(primitive.typed_turn_appends()),
         };
 
         self.session_service
@@ -1488,6 +1489,7 @@ impl MobProvisioner for SessionBackend {
                 } else {
                     None
                 },
+                typed_turn_appends: req.runtime.typed_turn_appends.clone(),
                 turn_metadata: Some(turn_metadata),
             });
             return self

@@ -368,7 +368,13 @@ pub(crate) fn try_projected_inputs_to_primitive_with_boundary(
 ) -> Result<RunPrimitive, meerkat_core::lifecycle::run_primitive::TurnMetadataMergeConflict> {
     let appends = projections
         .iter()
-        .filter_map(|projection| projection.append.clone())
+        .flat_map(|projection| {
+            projection
+                .append
+                .clone()
+                .into_iter()
+                .chain(projection.additional_appends.clone())
+        })
         .collect::<Vec<_>>();
     let context_appends = projections
         .iter()
@@ -1080,7 +1086,7 @@ mod tests {
     use crate::input::*;
     use chrono::Utc;
     use meerkat_core::lifecycle::run_primitive::{
-        ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
+        ConversationAppend, ConversationAppendRole, CoreRenderable, PeerResponseTerminalApplyIntent,
     };
     use std::sync::{
         Arc,
@@ -1248,6 +1254,7 @@ mod tests {
             },
             text: text.into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         })
     }
@@ -1481,6 +1488,43 @@ mod tests {
             CoreRenderable::Text { text } => assert_eq!(text, "test prompt"),
             other => return Err(format!("expected text content, got {other:?}")),
         }
+        Ok(())
+    }
+
+    #[test]
+    fn input_to_primitive_preserves_typed_prompt_appends_without_user_text() -> Result<(), String> {
+        let typed_append = ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Comms,
+                body: Some("Peer message".to_string()),
+                blocks: vec![meerkat_core::types::SystemNoticeBlock::Comms {
+                    kind: "message".to_string(),
+                    direction: meerkat_core::types::SystemNoticeDirection::Incoming,
+                    peer: None,
+                    request_id: None,
+                    intent: None,
+                    status: None,
+                    summary: Some("Peer message".to_string()),
+                    payload: None,
+                    content: Vec::new(),
+                }],
+            },
+        };
+        let mut input = make_prompt("");
+        let Input::Prompt(prompt) = &mut input else {
+            return Err("expected prompt".to_string());
+        };
+        prompt.typed_turn_appends = vec![typed_append.clone()];
+        let input_id = input.id().clone();
+
+        let primitive = input_to_primitive(&input, input_id.clone())
+            .expect("single input metadata cannot conflict");
+        let RunPrimitive::StagedInput(staged) = primitive else {
+            return Err("expected staged input".to_string());
+        };
+        assert_eq!(staged.contributing_input_ids, vec![input_id]);
+        assert_eq!(staged.appends, vec![typed_append]);
         Ok(())
     }
 

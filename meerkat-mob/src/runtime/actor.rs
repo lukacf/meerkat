@@ -2638,6 +2638,7 @@ impl MobActor {
                 } else {
                     None
                 },
+                typed_turn_appends: Vec::new(),
                 turn_metadata: None,
             });
 

@@ -89,6 +89,7 @@ pub struct RuntimeInputSemantics {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RuntimeInputProjection {
     pub append: Option<ConversationAppend>,
+    pub additional_appends: Vec<ConversationAppend>,
     pub context_append: Option<ConversationContextAppend>,
 }
 

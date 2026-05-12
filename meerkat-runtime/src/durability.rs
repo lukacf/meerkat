@@ -101,6 +101,7 @@ mod tests {
             header: make_header(InputDurability::Derived, InputOrigin::System),
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_err());
@@ -112,6 +113,7 @@ mod tests {
             header: make_header(InputDurability::Durable, InputOrigin::Operator),
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());
@@ -123,6 +125,7 @@ mod tests {
             header: make_header(InputDurability::Ephemeral, InputOrigin::Operator),
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert!(validate_durability(&input).is_ok());

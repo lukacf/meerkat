@@ -36,8 +36,8 @@ use meerkat_core::service::{
     SessionUsage, SessionView, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::types::{
-    HandlingMode, Message, RunResult, SessionId, ToolCallView, ToolDef, ToolProvenance, ToolResult,
-    Usage,
+    ContentBlock, ContentInput, HandlingMode, Message, RunResult, SessionId, SystemNoticeBlock,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolProvenance, ToolResult, Usage,
 };
 use meerkat_core::{
     AgentToolDispatcher, AppendSystemContextStatus, EventInjector, EventInjectorError,
@@ -4966,6 +4966,28 @@ impl SessionAgent for OverlayProbeSessionAgent {
             })
             .await;
         Ok(result)
+    }
+
+    async fn run_turn_with_events(
+        &mut self,
+        prompt: meerkat_core::types::ContentInput,
+        handling_mode: HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        _typed_turn_appends: Vec<meerkat_core::lifecycle::run_primitive::ConversationAppend>,
+        _execution_kind: Option<meerkat_core::lifecycle::RuntimeExecutionKind>,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Result<RunResult, meerkat_core::error::AgentError> {
+        if handling_mode != HandlingMode::Queue {
+            return Err(meerkat_core::error::AgentError::ConfigError(format!(
+                "unexpected overlay-probe handling mode: {handling_mode:?}"
+            )));
+        }
+        if render_metadata.is_some() {
+            return Err(meerkat_core::error::AgentError::ConfigError(
+                "overlay probe does not consume render metadata".to_string(),
+            ));
+        }
+        self.run_with_events(prompt, event_tx).await
     }
 
     fn set_skill_references(&mut self, _refs: Option<Vec<meerkat_core::skills::SkillKey>>) {}
@@ -23275,6 +23297,43 @@ impl RuntimeBackedRealCommsSessionService {
     }
 }
 
+fn provider_visible_prompt_from_start_turn_request(req: &StartTurnRequest) -> ContentInput {
+    let mut blocks = req.prompt.clone().into_blocks();
+    for append in &req.runtime.typed_turn_appends {
+        let meerkat_core::lifecycle::run_primitive::CoreRenderable::SystemNotice {
+            kind,
+            body,
+            blocks: notice_blocks,
+        } = &append.content
+        else {
+            continue;
+        };
+        let projection =
+            SystemNoticeMessage::with_blocks(*kind, body.clone(), notice_blocks.clone())
+                .model_projection_text();
+        if !projection.trim().is_empty() {
+            blocks.push(ContentBlock::Text { text: projection });
+        }
+        for notice_block in notice_blocks {
+            let content = match notice_block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => content,
+                _ => continue,
+            };
+            blocks.extend(content.iter().filter_map(|block| match block {
+                ContentBlock::Image { .. } | ContentBlock::Video { .. } => Some(block.clone()),
+                ContentBlock::Text { .. } | _ => None,
+            }));
+        }
+    }
+    if blocks.len() == 1
+        && let ContentBlock::Text { text } = blocks.remove(0)
+    {
+        return ContentInput::Text(text);
+    }
+    ContentInput::Blocks(blocks)
+}
+
 #[async_trait]
 impl SessionService for RuntimeBackedRealCommsSessionService {
     async fn create_session(&self, req: CreateSessionRequest) -> Result<RunResult, SessionError> {
@@ -23543,6 +23602,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
         boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
         contributing_input_ids: Vec<meerkat_core::InputId>,
     ) -> Result<meerkat_core::lifecycle::core_executor::CoreApplyOutput, SessionError> {
+        let provider_visible_prompt = provider_visible_prompt_from_start_turn_request(&req);
         let pre_turn_context_appends = req.runtime.pre_turn_context_appends;
         if !pre_turn_context_appends.is_empty() {
             for append in pre_turn_context_appends {
@@ -23569,7 +23629,7 @@ impl MobSessionService for RuntimeBackedRealCommsSessionService {
             .await
             .entry(session_id.clone())
             .or_default()
-            .push(req.prompt);
+            .push(provider_visible_prompt);
         self.applied_runtime_render_metadata
             .write()
             .await

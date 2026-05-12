@@ -277,6 +277,12 @@ pub struct PromptInput {
     /// text projection (backwards compat), and `blocks` carries the full content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<meerkat_core::types::ContentBlock>>,
+    /// Runtime-authored typed transcript appends that travel with this turn.
+    ///
+    /// These are not operator-authored prompt content. The runtime projects
+    /// them into model-facing text only when building the provider request.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub typed_turn_appends: Vec<ConversationAppend>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_metadata: Option<RuntimeTurnMetadata>,
 }
@@ -297,6 +303,7 @@ impl PromptInput {
             },
             text: text.into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
@@ -325,6 +332,7 @@ impl PromptInput {
             },
             text,
             blocks,
+            typed_turn_appends: Vec::new(),
             turn_metadata,
         }
     }
@@ -841,6 +849,13 @@ fn input_to_append(input: &Input) -> Option<ConversationAppend> {
     }
 
     let (role, content) = match input {
+        Input::Prompt(p)
+            if !p.typed_turn_appends.is_empty()
+                && p.text.trim().is_empty()
+                && p.blocks.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            return None;
+        }
         Input::Prompt(p) if p.blocks.is_some() => (
             ConversationAppendRole::User,
             CoreRenderable::Blocks {
@@ -935,6 +950,10 @@ pub(crate) fn runtime_input_projection(
 ) -> crate::ingress_types::RuntimeInputProjection {
     crate::ingress_types::RuntimeInputProjection {
         append: input_to_append(input),
+        additional_appends: match input {
+            Input::Prompt(prompt) => prompt.typed_turn_appends.clone(),
+            _ => Vec::new(),
+        },
         context_append: input_to_context_append(input),
     }
 }
@@ -970,18 +989,73 @@ mod tests {
         }
     }
 
+    fn typed_runtime_notice_append(detail: &str) -> ConversationAppend {
+        ConversationAppend {
+            role: ConversationAppendRole::SystemNotice,
+            content: CoreRenderable::SystemNotice {
+                kind: meerkat_core::types::SystemNoticeKind::Generic,
+                body: Some(detail.to_string()),
+                blocks: vec![meerkat_core::types::SystemNoticeBlock::RuntimeNotice {
+                    category: "test".to_string(),
+                    detail: Some(detail.to_string()),
+                    payload: None,
+                }],
+            },
+        }
+    }
+
     #[test]
     fn prompt_input_serde() {
         let input = Input::Prompt(PromptInput {
             header: make_header(),
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let json = serde_json::to_value(&input).unwrap();
         assert_eq!(json["input_type"], "prompt");
         let parsed: Input = serde_json::from_value(json).unwrap();
         assert!(matches!(parsed, Input::Prompt(_)));
+    }
+
+    #[test]
+    fn prompt_input_typed_turn_appends_project_without_user_text() {
+        let append = typed_runtime_notice_append("peer delivery");
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: String::new(),
+            blocks: None,
+            typed_turn_appends: vec![append.clone()],
+            turn_metadata: None,
+        });
+
+        let projection = runtime_input_projection(&input);
+        assert!(
+            projection.append.is_none(),
+            "empty runtime-authored prompt carrier must not synthesize a user append"
+        );
+        assert_eq!(projection.additional_appends, vec![append]);
+    }
+
+    #[test]
+    fn prompt_input_typed_turn_appends_serde_roundtrip() {
+        let append = typed_runtime_notice_append("typed appends persist");
+        let input = Input::Prompt(PromptInput {
+            header: make_header(),
+            text: String::new(),
+            blocks: None,
+            typed_turn_appends: vec![append.clone()],
+            turn_metadata: None,
+        });
+
+        let json = serde_json::to_value(&input).unwrap();
+        let parsed: Input = serde_json::from_value(json).unwrap();
+        let Input::Prompt(prompt) = parsed else {
+            panic!("expected prompt input");
+        };
+        assert_eq!(prompt.text, "");
+        assert_eq!(prompt.typed_turn_appends, vec![append]);
     }
 
     #[test]
@@ -1368,6 +1442,7 @@ mod tests {
             header: make_header(),
             text: "hi".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         assert_eq!(prompt.kind(), InputKind::Prompt);

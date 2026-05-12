@@ -158,6 +158,7 @@ mod tests {
             },
             text: "hello".into(),
             blocks: None,
+            typed_turn_appends: Vec::new(),
             turn_metadata: None,
         });
         let silent = vec!["mob.peer_added".to_string()];

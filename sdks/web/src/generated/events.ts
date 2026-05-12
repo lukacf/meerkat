@@ -78,6 +78,8 @@ export type AgentErrorReport = {
   reason?: AgentErrorReason | null;
 };
 
+export type AnthropicServerToolKind = "web_search" | "generic";
+
 export interface AssistantImageEvent {
   blob_ref: BlobRef;
   height: number;
@@ -115,6 +117,9 @@ export type ContentBlock = {
 } | {
   data: string;
   source: "inline";
+} | {
+  type: "json";
+  value: unknown;
 };
 
 export type ContentInput = string | ContentBlock[];
@@ -176,6 +181,10 @@ export type OpenAiImageMetadata = {
   target_model: string;
 };
 
+export type OpenAiServerToolItemKind = "web_search_call" | "web_search_result" | "file_search_call" | "computer_call" | "code_interpreter_call" | "image_generation_call" | "mcp_call" | "mcp_list_tools" | "mcp_approval_request";
+
+export type OpenAiWebSearchCallEventKind = "searching";
+
 export interface PromptText {
   content: string;
 }
@@ -209,6 +218,48 @@ export interface SchemaWarning {
   path: string;
   provider: Provider;
 }
+
+export type ServerToolContent = {
+  data: {
+  annotations: unknown;
+};
+  kind: "open_ai_message_annotations";
+} | {
+  data: {
+  item: unknown;
+  item_kind: OpenAiServerToolItemKind;
+};
+  kind: "open_ai_response_item";
+} | {
+  data: {
+  event_kind: OpenAiWebSearchCallEventKind;
+  item_id?: string | null;
+  output_index?: number | null;
+  sequence_number?: number | null;
+};
+  kind: "open_ai_web_search_call_event";
+} | {
+  data: {
+  citations: unknown;
+};
+  kind: "anthropic_text_citations";
+} | {
+  data: {
+  result: unknown;
+};
+  kind: "anthropic_web_search_tool_result";
+} | {
+  data: {
+  input: unknown;
+  tool: AnthropicServerToolKind;
+};
+  kind: "anthropic_server_tool_use";
+} | {
+  data: {
+  grounding_metadata: unknown;
+};
+  kind: "gemini_grounding_metadata";
+};
 
 export type SessionCheckpointErrorKind = "blob_externalization" | "deferred_turn_externalization" | "deferred_turn_serialization" | "store_save";
 
@@ -293,9 +344,6 @@ export type ToolConfigChangeStatus = {
   detail?: string | null;
   kind: "external_tool_delta";
   phase: ExternalToolDeltaPhase;
-} | {
-  kind: "legacy_status";
-  status: string;
 };
 
 export type ToolConfigChangedPayload = {
@@ -304,8 +352,7 @@ export type ToolConfigChangedPayload = {
   domain?: ToolConfigChangeDomain | null;
   operation: ToolConfigChangeOperation;
   persisted: boolean;
-  status: string;
-  status_info?: ToolConfigChangeStatus | null;
+  status_info: ToolConfigChangeStatus;
   target: string;
 };
 
@@ -365,7 +412,6 @@ export interface ExtractionFailedEvent {
 }
 
 export interface RunFailedEvent {
-  error: string;
   error_class: AgentErrorClass;
   error_report?: AgentErrorReport | null;
   session_id: SessionId;
@@ -428,9 +474,8 @@ export interface TextCompleteEvent {
 }
 
 export interface ServerToolContentEvent {
-  content: unknown;
+  content: ServerToolContent;
   id?: string | null;
-  name: string;
   type: "server_tool_content";
 }
 
@@ -447,7 +492,7 @@ export interface ToolCallRequestedEvent {
 }
 
 export interface ToolResultReceivedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   error?: ToolResultError | null;
   id: string;
   is_error: boolean;
@@ -468,13 +513,12 @@ export interface ToolExecutionStartedEvent {
 }
 
 export interface ToolExecutionCompletedEvent {
-  content?: ContentBlock[];
+  content: ContentBlock[];
   duration_ms: number;
   error?: ToolResultError | null;
   id: string;
   is_error: boolean;
   name: string;
-  result: string;
   type: "tool_execution_completed";
 }
 
@@ -528,9 +572,7 @@ export interface SkillsResolvedEvent {
 }
 
 export interface SkillResolutionFailedEvent {
-  error?: string;
-  reason?: SkillResolutionFailureReason;
-  reference?: string;
+  reason: SkillResolutionFailureReason;
   skill_key?: SkillKey | null;
   type: "skill_resolution_failed";
 }
@@ -569,7 +611,6 @@ export interface BackgroundJobCompletedEvent {
   detail: string;
   display_name: string;
   job_id: string;
-  status?: string | null;
   terminal_status: BackgroundJobTerminalStatus;
   type: "background_job_completed";
 }

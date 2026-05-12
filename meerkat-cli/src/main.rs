@@ -4024,14 +4024,6 @@ impl LoginProvider {
         }
     }
 
-    fn oauth_alias(self) -> &'static str {
-        match self {
-            Self::Anthropic => "anthropic",
-            Self::OpenAi => "openai",
-            Self::Google => "google",
-        }
-    }
-
     fn oauth_identity(self) -> meerkat_providers::oauth_flow::OAuthProviderIdentity {
         match self {
             Self::Anthropic => {
@@ -4737,11 +4729,8 @@ async fn interactive_login(
     .await
     .map_err(|e| anyhow::anyhow!("failed to bind loopback callback: {e}"))?;
     let redirect_url = pending_callback.redirect_url.clone();
-    let resolved = meerkat_providers::oauth_flow::resolve_oauth_provider(
-        provider.oauth_alias(),
-        &redirect_url,
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let resolved =
+        meerkat_providers::oauth_flow::resolve_oauth_provider_identity(identity, &redirect_url);
     debug_assert_eq!(resolved.identity, identity);
     let state_token = scope
         .oauth_flow_authority
@@ -5037,9 +5026,7 @@ async fn project_cli_auth_status(
 ) -> CliAuthStatusProjection {
     let lease_key = meerkat_core::handles::LeaseKey::from_auth_binding(auth_binding);
     let mut snapshot = auth_lease.snapshot(&lease_key);
-    let expected_mode = meerkat_providers::auth_store::persisted_auth_mode_for_auth_method(
-        &auth_profile.auth_method,
-    );
+    let expected_mode = auth_profile.persisted_auth_mode();
     let source_uses_store =
         meerkat_providers::auth_store::credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
@@ -11034,7 +11021,9 @@ async fn execute_mob_web_build(
         load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
     if let Some(requires) = &verified.archive.manifest.requires {
         for requirement in requires.typed_capabilities() {
-            if meerkat_contracts::capability::browser_mobpack_capability_decision(requirement)
+            if meerkat_contracts::capability::browser_mobpack_capability_decision_for_id(
+                requirement.id(),
+            )
                 .is_forbidden()
             {
                 anyhow::bail!(
@@ -13092,8 +13081,8 @@ default_model = "gemma"
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

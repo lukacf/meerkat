@@ -570,12 +570,24 @@ pub struct MobMemberParams {
     pub agent_identity: String,
 }
 
+/// Closed lifecycle state exposed by mob status/list/snapshot wire contracts.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "PascalCase")]
+pub enum WireMobState {
+    Creating,
+    Running,
+    Stopped,
+    Completed,
+    Destroyed,
+}
+
 /// One active mob row returned by `mob/list`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobStatusResult {
     pub mob_id: String,
-    pub status: String,
+    pub status: WireMobState,
 }
 
 /// Response payload for `mob/list`.
@@ -1743,7 +1755,7 @@ pub struct MobAppendSystemContextParams {
 pub struct MobAppendSystemContextResult {
     pub mob_id: String,
     pub agent_identity: String,
-    pub status: String,
+    pub status: meerkat_core::AppendSystemContextStatus,
 }
 
 /// Response payload for `mob/flows`.
@@ -2120,8 +2132,8 @@ pub struct MobMemberStatusResult {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MobSnapshotResult {
     pub mob_id: String,
-    pub status: String,
-    pub members: Vec<Value>,
+    pub status: WireMobState,
+    pub members: Vec<MobMemberListEntryWire>,
 }
 
 #[cfg(test)]

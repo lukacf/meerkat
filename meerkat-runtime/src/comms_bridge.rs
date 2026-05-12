@@ -18,6 +18,7 @@ use crate::identifiers::{CorrelationId, LogicalRuntimeId};
 use crate::input::{
     ExternalEventInput, Input, InputDurability, InputHeader, InputOrigin, InputVisibility,
     PeerConvention, PeerInput, ResponseProgressPhase, ResponseTerminalStatus,
+    peer_response_terminal_idempotency_key,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -122,6 +123,7 @@ fn peer_input_from_ingress_fact(
         .as_ref()
         .map(meerkat_core::PeerRoute::label)
         .or_else(|| ingress.display_label());
+    let idempotency_key = peer_response_terminal_input_idempotency_key(&peer_id, &convention);
 
     Ok(Input::Peer(PeerInput {
         header: InputHeader {
@@ -137,7 +139,7 @@ fn peer_input_from_ingress_fact(
                 transcript_eligible: true,
                 operator_eligible: true,
             },
-            idempotency_key: None,
+            idempotency_key,
             supersession_key: None,
             correlation_id: Some(CorrelationId::from_uuid(interaction.id.0)),
         },
@@ -147,6 +149,18 @@ fn peer_input_from_ingress_fact(
         blocks: peer_blocks(interaction),
         handling_mode,
     }))
+}
+
+fn peer_response_terminal_input_idempotency_key(
+    peer_id: &str,
+    convention: &PeerConvention,
+) -> Option<crate::identifiers::IdempotencyKey> {
+    match convention {
+        PeerConvention::ResponseTerminal { request_id, .. } => {
+            Some(peer_response_terminal_idempotency_key(peer_id, request_id))
+        }
+        _ => None,
+    }
 }
 
 fn map_ingress_convention(
@@ -994,6 +1008,11 @@ mod tests {
                 p.payload,
                 Some(serde_json::json!({"ok": true})),
                 "terminal response result must remain structured on PeerInput so runtime prompt projection stays runtime-owned"
+            );
+            let expected_key = format!("peer_response_terminal:{route_id}:{in_reply_to}");
+            assert_eq!(
+                p.header.idempotency_key.as_ref().map(ToString::to_string),
+                Some(expected_key)
             );
         } else {
             panic!("Expected PeerInput");

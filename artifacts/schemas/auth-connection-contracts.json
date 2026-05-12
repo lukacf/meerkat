@@ -28,7 +28,7 @@
     "unknown"
   ],
   "backend_kinds": [
-    "openai_api",
+    "open_ai_api",
     "chatgpt_backend",
     "anthropic_api",
     "bedrock",
@@ -38,7 +38,7 @@
     "vertex_ai",
     "google_code_assist",
     "self_hosted",
-    "openai_compatible"
+    "open_ai_compatible"
   ],
   "credential_source_kinds": [
     "inline_secret",
@@ -105,12 +105,12 @@
       "google_code_assist"
     ],
     "openai": [
-      "openai_api",
+      "open_ai_api",
       "chatgpt_backend"
     ],
     "self_hosted": [
       "self_hosted",
-      "openai_compatible"
+      "open_ai_compatible"
     ]
   },
   "providers": [

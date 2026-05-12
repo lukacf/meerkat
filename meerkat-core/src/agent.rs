@@ -14,6 +14,7 @@ pub mod skills;
 mod state;
 #[doc(hidden)]
 pub mod test_turn_state_handle;
+use crate::Provider;
 use crate::budget::Budget;
 use crate::comms::{
     CommsCommand, EventStream, PeerDirectoryEntry, PeerId, SendAndStreamError, SendError,
@@ -69,8 +70,8 @@ pub trait AgentLlmClient: Send + Sync {
         provider_params: Option<&ProviderParamsOverride>,
     ) -> Result<LlmStreamResult, AgentError>;
 
-    /// Get the provider name
-    fn provider(&self) -> &'static str;
+    /// Get the typed provider identity.
+    fn provider(&self) -> Provider;
 
     /// Get the typed provider identity for policy/default resolution.
     fn provider_id(&self) -> crate::Provider {

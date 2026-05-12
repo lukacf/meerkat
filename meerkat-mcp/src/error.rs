@@ -25,4 +25,7 @@ pub enum McpError {
 
     #[error("Tool call failed for '{tool}': {reason}")]
     ToolCallFailed { tool: String, reason: String },
+
+    #[error("Invalid arguments for tool '{tool}': {reason}")]
+    InvalidToolArguments { tool: String, reason: String },
 }

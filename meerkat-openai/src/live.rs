@@ -28,7 +28,6 @@ use oai_rt_rs::protocol::models::{
 use oai_rt_rs::{
     ClientEvent, Error as OpenAiLiveError, RealtimeClient, RealtimeSender, ServerEvent,
 };
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
@@ -339,67 +338,22 @@ fn openai_realtime_runtime_system_context_text(append: &PendingSystemContextAppe
 fn openai_realtime_authoritative_system_context(
     runtime_system_context: &[PendingSystemContextAppend],
 ) -> Option<String> {
-    let summaries = runtime_system_context
-        .iter()
-        .filter_map(openai_realtime_terminal_peer_response_summary)
-        .collect::<Vec<_>>();
     let raw_lines = runtime_system_context
         .iter()
         .map(|append| append.text.trim())
         .filter(|text| !text.is_empty())
         .map(ToOwned::to_owned)
         .collect::<Vec<_>>();
-    if summaries.is_empty() && raw_lines.is_empty() {
+    if raw_lines.is_empty() {
         return None;
     }
 
     let mut text = String::from(
         "Authoritative Meerkat runtime facts for this live-session reconstruction. Treat these facts as ground truth even if earlier conversation text conflicts.",
     );
-    if !summaries.is_empty() {
-        text.push_str(
-            "\n\nResolved terminal peer-response facts. Use these resolved facts directly; if a matching fact exists, do not answer that you are still waiting for the peer response. When multiple facts match the same request_intent and request_subject, the later bullet wins:\n- ",
-        );
-        text.push_str(&summaries.join("\n- "));
-    }
-    if !raw_lines.is_empty() {
-        text.push_str("\n\nRaw runtime facts:\n- ");
-        text.push_str(&raw_lines.join("\n- "));
-    }
+    text.push_str("\n\nRaw runtime facts:\n- ");
+    text.push_str(&raw_lines.join("\n- "));
     Some(text)
-}
-
-fn openai_realtime_terminal_peer_response_summary(
-    append: &PendingSystemContextAppend,
-) -> Option<String> {
-    let source = append.source.as_deref().unwrap_or("runtime_system_context");
-    if !source.starts_with("peer_response_terminal:") {
-        return None;
-    }
-    let (_, result_text) = append
-        .text
-        .split_once("Payload:")
-        .or_else(|| append.text.split_once("Result:"))?;
-    let mut deserializer = serde_json::Deserializer::from_str(result_text.trim());
-    let result = serde_json::Value::deserialize(&mut deserializer).ok()?;
-    let intent = result
-        .get("request_intent")
-        .and_then(|value| value.as_str())?;
-    let subject = result
-        .get("request_subject")
-        .and_then(|value| value.as_str());
-    let token = result.get("token").and_then(|value| value.as_str());
-    let mut fields = vec![
-        format!("source `{source}`"),
-        format!("request_intent `{intent}`"),
-    ];
-    if let Some(subject) = subject {
-        fields.push(format!("request_subject `{subject}`"));
-    }
-    if let Some(token) = token {
-        fields.push(format!("token `{token}`"));
-    }
-    Some(fields.join(", "))
 }
 
 fn openai_realtime_history_events(
@@ -4753,7 +4707,7 @@ mod tests {
     }
 
     #[test]
-    fn instructions_resolve_terminal_peer_response_facts() {
+    fn instructions_do_not_parse_terminal_peer_response_text_into_facts() {
         let seed_messages = vec![Message::System(meerkat_core::SystemMessage::new(
             "You are the realtime operator.".to_string(),
         ))];
@@ -4773,24 +4727,20 @@ mod tests {
             .expect("terminal peer response should produce instructions");
 
         assert!(
-            instructions.contains("Resolved terminal peer-response facts"),
-            "expected terminal peer response summary section: {instructions}"
+            instructions.contains("Raw runtime facts"),
+            "expected raw runtime context section: {instructions}"
         );
         assert!(
-            instructions.contains("request_intent `checksum_token`"),
-            "expected request intent summary: {instructions}"
+            !instructions.contains("Resolved terminal peer-response facts"),
+            "system-notice text must not become parsed peer-response facts: {instructions}"
         );
         assert!(
-            instructions.contains("request_subject `alpha beta gamma`"),
-            "expected request subject summary: {instructions}"
+            !instructions.contains("request_intent `checksum_token`"),
+            "system-notice text must not synthesize request intent authority: {instructions}"
         );
         assert!(
-            instructions.contains("token `birch seventeen`"),
-            "expected token summary: {instructions}"
-        );
-        assert!(
-            instructions.contains("do not answer that you are still waiting"),
-            "expected waiting-state override guidance: {instructions}"
+            !instructions.contains("token `birch seventeen`"),
+            "system-notice text must not synthesize token authority: {instructions}"
         );
         assert!(
             instructions.contains("Peer terminal response from analyst-rt"),
@@ -4823,8 +4773,8 @@ mod tests {
             .expect("terminal peer response should produce instructions");
 
         let runtime_index = instructions
-            .find("Resolved terminal peer-response facts")
-            .expect("runtime terminal facts should be present");
+            .find("Raw runtime facts")
+            .expect("raw runtime facts should be present");
         let root_index = instructions
             .find("You are the realtime operator.")
             .expect("root system prompt should be present");

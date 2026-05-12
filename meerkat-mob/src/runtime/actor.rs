@@ -80,6 +80,35 @@ struct SupervisorPendingRotationPersistence {
     persisted_record: Option<crate::store::SupervisorAuthorityRecord>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MobDslRejectionKind {
+    GuardRejected,
+    NoMatchingTransition,
+}
+
+#[derive(Debug)]
+struct MobDslInputRejection {
+    kind: MobDslRejectionKind,
+    message: String,
+}
+
+impl MobDslInputRejection {
+    const fn is_guard_rejected(&self) -> bool {
+        matches!(self.kind, MobDslRejectionKind::GuardRejected)
+    }
+}
+
+fn mob_dsl_rejection_kind(error: &mob_dsl::MobMachineTransitionError) -> MobDslRejectionKind {
+    match error {
+        mob_dsl::MobMachineTransitionError::GuardRejected { .. } => {
+            MobDslRejectionKind::GuardRejected
+        }
+        mob_dsl::MobMachineTransitionError::NoMatchingTransition { .. } => {
+            MobDslRejectionKind::NoMatchingTransition
+        }
+    }
+}
+
 struct SupervisorUnrecordedAttemptRecovery {
     rollback_succeeded: bool,
     pending_authority_process_local: bool,
@@ -1486,14 +1515,27 @@ impl MobActor {
         input: mob_dsl::MobMachineInput,
         context: &str,
     ) -> Result<Vec<mob_dsl::MobMachineEffect>, MobError> {
+        match self.apply_dsl_input_collect_effects_or_rejection(input, context)? {
+            Ok(effects) => Ok(effects),
+            Err(rejection) => Err(MobError::Internal(rejection.message)),
+        }
+    }
+
+    fn apply_dsl_input_collect_effects_or_rejection(
+        &mut self,
+        input: mob_dsl::MobMachineInput,
+        context: &str,
+    ) -> Result<Result<Vec<mob_dsl::MobMachineEffect>, MobDslInputRejection>, MobError> {
         self.ensure_destroy_mutation_allowed(context)?;
         let input_debug = format!("{input:?}");
-        let transition = mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input)
-            .map_err(|e| {
-                MobError::Internal(format!(
-                    "DSL authority ({context}) rejected {input_debug}: {e}"
-                ))
-            })?;
+        let transition = match mob_dsl::MobMachineMutator::apply(&mut self.dsl_authority, input) {
+            Ok(transition) => transition,
+            Err(error) => {
+                let kind = mob_dsl_rejection_kind(&error);
+                let message = format!("DSL authority ({context}) rejected {input_debug}: {error}");
+                return Ok(Err(MobDslInputRejection { kind, message }));
+            }
+        };
         let effects = transition.effects.clone();
         self.queue_routed_effects_from(&transition.effects);
         if transition.from_phase != transition.to_phase {
@@ -1503,7 +1545,7 @@ impl MobActor {
             let _ = self.phase_watch_tx.send(self.state());
         }
         self.publish_machine_state_projection();
-        Ok(effects)
+        Ok(Ok(effects))
     }
 
     fn prepare_dsl_input(
@@ -6062,28 +6104,7 @@ impl MobActor {
         // Submit the DSL input. `edge_not_already_wired` may reject as
         // idempotent-success. We still fall through to repair trust/
         // notifications if the roster projection is out of sync.
-        let dsl_added = match self.apply_dsl_input(
-            mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
-            "wire_members",
-        ) {
-            Ok(()) => true,
-            Err(MobError::Internal(message)) if message.contains("wire_members") => {
-                if self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == &edge)
-                {
-                    false
-                } else {
-                    return Err(MobError::WiringError(format!(
-                        "wire rejected by MobMachine DSL: {message}"
-                    )));
-                }
-            }
-            Err(other) => return Err(other),
-        };
+        let dsl_added = self.apply_wire_members_idempotent(&edge)?;
 
         let local_peer_id = Self::trusted_peer_removal_key(&local_spec);
         let peer_peer_id = Self::trusted_peer_removal_key(&peer_spec);
@@ -6192,12 +6213,12 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        match self.apply_dsl_input_collect_effects_or_rejection(
             mob_dsl::MobMachineInput::WireMembers { edge: edge.clone() },
             "wire_members",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("wire_members") => {
+        )? {
+            Ok(_) => Ok(true),
+            Err(rejection) if rejection.is_guard_rejected() => {
                 if self
                     .dsl_authority
                     .state
@@ -6208,11 +6229,12 @@ impl MobActor {
                     Ok(false)
                 } else {
                     Err(MobError::WiringError(format!(
-                        "wire rejected by MobMachine DSL: {message}"
+                        "wire rejected by MobMachine DSL: {}",
+                        rejection.message
                     )))
                 }
             }
-            Err(other) => Err(other),
+            Err(rejection) => Err(MobError::Internal(rejection.message)),
         }
     }
 
@@ -6562,30 +6584,7 @@ impl MobActor {
         // Submit DSL input first. Idempotent rejection (edge absent) is
         // handled above; here we expect acceptance (or a non-idempotent
         // rejection that must surface).
-        let dsl_removed = match self.apply_dsl_input(
-            mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
-            "unwire_members",
-        ) {
-            Ok(()) => true,
-            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
-                if !self
-                    .dsl_authority
-                    .state
-                    .wiring_edges
-                    .iter()
-                    .any(|existing| existing == &edge)
-                {
-                    // DSL already absent — proceed with trust removal +
-                    // notification so live comms state is repaired.
-                    false
-                } else {
-                    return Err(MobError::WiringError(format!(
-                        "unwire rejected by MobMachine DSL: {message}"
-                    )));
-                }
-            }
-            Err(other) => return Err(other),
-        };
+        let dsl_removed = self.apply_unwire_members_idempotent(&edge)?;
 
         let mut removed_local_trust = false;
         let mut removed_peer_trust = false;
@@ -6746,12 +6745,12 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::WiringEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        match self.apply_dsl_input_collect_effects_or_rejection(
             mob_dsl::MobMachineInput::UnwireMembers { edge: edge.clone() },
             "unwire_members",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("unwire_members") => {
+        )? {
+            Ok(_) => Ok(true),
+            Err(rejection) if rejection.is_guard_rejected() => {
                 if !self
                     .dsl_authority
                     .state
@@ -6762,11 +6761,12 @@ impl MobActor {
                     Ok(false)
                 } else {
                     Err(MobError::WiringError(format!(
-                        "unwire rejected by MobMachine DSL: {message}"
+                        "unwire rejected by MobMachine DSL: {}",
+                        rejection.message
                     )))
                 }
             }
-            Err(other) => Err(other),
+            Err(rejection) => Err(MobError::Internal(rejection.message)),
         }
     }
 
@@ -6798,12 +6798,12 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        match self.apply_dsl_input_collect_effects_or_rejection(
             mob_dsl::MobMachineInput::WireExternalPeer { edge: edge.clone() },
             "wire_external_peer",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("wire_external_peer") => {
+        )? {
+            Ok(_) => Ok(true),
+            Err(rejection) if rejection.is_guard_rejected() => {
                 if self
                     .dsl_authority
                     .state
@@ -6814,11 +6814,12 @@ impl MobActor {
                     Ok(false)
                 } else {
                     Err(MobError::WiringError(format!(
-                        "wire external peer rejected by MobMachine DSL: {message}"
+                        "wire external peer rejected by MobMachine DSL: {}",
+                        rejection.message
                     )))
                 }
             }
-            Err(other) => Err(other),
+            Err(rejection) => Err(MobError::Internal(rejection.message)),
         }
     }
 
@@ -6826,12 +6827,12 @@ impl MobActor {
         &mut self,
         edge: &mob_dsl::ExternalPeerEdge,
     ) -> Result<bool, MobError> {
-        match self.apply_dsl_input(
+        match self.apply_dsl_input_collect_effects_or_rejection(
             mob_dsl::MobMachineInput::UnwireExternalPeer { edge: edge.clone() },
             "unwire_external_peer",
-        ) {
-            Ok(()) => Ok(true),
-            Err(MobError::Internal(message)) if message.contains("unwire_external_peer") => {
+        )? {
+            Ok(_) => Ok(true),
+            Err(rejection) if rejection.is_guard_rejected() => {
                 if !self
                     .dsl_authority
                     .state
@@ -6842,11 +6843,12 @@ impl MobActor {
                     Ok(false)
                 } else {
                     Err(MobError::WiringError(format!(
-                        "unwire external peer rejected by MobMachine DSL: {message}"
+                        "unwire external peer rejected by MobMachine DSL: {}",
+                        rejection.message
                     )))
                 }
             }
-            Err(other) => Err(other),
+            Err(rejection) => Err(MobError::Internal(rejection.message)),
         }
     }
 
@@ -11916,6 +11918,11 @@ impl MobActor {
         });
 
         let cmd = match intent {
+            "mob.peer_added" => CommsCommand::PeerLifecycle {
+                to: peer_route,
+                kind: PeerLifecycleKind::PeerAdded,
+                params,
+            },
             "mob.peer_retired" => CommsCommand::PeerLifecycle {
                 to: peer_route,
                 kind: PeerLifecycleKind::PeerRetired,
@@ -11926,14 +11933,7 @@ impl MobActor {
                 kind: PeerLifecycleKind::PeerUnwired,
                 params,
             },
-            _ => CommsCommand::PeerRequest {
-                to: peer_route,
-                intent: intent.to_string(),
-                params,
-                blocks: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
-                stream: meerkat_core::comms::InputStreamMode::None,
-            },
+            _ => return Ok(()),
         };
 
         sender_comms.send(cmd).await?;

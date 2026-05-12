@@ -50,9 +50,9 @@ impl LlmClient for CaptureClient {
         self.inner.stream(request)
     }
 
-    fn provider(&self) -> &'static str {
-        self.inner.provider()
-    }
+    fn provider(&self) -> meerkat_core::Provider {
+            self.inner.provider()
+        }
 
     async fn health_check(&self) -> Result<(), LlmError> {
         self.inner.health_check().await

@@ -1,6 +1,17 @@
 {
   "CatalogModelEntry": {
     "$defs": {
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -59,6 +70,10 @@
           "params_schema": {
             "description": "JSON Schema describing accepted provider-specific parameters."
           },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "Typed provider owner."
+          },
           "realtime": {
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
@@ -88,6 +103,7 @@
           }
         },
         "required": [
+          "provider",
           "model_family",
           "supports_temperature",
           "supports_thinking",
@@ -259,6 +275,17 @@
         ],
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "ProviderCatalog": {
         "description": "Provider-level grouping in the catalog response.",
         "properties": {
@@ -274,8 +301,8 @@
             "type": "array"
           },
           "provider": {
-            "description": "Canonical provider name.",
-            "type": "string"
+            "$ref": "#/$defs/Provider",
+            "description": "Typed provider owner."
           }
         },
         "required": [
@@ -343,6 +370,10 @@
           "params_schema": {
             "description": "JSON Schema describing accepted provider-specific parameters."
           },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "Typed provider owner."
+          },
           "realtime": {
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
@@ -372,6 +403,7 @@
           }
         },
         "required": [
+          "provider",
           "model_family",
           "supports_temperature",
           "supports_thinking",
@@ -479,6 +511,17 @@
         ],
         "type": "object"
       },
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -537,6 +580,10 @@
           "params_schema": {
             "description": "JSON Schema describing accepted provider-specific parameters."
           },
+          "provider": {
+            "$ref": "#/$defs/Provider",
+            "description": "Typed provider owner."
+          },
           "realtime": {
             "default": false,
             "description": "Whether the model supports realtime bidirectional transport.",
@@ -566,6 +613,7 @@
           }
         },
         "required": [
+          "provider",
           "model_family",
           "supports_temperature",
           "supports_thinking",
@@ -605,8 +653,8 @@
         "type": "array"
       },
       "provider": {
-        "description": "Canonical provider name.",
-        "type": "string"
+        "$ref": "#/$defs/Provider",
+        "description": "Typed provider owner."
       }
     },
     "required": [
@@ -619,6 +667,17 @@
   },
   "WireModelProfile": {
     "$defs": {
+      "Provider": {
+        "description": "Supported LLM providers.",
+        "enum": [
+          "anthropic",
+          "open_a_i",
+          "gemini",
+          "self_hosted",
+          "other"
+        ],
+        "type": "string"
+      },
       "WireModelBetaHeader": {
         "description": "Catalog-owned beta header metadata.",
         "properties": {
@@ -678,6 +737,10 @@
       "params_schema": {
         "description": "JSON Schema describing accepted provider-specific parameters."
       },
+      "provider": {
+        "$ref": "#/$defs/Provider",
+        "description": "Typed provider owner."
+      },
       "realtime": {
         "default": false,
         "description": "Whether the model supports realtime bidirectional transport.",
@@ -707,6 +770,7 @@
       }
     },
     "required": [
+      "provider",
       "model_family",
       "supports_temperature",
       "supports_thinking",

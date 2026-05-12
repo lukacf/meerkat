@@ -102,6 +102,11 @@ pub enum ContentBlock {
         #[serde(flatten)]
         data: VideoData,
     },
+    /// Structured JSON content.
+    Json {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        value: Value,
+    },
 }
 
 impl ContentBlock {
@@ -114,12 +119,18 @@ impl ContentBlock {
             ContentBlock::Text { text } => Cow::Borrowed(text),
             ContentBlock::Image { media_type, .. } => Cow::Owned(format!("[image: {media_type}]")),
             ContentBlock::Video { media_type, .. } => Cow::Owned(format!("[video: {media_type}]")),
+            ContentBlock::Json { value } => Cow::Owned(value.to_string()),
         }
     }
 
     /// Convenience: wrap a string into a single-element Vec of Text blocks.
     pub fn text_vec(s: String) -> Vec<ContentBlock> {
         vec![ContentBlock::Text { text: s }]
+    }
+
+    /// Convenience: wrap a JSON value into a single-element Vec of JSON blocks.
+    pub fn json_vec(value: Value) -> Vec<ContentBlock> {
+        vec![ContentBlock::Json { value }]
     }
 
     pub fn image_inline_data(&self) -> Option<(&str, &str)> {
@@ -407,6 +418,39 @@ pub struct RenderMetadata {
 // New ordered transcript types (spec section 3.1)
 // ===========================================================================
 
+/// OpenAI Responses replay phase marker.
+///
+/// This is intentionally closed at the transcript boundary. Provider adapters
+/// may observe arbitrary wire strings, but only known replay phases become
+/// durable transcript truth.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiReplayPhase {
+    Reasoning,
+    Draft,
+    Response,
+}
+
+impl OpenAiReplayPhase {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
+            "reasoning" => Some(Self::Reasoning),
+            "draft" => Some(Self::Draft),
+            "response" => Some(Self::Response),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Reasoning => "reasoning",
+            Self::Draft => "draft",
+            Self::Response => "response",
+        }
+    }
+}
+
 /// Provider-specific metadata for replay continuity.
 /// Typed enum prevents runtime "is this an object?" errors.
 #[non_exhaustive]
@@ -435,8 +479,8 @@ pub enum ProviderMeta {
         thought_signature: String,
     },
     /// OpenAI reasoning item metadata for stateless replay.
-    /// The `id`, `encrypted_content`, and `phase` fields must be preserved
-    /// verbatim when present so Responses API output items can be replayed.
+    /// The `id`, `encrypted_content`, and typed `phase` fields are preserved
+    /// when present so Responses API output items can be replayed.
     OpenAi {
         /// Reasoning item ID (required by OpenAI schema)
         id: String,
@@ -447,8 +491,162 @@ pub enum ProviderMeta {
         /// Responses API phase marker for manual stateless replay.
         #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
-        phase: Option<String>,
+        phase: Option<OpenAiReplayPhase>,
     },
+}
+
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiServerToolItemKind {
+    WebSearchCall,
+    WebSearchResult,
+    FileSearchCall,
+    ComputerCall,
+    CodeInterpreterCall,
+    ImageGenerationCall,
+    McpCall,
+    McpListTools,
+    McpApprovalRequest,
+}
+
+impl OpenAiServerToolItemKind {
+    pub fn from_response_item_type(value: &str) -> Option<Self> {
+        match value {
+            "web_search_call" => Some(Self::WebSearchCall),
+            "web_search_result" => Some(Self::WebSearchResult),
+            "file_search_call" => Some(Self::FileSearchCall),
+            "computer_call" => Some(Self::ComputerCall),
+            "code_interpreter_call" => Some(Self::CodeInterpreterCall),
+            "image_generation_call" => Some(Self::ImageGenerationCall),
+            "mcp_call" => Some(Self::McpCall),
+            "mcp_list_tools" => Some(Self::McpListTools),
+            "mcp_approval_request" => Some(Self::McpApprovalRequest),
+            _ => None,
+        }
+    }
+
+    pub const fn response_item_type(self) -> &'static str {
+        match self {
+            Self::WebSearchCall => "web_search_call",
+            Self::WebSearchResult => "web_search_result",
+            Self::FileSearchCall => "file_search_call",
+            Self::ComputerCall => "computer_call",
+            Self::CodeInterpreterCall => "code_interpreter_call",
+            Self::ImageGenerationCall => "image_generation_call",
+            Self::McpCall => "mcp_call",
+            Self::McpListTools => "mcp_list_tools",
+            Self::McpApprovalRequest => "mcp_approval_request",
+        }
+    }
+}
+
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAiWebSearchCallEventKind {
+    Searching,
+}
+
+impl OpenAiWebSearchCallEventKind {
+    pub fn from_event_type(value: &str) -> Option<Self> {
+        match value {
+            "response.web_search_call.searching" => Some(Self::Searching),
+            _ => None,
+        }
+    }
+
+    pub const fn event_type(self) -> &'static str {
+        match self {
+            Self::Searching => "response.web_search_call.searching",
+        }
+    }
+}
+
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AnthropicServerToolKind {
+    WebSearch,
+    Generic,
+}
+
+impl AnthropicServerToolKind {
+    pub fn from_provider_name(value: &str) -> Self {
+        match value {
+            "web_search" => Self::WebSearch,
+            _ => Self::Generic,
+        }
+    }
+
+    pub const fn provider_name(self) -> &'static str {
+        match self {
+            Self::WebSearch => "web_search",
+            Self::Generic => "server_tool",
+        }
+    }
+}
+
+/// Provider-executed tool evidence, such as web-search citations or provider
+/// grounding metadata. The variant is the semantic tool kind; provider-native
+/// JSON is kept only as the evidence payload inside that typed variant.
+#[non_exhaustive]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum ServerToolContent {
+    OpenAiMessageAnnotations {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        annotations: Value,
+    },
+    OpenAiResponseItem {
+        item_kind: OpenAiServerToolItemKind,
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        item: Value,
+    },
+    OpenAiWebSearchCallEvent {
+        event_kind: OpenAiWebSearchCallEventKind,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        item_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output_index: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        sequence_number: Option<u64>,
+    },
+    AnthropicTextCitations {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        citations: Value,
+    },
+    AnthropicWebSearchToolResult {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        result: Value,
+    },
+    AnthropicServerToolUse {
+        tool: AnthropicServerToolKind,
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        input: Value,
+    },
+    GeminiGroundingMetadata {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        grounding_metadata: Value,
+    },
+}
+
+impl ServerToolContent {
+    pub fn display_kind(&self) -> &'static str {
+        match self {
+            Self::OpenAiMessageAnnotations { .. } => "openai.message_annotations",
+            Self::OpenAiResponseItem { item_kind, .. } => item_kind.response_item_type(),
+            Self::OpenAiWebSearchCallEvent { event_kind, .. } => event_kind.event_type(),
+            Self::AnthropicTextCitations { .. } => "anthropic.text_citations",
+            Self::AnthropicWebSearchToolResult { .. } => "anthropic.web_search_tool_result",
+            Self::AnthropicServerToolUse { tool, .. } => tool.provider_name(),
+            Self::GeminiGroundingMetadata { .. } => "gemini.grounding_metadata",
+        }
+    }
 }
 
 /// Deserializes `Box<RawValue>` from a possibly-buffered serde value.
@@ -539,10 +737,7 @@ pub enum AssistantBlock {
         /// Provider item or tool-use ID when one exists.
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        /// Provider-native tool name, for example `web_search` or `google_search`.
-        name: String,
-        /// Provider-native JSON payload, preserved for citations and grounding evidence.
-        content: Value,
+        content: ServerToolContent,
         /// Provider continuity metadata, if any.
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<Box<ProviderMeta>>,
@@ -610,17 +805,15 @@ impl PartialEq for AssistantBlock {
             (
                 AssistantBlock::ServerToolContent {
                     id: i1,
-                    name: n1,
                     content: c1,
                     meta: m1,
                 },
                 AssistantBlock::ServerToolContent {
                     id: i2,
-                    name: n2,
                     content: c2,
                     meta: m2,
                 },
-            ) => i1 == i2 && n1 == n2 && c1 == c2 && m1 == m2,
+            ) => i1 == i2 && c1 == c2 && m1 == m2,
             (
                 AssistantBlock::Image {
                     image_id: i1,
@@ -1851,6 +2044,15 @@ impl ToolResult {
         self.is_error = true;
         self.error = Some(error);
         self
+    }
+
+    /// Create a tool result from a JSON value without stringifying structured
+    /// success as the authoritative content.
+    pub fn from_json_value(tool_use_id: String, value: Value, is_error: bool) -> Self {
+        match value {
+            Value::String(text) => Self::new(tool_use_id, text, is_error),
+            value => Self::with_blocks(tool_use_id, ContentBlock::json_vec(value), is_error),
+        }
     }
 
     /// Get concatenated text content (text projection for all blocks).

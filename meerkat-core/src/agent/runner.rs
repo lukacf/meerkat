@@ -845,7 +845,6 @@ where
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
                 error_class: error_report.class,
-                error: error_report.message.clone(),
                 terminal_cause_kind,
                 error_report: Some(error_report),
             },

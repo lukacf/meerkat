@@ -101,7 +101,7 @@ mod tests {
             self.inner.stream(request)
         }
 
-        fn provider(&self) -> &'static str {
+        fn provider(&self) -> meerkat_core::Provider {
             self.inner.provider()
         }
 

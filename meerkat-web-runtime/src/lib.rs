@@ -24,7 +24,7 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` → JSON lifecycle result
+//! - `mob_lifecycle(mob_id, action_json)` → JSON lifecycle result
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, agent_identity)`
@@ -74,9 +74,50 @@ use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
 use meerkat::{AgentBuildConfig, SessionServiceControlExt};
+use meerkat_contracts::WireMobState;
 use meerkat_core::{Config, SessionService};
-use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, RunId};
+
+fn content_input_from_js(
+    value: JsValue,
+    field: &'static str,
+) -> Result<meerkat_core::types::ContentInput, JsValue> {
+    if value.is_undefined() || value.is_null() {
+        return Err(err_js(
+            "invalid_content_input",
+            &format!("{field} must be a string or content block array"),
+        ));
+    }
+    if let Some(text) = value.as_string() {
+        return Ok(text.into());
+    }
+    let json = js_sys::JSON::stringify(&value)
+        .ok()
+        .and_then(|raw| raw.as_string())
+        .ok_or_else(|| {
+            err_js(
+                "invalid_content_input",
+                &format!("{field} must be JSON-serializable ContentInput"),
+            )
+        })?;
+    serde_json::from_str::<meerkat_core::types::ContentInput>(&json).map_err(|e| {
+        err_js(
+            "invalid_content_input",
+            &format!("{field} must be a string or content block array: {e}"),
+        )
+    })
+}
+use meerkat_mob::{AgentIdentity, FlowId, MobDefinition, MobId, MobState, RunId};
 use meerkat_mob_mcp::{MobMcpDestroyError, MobMcpState};
+
+fn wire_mob_state(state: MobState) -> WireMobState {
+    match state {
+        MobState::Creating => WireMobState::Creating,
+        MobState::Running => WireMobState::Running,
+        MobState::Stopped => WireMobState::Stopped,
+        MobState::Completed => WireMobState::Completed,
+        MobState::Destroyed => WireMobState::Destroyed,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════
 // Tracing → browser console (wasm32 only)
@@ -721,8 +762,10 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
 
     if let Some(requires) = &archive.manifest.requires {
         for capability in requires.typed_capabilities() {
-            if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
-                .is_forbidden()
+            if meerkat_contracts::capability::browser_mobpack_capability_decision_for_id(
+                capability.id(),
+            )
+            .is_forbidden()
             {
                 return Err(format!(
                     "forbidden capability '{}' is not allowed in browser-safe mode",
@@ -1416,7 +1459,7 @@ pub async fn append_system_context(
 /// Agent-level errors reject with a typed terminal payload, matching
 /// infrastructure errors instead of resolving as a successful turn result.
 #[wasm_bindgen]
-pub async fn start_turn(session_id: &str, prompt: &str) -> Result<JsValue, JsValue> {
+pub async fn start_turn(session_id: &str, prompt: JsValue) -> Result<JsValue, JsValue> {
     let parsed_session_id = parse_runtime_session_id(session_id)?;
     let session_service = with_runtime_state(|state| {
         state
@@ -1426,11 +1469,7 @@ pub async fn start_turn(session_id: &str, prompt: &str) -> Result<JsValue, JsVal
         Ok(state.session_service.clone())
     })?;
 
-    // Parse the prompt as structured ContentInput (supports both plain strings
-    // and JSON-serialized content blocks from the Web SDK). Falls back to plain
-    // text when the prompt is not valid ContentInput JSON.
-    let content_input: meerkat_core::types::ContentInput =
-        serde_json::from_str(prompt).unwrap_or_else(|_| prompt.into());
+    let content_input = content_input_from_js(prompt, "prompt")?;
 
     let run_result = session_service
         .start_turn(
@@ -1624,7 +1663,7 @@ pub async fn mob_create(definition_json: &str) -> Result<JsValue, JsValue> {
 
 /// Get the status of a mob.
 ///
-/// Returns JSON with the generated mob status plus the legacy state projection.
+/// Returns JSON with the generated typed mob status.
 #[wasm_bindgen]
 pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
@@ -1632,8 +1671,7 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
     let state = mob_state.mob_status(&id).await.map_err(err_mob)?;
     let result = serde_json::json!({
         "mob_id": mob_id,
-        "status": state.as_str(),
-        "state": state.as_str(),
+        "status": wire_mob_state(state),
     });
     Ok(JsValue::from_str(&result.to_string()))
 }
@@ -1653,7 +1691,7 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
         .map(|(id, state)| {
             serde_json::json!({
                 "mob_id": id.to_string(),
-                "status": state.as_str(),
+                "status": wire_mob_state(state),
             })
         })
         .collect();
@@ -1663,12 +1701,9 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 }
 
 /// Perform a lifecycle action on a mob.
-///
-/// `action` is a compatibility string carrier that is immediately
-/// deserialized into the typed wire lifecycle action contract.
 #[wasm_bindgen]
-pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValue> {
-    let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
+pub async fn mob_lifecycle(mob_id: &str, action_json: &str) -> Result<JsValue, JsValue> {
+    let action = parse_mob_lifecycle_action_arg(action_json).map_err(|err| {
         err_js(
             "invalid_action",
             &format!("invalid lifecycle action: {err}"),
@@ -1692,10 +1727,16 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValu
     Ok(JsValue::from_str(&json))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WasmMobLifecycleAction {
+    action: meerkat_contracts::WireMobLifecycleAction,
+}
+
 fn parse_mob_lifecycle_action_arg(
-    action: &str,
+    action_json: &str,
 ) -> Result<meerkat_contracts::WireMobLifecycleAction, serde_json::Error> {
-    serde_json::from_value(serde_json::Value::String(action.to_string()))
+    serde_json::from_str::<WasmMobLifecycleAction>(action_json).map(|params| params.action)
 }
 
 /// Fetch mob events.
@@ -2199,15 +2240,16 @@ pub async fn mob_member_status(mob_id: &str, agent_identity: &str) -> Result<JsV
 pub async fn mob_respawn(
     mob_id: &str,
     agent_identity: &str,
-    initial_message: Option<String>,
+    initial_message: JsValue,
 ) -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
     let mid = AgentIdentity::from(agent_identity);
-    let initial_message = initial_message.map(|message| {
-        serde_json::from_str::<meerkat_core::types::ContentInput>(&message)
-            .unwrap_or_else(|_| message.into())
-    });
+    let initial_message = if initial_message.is_undefined() || initial_message.is_null() {
+        None
+    } else {
+        Some(content_input_from_js(initial_message, "initial_message")?)
+    };
     match mob_state.mob_respawn(&id, mid, initial_message).await {
         Ok(receipt) => {
             let identity_str = receipt.identity.to_string();
@@ -2988,9 +3030,9 @@ capabilities = [{capability_values}]
                 .expect("requires section")
                 .capabilities,
             vec![
-                "sessions".to_string(),
-                "comms".to_string(),
-                "vendor.custom".to_string(),
+                meerkat_mob_pack::manifest::MobpackManifestCapability::parse("sessions"),
+                meerkat_mob_pack::manifest::MobpackManifestCapability::parse("comms"),
+                meerkat_mob_pack::manifest::MobpackManifestCapability::parse("vendor.custom"),
             ]
         );
     }
@@ -3328,12 +3370,19 @@ skills = ["skills/review.md"]
     }
 
     #[test]
-    fn mob_lifecycle_action_string_carrier_uses_typed_contract_boundary() {
-        let action = parse_mob_lifecycle_action_arg("resume")
+    fn mob_lifecycle_action_envelope_uses_typed_contract_boundary() {
+        let action = parse_mob_lifecycle_action_arg(r#"{"action":"resume"}"#)
             .expect("valid lifecycle action must deserialize");
         assert_eq!(action, meerkat_contracts::WireMobLifecycleAction::Resume);
 
-        let err = parse_mob_lifecycle_action_arg("explode")
+        let bare_string = parse_mob_lifecycle_action_arg(r#""resume""#)
+            .expect_err("bare action strings must not be the wasm boundary");
+        assert!(
+            bare_string.to_string().contains("invalid type"),
+            "unexpected error: {bare_string}"
+        );
+
+        let err = parse_mob_lifecycle_action_arg(r#"{"action":"explode"}"#)
             .expect_err("unknown lifecycle action must fail typed deserialization");
         assert!(
             err.to_string().contains("unknown variant"),

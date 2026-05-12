@@ -424,7 +424,6 @@ impl MobMachineFlowRunCommand {
             loop_instance_id: self
                 .loop_instance_id()
                 .map(|loop_id| mob_dsl::LoopInstanceId::from(loop_id.as_str())),
-            retry_key: self.retry_key().map(str::to_owned),
         }
     }
 
@@ -537,13 +536,6 @@ impl MobMachineFlowRunCommand {
         match self {
             Self::RegisterPendingBodyFrame(payload) => Some(&payload.loop_instance_id),
             Self::PumpFrameScheduler(payload) => Some(&payload.loop_instance_id),
-            _ => None,
-        }
-    }
-
-    fn retry_key(&self) -> Option<&str> {
-        match self {
-            Self::RecordTargetFailure(payload) => Some(payload.retry_key.as_str()),
             _ => None,
         }
     }
@@ -969,7 +961,6 @@ pub enum FlowAuthorityInputRecord {
         frame_id: Option<mob_dsl::FrameId>,
         node_id: Option<mob_dsl::FlowNodeId>,
         loop_instance_id: Option<mob_dsl::LoopInstanceId>,
-        retry_key: Option<String>,
     },
     CreateFrameSeed(FlowFrameSeedAuthorityRecord),
     AuthorizeFlowFrameReducerCommand {
@@ -1083,7 +1074,6 @@ impl FlowAuthorityInputRecord {
                 frame_id,
                 node_id,
                 loop_instance_id,
-                retry_key,
             } => Self::AuthorizeFlowRunReducerCommand {
                 run_id,
                 command: command.into(),
@@ -1094,7 +1084,6 @@ impl FlowAuthorityInputRecord {
                 frame_id,
                 node_id,
                 loop_instance_id,
-                retry_key,
             },
             mob_dsl::MobMachineInput::CreateFrameSeed {
                 run_id,
@@ -1330,7 +1319,6 @@ impl FlowAuthorityInputRecord {
                 frame_id,
                 node_id,
                 loop_instance_id,
-                retry_key,
             } => mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
                 run_id,
                 command: command.into(),
@@ -1341,7 +1329,6 @@ impl FlowAuthorityInputRecord {
                 frame_id,
                 node_id,
                 loop_instance_id,
-                retry_key,
             },
             Self::CreateFrameSeed(record) => mob_dsl::MobMachineInput::CreateFrameSeed {
                 run_id: record.run_id,
@@ -1588,7 +1575,6 @@ pub(crate) fn apply_mob_machine_flow_run_command(
                 run_id,
                 &payload.step_id,
                 &payload.target_id,
-                &payload.retry_key,
             )
         }
         MobMachineFlowRunCommand::RegisterReadyFrame(payload) => {
@@ -2050,14 +2036,14 @@ pub(crate) fn project_flow_run_state_from_machine(
                 .insert(step_id, saturating_u64_to_u32(*count));
         }
     }
-    state.target_retry_counts = machine_state
-        .run_target_retry_counts
-        .get(&run_key)
-        .cloned()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(key, value)| (key, saturating_u64_to_u32(value)))
-        .collect();
+    state.target_retry_counts = BTreeMap::new();
+    for (key, count) in &machine_state.run_target_retry_counts_flat {
+        if let Some(step_id) = project_run_step_key_for_run(key, run_id) {
+            state
+                .target_retry_counts
+                .insert(step_id, saturating_u64_to_u32(*count));
+        }
+    }
     project_flow_run_counters_from_machine(&mut state, machine_state, &run_key)?;
     state.escalation_threshold = *required_machine_value(
         &machine_state.run_escalation_threshold,
@@ -2657,30 +2643,22 @@ fn project_flow_run_target_failure_from_machine(
     run_id: &RunId,
     step_id: &StepId,
     target_id: &MeerkatId,
-    retry_key: &str,
 ) -> Result<flow_run::Outcome, MobError> {
-    let run_key = mob_dsl::RunId::from(run_id.to_string());
     let flat_key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
     let count = machine_state
         .run_target_retry_counts_flat
         .get(&flat_key)
         .copied()
-        .or_else(|| {
-            machine_state
-                .run_target_retry_counts
-                .get(&run_key)
-                .and_then(|counts| counts.get(retry_key))
-                .copied()
-        })
         .ok_or_else(|| {
             MobError::Internal(format!(
-                "MobMachine target retry projection missing key '{retry_key}' for run '{run_id}'"
+                "MobMachine target retry projection missing step '{}' for run '{run_id}'",
+                step_id.as_str()
             ))
         })?;
     let mut next_state = state.clone();
     next_state
         .target_retry_counts
-        .insert(retry_key.to_owned(), saturating_u64_to_u32(count));
+        .insert(step_id.clone(), saturating_u64_to_u32(count));
     Ok(flow_run::Outcome {
         transition_id: flow_run::TransitionId::RecordTargetFailure,
         next_state,
@@ -3721,7 +3699,7 @@ impl MobRun {
             };
             statuses.insert(
                 step_key.clone(),
-                StepRunStatus::from_flow_run_status(value.as_str(), &self.run_id)?,
+                StepRunStatus::from_flow_run_status(*value),
             );
         }
 
@@ -4456,16 +4434,13 @@ pub enum StepRunStatus {
 }
 
 impl StepRunStatus {
-    pub(crate) fn from_flow_run_status(value: &str, run_id: &RunId) -> Result<Self, MobError> {
+    pub(crate) fn from_flow_run_status(value: flow_run::StepRunStatus) -> Self {
         match value {
-            "Dispatched" => Ok(Self::Dispatched),
-            "Completed" => Ok(Self::Completed),
-            "Failed" => Ok(Self::Failed),
-            "Skipped" => Ok(Self::Skipped),
-            "Canceled" => Ok(Self::Canceled),
-            other => Err(MobError::Internal(format!(
-                "unknown StepRunStatus variant `{other}` for {run_id}"
-            ))),
+            flow_run::StepRunStatus::Dispatched => Self::Dispatched,
+            flow_run::StepRunStatus::Completed => Self::Completed,
+            flow_run::StepRunStatus::Failed => Self::Failed,
+            flow_run::StepRunStatus::Skipped => Self::Skipped,
+            flow_run::StepRunStatus::Canceled => Self::Canceled,
         }
     }
 
@@ -4693,7 +4668,6 @@ mod tests {
             frame_id: None,
             node_id: None,
             loop_instance_id: None,
-            retry_key: None,
         };
         let run_token =
             MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&run_authority_input)
@@ -4709,6 +4683,58 @@ mod tests {
         assert!(
             err.to_string().contains("run_step_status_flat missing"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn flow_target_retry_projection_uses_typed_run_step_key() {
+        let run_state = flow_run::initial_state();
+        let mut machine_state = mob_dsl::MobMachineState::default();
+        let run_id = RunId::new();
+        let step_id = StepId::from("step");
+        let run_step_key = mob_dsl::RunStepKey::from(format!("{run_id}\u{0}{}", step_id.as_str()));
+        machine_state
+            .run_target_retry_counts_flat
+            .insert(run_step_key.clone(), 2);
+
+        let run_authority_input = mob_dsl::MobMachineInput::AuthorizeFlowRunReducerCommand {
+            run_id: mob_dsl::RunId::from(run_id.to_string()),
+            command: mob_dsl::FlowRunReducerCommandKind::RecordTargetFailure,
+            step_id: Some(mob_dsl::StepId::from(step_id.as_str())),
+            run_step_key: Some(run_step_key),
+            step_status: None,
+            target_count: None,
+            frame_id: None,
+            node_id: None,
+            loop_instance_id: None,
+        };
+        let run_token =
+            MobMachineFlowAuthorityToken::from_accepted_mob_machine_input(&run_authority_input)
+                .expect("run command input must authorize run reducer family");
+
+        let outcome = apply_mob_machine_flow_run_command(
+            &run_state,
+            &machine_state,
+            &run_id,
+            MobMachineFlowRunCommand::RecordTargetFailure(flow_run::inputs::RecordTargetFailure {
+                step_id: step_id.clone(),
+                target_id: MeerkatId::from("target"),
+            }),
+            run_token,
+        )
+        .expect("typed RunStepKey retry projection should apply");
+
+        assert_eq!(
+            outcome.next_state.target_retry_counts.get(&step_id),
+            Some(&2)
+        );
+        assert!(
+            outcome
+                .next_state
+                .target_retry_counts
+                .keys()
+                .all(|key| key == &step_id),
+            "retry counts must be keyed by typed StepId projected from RunStepKey"
         );
     }
 
@@ -4932,6 +4958,27 @@ mod tests {
             run.step_status_snapshot().unwrap(),
             BTreeMap::from([(StepId::from("step-a"), StepRunStatus::Completed)])
         );
+    }
+
+    #[test]
+    fn test_step_run_status_maps_all_kernel_variants_directly() {
+        let cases = [
+            (
+                flow_run::StepRunStatus::Dispatched,
+                StepRunStatus::Dispatched,
+            ),
+            (flow_run::StepRunStatus::Completed, StepRunStatus::Completed),
+            (flow_run::StepRunStatus::Failed, StepRunStatus::Failed),
+            (flow_run::StepRunStatus::Skipped, StepRunStatus::Skipped),
+            (flow_run::StepRunStatus::Canceled, StepRunStatus::Canceled),
+        ];
+
+        for (kernel_status, public_status) in cases {
+            assert_eq!(
+                StepRunStatus::from_flow_run_status(kernel_status),
+                public_status
+            );
+        }
     }
 
     #[test]

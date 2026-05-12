@@ -204,9 +204,9 @@ impl SkillSource for CompositeSkillSource {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<meerkat_core::skills::SkillFunctionResult, SkillError> {
         for named in &self.sources {
             match named
                 .source
@@ -258,19 +258,14 @@ impl SkillSource for CompositeSkillSource {
     async fn load_from_source(
         &self,
         key: &SkillKey,
-        source_name: Option<&str>,
+        source_uuid: Option<&SourceUuid>,
     ) -> Result<SkillDocument, SkillError> {
         let canonical_key = self.resolve_key_for_load(key)?;
-        let Some(target) = source_name else {
+        let Some(target_uuid) = source_uuid else {
             return self.load_canonical(&canonical_key).await;
         };
-        let target_uuid = {
-            let parsed = SourceUuid::parse(target)?;
-            let target_key = SkillKey::new(parsed, canonical_key.skill_name.clone());
-            self.resolve_key_for_load(&target_key)?.source_uuid
-        };
         for named in &self.sources {
-            if named.source_uuid() == &target_uuid {
+            if named.source_uuid() == target_uuid {
                 let mut doc = named.source.load(&canonical_key).await?;
                 doc.descriptor.source_name = named.display_name().to_string();
                 return Ok(doc);

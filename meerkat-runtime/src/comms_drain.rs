@@ -880,7 +880,7 @@ async fn send_bridge_response(
             to,
             in_reply_to: candidate.interaction.id,
             status,
-            result,
+            result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(result)),
             blocks: None,
             handling_mode: None,
         })
@@ -1879,6 +1879,15 @@ mod tests {
     const PEER_ID_RECEIVER: &str = "00000000-0000-0000-0000-00000000aaaa"; // "receiver"
     const PEER_ID_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000bbbb"; // "supervisor"
     const PEER_ID_OLD_SUPERVISOR: &str = "00000000-0000-0000-0000-00000000dddd"; // "old-supervisor"
+
+    fn bridge_reply_from_response_payload(
+        result: Option<meerkat_core::PeerResponsePayload>,
+    ) -> BridgeReply {
+        let Some(meerkat_core::PeerResponsePayload::SupervisorBridge(result)) = result else {
+            panic!("expected supervisor bridge response payload, got {result:?}");
+        };
+        serde_json::from_value(result).expect("typed bridge reply")
+    }
 
     fn test_pubkey(seed: u8) -> meerkat_comms::PubKey {
         assert_ne!(seed, 0, "test pubkey seed must be non-zero");
@@ -3368,7 +3377,7 @@ mod tests {
             status,
             meerkat_core::interaction::ResponseStatus::Failed
         ));
-        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        let reply = bridge_reply_from_response_payload(result);
         match reply {
             BridgeReply::Rejected { cause, reason } => {
                 assert_eq!(cause, BridgeRejectionCause::UnsupportedProtocolVersion);
@@ -3812,7 +3821,7 @@ mod tests {
             matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
             "rebind rejection must surface as Failed status"
         );
-        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        let reply = bridge_reply_from_response_payload(result);
         match reply {
             BridgeReply::Rejected { cause, .. } => {
                 assert_eq!(
@@ -3942,7 +3951,7 @@ mod tests {
             status,
             meerkat_core::interaction::ResponseStatus::Completed
         ));
-        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        let reply = bridge_reply_from_response_payload(result);
         let BridgeReply::BindMember(response) = reply else {
             panic!("expected bind response");
         };
@@ -4024,7 +4033,7 @@ mod tests {
             matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
             "unsupported hard-cancel bridge command must fail at the comms boundary"
         );
-        let reply: BridgeReply = serde_json::from_value(result).expect("typed bridge reply");
+        let reply = bridge_reply_from_response_payload(result);
         match reply {
             BridgeReply::Rejected { cause, .. } => {
                 assert_eq!(cause, BridgeRejectionCause::Unsupported);
@@ -4119,8 +4128,7 @@ mod tests {
             matches!(status, meerkat_core::interaction::ResponseStatus::Failed),
             "invariant violation must surface as Failed status"
         );
-        let reply: BridgeReply =
-            serde_json::from_value(result.clone()).expect("typed bridge reply");
+        let reply = bridge_reply_from_response_payload(result.clone());
         assert!(
             matches!(reply, BridgeReply::Rejected { .. }),
             "expected Rejected reply for invariant violation, got: {reply:?}"

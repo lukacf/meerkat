@@ -5027,8 +5027,8 @@ mod inline_video_admission_tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "noop"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         fn model(&self) -> &str {

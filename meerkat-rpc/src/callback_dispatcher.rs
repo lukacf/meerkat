@@ -20,13 +20,15 @@ use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
 
 use async_trait::async_trait;
+use meerkat_contracts::wire::WireToolResultContent;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolDispatchOutcome;
 use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::event::{ExternalToolDelta, ExternalToolDeltaPhase, ToolConfigChangeOperation};
 use meerkat_core::tool_catalog::stable_owner_key_for_tool;
-use meerkat_core::types::{ToolCallView, ToolDef, ToolResult};
+use meerkat_core::types::{ContentBlock, ToolCallView, ToolDef, ToolResult};
 use meerkat_core::{ToolCatalogCapabilities, ToolCatalogEntry};
 
 use crate::protocol::{RpcId, RpcRequest, RpcResponse};
@@ -165,13 +167,12 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
         }
 
         let request_id = self.next_id();
-        let arguments: serde_json::Value = serde_json::from_str(call.args.get()).map_err(|e| {
-            ToolError::invalid_arguments(call.name, format!("malformed tool-call arguments: {e}"))
-        })?;
+        let arguments = ToolCallArguments::from_raw_json(call.args)
+            .map_err(|e| ToolError::invalid_arguments(call.name, e.to_string()))?;
         let params = serde_json::json!({
             "tool_use_id": call.id,
             "name": call.name,
-            "arguments": arguments,
+            "arguments": arguments.into_value(),
         });
 
         let params_raw = RawValue::from_string(serde_json::to_string(&params).map_err(|e| {
@@ -214,10 +215,14 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             ToolError::execution_failed("Callback response missing result".to_string())
         })?;
 
+        fn empty_callback_content() -> WireToolResultContent {
+            WireToolResultContent::Text(String::new())
+        }
+
         #[derive(serde::Deserialize)]
         struct CallbackResult {
-            #[serde(default)]
-            content: String,
+            #[serde(default = "empty_callback_content")]
+            content: WireToolResultContent,
             #[serde(default)]
             is_error: bool,
         }
@@ -226,7 +231,25 @@ impl AgentToolDispatcher for CallbackToolDispatcher {
             ToolError::execution_failed(format!("Failed to parse callback result: {e}"))
         })?;
 
-        Ok(ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error).into())
+        let result = match parsed.content {
+            WireToolResultContent::Text(content) => {
+                ToolResult::new(call.id.to_string(), content, parsed.is_error)
+            }
+            WireToolResultContent::Blocks(blocks) => {
+                let blocks = blocks
+                    .into_iter()
+                    .map(ContentBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| {
+                        ToolError::execution_failed(format!(
+                            "Callback response content contains an invalid block: {err}"
+                        ))
+                    })?;
+                ToolResult::with_blocks(call.id.to_string(), blocks, parsed.is_error)
+            }
+        };
+
+        Ok(result.into())
     }
 
     /// Detect global tools added/removed since last poll and emit deltas.
@@ -350,6 +373,74 @@ mod tests {
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result.result.text_content(), "results here");
         assert!(!result.result.is_error);
+    }
+
+    #[tokio::test]
+    async fn callback_dispatcher_preserves_typed_content_blocks() {
+        let (callback_tx, mut callback_rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("blocks")]));
+
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, vec![]);
+
+        let handle = tokio::spawn(async move {
+            let args = RawValue::from_string("{}".to_string()).unwrap();
+            let call = ToolCallView {
+                id: "tc-blocks",
+                name: "blocks",
+                args: &args,
+            };
+            dispatcher.dispatch(call).await
+        });
+
+        let (request, response_tx) = callback_rx.recv().await.unwrap();
+        let result_raw = RawValue::from_string(
+            serde_json::to_string(&serde_json::json!({
+                "content": [{"type": "text", "text": "block result"}],
+                "is_error": false
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        response_tx
+            .send(RpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id: request.id,
+                result: Some(result_raw),
+                error: None,
+            })
+            .unwrap();
+
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(
+            result.result.content,
+            vec![ContentBlock::Text {
+                text: "block result".to_string()
+            }]
+        );
+        assert!(!result.result.is_error);
+    }
+
+    #[tokio::test]
+    async fn callback_dispatcher_rejects_non_object_tool_arguments() {
+        let (callback_tx, mut callback_rx) = mpsc::channel(10);
+        let id_counter = Arc::new(AtomicU64::new(0));
+        let tools = Arc::new(StdRwLock::new(vec![make_tool_def("search")]));
+
+        let dispatcher = CallbackToolDispatcher::new(tools, callback_tx, id_counter, vec![]);
+        let args = RawValue::from_string("\"legacy string args\"".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "tc-string",
+            name: "search",
+            args: &args,
+        };
+
+        let result = dispatcher.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
+        assert!(
+            callback_rx.try_recv().is_err(),
+            "invalid tool args must be rejected before callback dispatch"
+        );
     }
 
     #[tokio::test]

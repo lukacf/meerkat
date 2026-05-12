@@ -21,7 +21,7 @@ const authProfile = {
 const backendProfile = {
   id: 'openai_api',
   provider: 'openai',
-  backend_kind: 'openai_api',
+  backend_kind: 'open_ai_api',
   base_url: 'https://api.openai.com',
   options: { region: 'us-east-1' },
 };
@@ -81,7 +81,7 @@ test('generated realm connection parser round-trips valid connection payloads', 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), payload);
 });
 
-test('Auth helpers fail closed before transport for unknown provider and auth method strings', async () => {
+test('Auth helpers fail closed before transport for provider aliases and auth method strings', async () => {
   let called = false;
   const auth = new Auth({
     async request() {
@@ -93,7 +93,7 @@ test('Auth helpers fail closed before transport for unknown provider and auth me
   await assert.rejects(
     () =>
       auth.loginStart({
-        provider: 'not_a_provider',
+        provider: 'openai',
         redirect_uri: 'http://localhost:1455/callback',
         realm_id: 'dev',
         binding_id: 'default_openai',
@@ -294,7 +294,7 @@ test('Auth.status and device-complete ready parse generated terminal payloads', 
     auth_binding: { realm: 'dev', binding: 'anthropic_main' },
     profile_id: 'console',
     state: 'ready',
-    provider: 'anthropic',
+    provider: 'anthropic_console_api_key',
     expires_at: null,
     has_refresh_token: true,
     scopes: ['org:create_api_key'],
@@ -303,7 +303,7 @@ test('Auth.status and device-complete ready parse generated terminal payloads', 
 
   assert.deepEqual(
     await auth.loginDeviceComplete({
-      provider: 'anthropic',
+      provider: 'anthropic_console_api_key',
       device_code: 'device-1',
       realm_id: 'dev',
       binding_id: 'anthropic_main',

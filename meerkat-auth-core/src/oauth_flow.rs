@@ -18,9 +18,9 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::auth_oauth::{OAuthEndpoints, OAuthTokenRequestFormat};
-use crate::auth_store::{
-    PersistedAuthMode, credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-};
+use crate::auth_store::{PersistedAuthMode, credential_source_uses_persisted_store};
+
+pub use meerkat_core::OAuthProviderIdentity;
 
 const DEFAULT_MAX_OUTSTANDING_FLOWS: usize = 1024;
 
@@ -29,7 +29,8 @@ const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const ANTHROPIC_CONSOLE_AUTHORIZE_URL: &str = "https://platform.claude.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const ANTHROPIC_CONSOLE_SCOPES: &[&str] = &["org:create_api_key", "user:profile"];
-const ANTHROPIC_CLAUDE_AI_SCOPES: &[&str] = &[
+const ANTHROPIC_ALL_OAUTH_SCOPES: &[&str] = &[
+    "org:create_api_key",
     "user:profile",
     "user:inference",
     "user:sessions:claude_code",
@@ -68,133 +69,79 @@ const GOOGLE_SCOPES: &[&str] = &[
 const TEST_OAUTH_ENDPOINT_OVERRIDE_ENV: &str = "MEERKAT_TEST_OAUTH_ENDPOINT_OVERRIDE";
 const TEST_OAUTH_BASE_URL_ENV: &str = "MEERKAT_TEST_OAUTH_BASE_URL";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OAuthProviderIdentity {
-    AnthropicClaudeAi,
-    AnthropicConsoleApiKey,
-    OpenAiChatGpt,
-    GoogleCodeAssist,
-}
-
-impl OAuthProviderIdentity {
-    pub fn from_alias(alias: &str) -> Option<Self> {
-        match alias {
-            "anthropic" | "claude" | "claude.ai" => Some(Self::AnthropicClaudeAi),
-            "anthropic_console_api_key" => Some(Self::AnthropicConsoleApiKey),
-            "openai" | "chatgpt" => Some(Self::OpenAiChatGpt),
-            "google" | "gemini" | "code_assist" => Some(Self::GoogleCodeAssist),
-            _ => None,
-        }
-    }
-
-    pub fn canonical_alias(self) -> &'static str {
-        match self {
-            Self::AnthropicClaudeAi => "anthropic",
-            Self::AnthropicConsoleApiKey => "anthropic_console_api_key",
-            Self::OpenAiChatGpt => "openai",
-            Self::GoogleCodeAssist => "google",
-        }
-    }
-
-    pub fn provider(self) -> Provider {
-        match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => Provider::Anthropic,
-            Self::OpenAiChatGpt => Provider::OpenAI,
-            Self::GoogleCodeAssist => Provider::Gemini,
-        }
-    }
-
-    pub fn auth_mode(self) -> PersistedAuthMode {
-        match self {
-            Self::AnthropicClaudeAi => PersistedAuthMode::ClaudeAiOauth,
-            Self::AnthropicConsoleApiKey => PersistedAuthMode::OauthToApiKey,
-            Self::OpenAiChatGpt => PersistedAuthMode::ChatgptOauth,
-            Self::GoogleCodeAssist => PersistedAuthMode::GoogleOauth,
-        }
-    }
-
-    pub fn backend_kind(self) -> &'static str {
-        match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey => "anthropic_api",
-            Self::OpenAiChatGpt => "chatgpt_backend",
-            Self::GoogleCodeAssist => "google_code_assist",
-        }
-    }
-
-    pub fn client_secret(self) -> Option<&'static str> {
-        match self {
-            Self::AnthropicClaudeAi | Self::AnthropicConsoleApiKey | Self::OpenAiChatGpt => None,
-            Self::GoogleCodeAssist => Some(GOOGLE_CLIENT_SECRET),
-        }
-    }
-
-    pub fn endpoints(self, redirect_uri: impl Into<String>) -> OAuthEndpoints {
-        let endpoints = match self {
-            Self::AnthropicClaudeAi => OAuthEndpoints {
-                client_id: ANTHROPIC_CLIENT_ID.into(),
-                authorize_url: ANTHROPIC_AUTHORIZE_URL.into(),
-                token_url: ANTHROPIC_TOKEN_URL.into(),
-                device_code_url: None,
-                redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
-                extra_authorize_params: vec![("code".into(), "true".into())],
-                token_request_format: OAuthTokenRequestFormat::Json,
-                include_state_in_token_exchange: true,
-                refresh_scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
-                extra_headers: Vec::new(),
-            },
-            Self::AnthropicConsoleApiKey => OAuthEndpoints {
-                client_id: ANTHROPIC_CLIENT_ID.into(),
-                authorize_url: ANTHROPIC_CONSOLE_AUTHORIZE_URL.into(),
-                token_url: ANTHROPIC_TOKEN_URL.into(),
-                device_code_url: None,
-                redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
-                extra_authorize_params: Vec::new(),
-                token_request_format: OAuthTokenRequestFormat::Json,
-                include_state_in_token_exchange: true,
-                refresh_scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
-                extra_headers: Vec::new(),
-            },
-            Self::OpenAiChatGpt => OAuthEndpoints {
-                client_id: OPENAI_CLIENT_ID.into(),
-                authorize_url: OPENAI_AUTHORIZE_URL.into(),
-                token_url: OPENAI_TOKEN_URL.into(),
-                device_code_url: None,
-                redirect_uri: redirect_uri.into(),
-                scopes: strings(OPENAI_SCOPES),
-                extra_authorize_params: vec![
-                    ("id_token_add_organizations".into(), "true".into()),
-                    ("codex_cli_simplified_flow".into(), "true".into()),
-                    ("originator".into(), OPENAI_ORIGINATOR.into()),
-                ],
-                token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-                include_state_in_token_exchange: false,
-                refresh_scopes: Vec::new(),
-                extra_headers: Vec::new(),
-            },
-            Self::GoogleCodeAssist => OAuthEndpoints {
-                client_id: GOOGLE_CLIENT_ID.into(),
-                authorize_url: GOOGLE_AUTHORIZE_URL.into(),
-                token_url: GOOGLE_TOKEN_URL.into(),
-                device_code_url: Some(GOOGLE_DEVICE_CODE_URL.into()),
-                redirect_uri: redirect_uri.into(),
-                scopes: strings(GOOGLE_SCOPES),
-                extra_authorize_params: Vec::new(),
-                token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
-                include_state_in_token_exchange: false,
-                refresh_scopes: Vec::new(),
-                extra_headers: Vec::new(),
-            },
-        };
-        apply_test_oauth_endpoint_override(self, endpoints)
+fn oauth_provider_client_secret(identity: OAuthProviderIdentity) -> Option<&'static str> {
+    match identity {
+        OAuthProviderIdentity::AnthropicClaudeAi
+        | OAuthProviderIdentity::AnthropicConsoleApiKey
+        | OAuthProviderIdentity::OpenAiChatGpt => None,
+        OAuthProviderIdentity::GoogleCodeAssist => Some(GOOGLE_CLIENT_SECRET),
     }
 }
 
-impl std::fmt::Display for OAuthProviderIdentity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.canonical_alias())
-    }
+fn oauth_provider_endpoints(
+    identity: OAuthProviderIdentity,
+    redirect_uri: impl Into<String>,
+) -> OAuthEndpoints {
+    let redirect_uri = redirect_uri.into();
+    let endpoints = match identity {
+        OAuthProviderIdentity::AnthropicClaudeAi => OAuthEndpoints {
+            client_id: ANTHROPIC_CLIENT_ID.into(),
+            authorize_url: ANTHROPIC_AUTHORIZE_URL.into(),
+            token_url: ANTHROPIC_TOKEN_URL.into(),
+            device_code_url: None,
+            redirect_uri,
+            scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
+            extra_authorize_params: vec![("code".into(), "true".into())],
+            token_request_format: OAuthTokenRequestFormat::Json,
+            include_state_in_token_exchange: true,
+            refresh_scopes: strings(ANTHROPIC_ALL_OAUTH_SCOPES),
+            extra_headers: Vec::new(),
+        },
+        OAuthProviderIdentity::AnthropicConsoleApiKey => OAuthEndpoints {
+            client_id: ANTHROPIC_CLIENT_ID.into(),
+            authorize_url: ANTHROPIC_CONSOLE_AUTHORIZE_URL.into(),
+            token_url: ANTHROPIC_TOKEN_URL.into(),
+            device_code_url: None,
+            redirect_uri,
+            scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::Json,
+            include_state_in_token_exchange: true,
+            refresh_scopes: strings(ANTHROPIC_CONSOLE_SCOPES),
+            extra_headers: Vec::new(),
+        },
+        OAuthProviderIdentity::OpenAiChatGpt => OAuthEndpoints {
+            client_id: OPENAI_CLIENT_ID.into(),
+            authorize_url: OPENAI_AUTHORIZE_URL.into(),
+            token_url: OPENAI_TOKEN_URL.into(),
+            device_code_url: None,
+            redirect_uri,
+            scopes: strings(OPENAI_SCOPES),
+            extra_authorize_params: vec![
+                ("id_token_add_organizations".into(), "true".into()),
+                ("codex_cli_simplified_flow".into(), "true".into()),
+                ("originator".into(), OPENAI_ORIGINATOR.into()),
+            ],
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            refresh_scopes: Vec::new(),
+            extra_headers: Vec::new(),
+        },
+        OAuthProviderIdentity::GoogleCodeAssist => OAuthEndpoints {
+            client_id: GOOGLE_CLIENT_ID.into(),
+            authorize_url: GOOGLE_AUTHORIZE_URL.into(),
+            token_url: GOOGLE_TOKEN_URL.into(),
+            device_code_url: Some(GOOGLE_DEVICE_CODE_URL.into()),
+            redirect_uri,
+            scopes: strings(GOOGLE_SCOPES),
+            extra_authorize_params: Vec::new(),
+            token_request_format: OAuthTokenRequestFormat::FormUrlEncoded,
+            include_state_in_token_exchange: false,
+            refresh_scopes: Vec::new(),
+            extra_headers: Vec::new(),
+        },
+    };
+    apply_test_oauth_endpoint_override(identity, endpoints)
 }
 
 #[derive(Debug, Clone)]
@@ -206,28 +153,17 @@ pub struct OAuthProviderResolution {
     pub client_secret: Option<&'static str>,
 }
 
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[error("Unknown provider '{provider}'. Supported: anthropic, openai, google.")]
-pub struct OAuthProviderResolutionError {
-    pub provider: String,
-}
-
-pub fn resolve_oauth_provider(
-    provider: &str,
+pub fn resolve_oauth_provider_identity(
+    identity: OAuthProviderIdentity,
     redirect_uri: impl Into<String>,
-) -> Result<OAuthProviderResolution, OAuthProviderResolutionError> {
-    let identity = OAuthProviderIdentity::from_alias(provider).ok_or_else(|| {
-        OAuthProviderResolutionError {
-            provider: provider.to_string(),
-        }
-    })?;
-    Ok(OAuthProviderResolution {
+) -> OAuthProviderResolution {
+    OAuthProviderResolution {
         identity,
         provider: identity.provider(),
-        endpoints: identity.endpoints(redirect_uri),
+        endpoints: oauth_provider_endpoints(identity, redirect_uri),
         auth_mode: identity.auth_mode(),
-        client_secret: identity.client_secret(),
-    })
+        client_secret: oauth_provider_client_secret(identity),
+    }
 }
 
 /// Apply the local OAuth fixture endpoint override used by release-grade auth
@@ -255,7 +191,7 @@ pub fn apply_test_oauth_endpoint_override(
             return endpoints;
         };
         let base_url = base_url.trim_end_matches('/');
-        let provider = identity.canonical_alias();
+        let provider = identity.fixture_path_segment();
         endpoints.authorize_url = format!("{base_url}/{provider}/authorize");
         endpoints.token_url = format!("{base_url}/{provider}/token");
         if endpoints.device_code_url.is_some() {
@@ -330,7 +266,7 @@ pub fn validate_oauth_target_for_auth_mode(
             actual: auth_profile.provider,
         });
     }
-    match persisted_auth_mode_for_auth_method(&auth_profile.auth_method) {
+    match auth_profile.persisted_auth_mode() {
         Some(actual_mode) if actual_mode == expected_mode => {}
         _ => {
             return Err(OAuthTargetValidationError::AuthMethodMismatch {
@@ -441,7 +377,7 @@ pub struct OAuthFlowRegistrySnapshot {
 pub struct PersistedOAuthBrowserFlow {
     pub state: String,
     pub target: AuthBindingRef,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub redirect_uri: String,
     pub pkce_verifier: String,
     pub created_at_millis: u64,
@@ -451,7 +387,7 @@ pub struct PersistedOAuthBrowserFlow {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedOAuthDeviceFlow {
     pub target: AuthBindingRef,
-    pub provider: String,
+    pub provider: OAuthProviderIdentity,
     pub device_code: String,
     pub created_at_millis: u64,
     pub expires_at_millis: u64,
@@ -1035,7 +971,7 @@ impl OAuthFlowRegistry {
                 Some(PersistedOAuthBrowserFlow {
                     state: state.clone(),
                     target: record.target.clone(),
-                    provider: record.provider.canonical_alias().to_string(),
+                    provider: record.provider,
                     redirect_uri: record.redirect_uri.clone(),
                     pkce_verifier: record.pkce_verifier.clone(),
                     created_at_millis: now_millis.saturating_sub(elapsed_millis),
@@ -1055,7 +991,7 @@ impl OAuthFlowRegistry {
                 let created_elapsed = state.record.created_at.elapsed();
                 Some(PersistedOAuthDeviceFlow {
                     target: state.record.target.clone(),
-                    provider: state.record.provider.canonical_alias().to_string(),
+                    provider: state.record.provider,
                     device_code: state.record.device_code.clone(),
                     created_at_millis: now_millis
                         .saturating_sub(duration_millis_u64(created_elapsed)),
@@ -2371,61 +2307,27 @@ mod tests {
     }
 
     #[test]
-    fn oauth_provider_resolution_preserves_aliases() {
+    fn oauth_provider_resolution_uses_typed_identity() {
         let cases = [
             (
-                "anthropic",
                 OAuthProviderIdentity::AnthropicClaudeAi,
                 Provider::Anthropic,
                 PersistedAuthMode::ClaudeAiOauth,
             ),
             (
-                "claude",
-                OAuthProviderIdentity::AnthropicClaudeAi,
-                Provider::Anthropic,
-                PersistedAuthMode::ClaudeAiOauth,
-            ),
-            (
-                "claude.ai",
-                OAuthProviderIdentity::AnthropicClaudeAi,
-                Provider::Anthropic,
-                PersistedAuthMode::ClaudeAiOauth,
-            ),
-            (
-                "openai",
                 OAuthProviderIdentity::OpenAiChatGpt,
                 Provider::OpenAI,
                 PersistedAuthMode::ChatgptOauth,
             ),
             (
-                "chatgpt",
-                OAuthProviderIdentity::OpenAiChatGpt,
-                Provider::OpenAI,
-                PersistedAuthMode::ChatgptOauth,
-            ),
-            (
-                "google",
-                OAuthProviderIdentity::GoogleCodeAssist,
-                Provider::Gemini,
-                PersistedAuthMode::GoogleOauth,
-            ),
-            (
-                "gemini",
-                OAuthProviderIdentity::GoogleCodeAssist,
-                Provider::Gemini,
-                PersistedAuthMode::GoogleOauth,
-            ),
-            (
-                "code_assist",
                 OAuthProviderIdentity::GoogleCodeAssist,
                 Provider::Gemini,
                 PersistedAuthMode::GoogleOauth,
             ),
         ];
 
-        for (alias, identity, provider, auth_mode) in cases {
-            let resolved =
-                resolve_oauth_provider(alias, "http://127.0.0.1/callback").expect("alias resolves");
+        for (identity, provider, auth_mode) in cases {
+            let resolved = resolve_oauth_provider_identity(identity, "http://127.0.0.1/callback");
             assert_eq!(resolved.identity, identity);
             assert_eq!(resolved.provider, provider);
             assert_eq!(resolved.auth_mode, auth_mode);
@@ -2435,8 +2337,7 @@ mod tests {
 
     #[test]
     fn oauth_provider_resolution_exposes_google_device_secret() {
-        let resolved =
-            resolve_oauth_provider("code_assist", "").expect("google code assist resolves");
+        let resolved = resolve_oauth_provider_identity(OAuthProviderIdentity::GoogleCodeAssist, "");
 
         assert_eq!(resolved.identity, OAuthProviderIdentity::GoogleCodeAssist);
         assert!(resolved.endpoints.device_code_url.is_some());
@@ -2446,8 +2347,10 @@ mod tests {
     #[cfg(feature = "oauth")]
     #[test]
     fn openai_provider_resolution_matches_codex_authorize_contract() {
-        let resolved = resolve_oauth_provider("openai", "http://localhost:1455/auth/callback")
-            .expect("openai resolves");
+        let resolved = resolve_oauth_provider_identity(
+            OAuthProviderIdentity::OpenAiChatGpt,
+            "http://localhost:1455/auth/callback",
+        );
         let pkce = crate::auth_oauth::PkcePair::generate_s256();
         let authorize_url = resolved
             .endpoints
@@ -2471,8 +2374,10 @@ mod tests {
 
     #[test]
     fn anthropic_provider_resolution_matches_claude_code_token_contract() {
-        let resolved = resolve_oauth_provider("anthropic", "http://localhost:1455/callback")
-            .expect("anthropic resolves");
+        let resolved = resolve_oauth_provider_identity(
+            OAuthProviderIdentity::AnthropicClaudeAi,
+            "http://localhost:1455/callback",
+        );
 
         assert_eq!(
             resolved.endpoints.token_request_format,
@@ -2481,7 +2386,7 @@ mod tests {
         assert!(resolved.endpoints.include_state_in_token_exchange);
         assert_eq!(
             resolved.endpoints.refresh_scopes,
-            strings(ANTHROPIC_CLAUDE_AI_SCOPES)
+            strings(ANTHROPIC_ALL_OAUTH_SCOPES)
         );
         assert!(
             resolved

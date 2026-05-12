@@ -29,6 +29,29 @@ use std::time::SystemTime;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+fn checksum_request(subject: impl Into<String>) -> meerkat_core::PeerRequestPayload {
+    meerkat_core::PeerRequestPayload::ChecksumToken(meerkat_core::CommsChecksumTokenParams {
+        subject: subject.into(),
+    })
+}
+
+fn checksum_response(
+    subject: impl Into<String>,
+    token: impl Into<String>,
+) -> Option<meerkat_core::PeerResponsePayload> {
+    Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+        meerkat_core::CommsChecksumTokenResult {
+            request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+            request_subject: subject.into(),
+            token: token.into(),
+        },
+    ))
+}
+
+fn generic_response(value: serde_json::Value) -> Option<meerkat_core::PeerResponsePayload> {
+    Some(meerkat_core::PeerResponsePayload::SupervisorBridge(value))
+}
+
 fn inproc_peer_descriptor(
     name: &str,
     runtime: &CommsRuntime,
@@ -105,8 +128,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
     // Send PeerRequest from sender to receiver
     let request_cmd = CommsCommand::PeerRequest {
         to: inproc_peer_route(&receiver_name, receiver.as_ref()).expect("valid peer route"),
-        intent: "mob.ping".to_string(),
-        params: serde_json::json!({"seq": 1}),
+        request: checksum_request("mob.ping:1"),
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
@@ -153,8 +175,8 @@ async fn contract_mob_002_peer_request_response_round_trip() {
 
     let request_id = match &request_interaction.content {
         meerkat_core::InteractionContent::Request { intent, params, .. } => {
-            assert_eq!(intent, "mob.ping");
-            assert_eq!(params["seq"], 1);
+            assert_eq!(intent, "checksum_token");
+            assert_eq!(params["subject"], "mob.ping:1");
             assert_eq!(
                 request_interaction.id.0, request_envelope_id,
                 "receiver-visible request interaction id should equal the sender envelope id for response correlation"
@@ -174,7 +196,7 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         to: inproc_peer_route(&sender_name, sender.as_ref()).expect("valid peer route"),
         in_reply_to: request_id,
         status: meerkat_core::ResponseStatus::Completed,
-        result: serde_json::json!({"pong": true}),
+        result: checksum_response("mob.ping:1", "pong"),
         blocks: None,
         handling_mode: None,
     };
@@ -202,7 +224,9 @@ async fn contract_mob_002_peer_request_response_round_trip() {
         } => {
             assert_eq!(*in_reply_to, request_id);
             assert_eq!(*status, meerkat_core::ResponseStatus::Completed);
-            assert_eq!(result["pong"], true);
+            assert_eq!(result["request_intent"], "checksum_token");
+            assert_eq!(result["request_subject"], "mob.ping:1");
+            assert_eq!(result["token"], "pong");
         }
         other => panic!("expected Response interaction, got: {other:?}"),
     }
@@ -281,8 +305,7 @@ async fn contract_mob_002b_terminal_transition_drives_registry_cleanup_via_effec
     // reservation commits — an install-then-reject would refuse to send.
     let request_cmd = CommsCommand::PeerRequest {
         to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
-        intent: "mob.ping".into(),
-        params: serde_json::json!({"seq": 1}),
+        request: checksum_request("mob.ping:1"),
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: InputStreamMode::ReserveInteraction,
@@ -439,8 +462,7 @@ async fn contract_mob_002c_dsl_reject_refuses_shell_commit() {
         sender.as_ref(),
         CommsCommand::PeerRequest {
             to: inproc_peer_route(&receiver_name, &receiver).unwrap(),
-            intent: "mob.ping".into(),
-            params: serde_json::json!({"seq": 2}),
+            request: checksum_request("mob.ping:2"),
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: InputStreamMode::None,
@@ -541,7 +563,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
             to: inproc_peer_route(&originator_name, &originator).unwrap(),
             in_reply_to,
             status: meerkat_core::ResponseStatus::Accepted,
-            result: serde_json::json!({"progress": true}),
+            result: generic_response(serde_json::json!({"progress": true})),
             blocks: None,
             handling_mode: None,
         },
@@ -561,7 +583,7 @@ async fn contract_mob_002d_inbound_terminal_reply_closes_lifecycle_via_send() {
             to: inproc_peer_route(&originator_name, &originator).unwrap(),
             in_reply_to,
             status: meerkat_core::ResponseStatus::Completed,
-            result: serde_json::json!({"done": true}),
+            result: generic_response(serde_json::json!({"done": true})),
             blocks: None,
             handling_mode: None,
         },
@@ -1103,8 +1125,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
     // Verify comms request before additional turns.
     let before_cmd = CommsCommand::PeerRequest {
         to: inproc_peer_route(&b_name, &comms_b).expect("valid peer route"),
-        intent: "mob.contract.before".to_string(),
-        params: serde_json::json!({"step": "before_turn"}),
+        request: checksum_request("mob.contract.before"),
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
@@ -1140,8 +1161,7 @@ async fn contract_mob_001_keep_alive_session_stays_alive() {
     // Verify comms still works after extra turn.
     let after_cmd = CommsCommand::PeerRequest {
         to: inproc_peer_route(&a_name, &comms_a).expect("valid peer route"),
-        intent: "mob.contract.after".to_string(),
-        params: serde_json::json!({"step": "after_turn"}),
+        request: checksum_request("mob.contract.after"),
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,

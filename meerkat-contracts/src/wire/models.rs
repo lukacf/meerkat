@@ -1,6 +1,7 @@
 //! Wire types for model catalog responses.
 
 use crate::version::ContractVersion;
+use meerkat_core::Provider;
 use serde::{Deserialize, Serialize};
 
 /// Model recommendation tier.
@@ -18,6 +19,8 @@ pub enum WireModelTier {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct WireModelProfile {
+    /// Typed provider owner.
+    pub provider: Provider,
     /// Model family identifier (e.g., `"claude-opus-4"`, `"gpt-5"`).
     pub model_family: String,
     /// Whether the model accepts a `temperature` parameter.
@@ -123,8 +126,8 @@ pub struct CatalogModelEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProviderCatalog {
-    /// Canonical provider name.
-    pub provider: String,
+    /// Typed provider owner.
+    pub provider: Provider,
     /// Default model ID for this provider.
     pub default_model_id: String,
     /// All catalog models for this provider.

@@ -10,10 +10,11 @@ pub use meerkat_core::model_profile::capabilities;
 pub use meerkat_core::model_profile::catalog;
 
 pub use meerkat_core::model_profile::capabilities::{
-    BetaHeader, BetaValue, ModelCapabilities, ThinkingSupport, capabilities_for,
+    BetaHeader, BetaValue, ModelBetaFeature, ModelCapabilities, ModelEffortLevel, ThinkingSupport,
+    capabilities_for,
 };
 pub use meerkat_core::model_profile::catalog::{
     CatalogEntry, ModelTier, ProviderDefaults, allowed_models, catalog, default_model, entry_for,
-    provider_defaults, provider_names,
+    provider_defaults, providers,
 };
 pub use meerkat_core::model_profile::{ModelProfile, profile_for};

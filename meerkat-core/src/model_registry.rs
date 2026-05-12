@@ -128,21 +128,16 @@ impl ModelRegistry {
         let mut profiles = BTreeMap::new();
         let mut defaults = BTreeMap::new();
 
-        for provider_name in crate::model_profile::catalog::provider_names() {
-            let provider = Provider::parse_strict(provider_name).ok_or_else(|| {
-                ConfigError::InternalError(format!("unknown built-in provider '{provider_name}'"))
-            })?;
-            let default_model = crate::model_profile::catalog::default_model(provider_name)
-                .ok_or_else(|| {
-                    ConfigError::InternalError(format!(
-                        "missing built-in default for '{provider_name}'"
-                    ))
+        for &provider in crate::model_profile::catalog::providers() {
+            let default_model =
+                crate::model_profile::catalog::default_model(provider).ok_or_else(|| {
+                    ConfigError::InternalError(format!("missing built-in default for '{provider}'"))
                 })?;
             defaults.insert(provider, default_model.to_string());
 
             for entry in crate::model_profile::catalog::catalog()
                 .iter()
-                .filter(|entry| entry.provider == *provider_name)
+                .filter(|entry| entry.provider == provider)
             {
                 let profile =
                     crate::model_profile::profile_for(provider, entry.id).ok_or_else(|| {
@@ -318,7 +313,7 @@ fn append_self_hosted(
             base_url: normalize_base_url(&server.base_url),
         };
         let profile = ModelProfile {
-            provider: Provider::SelfHosted.as_str().to_string(),
+            provider: Provider::SelfHosted,
             model_family: model.family.clone(),
             supports_temperature: model.supports_temperature,
             supports_thinking: model.supports_thinking,

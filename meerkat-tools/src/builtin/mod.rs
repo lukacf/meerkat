@@ -64,7 +64,7 @@ use std::sync::Arc;
 /// Output type for builtin tools, supporting text and multimodal content.
 #[derive(Debug, Clone)]
 pub enum ToolOutput {
-    /// JSON value (existing behavior). Serialized to text for ToolResult.
+    /// JSON value. Structured values become JSON content blocks in ToolResult.
     Json(serde_json::Value),
     /// JSON value plus session effects to apply at the canonical turn owner.
     JsonWithEffects {

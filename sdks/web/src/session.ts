@@ -9,10 +9,11 @@ import type {
   AppendSystemContextOptions,
   AppendSystemContextResult,
   SubscriptionLaggedEvent,
+  ContentInput,
 } from './types.js';
 
 // WASM function signatures (bound at construction)
-type StartTurnFn = (sessionId: string, prompt: string) => Promise<string>;
+type StartTurnFn = (sessionId: string, prompt: ContentInput) => Promise<string>;
 type GetSessionStateFn = (sessionId: string) => string;
 type DestroySessionFn = (sessionId: string) => void;
 type PollEventsFn = (sessionId: string) => string;
@@ -163,10 +164,9 @@ export class Session {
 
   /** Run a turn through the agent loop. */
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
-    const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
     let json: string;
     try {
-      json = await this.startTurnFn(this.sessionId, promptStr);
+      json = await this.startTurnFn(this.sessionId, prompt);
     } catch (error) {
       throw normalizeStartTurnError(error);
     }

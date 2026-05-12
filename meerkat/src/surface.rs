@@ -314,6 +314,7 @@ pub fn build_models_catalog_response(
                             ))
                         })?;
                     let profile = Some(meerkat_contracts::WireModelProfile {
+                        provider: model_profile.provider,
                         model_family: model_profile.model_family.clone(),
                         supports_temperature: model_profile.supports_temperature,
                         supports_thinking: model_profile.supports_thinking,
@@ -358,7 +359,7 @@ pub fn build_models_catalog_response(
                 })
                 .collect::<Result<Vec<_>, meerkat_core::ConfigError>>()?;
             Ok(meerkat_contracts::ProviderCatalog {
-                provider: provider.as_str().to_string(),
+                provider,
                 default_model_id: default_model_id.to_string(),
                 models,
             })
@@ -440,17 +441,17 @@ pub async fn list_skills_introspection(
     Some(runtime.list_all_with_provenance(filter).await)
 }
 
-/// Load and inspect a skill by ID, optionally from a specific source.
+/// Load and inspect a skill by ID, optionally from a specific source UUID.
 #[cfg(feature = "skills")]
 ///
 /// Returns `None` if the skill runtime is not available.
 pub async fn inspect_skill(
     skill_runtime: &Option<Arc<SkillRuntime>>,
     key: &SkillKey,
-    source_name: Option<&str>,
+    source_uuid: Option<&meerkat_core::skills::SourceUuid>,
 ) -> Option<Result<SkillDocument, SkillError>> {
     let runtime = skill_runtime.as_ref()?;
-    Some(runtime.load_from_source(key, source_name).await)
+    Some(runtime.load_from_source(key, source_uuid).await)
 }
 
 /// Spawn a task that forwards agent events from a channel to a callback.
@@ -721,7 +722,7 @@ family = "gemma-4"
     #[test]
     fn build_models_catalog_response_exposes_stable_capability_bits() {
         let catalog = build_models_catalog_response(&Config::default()).expect("catalog response");
-        let find_profile = |provider: &str, model: &str| {
+        let find_profile = |provider: meerkat_core::Provider, model: &str| {
             catalog
                 .providers
                 .iter()
@@ -731,7 +732,7 @@ family = "gemma-4"
                 .unwrap_or_else(|| panic!("missing profile for {provider}:{model}"))
         };
 
-        let claude = find_profile("anthropic", "claude-sonnet-4-5");
+        let claude = find_profile(meerkat_core::Provider::Anthropic, "claude-sonnet-4-5");
         assert!(claude.vision);
         assert!(claude.image_input);
         assert!(claude.image_tool_results);
@@ -740,7 +741,7 @@ family = "gemma-4"
         assert!(claude.supports_web_search);
         assert!(!claude.image_generation);
 
-        let gpt = find_profile("openai", "gpt-5.4");
+        let gpt = find_profile(meerkat_core::Provider::OpenAI, "gpt-5.4");
         assert!(gpt.vision);
         assert!(gpt.image_input);
         assert!(!gpt.image_tool_results);
@@ -749,7 +750,7 @@ family = "gemma-4"
         assert!(gpt.supports_web_search);
         assert!(gpt.image_generation);
 
-        let realtime = find_profile("openai", "gpt-realtime-2");
+        let realtime = find_profile(meerkat_core::Provider::OpenAI, "gpt-realtime-2");
         // gpt-realtime-2 accepts text + audio + image input per
         // OpenAI's model docs (`developers.openai.com/api/docs/models/gpt-realtime-2`),
         // so `image_input` is `true`. The previous expectation

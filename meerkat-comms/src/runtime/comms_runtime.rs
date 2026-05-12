@@ -569,13 +569,15 @@ impl CoreCommsRuntime for CommsRuntime {
                 .map(|envelope_id| SendReceipt::PeerLifecycleSent { envelope_id }),
             CommsCommand::PeerRequest {
                 to,
-                intent,
-                params,
+                request,
                 blocks,
                 handling_mode,
                 stream,
             } => {
                 let blocks = CommsContentAuthority::normalize_blocks(blocks);
+                let (intent, params) = request
+                    .into_transport_parts()
+                    .map_err(|err| SendError::Validation(format!("invalid peer request: {err}")))?;
                 let interaction_id = Uuid::new_v4();
                 let corr_id = meerkat_core::PeerCorrelationId::from_uuid(interaction_id);
                 let stream_reserved = stream == InputStreamMode::ReserveInteraction;
@@ -614,7 +616,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         &to,
                         interaction_id,
                         crate::types::MessageKind::Request {
-                            intent,
+                            intent: intent.to_string(),
                             params,
                             blocks,
                             handling_mode: Some(handling_mode),
@@ -678,7 +680,14 @@ impl CoreCommsRuntime for CommsRuntime {
                         crate::types::MessageKind::Response {
                             in_reply_to: in_reply_to.0,
                             status,
-                            result,
+                            result: match result {
+                                Some(result) => result.into_transport_value().map_err(|err| {
+                                    SendError::Validation(format!(
+                                        "invalid peer response result: {err}"
+                                    ))
+                                })?,
+                                None => serde_json::Value::Null,
+                            },
                             blocks,
                             handling_mode: effective_handling_mode,
                         },
@@ -757,13 +766,17 @@ impl CoreCommsRuntime for CommsRuntime {
             }
             CommsCommand::PeerRequest {
                 to,
-                intent,
-                params,
+                request,
                 blocks,
                 handling_mode,
                 stream: InputStreamMode::ReserveInteraction,
             } => {
                 let blocks = CommsContentAuthority::normalize_blocks(blocks);
+                let (intent, params) = request.into_transport_parts().map_err(|err| {
+                    SendAndStreamError::Send(SendError::Validation(format!(
+                        "invalid peer request: {err}"
+                    )))
+                })?;
                 // Reserve under the canonical request envelope id so the same
                 // id can be used for stream attachment and reply correlation.
                 let interaction_id = Uuid::new_v4();
@@ -796,7 +809,7 @@ impl CoreCommsRuntime for CommsRuntime {
                         &to,
                         interaction_id,
                         crate::types::MessageKind::Request {
-                            intent,
+                            intent: intent.to_string(),
                             params,
                             blocks,
                             handling_mode: Some(handling_mode),
@@ -919,7 +932,6 @@ impl CoreCommsRuntime for CommsRuntime {
         &self,
     ) -> Result<Vec<meerkat_core::ClassifiedInboxInteraction>, meerkat_core::CommsCapabilityError>
     {
-        use crate::agent::types::MessageIntent;
         use crate::types::MessageKind;
 
         let mut inbox = self.inbox.lock().await;
@@ -1003,7 +1015,8 @@ impl CoreCommsRuntime for CommsRuntime {
                                 blocks,
                                 handling_mode: _,
                             } => {
-                                let typed_intent = MessageIntent::from(intent.as_str());
+                                let typed_intent =
+                                    canonical_interaction_request_intent(intent.as_str())?;
                                 meerkat_core::InteractionContent::Request {
                                     intent: typed_intent.to_string(),
                                     params,
@@ -1182,6 +1195,17 @@ fn map_event_injector_error(error: meerkat_core::event_injector::EventInjectorEr
         }
         meerkat_core::event_injector::EventInjectorError::Closed => SendError::InputClosed,
     }
+}
+
+fn canonical_interaction_request_intent(intent: &str) -> Option<&'static str> {
+    meerkat_core::CommsPeerRequestIntent::try_from(intent)
+        .map(meerkat_core::CommsPeerRequestIntent::as_str)
+        .ok()
+        .or_else(|| {
+            crate::agent::types::MessageIntent::try_from(intent)
+                .map(|intent| intent.as_str())
+                .ok()
+        })
 }
 
 #[derive(Debug, Error)]
@@ -3893,8 +3917,11 @@ mod tests {
             runtime.as_ref(),
             CommsCommand::PeerRequest {
                 to: peer_route(&peer_name, peer.public_key()),
-                intent: "checksum".to_string(),
-                params: serde_json::json!({"path": "README.md"}),
+                request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenParams {
+                        subject: "README.md".to_string(),
+                    },
+                ),
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::ReserveInteraction,
@@ -3949,8 +3976,11 @@ mod tests {
             &runtime,
             CommsCommand::PeerRequest {
                 to: peer_route(&peer_name, peer.public_key()),
-                intent: "must-have-authority".to_string(),
-                params: serde_json::json!({}),
+                request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenParams {
+                        subject: "must-have-authority".to_string(),
+                    },
+                ),
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::None,
@@ -3997,8 +4027,11 @@ mod tests {
             &runtime,
             CommsCommand::PeerRequest {
                 to: peer_route(&peer_name, peer.public_key()),
-                intent: "must-have-stream-authority".to_string(),
-                params: serde_json::json!({}),
+                request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenParams {
+                        subject: "must-have-stream-authority".to_string(),
+                    },
+                ),
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::ReserveInteraction,
@@ -4051,7 +4084,9 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({"ok": true}),
+                result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                    serde_json::json!({"ok": true}),
+                )),
                 blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
@@ -4090,7 +4125,9 @@ mod tests {
                 to: missing_peer_route(&format!("missing-response-peer-{suffix}")),
                 in_reply_to: InteractionId(interaction_id),
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({"ok": true}),
+                result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                    serde_json::json!({"ok": true}),
+                )),
                 blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
@@ -4202,8 +4239,11 @@ mod tests {
             runtime.as_ref(),
             CommsCommand::PeerRequest {
                 to: peer_route(&peer_name, peer.public_key()),
-                intent: "must-have-complete-authority".to_string(),
-                params: serde_json::json!({}),
+                request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenParams {
+                        subject: "must-have-complete-authority".to_string(),
+                    },
+                ),
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 stream: InputStreamMode::None,
@@ -4262,7 +4302,9 @@ mod tests {
                 to: peer_route(&peer_name, peer.public_key()),
                 in_reply_to: InteractionId(interaction_id),
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({"ok": true}),
+                result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                    serde_json::json!({"ok": true}),
+                )),
                 blocks: None,
                 handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
             },
@@ -5431,8 +5473,11 @@ mod tests {
                 },
             }]),
             to: peer_route(&receiver_name, receiver.public_key()),
-            intent: "checksum".to_string(),
-            params: serde_json::json!({"subject": "image"}),
+            request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenParams {
+                    subject: "image".to_string(),
+                },
+            ),
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             stream: InputStreamMode::ReserveInteraction,
         };
@@ -5517,7 +5562,9 @@ mod tests {
             to: peer_route(&receiver_name, receiver.public_key()),
             in_reply_to: InteractionId(interaction_id),
             status: meerkat_core::ResponseStatus::Completed,
-            result: serde_json::json!({"ok": true}),
+            result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                serde_json::json!({"ok": true}),
+            )),
             handling_mode: Some(meerkat_core::types::HandlingMode::Queue),
         };
 
@@ -6495,8 +6542,11 @@ mod tests {
                     },
                     PeerSendability::PeerRequest => CommsCommand::PeerRequest {
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
-                        intent: "test".to_string(),
-                        params: serde_json::json!({}),
+                        request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                            meerkat_core::CommsChecksumTokenParams {
+                                subject: "truthfulness test".to_string(),
+                            },
+                        ),
                         blocks: None,
                         handling_mode: meerkat_core::types::HandlingMode::Queue,
                         stream: InputStreamMode::None,
@@ -6505,7 +6555,9 @@ mod tests {
                         to: PeerRoute::with_display_name(entry.peer_id, entry.name.clone()),
                         in_reply_to: meerkat_core::InteractionId(Uuid::new_v4()),
                         status: meerkat_core::ResponseStatus::Completed,
-                        result: serde_json::json!({}),
+                        result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                            serde_json::json!({}),
+                        )),
                         blocks: None,
                         handling_mode: None,
                     },

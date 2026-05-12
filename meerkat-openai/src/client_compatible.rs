@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage,
+    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -587,8 +587,8 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "self_hosted"
+    fn provider(&self) -> Provider {
+        Provider::SelfHosted
     }
 
     fn provider_id(&self) -> meerkat_core::Provider {

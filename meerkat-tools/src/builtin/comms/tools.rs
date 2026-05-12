@@ -1,4 +1,4 @@
-//! Comms tool implementations: `send` and `peers`.
+//! Legacy comms builtin implementations.
 
 use crate::builtin::{BuiltinTool, BuiltinToolError, ToolOutput};
 use crate::schema::empty_object_schema;
@@ -53,40 +53,6 @@ fn get_tool_def(name: &str) -> ToolDef {
                 provenance: comms_provenance(),
             },
         )
-}
-
-/// Unified send tool — dispatches peer_message, peer_request, peer_response via `kind`.
-pub struct SendTool {
-    state: CommsToolState,
-}
-
-impl SendTool {
-    pub fn new(state: CommsToolState) -> Self {
-        Self { state }
-    }
-}
-
-#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
-impl BuiltinTool for SendTool {
-    fn name(&self) -> &'static str {
-        "send"
-    }
-
-    fn def(&self) -> ToolDef {
-        get_tool_def("send")
-    }
-
-    fn default_enabled(&self) -> bool {
-        true
-    }
-
-    async fn call(&self, args: Value) -> Result<ToolOutput, BuiltinToolError> {
-        handle_tools_call(&self.state.tool_context, "send", &args)
-            .await
-            .map(ToolOutput::Json)
-            .map_err(BuiltinToolError::ExecutionFailed)
-    }
 }
 
 /// Peers discovery tool.
@@ -150,13 +116,6 @@ mod tests {
             true,
         ));
         CommsToolState::new(router, trusted_peers)
-    }
-
-    #[test]
-    fn test_send_tool_name() {
-        let state = make_test_state();
-        let tool = SendTool::new(state);
-        assert_eq!(tool.name(), "send");
     }
 
     #[test]

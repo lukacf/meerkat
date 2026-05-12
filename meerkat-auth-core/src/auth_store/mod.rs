@@ -34,21 +34,6 @@ pub use meerkat_core::auth::token_store::{
     TokenStore, TokenStoreError,
 };
 
-pub fn persisted_auth_mode_for_auth_method(auth_method: &str) -> Option<PersistedAuthMode> {
-    match auth_method {
-        "api_key" | "api_key_express" | "foundry_api_key" => Some(PersistedAuthMode::ApiKey),
-        "static_bearer" | "bearer_api_key" | "bedrock_bearer" => {
-            Some(PersistedAuthMode::StaticBearer)
-        }
-        "managed_chatgpt_oauth" => Some(PersistedAuthMode::ChatgptOauth),
-        "external_chatgpt_tokens" => Some(PersistedAuthMode::ExternalTokens),
-        "claude_ai_oauth" => Some(PersistedAuthMode::ClaudeAiOauth),
-        "oauth_to_api_key" => Some(PersistedAuthMode::OauthToApiKey),
-        "google_oauth" => Some(PersistedAuthMode::GoogleOauth),
-        _ => None,
-    }
-}
-
 pub fn credential_source_uses_persisted_store(source: &CredentialSourceSpec) -> bool {
     matches!(
         source,

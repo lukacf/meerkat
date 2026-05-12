@@ -7,8 +7,8 @@ use futures::StreamExt;
 use meerkat_core::lifecycle::run_primitive::{ProviderParamsOverride, ProviderTag};
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, StopReason,
-    ToolDef, Usage,
+    AgentError, AgentEvent, AgentLlmClient, LlmStreamResult, Message, OutputSchema, Provider,
+    StopReason, ToolDef, Usage,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -117,7 +117,7 @@ impl LlmClientAdapter {
         };
 
         match self.client.provider() {
-            "anthropic" if params.thinking_budget_tokens.is_some() => match tag {
+            Provider::Anthropic if params.thinking_budget_tokens.is_some() => match tag {
                 Some(ProviderTag::Anthropic(mut tag)) => {
                     tag.thinking_budget_tokens = params.thinking_budget_tokens;
                     Some(ProviderTag::Anthropic(tag))
@@ -130,7 +130,7 @@ impl LlmClientAdapter {
                 )),
                 other => other,
             },
-            "gemini" | "google"
+            Provider::Gemini
                 if params.top_p.is_some() || params.thinking_budget_tokens.is_some() =>
             {
                 match tag {
@@ -222,7 +222,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 .project_replay_messages(messages)
                 .map_err(|error| {
                     AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         error.failure_reason(),
                         error.to_string(),
                     )
@@ -342,19 +342,13 @@ impl AgentLlmClient for LlmClientAdapter {
                         };
                         let _ = assembler.on_tool_call_complete(id, name, args_raw, effective_meta);
                     }
-                    LlmEvent::ServerToolContent {
-                        id,
-                        name,
-                        content,
-                        meta,
-                    } => {
+                    LlmEvent::ServerToolContent { id, content, meta } => {
                         let event_id = id.clone();
-                        assembler.on_server_tool_content(id, name.clone(), content.clone(), meta);
+                        assembler.on_server_tool_content(id, content.clone(), meta);
                         if let Some(ref tx) = self.event_tx {
                             let _ = tx
                                 .send(AgentEvent::ServerToolContent {
                                     id: event_id,
-                                    name,
                                     content,
                                 })
                                 .await;
@@ -369,7 +363,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider(),
+                                self.client.provider().as_str(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -378,7 +372,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         e.failure_reason(),
                         e.to_string(),
                     ));
@@ -392,7 +386,7 @@ impl AgentLlmClient for LlmClientAdapter {
         ))
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> Provider {
         self.client.provider()
     }
 
@@ -467,8 +461,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "projection-test"
+        fn provider(&self) -> Provider {
+            Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

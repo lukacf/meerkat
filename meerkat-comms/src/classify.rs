@@ -1010,7 +1010,7 @@ mod tests {
     #[test]
     fn classify_builtin_intent_in_silent_list() {
         // Silent matching must work for built-in intent names (e.g. "review"),
-        // not just Custom variants. Regression test for P2 fix.
+        // not just extension strings. Regression test for P2 fix.
         let sender = make_keypair();
         let trusted = make_trusted_peers("sender-agent", &sender.public_key());
         let ctx = make_context(true, trusted, vec!["review"]);

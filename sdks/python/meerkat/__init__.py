@@ -305,6 +305,7 @@ from .events import (
     WarningFailedClosedToolConfigChangeStatus,
     parse_event,
 )
+from .tools import ToolCallbackResult, ToolCallbackReturn
 
 __all__ = [
     # Client & session
@@ -321,6 +322,8 @@ __all__ = [
     "MobSpawnSpec",
     "MemberDeliveryReceipt",
     "MemberRespawnReceipt",
+    "ToolCallbackResult",
+    "ToolCallbackReturn",
     "MobPeerConnectivitySnapshot",
     "MobUnreachablePeer",
     "EventStream",

@@ -26,10 +26,10 @@ where
 use std::collections::BTreeMap;
 
 use meerkat_core::{
-    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
-    SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    ToolResultError, TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource,
-    VideoData,
+    AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, OpenAiReplayPhase,
+    ProviderMeta, SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason,
+    SystemNoticeKind, ToolResultError, TranscriptEditRunningBehavior, TranscriptReplacement,
+    TranscriptSource, VideoData,
 };
 use std::convert::TryFrom;
 
@@ -232,7 +232,7 @@ pub enum WireProviderMeta {
         encrypted_content: Option<String>,
         #[serde(default)]
         #[serde(skip_serializing_if = "Option::is_none")]
-        phase: Option<String>,
+        phase: Option<OpenAiReplayPhase>,
     },
     Unknown,
 }
@@ -326,6 +326,10 @@ pub enum WireContentBlock {
         #[serde(flatten)]
         data: WireVideoData,
     },
+    Json {
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))]
+        value: serde_json::Value,
+    },
     /// Forward-compatibility for unknown block types.
     #[serde(other)]
     Unknown,
@@ -353,6 +357,7 @@ impl From<ContentBlock> for WireContentBlock {
                     VideoData::Inline { data } => WireVideoData::Inline { data },
                 },
             },
+            ContentBlock::Json { value } => WireContentBlock::Json { value },
             _ => WireContentBlock::Unknown,
         }
     }
@@ -382,6 +387,7 @@ impl TryFrom<WireContentBlock> for ContentBlock {
                     WireVideoData::Inline { data } => VideoData::Inline { data },
                 },
             }),
+            WireContentBlock::Json { value } => Ok(ContentBlock::Json { value }),
             WireContentBlock::Unknown => Err("unknown content block type"),
         }
     }
@@ -501,8 +507,7 @@ pub enum WireAssistantBlock {
     ServerToolContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
-        content: serde_json::Value,
+        content: meerkat_core::ServerToolContent,
         #[serde(skip_serializing_if = "Option::is_none")]
         meta: Option<WireProviderMeta>,
     },
@@ -612,14 +617,8 @@ impl From<AssistantBlock> for WireAssistantBlock {
                 args,
                 meta: meta.map(|m| (*m).into()),
             },
-            AssistantBlock::ServerToolContent {
+            AssistantBlock::ServerToolContent { id, content, meta } => Self::ServerToolContent {
                 id,
-                name,
-                content,
-                meta,
-            } => Self::ServerToolContent {
-                id,
-                name,
                 content,
                 meta: meta.map(|m| (*m).into()),
             },
@@ -728,17 +727,13 @@ impl TryFrom<WireAssistantBlock> for AssistantBlock {
                 args,
                 meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
             },
-            WireAssistantBlock::ServerToolContent {
-                id,
-                name,
-                content,
-                meta,
-            } => Self::ServerToolContent {
-                id,
-                name,
-                content,
-                meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
-            },
+            WireAssistantBlock::ServerToolContent { id, content, meta } => {
+                Self::ServerToolContent {
+                    id,
+                    content,
+                    meta: meta.and_then(wire_provider_meta_to_core).map(Box::new),
+                }
+            }
             WireAssistantBlock::Image {
                 image_id,
                 blob_ref,
@@ -1392,6 +1387,16 @@ mod tests {
     }
 
     #[test]
+    fn test_wire_content_block_json_roundtrip() {
+        let block = WireContentBlock::Json {
+            value: serde_json::json!({"ok": true}),
+        };
+        let json = serde_json::to_string(&block).unwrap();
+        let parsed: WireContentBlock = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, block);
+    }
+
+    #[test]
     fn test_wire_content_block_unknown_forward_compat() {
         let json = r#"{"type":"hologram","url":"https://example.com/v.mp4"}"#;
         let parsed: WireContentBlock = serde_json::from_str(json).unwrap();
@@ -1482,6 +1487,17 @@ mod tests {
             },
         ]);
         let json = serde_json::to_string(&content).unwrap();
+        let parsed: WireToolResultContent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, content);
+    }
+
+    #[test]
+    fn test_wire_tool_result_content_json_block_roundtrip() {
+        let content = WireToolResultContent::Blocks(vec![WireContentBlock::Json {
+            value: serde_json::json!({"peers": []}),
+        }]);
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains(r#""type":"json""#));
         let parsed: WireToolResultContent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, content);
     }
@@ -1621,8 +1637,8 @@ mod tests {
     #[test]
     fn test_assistant_block_core_wire_core_round_trip_symmetric() {
         use meerkat_core::{
-            AssistantImageId, BlobId, BlobRef, MediaType, ProviderImageMetadata,
-            RevisedPromptDisposition,
+            AssistantImageId, BlobId, BlobRef, MediaType, OpenAiServerToolItemKind,
+            ProviderImageMetadata, RevisedPromptDisposition, ServerToolContent,
         };
         use uuid::Uuid;
 
@@ -1638,7 +1654,7 @@ mod tests {
                 meta: Some(Box::new(ProviderMeta::OpenAi {
                     id: "rs_1".to_string(),
                     encrypted_content: Some("enc".to_string()),
-                    phase: Some("draft".to_string()),
+                    phase: Some(OpenAiReplayPhase::Draft),
                 })),
             },
             AssistantBlock::Transcript {
@@ -1657,8 +1673,10 @@ mod tests {
             },
             AssistantBlock::ServerToolContent {
                 id: Some("st-1".to_string()),
-                name: "web_search".to_string(),
-                content: serde_json::json!({"hits": 3}),
+                content: ServerToolContent::OpenAiResponseItem {
+                    item_kind: OpenAiServerToolItemKind::WebSearchCall,
+                    item: serde_json::json!({"hits": 3}),
+                },
                 meta: None,
             },
             AssistantBlock::Image {

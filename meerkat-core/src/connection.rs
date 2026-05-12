@@ -18,7 +18,8 @@ use crate::Config;
 use crate::auth::{AuthConstraints, AuthMetadataDefaults};
 use crate::provider::Provider;
 use crate::provider_matrix::{
-    AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
+    AnthropicAuthMethod, AnthropicBackendKind, GoogleAuthMethod, GoogleBackendKind,
+    OpenAiAuthMethod, OpenAiBackendKind, SelfHostedAuthMethod, SelfHostedBackendKind,
 };
 
 // ---------------------------------------------------------------------
@@ -152,6 +153,61 @@ pub struct AuthProfile {
     pub constraints: AuthConstraints,
     #[serde(default)]
     pub metadata_defaults: AuthMetadataDefaults,
+}
+
+impl AuthProfile {
+    /// Persisted credential mode authorized by this provider-owned auth method.
+    ///
+    /// TokenStore callers use this typed provider/method mapping instead of
+    /// matching auth-method strings locally.
+    pub fn persisted_auth_mode(&self) -> Option<crate::auth::PersistedAuthMode> {
+        persisted_auth_mode_for_provider_auth_method(self.provider, &self.auth_method)
+    }
+}
+
+pub fn persisted_auth_mode_for_provider_auth_method(
+    provider: Provider,
+    auth_method: &str,
+) -> Option<crate::auth::PersistedAuthMode> {
+    use crate::auth::PersistedAuthMode;
+
+    match provider {
+        Provider::OpenAI => match OpenAiAuthMethod::parse(auth_method)? {
+            OpenAiAuthMethod::ApiKey => Some(PersistedAuthMode::ApiKey),
+            OpenAiAuthMethod::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            OpenAiAuthMethod::ManagedChatGptOauth => Some(PersistedAuthMode::ChatgptOauth),
+            OpenAiAuthMethod::ExternalChatGptTokens => Some(PersistedAuthMode::ExternalTokens),
+            OpenAiAuthMethod::ExternalAuthorizer => Some(PersistedAuthMode::ExternalAuthorizer),
+        },
+        Provider::Anthropic => match AnthropicAuthMethod::parse(auth_method)? {
+            AnthropicAuthMethod::ApiKey => Some(PersistedAuthMode::ApiKey),
+            AnthropicAuthMethod::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            AnthropicAuthMethod::ClaudeAiOauth => Some(PersistedAuthMode::ClaudeAiOauth),
+            AnthropicAuthMethod::OauthToApiKey => Some(PersistedAuthMode::OauthToApiKey),
+            AnthropicAuthMethod::ExternalAuthorizer => Some(PersistedAuthMode::ExternalAuthorizer),
+            AnthropicAuthMethod::BedrockBearer => Some(PersistedAuthMode::StaticBearer),
+            AnthropicAuthMethod::BedrockAwsSigv4 => Some(PersistedAuthMode::Bedrock),
+            AnthropicAuthMethod::VertexGoogleAuth => Some(PersistedAuthMode::Vertex),
+            AnthropicAuthMethod::FoundryApiKey => Some(PersistedAuthMode::ApiKey),
+            AnthropicAuthMethod::FoundryAzureAd => Some(PersistedAuthMode::Foundry),
+        },
+        Provider::Gemini => match GoogleAuthMethod::parse(auth_method)? {
+            GoogleAuthMethod::ApiKey | GoogleAuthMethod::ApiKeyExpress => {
+                Some(PersistedAuthMode::ApiKey)
+            }
+            GoogleAuthMethod::BearerApiKey => Some(PersistedAuthMode::StaticBearer),
+            GoogleAuthMethod::ExternalAuthorizer => Some(PersistedAuthMode::ExternalAuthorizer),
+            GoogleAuthMethod::Adc => Some(PersistedAuthMode::Adc),
+            GoogleAuthMethod::GoogleOauth => Some(PersistedAuthMode::GoogleOauth),
+            GoogleAuthMethod::ComputeAdc => Some(PersistedAuthMode::ComputeAdc),
+        },
+        Provider::SelfHosted => match SelfHostedAuthMethod::parse(auth_method)? {
+            SelfHostedAuthMethod::ApiKey => Some(PersistedAuthMode::ApiKey),
+            SelfHostedAuthMethod::StaticBearer => Some(PersistedAuthMode::StaticBearer),
+            SelfHostedAuthMethod::None => None,
+        },
+        Provider::Other => None,
+    }
 }
 
 /// Where credentials come from.
@@ -1456,6 +1512,28 @@ auth_profile = "default_profile"
             err.to_string().contains("invalid character"),
             "external resolver handles must be parsed as typed resolver ids: {err}"
         );
+    }
+
+    #[test]
+    fn auth_profile_persisted_mode_uses_provider_owned_auth_domain() {
+        let chatgpt = AuthProfile {
+            id: "openai_oauth".into(),
+            provider: Provider::OpenAI,
+            auth_method: "managed_chatgpt_oauth".into(),
+            source: CredentialSourceSpec::ManagedStore,
+            constraints: Default::default(),
+            metadata_defaults: Default::default(),
+        };
+        assert_eq!(
+            chatgpt.persisted_auth_mode(),
+            Some(crate::auth::PersistedAuthMode::ChatgptOauth),
+        );
+
+        let same_string_wrong_provider = AuthProfile {
+            provider: Provider::Anthropic,
+            ..chatgpt
+        };
+        assert_eq!(same_string_wrong_provider.persisted_auth_mode(), None);
     }
 
     #[test]

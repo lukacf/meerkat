@@ -10,7 +10,8 @@
 /// The remaining_text is the message content after the skill reference (trimmed).
 ///
 /// Returns `None` if the message doesn't start with a skill reference.
-pub fn detect_skill_ref(message: &str) -> Option<(&str, &str)> {
+#[cfg(test)]
+fn detect_skill_ref(message: &str) -> Option<(&str, &str)> {
     let trimmed = message.strip_prefix('/')?;
     let split_at = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
     let (candidate, trailing) = trimmed.split_at(split_at);
@@ -23,6 +24,7 @@ pub fn detect_skill_ref(message: &str) -> Option<(&str, &str)> {
     Some((candidate, trailing.trim_start()))
 }
 
+#[cfg(test)]
 fn is_valid_segment(segment: &str) -> bool {
     !segment.is_empty()
         && segment

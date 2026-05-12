@@ -1,13 +1,15 @@
-//! CommsToolSet - groups all comms tools together
+//! Legacy comms tool set.
 
-use super::tools::{CommsToolState, PeersTool, SendTool};
+use super::tools::{CommsToolState, PeersTool};
 use meerkat_comms::{Router, TrustedPeers};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-/// Collection of all comms tools: `send` and `peers`.
+/// Collection of legacy comms builtins.
+///
+/// Message/request/response tools are provided by `CommsToolSurface`, which
+/// exposes the typed split tools from `meerkat-comms`.
 pub struct CommsToolSet {
-    pub send: SendTool,
     pub peers: PeersTool,
 }
 
@@ -16,14 +18,13 @@ impl CommsToolSet {
     pub fn new(router: Arc<Router>, trusted_peers: Arc<RwLock<TrustedPeers>>) -> Self {
         let state = CommsToolState::new(router, trusted_peers);
         Self {
-            send: SendTool::new(state.clone()),
             peers: PeersTool::new(state),
         }
     }
 
     /// Get tool names for collision detection
     pub fn tool_names(&self) -> Vec<&str> {
-        vec!["send", "peers"]
+        vec!["peers"]
     }
 
     /// Usage instructions for comms tools
@@ -32,9 +33,9 @@ impl CommsToolSet {
 
 You have access to comms tools for communicating with other agents:
 
-- `send`: Send a message, request, or response to a peer. Use `kind` to select the type.
 - `peers`: List all visible peers.
 
+Use `CommsToolSurface` for typed `send_message`, `send_request`, and `send_response` tools.
 When communicating with other agents, identify them by their peer name (not pubkey)."
     }
 }
@@ -68,6 +69,6 @@ mod tests {
         ));
 
         let tool_set = CommsToolSet::new(router, trusted_peers);
-        assert_eq!(tool_set.tool_names().len(), 2);
+        assert_eq!(tool_set.tool_names(), vec!["peers"]);
     }
 }

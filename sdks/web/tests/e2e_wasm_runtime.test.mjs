@@ -498,7 +498,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
       return "mob-web-parity";
     },
     async mob_status(mobId) {
-      return JSON.stringify({ mob_id: mobId, status: "running" });
+      return JSON.stringify({ mob_id: mobId, status: "Running" });
     },
     async mob_list() {
       return JSON.stringify({ mobs: [] });

@@ -163,16 +163,27 @@ pub fn dsl_auth_machine_production_schema() -> MachineSchema {
 
 pub fn auth_machine_schema_metadata() -> MachineSchemaMetadata {
     machine_schema_metadata(
-        vec![NamedTypeBinding::string_enum(
-            "AuthLifecyclePhase",
-            &[
-                "Valid",
-                "Expiring",
-                "Refreshing",
-                "ReauthRequired",
-                "Released",
-            ],
-        )],
+        vec![
+            NamedTypeBinding::string_enum(
+                "AuthLifecyclePhase",
+                &[
+                    "Valid",
+                    "Expiring",
+                    "Refreshing",
+                    "ReauthRequired",
+                    "Released",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "OAuthProviderIdentity",
+                &[
+                    "AnthropicClaudeAi",
+                    "AnthropicConsoleApiKey",
+                    "OpenAiChatGpt",
+                    "GoogleCodeAssist",
+                ],
+            ),
+        ],
         vec![],
     )
 }
@@ -345,6 +356,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["Message", "Request", "Lifecycle", "Response", "Ack"],
             ),
             NamedTypeBinding::string_enum(
+                "PeerIngressRequestClass",
+                &[
+                    "Other",
+                    "SupervisorBridge",
+                    "PeerAdded",
+                    "PeerRetired",
+                    "PeerUnwired",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "PeerIngressInputClass",
                 &[
                     "ActionableMessage",
@@ -476,6 +497,16 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum(
                 "RuntimeNoticeKind",
                 &["Drain", "Reset", "Stop", "Exit", "Recover"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RuntimeEventKind",
+                &[
+                    "InputLifecycle",
+                    "RunLifecycle",
+                    "RuntimeStateChange",
+                    "Topology",
+                    "Projection",
+                ],
             ),
             NamedTypeBinding::string_enum(
                 "RuntimeEffectKind",

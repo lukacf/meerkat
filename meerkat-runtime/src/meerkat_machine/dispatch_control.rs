@@ -1,5 +1,27 @@
 use super::*;
 
+fn runtime_event_kind(
+    event: &crate::runtime_event::RuntimeEvent,
+) -> crate::meerkat_machine::dsl::RuntimeEventKind {
+    match event {
+        crate::runtime_event::RuntimeEvent::InputLifecycle(_) => {
+            crate::meerkat_machine::dsl::RuntimeEventKind::InputLifecycle
+        }
+        crate::runtime_event::RuntimeEvent::RunLifecycle(_) => {
+            crate::meerkat_machine::dsl::RuntimeEventKind::RunLifecycle
+        }
+        crate::runtime_event::RuntimeEvent::RuntimeStateChange(_) => {
+            crate::meerkat_machine::dsl::RuntimeEventKind::RuntimeStateChange
+        }
+        crate::runtime_event::RuntimeEvent::Topology(_) => {
+            crate::meerkat_machine::dsl::RuntimeEventKind::Topology
+        }
+        crate::runtime_event::RuntimeEvent::Projection(_) => {
+            crate::meerkat_machine::dsl::RuntimeEventKind::Projection
+        }
+    }
+}
+
 impl MeerkatMachine {
     pub(super) async fn execute_meerkat_machine_control_command(
         &self,
@@ -148,8 +170,7 @@ impl MeerkatMachine {
                     self.lookup_entry(&runtime_id).await?;
 
                 // DSL-first: stage PublishEvent before driver mutation.
-                // Compute event_kind before consuming the event.
-                let event_kind = format!("{:?}", std::mem::discriminant(&event.event));
+                let event_kind = runtime_event_kind(&event.event);
                 let previous_dsl_state = self
                     .stage_session_dsl_input(
                         &session_id,
@@ -864,6 +885,61 @@ impl MeerkatMachine {
                 Ok(MeerkatMachineCommandResult::BoundaryReceipt(receipt))
             }
             _ => unreachable!("non-control command routed to control handler"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identifiers::{LogicalRuntimeId, RuntimeEventId};
+    use crate::runtime_event::{
+        InputLifecycleEvent, RunLifecycleEvent, RuntimeEvent, RuntimeProjectionEvent,
+        RuntimeStateChangeEvent, RuntimeTopologyEvent,
+    };
+    use crate::runtime_state::RuntimeState;
+    use meerkat_core::lifecycle::{InputId, RunId};
+
+    #[test]
+    fn publish_event_kind_is_typed_from_runtime_event_variant() {
+        let input_id = InputId::new();
+        let run_id = RunId::new();
+        let runtime_id = LogicalRuntimeId::new("runtime-1");
+
+        let cases = [
+            (
+                RuntimeEvent::InputLifecycle(InputLifecycleEvent::Accepted { input_id }),
+                crate::meerkat_machine::dsl::RuntimeEventKind::InputLifecycle,
+            ),
+            (
+                RuntimeEvent::RunLifecycle(RunLifecycleEvent::Started { run_id }),
+                crate::meerkat_machine::dsl::RuntimeEventKind::RunLifecycle,
+            ),
+            (
+                RuntimeEvent::RuntimeStateChange(RuntimeStateChangeEvent {
+                    from: RuntimeState::Attached,
+                    to: RuntimeState::Running,
+                }),
+                crate::meerkat_machine::dsl::RuntimeEventKind::RuntimeStateChange,
+            ),
+            (
+                RuntimeEvent::Topology(RuntimeTopologyEvent::RuntimeCreated {
+                    runtime_id: runtime_id.clone(),
+                }),
+                crate::meerkat_machine::dsl::RuntimeEventKind::Topology,
+            ),
+            (
+                RuntimeEvent::Projection(RuntimeProjectionEvent {
+                    rule_id: "rule-1".to_string(),
+                    projected_input_id: InputId::new(),
+                    source_event_id: RuntimeEventId::new(),
+                }),
+                crate::meerkat_machine::dsl::RuntimeEventKind::Projection,
+            ),
+        ];
+
+        for (event, expected) in cases {
+            assert_eq!(runtime_event_kind(&event), expected);
         }
     }
 }

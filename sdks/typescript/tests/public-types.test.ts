@@ -24,6 +24,7 @@ import type {
   SpawnSpec,
   SupervisorRotationReportWire,
   ToolCallRequestedEvent,
+  ToolCallbackReturn,
   WireAuthProfileCleared,
   WireAuthProfileCreated,
   WireAuthProfileDetail,
@@ -111,11 +112,17 @@ const publicRunFailedEvent: RunFailedEvent = {
   type: "run_failed",
   sessionId: "session-1",
   errorClass: "hook",
-  error: "denied",
   errorReport: hookDeniedErrorReport,
 };
 
 void publicRunFailedEvent;
+
+const callbackBlockResult: ToolCallbackReturn = {
+  content: [{ type: "text", text: "typed tool result" }],
+  isError: false,
+};
+
+void callbackBlockResult;
 
 const spawnSpecWithGeneration: SpawnSpec = {
   profile: "worker",

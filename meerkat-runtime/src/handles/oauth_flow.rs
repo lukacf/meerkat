@@ -323,7 +323,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::AdmitOAuthBrowserFlow {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 redirect_uri: redirect_uri.to_string(),
                 expires_at_millis,
                 max_outstanding_flows: self.registry.max_outstanding() as u64,
@@ -344,7 +344,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::VerifyOAuthBrowserFlow {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 redirect_uri: redirect_uri.to_string(),
                 now_millis: current_time_millis(),
             },
@@ -364,7 +364,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::ConsumeOAuthBrowserFlow {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 redirect_uri: redirect_uri.to_string(),
                 now_millis: current_time_millis(),
             },
@@ -395,7 +395,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 expires_at_millis,
                 max_outstanding_flows: self.registry.max_outstanding() as u64,
             },
@@ -414,7 +414,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::VerifyOAuthDeviceFlow {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 now_millis: current_time_millis(),
             },
             "verify_oauth_device_flow",
@@ -432,7 +432,7 @@ impl RuntimeOAuthFlowHandle {
             target,
             auth_dsl::AuthMachineInput::BeginOAuthDevicePoll {
                 flow_id: flow_id.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 now_millis: current_time_millis(),
             },
             "begin_oauth_device_poll",
@@ -677,11 +677,9 @@ impl RuntimeOAuthFlowHandle {
             .iter()
             .filter(|flow| !durable_browser.contains(&persisted_browser_snapshot_key(flow)))
         {
-            if let Some(provider) = OAuthProviderIdentity::from_alias(&flow.provider) {
-                let _ =
-                    self.registry
-                        .consume(&flow.state, &flow.target, provider, &flow.redirect_uri);
-            }
+            let _ =
+                self.registry
+                    .consume(&flow.state, &flow.target, flow.provider, &flow.redirect_uri);
             let _ = self.expire_browser(&flow.target, &flow.state);
         }
         for flow in current
@@ -689,11 +687,9 @@ impl RuntimeOAuthFlowHandle {
             .iter()
             .filter(|flow| !durable_device.contains(&persisted_device_snapshot_key(flow)))
         {
-            if let Some(provider) = OAuthProviderIdentity::from_alias(&flow.provider) {
-                let _ = self
-                    .registry
-                    .expire_device_code(&flow.device_code, &flow.target, provider);
-            }
+            let _ =
+                self.registry
+                    .expire_device_code(&flow.device_code, &flow.target, flow.provider);
             let _ = self
                 .lifecycle
                 .expire_device_flow(&flow.target, &flow.device_code);
@@ -743,9 +739,7 @@ impl RuntimeOAuthFlowHandle {
         if persisted.expires_at_millis <= now_millis {
             return;
         }
-        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
-            return;
-        };
+        let provider = persisted.provider;
         let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
         let elapsed = self.registry.ttl().saturating_sub(remaining);
         let created_at = now_instant.checked_sub(elapsed).unwrap_or(now_instant);
@@ -786,9 +780,7 @@ impl RuntimeOAuthFlowHandle {
         if persisted.expires_at_millis <= now_millis {
             return;
         }
-        let Some(provider) = OAuthProviderIdentity::from_alias(&persisted.provider) else {
-            return;
-        };
+        let provider = persisted.provider;
         let remaining = Duration::from_millis(persisted.expires_at_millis - now_millis);
         let expires_at = now_instant.checked_add(remaining).unwrap_or(now_instant);
         let elapsed = Duration::from_millis(now_millis.saturating_sub(persisted.created_at_millis));
@@ -1229,7 +1221,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
             target,
             auth_dsl::AuthMachineInput::ConsumeOAuthDeviceFlow {
                 flow_id: device_code.to_string(),
-                provider: provider.canonical_alias().to_string(),
+                provider,
                 now_millis: current_time_millis(),
             },
             "consume_oauth_device_flow",
@@ -1270,7 +1262,7 @@ impl OAuthDevicePollLifecycle for RuntimeAuthLeaseHandle {
             &record.target,
             auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
                 flow_id: record.device_code.clone(),
-                provider: record.provider.canonical_alias().to_string(),
+                provider: record.provider,
                 expires_at_millis,
                 max_outstanding_flows: u64::MAX,
             },
@@ -1326,7 +1318,7 @@ impl OAuthDevicePollLifecycle for RuntimeOAuthDevicePollLifecycle {
                 &record.target,
                 auth_dsl::AuthMachineInput::AdmitOAuthDeviceFlow {
                     flow_id: record.device_code.clone(),
-                    provider: record.provider.canonical_alias().to_string(),
+                    provider: record.provider,
                     expires_at_millis,
                     max_outstanding_flows: self.registry.max_outstanding() as u64,
                 },

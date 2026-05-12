@@ -111,6 +111,7 @@ impl AnthropicClientBuilder {
         let pool_idle_timeout = self.pool_idle_timeout;
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
+            .user_agent("claude-cli/2.1.88 (cli)")
             .connect_timeout(connect_timeout)
             .timeout(request_timeout)
             .pool_idle_timeout(pool_idle_timeout)
@@ -962,9 +963,18 @@ impl LlmClient for AnthropicClient {
                 req = req.header("anthropic-dangerous-direct-browser-access", "true");
             }
 
-            let response = req
-                .json(&body)
-                .send()
+            let built = req.json(&body).build().map_err(|_| LlmError::NetworkTimeout {
+                    duration_ms: 30000,
+                })?;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/rkat-request-dump.log") {
+                use std::io::Write;
+                let _ = writeln!(f, "REQUEST {} {}", built.method(), built.url());
+                for (name, value) in built.headers() {
+                    let _ = writeln!(f, "  {}: {}", name, value.to_str().unwrap_or("<binary>"));
+                }
+                let _ = writeln!(f, "---");
+            }
+            let response = self.http.execute(built)
                 .await
                 .map_err(|_| LlmError::NetworkTimeout {
                     duration_ms: 30000,
@@ -976,6 +986,11 @@ impl LlmClient for AnthropicClient {
             } else {
                 let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
+                tracing::error!(
+                    status = status_code,
+                    body = %text,
+                    "Anthropic API error"
+                );
                 Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
@@ -1255,6 +1270,7 @@ impl LlmClient for AnthropicClient {
                             tracing::error!(
                                 error_type,
                                 error_msg,
+                                error_json = ?$event.error,
                                 "Anthropic streaming error"
                             );
 

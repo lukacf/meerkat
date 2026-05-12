@@ -76,11 +76,11 @@ impl HttpAuthorizer for ClaudeAiOAuthAuthorizer {
             "Authorization".to_string(),
             format!("Bearer {}", self.access_token),
         ));
-        req.headers.push((
-            oauth::OAUTH_BETA_HEADER_NAME.to_string(),
-            oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
-        ));
         req.headers.push(("x-app".to_string(), "cli".to_string()));
+        req.headers.push((
+            "X-Claude-Code-Session-Id".to_string(),
+            meerkat_core::time_compat::new_uuid_v7().to_string(),
+        ));
         Ok(())
     }
 
@@ -721,10 +721,10 @@ mod tests {
         authorizer.authorize(&mut request).await.unwrap();
 
         assert!(headers.contains(&("Authorization".to_string(), "Bearer tok-claude".to_string(),)));
-        assert!(headers.contains(&(
-            oauth::OAUTH_BETA_HEADER_NAME.to_string(),
-            oauth::OAUTH_BETA_HEADER_VALUE.to_string(),
-        )));
+        assert!(
+            !headers.iter().any(|(k, _)| k == "anthropic-beta"),
+            "OAuth authorizer must not inject anthropic-beta on messages API requests"
+        );
         assert!(headers.contains(&("x-app".to_string(), "cli".to_string())));
     }
 

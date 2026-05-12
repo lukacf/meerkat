@@ -36,6 +36,14 @@ const ANTHROPIC_CLAUDE_AI_SCOPES: &[&str] = &[
     "user:mcp_servers",
     "user:file_upload",
 ];
+const ANTHROPIC_ALL_SCOPES: &[&str] = &[
+    "org:create_api_key",
+    "user:profile",
+    "user:inference",
+    "user:sessions:claude_code",
+    "user:mcp_servers",
+    "user:file_upload",
+];
 
 const OPENAI_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
@@ -136,7 +144,7 @@ impl OAuthProviderIdentity {
                 token_url: ANTHROPIC_TOKEN_URL.into(),
                 device_code_url: None,
                 redirect_uri: redirect_uri.into(),
-                scopes: strings(ANTHROPIC_CLAUDE_AI_SCOPES),
+                scopes: strings(ANTHROPIC_ALL_SCOPES),
                 extra_authorize_params: vec![("code".into(), "true".into())],
                 token_request_format: OAuthTokenRequestFormat::Json,
                 include_state_in_token_exchange: true,

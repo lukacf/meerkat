@@ -4827,6 +4827,7 @@ async fn interactive_login(
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
     let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
+    eprintln!("DEBUG authorize_url: {authorize_url}");
     let browser_ok = webbrowser::open(&authorize_url).is_ok();
     if browser_ok {
         print_ok("Browser launched. Complete the sign-in there.");
@@ -4887,7 +4888,10 @@ async fn interactive_login(
 
     // --- Step 4: exchange + persist ------------------------------
     print_step(4, 4, "Exchanging the code for access + refresh tokens");
-    let http = reqwest::Client::new();
+    let http = reqwest::Client::builder()
+        .user_agent("axios/1.14.0")
+        .build()
+        .expect("http client");
     let result = meerkat_providers::auth_oauth::exchange_authorization_code_with_state(
         &http,
         &endpoints,

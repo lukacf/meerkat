@@ -82,7 +82,7 @@ pub fn claude_ai_endpoints(redirect_uri: impl Into<String>) -> OAuthEndpoints {
         token_url: TOKEN_URL.into(),
         device_code_url: None,
         redirect_uri: redirect_uri.into(),
-        scopes: CLAUDE_AI_SCOPES.iter().map(|s| (*s).to_string()).collect(),
+        scopes: ALL_OAUTH_SCOPES.iter().map(|s| (*s).to_string()).collect(),
         extra_authorize_params: vec![("code".into(), "true".into())],
         token_request_format: OAuthTokenRequestFormat::Json,
         include_state_in_token_exchange: true,
@@ -455,7 +455,7 @@ mod tests {
         assert_eq!(endpoints.redirect_uri, "http://localhost:1455/callback");
         assert_eq!(
             endpoints.scopes,
-            CLAUDE_AI_SCOPES
+            ALL_OAUTH_SCOPES
                 .iter()
                 .map(|scope| (*scope).to_string())
                 .collect::<Vec<_>>()

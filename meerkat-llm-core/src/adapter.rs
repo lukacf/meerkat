@@ -222,7 +222,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 .project_replay_messages(messages)
                 .map_err(|error| {
                     AgentError::llm(
-                        self.client.provider().as_str(),
+                        self.client.provider(),
                         error.failure_reason(),
                         error.to_string(),
                     )
@@ -363,7 +363,7 @@ impl AgentLlmClient for LlmClientAdapter {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider().as_str(),
+                                self.client.provider(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -372,7 +372,7 @@ impl AgentLlmClient for LlmClientAdapter {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider().as_str(),
+                        self.client.provider(),
                         e.failure_reason(),
                         e.to_string(),
                     ));

@@ -2,6 +2,7 @@
 
 use crate::checkpoint::SessionCheckpointError;
 use crate::hooks::{HookId, HookPoint, HookReasonCode};
+use crate::provider::Provider;
 use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
 use serde::{Deserialize, Serialize};
@@ -279,7 +280,7 @@ impl From<&str> for ToolError {
 pub enum AgentError {
     #[error("LLM error ({provider}): {message}")]
     Llm {
-        provider: &'static str,
+        provider: Provider,
         reason: LlmFailureReason,
         message: String,
     },
@@ -394,18 +395,18 @@ pub enum AgentError {
 
 impl AgentError {
     pub fn llm(
-        provider: &'static str,
+        provider: impl Into<Provider>,
         reason: LlmFailureReason,
         message: impl Into<String>,
     ) -> Self {
         Self::Llm {
-            provider,
+            provider: provider.into(),
             reason,
             message: message.into(),
         }
     }
 
-    pub fn llm_empty_response(provider: &'static str) -> Self {
+    pub fn llm_empty_response(provider: impl Into<Provider>) -> Self {
         Self::llm(
             provider,
             LlmFailureReason::ProviderError(LlmProviderError::non_retryable(

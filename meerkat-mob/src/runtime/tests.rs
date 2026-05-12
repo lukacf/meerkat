@@ -9399,15 +9399,16 @@ async fn test_completed_unknown_retire_is_rejected_by_machine_admission() {
 }
 
 #[tokio::test]
-async fn test_stopped_empty_task_create_is_rejected_by_machine_admission() {
+async fn test_stopped_empty_submit_work_is_rejected_by_machine_admission() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle.stop().await.expect("stop");
 
     let result = handle
-        .task_create(
-            "   ".to_string(),
-            "empty subject must not shadow stopped admission".to_string(),
-            vec![],
+        .submit_work(
+            AgentRuntimeId::initial(AgentIdentity::from("missing-empty-task")),
+            FenceToken::new(0),
+            WorkRef::new(),
+            WorkSpec::new("   ".to_string(), WorkOrigin::Internal),
         )
         .await;
 

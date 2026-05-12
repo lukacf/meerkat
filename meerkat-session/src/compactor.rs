@@ -3,7 +3,7 @@
 //! Gated behind the `session-compaction` feature.
 
 use meerkat_core::compact::{CompactionConfig, CompactionContext, CompactionResult, Compactor};
-use meerkat_core::types::{ContentBlock, Message};
+use meerkat_core::types::{AssistantBlock, BlockAssistantMessage, ContentBlock, Message};
 
 /// Summarization prompt sent to the LLM with the current history.
 const COMPACTION_PROMPT: &str = "\
@@ -57,19 +57,48 @@ fn project_media_for_summarization(blocks: &[ContentBlock]) -> Vec<ContentBlock>
         .collect()
 }
 
+/// Strip reasoning blocks from assistant messages for compaction.
+///
+/// Reasoning blocks contain provider-specific encrypted content that is
+/// only valid within the original API session. Replaying them into a
+/// compaction call (a fresh API request) causes provider failures.
+/// The visible reasoning text is already captured in `Text` blocks or
+/// is internal-only; the summarizer does not need it.
+fn project_assistant_blocks_for_summarization(blocks: &[AssistantBlock]) -> Vec<AssistantBlock> {
+    blocks
+        .iter()
+        .filter(|b| !matches!(b, AssistantBlock::Reasoning { .. }))
+        .cloned()
+        .collect()
+}
+
 /// Project media from all messages in a history for the summary request.
 ///
 /// Applies `project_media_for_summarization` to `UserMessage.content` and
-/// `ToolResult.content` blocks. Other message types pass through unchanged.
+/// `ToolResult.content` blocks. Strips reasoning blocks from assistant
+/// messages (encrypted content is session-scoped and cannot be replayed).
+/// Drops assistant messages that become empty after projection.
 fn project_messages_for_summarization(messages: &[Message]) -> Vec<Message> {
     messages
         .iter()
-        .map(|msg| match msg {
+        .filter_map(|msg| match msg {
             Message::User(user) => {
                 let content = project_media_for_summarization(&user.content);
                 let mut user = user.clone();
                 user.content = content;
-                Message::User(user)
+                Some(Message::User(user))
+            }
+            Message::BlockAssistant(assistant) => {
+                let blocks = project_assistant_blocks_for_summarization(&assistant.blocks);
+                if blocks.is_empty() {
+                    None
+                } else {
+                    Some(Message::BlockAssistant(BlockAssistantMessage {
+                        blocks,
+                        stop_reason: assistant.stop_reason,
+                        created_at: assistant.created_at,
+                    }))
+                }
             }
             Message::ToolResults {
                 results,
@@ -86,12 +115,12 @@ fn project_messages_for_summarization(messages: &[Message]) -> Vec<Message> {
                         )
                     })
                     .collect();
-                Message::ToolResults {
+                Some(Message::ToolResults {
                     results,
                     created_at: *created_at,
-                }
+                })
             }
-            other => other.clone(),
+            other => Some(other.clone()),
         })
         .collect()
 }
@@ -925,5 +954,75 @@ mod tests {
             !json.contains("[image:") && !json.contains("[video:"),
             "retained transcript JSON must keep typed media blocks, not summary placeholders: {json}"
         );
+    }
+
+    #[test]
+    fn prepare_for_summarization_strips_reasoning_blocks() {
+        use meerkat_core::types::{ProviderMeta, StopReason};
+
+        let c = DefaultCompactor::new(make_config());
+        let messages = vec![
+            Message::User(UserMessage::text("Hello".to_string())),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![
+                    AssistantBlock::Reasoning {
+                        text: "Let me think".to_string(),
+                        meta: Some(Box::new(ProviderMeta::OpenAi {
+                            id: "rs_1".to_string(),
+                            encrypted_content: Some("enc_data".to_string()),
+                            phase: None,
+                        })),
+                    },
+                    AssistantBlock::Text {
+                        text: "Here is my answer".to_string(),
+                        meta: None,
+                    },
+                ],
+                StopReason::EndTurn,
+            )),
+        ];
+
+        let prepared = c.prepare_for_summarization(&messages);
+        assert_eq!(prepared.len(), 2);
+
+        if let Message::BlockAssistant(a) = &prepared[1] {
+            assert_eq!(a.blocks.len(), 1);
+            assert!(
+                matches!(&a.blocks[0], AssistantBlock::Text { text, .. } if text == "Here is my answer")
+            );
+        } else {
+            panic!("expected BlockAssistant message");
+        }
+    }
+
+    #[test]
+    fn prepare_for_summarization_drops_reasoning_only_assistant() {
+        use meerkat_core::types::{ProviderMeta, StopReason};
+
+        let c = DefaultCompactor::new(make_config());
+        let messages = vec![
+            Message::User(UserMessage::text("First".to_string())),
+            Message::BlockAssistant(BlockAssistantMessage::new(
+                vec![AssistantBlock::Reasoning {
+                    text: String::new(),
+                    meta: Some(Box::new(ProviderMeta::OpenAi {
+                        id: "rs_orphan".to_string(),
+                        encrypted_content: Some("enc".to_string()),
+                        phase: None,
+                    })),
+                }],
+                StopReason::EndTurn,
+            )),
+            Message::User(UserMessage::text("Second".to_string())),
+        ];
+
+        let prepared = c.prepare_for_summarization(&messages);
+        assert_eq!(
+            prepared.len(),
+            2,
+            "reasoning-only assistant should be dropped"
+        );
+        assert!(matches!(&prepared[0], Message::User(u) if u.text_content() == "First"));
+        assert!(matches!(&prepared[1], Message::User(u) if u.text_content() == "Second"));
     }
 }

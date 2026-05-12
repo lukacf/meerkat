@@ -447,7 +447,16 @@ async fn inner_e2e_cli_generate_image_openai_default() -> Result<(), Box<dyn std
     let project_dir = PathBuf::from(std::env::var("TEST_PROJECT_DIR")?);
 
     std::env::set_current_dir(&project_dir)?;
-    write_smoke_config(&project_dir).await?;
+    // Image generation needs more output tokens than the shared smoke config's
+    // 256 — the model must emit web search calls, a generate_image tool call
+    // with a detailed prompt, and a blob_save_file call.
+    let rkat_dir = project_dir.join(".rkat");
+    tokio::fs::create_dir_all(&rkat_dir).await?;
+    let mut config = Config::default();
+    config.agent.max_tokens_per_turn = 4096;
+    config.agent.model = smoke_model();
+    let config_toml = toml::to_string_pretty(&config)?;
+    tokio::fs::write(rkat_dir.join("config.toml"), config_toml).await?;
 
     let rkat = rkat_binary_path().ok_or("rkat binary not found")?;
     let output = timeout(

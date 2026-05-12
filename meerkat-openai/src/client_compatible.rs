@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages};
+use crate::tool_schema::openai_function_parameters;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiCompatibleMode {
@@ -131,7 +132,7 @@ impl OpenAiCompatibleClient {
                             "function": {
                                 "name": tool.name,
                                 "description": tool.description,
-                                "parameters": tool.input_schema
+                                "parameters": openai_function_parameters(&tool.input_schema)
                             }
                         })
                     })

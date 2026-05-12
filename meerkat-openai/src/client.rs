@@ -32,6 +32,7 @@ use crate::image_generation::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
     OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
 };
+use crate::tool_schema::openai_function_parameters;
 
 /// Extract the typed OpenAI provider tag from a request.
 pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
@@ -464,7 +465,7 @@ impl OpenAiClient {
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema
+                        "parameters": openai_function_parameters(&t.input_schema)
                     })
                 })
                 .collect();

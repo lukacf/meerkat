@@ -7,7 +7,10 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::web_search::{
     WebSearchEvidence, WebSearchNativeEvent, WebSearchRequest, WebSearchResult, WebSearchStatus,
 };
-use meerkat_core::{AgentLlmClient, AssistantBlock, Message, Provider, SystemMessage, UserMessage};
+use meerkat_core::{
+    AgentLlmClient, AssistantBlock, Message, Provider, ServerToolContent, SystemMessage,
+    UserMessage,
+};
 use meerkat_llm_core::{LlmError, WebSearchExecutor};
 use std::sync::Arc;
 
@@ -101,11 +104,11 @@ async fn execute_native_web_search(
                     answer_parts.push(text.trim().to_string());
                 }
             }
-            AssistantBlock::ServerToolContent { name, content, .. } => {
-                collect_evidence(content, &mut evidence);
+            AssistantBlock::ServerToolContent { content, .. } => {
+                collect_server_tool_evidence(content, &mut evidence);
                 native_events.push(WebSearchNativeEvent {
-                    name: name.clone(),
-                    content: content.clone(),
+                    name: content.display_kind().to_string(),
+                    content: server_tool_content_json(content),
                 });
             }
             _ => {}
@@ -146,6 +149,39 @@ fn web_search_user_prompt(request: &WebSearchRequest) -> String {
         prompt.push_str(context.trim());
     }
     prompt
+}
+
+fn collect_server_tool_evidence(content: &ServerToolContent, out: &mut Vec<WebSearchEvidence>) {
+    match content {
+        ServerToolContent::OpenAiMessageAnnotations { annotations } => {
+            collect_evidence(annotations, out);
+        }
+        ServerToolContent::OpenAiResponseItem { item, .. } => {
+            collect_evidence(item, out);
+        }
+        ServerToolContent::OpenAiWebSearchCallEvent { .. } => {}
+        ServerToolContent::AnthropicTextCitations { citations } => {
+            collect_evidence(citations, out);
+        }
+        ServerToolContent::AnthropicWebSearchToolResult { result } => {
+            collect_evidence(result, out);
+        }
+        ServerToolContent::AnthropicServerToolUse { input, .. } => {
+            collect_evidence(input, out);
+        }
+        ServerToolContent::GeminiGroundingMetadata { grounding_metadata } => {
+            collect_evidence(grounding_metadata, out);
+        }
+        _ => {}
+    }
+}
+
+fn server_tool_content_json(content: &ServerToolContent) -> serde_json::Value {
+    serde_json::to_value(content).unwrap_or_else(|_| {
+        serde_json::json!({
+            "kind": content.display_kind(),
+        })
+    })
 }
 
 fn collect_evidence(value: &serde_json::Value, out: &mut Vec<WebSearchEvidence>) {

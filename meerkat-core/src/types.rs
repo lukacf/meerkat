@@ -1398,43 +1398,87 @@ impl SystemNoticeBlock {
                 content,
                 ..
             } => {
+                let peer_id = peer.as_ref().map(|peer| peer.id.as_str());
                 let peer_label = peer
                     .as_ref()
                     .and_then(|peer| peer.display_name.as_deref())
                     .or_else(|| peer.as_ref().map(|peer| peer.id.as_str()))
                     .unwrap_or("peer");
-                let mut lines = vec![match kind.as_str() {
-                    "request" => format!("Peer request from {peer_label}"),
-                    "response_progress" => format!("Peer response progress from {peer_label}"),
-                    "response_terminal" => format!("Peer terminal response from {peer_label}"),
-                    _ => format!("Peer message from {peer_label}"),
-                }];
-                if let Some(request_id) = request_id {
-                    lines.push(format!("Request ID: {request_id}"));
-                }
-                if let Some(intent) = intent {
-                    lines.push(format!("Intent: {intent}"));
-                }
-                if let Some(status) = status {
-                    lines.push(format!("Status: {status}"));
-                }
-                if let Some(summary) = summary {
-                    lines.push(summary.clone());
-                }
+                let mut body_lines = Vec::new();
                 for block in content {
                     let text = block.text_projection();
                     if !text.trim().is_empty() {
-                        lines.push(text.into_owned());
+                        body_lines.push(text.into_owned());
                     }
                 }
-                if let Some(payload) = payload {
-                    lines.push(format!("Payload: {}", format_notice_payload(payload)));
+                let body = body_lines.join("\n");
+                let mut lines = match kind.as_str() {
+                    "request" | "peer_request" => {
+                        let peer_id = peer_id.unwrap_or(peer_label);
+                        let params = payload.as_ref().unwrap_or(&Value::Null);
+                        match crate::comms::PeerId::parse(peer_id) {
+                            Ok(parsed_peer_id) => {
+                                let mut lines =
+                                    vec![crate::interaction::format_peer_request_projection(
+                                        parsed_peer_id,
+                                        Some(peer_label),
+                                        request_id.as_deref().unwrap_or_default(),
+                                        intent.as_deref().unwrap_or("request"),
+                                        params,
+                                    )];
+                                if !body.trim().is_empty() {
+                                    lines.push(body);
+                                }
+                                lines
+                            }
+                            Err(_) => {
+                                vec![format!("Peer request from {peer_label}\n{body}")]
+                            }
+                        }
+                    }
+                    "response_progress" | "peer_response_progress" => vec![format!(
+                        "Peer response progress from {peer_label}\nRequest ID: {}",
+                        request_id.as_deref().unwrap_or_default()
+                    )],
+                    "response_terminal" | "peer_response_terminal" => {
+                        let status = status.as_deref().unwrap_or("completed");
+                        let mut text = format!(
+                            "Peer terminal response from {peer_label}\nRequest ID: {}\nStatus: {status}",
+                            request_id.as_deref().unwrap_or_default()
+                        );
+                        if let Some(payload) = payload {
+                            text.push_str(&format!("\nResult: {}", format_notice_payload(payload)));
+                        }
+                        vec![text]
+                    }
+                    _ => vec![crate::interaction::format_peer_message_projection(
+                        peer_label, &body,
+                    )],
+                };
+                if !matches!(
+                    kind.as_str(),
+                    "request" | "peer_request" | "response_terminal" | "peer_response_terminal"
+                ) {
+                    if let Some(request_id) = request_id {
+                        lines.push(format!("Request ID: {request_id}"));
+                    }
+                    if let Some(intent) = intent {
+                        lines.push(format!("Intent: {intent}"));
+                    }
+                    if let Some(status) = status {
+                        lines.push(format!("Status: {status}"));
+                    }
+                    if let Some(summary) = summary {
+                        lines.push(summary.clone());
+                    }
                 }
-                if kind == "request" {
-                    lines.push(
-                        "Respond to this request with the appropriate peer response tool."
-                            .to_string(),
-                    );
+                if let Some(payload) = payload
+                    && !matches!(
+                        kind.as_str(),
+                        "request" | "peer_request" | "response_terminal" | "peer_response_terminal"
+                    )
+                {
+                    lines.push(format!("Payload: {}", format_notice_payload(payload)));
                 }
                 lines.join("\n")
             }
@@ -1446,10 +1490,10 @@ impl SystemNoticeBlock {
                 content,
                 ..
             } => {
-                let mut lines = vec![format!("External event via {source}: {event_type}")];
-                if let Some(body) = body {
-                    lines.push(body.clone());
-                }
+                let mut lines = vec![crate::interaction::format_external_event_projection(
+                    source,
+                    body.as_deref().or(Some(event_type.as_str())),
+                )];
                 for block in content {
                     let text = block.text_projection();
                     if !text.trim().is_empty() {

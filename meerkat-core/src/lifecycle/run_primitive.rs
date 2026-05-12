@@ -1839,17 +1839,29 @@ fn append_content_blocks(
         CoreRenderable::Blocks { blocks } => {
             all_blocks.extend(blocks.iter().cloned());
         }
-        CoreRenderable::SystemNotice { blocks, .. } => {
-            append_system_notice_media_blocks(blocks, all_blocks);
+        CoreRenderable::SystemNotice { kind, body, blocks } => {
+            append_system_notice_projection_blocks(kind, body.as_deref(), blocks, all_blocks);
         }
         _ => {}
     }
 }
 
-fn append_system_notice_media_blocks(
+fn append_system_notice_projection_blocks(
+    kind: &SystemNoticeKind,
+    body: Option<&str>,
     blocks: &[SystemNoticeBlock],
     all_blocks: &mut Vec<crate::types::ContentBlock>,
 ) {
+    let notice = crate::types::SystemNoticeMessage::with_blocks(
+        *kind,
+        body.map(ToOwned::to_owned),
+        blocks.to_vec(),
+    );
+    let projection = notice.model_projection_text();
+    if !projection.trim().is_empty() {
+        all_blocks.push(crate::types::ContentBlock::Text { text: projection });
+    }
+
     for block in blocks {
         let content = match block {
             SystemNoticeBlock::Comms { content, .. }
@@ -1993,7 +2005,7 @@ mod tests {
     }
 
     #[test]
-    fn system_notice_append_does_not_project_into_prompt_text() {
+    fn system_notice_append_projects_to_provider_prompt_text() {
         let append = ConversationAppend {
             role: ConversationAppendRole::SystemNotice,
             content: CoreRenderable::SystemNotice {
@@ -2002,8 +2014,11 @@ mod tests {
                 blocks: vec![SystemNoticeBlock::Comms {
                     kind: "peer_request".to_string(),
                     direction: crate::types::SystemNoticeDirection::Incoming,
-                    peer: None,
-                    request_id: Some("req-1".to_string()),
+                    peer: Some(crate::types::SystemNoticePeer {
+                        id: crate::comms::PeerId::new().to_string(),
+                        display_name: Some("worker-1".to_string()),
+                    }),
+                    request_id: Some(crate::time_compat::new_uuid_v7().to_string()),
                     intent: Some("checksum_token".to_string()),
                     status: None,
                     summary: Some("Peer request: checksum_token".to_string()),
@@ -2017,14 +2032,15 @@ mod tests {
         let p = make_staged(vec![append.clone()]);
 
         assert_eq!(p.typed_turn_appends(), vec![append]);
-        assert_eq!(
-            p.extract_content_input(),
-            crate::types::ContentInput::Text(String::new())
-        );
+        let prompt = p.extract_content_input().text_content();
+        assert!(prompt.contains("Peer request: checksum_token"));
+        assert!(prompt.contains("Peer request from peer_id"));
+        assert!(prompt.contains("What is the token?"));
+        assert!(prompt.contains("send_response"));
     }
 
     #[test]
-    fn system_notice_append_preserves_media_prompt_blocks_without_text_projection() {
+    fn system_notice_append_preserves_media_prompt_blocks_with_text_projection() {
         let image = crate::types::ContentBlock::Image {
             media_type: "image/png".to_string(),
             data: crate::types::ImageData::Inline {
@@ -2054,8 +2070,10 @@ mod tests {
 
         let result = p.extract_content_input();
         assert!(
-            matches!(&result, crate::types::ContentInput::Blocks(blocks) if blocks == &vec![image]),
-            "expected media-only prompt blocks, got {result:?}"
+            matches!(&result, crate::types::ContentInput::Blocks(blocks)
+                if matches!(blocks.as_slice(), [crate::types::ContentBlock::Text { text }, got_image]
+                    if text.contains("External event via webhook") && got_image == &image)),
+            "expected projected text plus media prompt blocks, got {result:?}"
         );
     }
 
@@ -2073,7 +2091,7 @@ mod tests {
         assert!(p.typed_turn_appends().is_empty());
         assert_eq!(
             p.extract_content_input(),
-            crate::types::ContentInput::Text(String::new())
+            crate::types::ContentInput::Text("context".to_string())
         );
     }
 

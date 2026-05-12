@@ -242,6 +242,7 @@ pub fn format_peer_request_projection(
     format!(
         "Peer request from peer_id {from_peer_id}{display_suffix} (id: {request_id})\n\
          Intent: {intent}{params_str}\n\
+         Request ID: {request_id}\n\
          \n\
          This is a correlated peer request. {} \
          Do not answer this request with send_message.",

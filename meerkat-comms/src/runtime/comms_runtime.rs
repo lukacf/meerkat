@@ -3688,7 +3688,7 @@ mod tests {
         let interaction = &interactions[0];
         assert_eq!(
             interaction.rendered_text,
-            "[COMMS MESSAGE from sender]\nplease inspect this"
+            "Peer message from sender:\nplease inspect this"
         );
         match &interaction.content {
             meerkat_core::InteractionContent::Message {

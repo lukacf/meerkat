@@ -380,15 +380,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PublishCommittedVisibleSetStopped`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`
-- `RetireRequestedFromIdle`
-  - anchors: `meerkat_machine`
-  - scenarios: `bind-run-boundary-terminal`
 - `RetireBoundRuntime`
   - anchors: `meerkat_machine`
-  - scenarios: `session_registration_and_binding`
+  - scenarios: `bind-run-boundary-terminal`
 - `RetireUnboundRuntime`
   - anchors: `meerkat_machine`
-  - scenarios: `retire-reset-destroy`, `session_registration_and_binding`, `recycle_and_compaction`
+  - scenarios: `bind-run-boundary-terminal`
 - `RetireAlreadyRetired`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`

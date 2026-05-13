@@ -330,7 +330,7 @@ class MobListResult:
 class MobStatusResult:
     """One active mob row returned by `mob/list`."""
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -666,7 +666,7 @@ class MobAppendSystemContextResult:
     """Response payload for `mob/append_system_context`."""
     agent_identity: str
     mob_id: str
-    status: str
+    status: Literal['applied', 'staged', 'duplicate']
 
 
 @dataclass
@@ -846,9 +846,9 @@ class MobMemberStatusResult:
 @dataclass
 class MobSnapshotResult:
     """Response payload for `mob/snapshot`."""
-    members: list[Any]
+    members: list[MobMemberListEntryWire]
     mob_id: str
-    status: str
+    status: Literal['Creating', 'Running', 'Stopped', 'Completed', 'Destroyed']
 
 
 @dataclass
@@ -2496,7 +2496,7 @@ class ProviderCatalog:
     """Provider-level grouping in the catalog response."""
     default_model_id: str
     models: list[dict[str, Any]]
-    provider: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
 
 
 @dataclass
@@ -2511,6 +2511,7 @@ class WireModelProfile:
     """Runtime profile for a model — capabilities and parameter schema."""
     model_family: str
     params_schema: Any
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     supports_reasoning: bool
     supports_temperature: bool
     supports_thinking: bool
@@ -2584,11 +2585,10 @@ the colon-joined form cannot travel across wire boundaries."""
 @dataclass
 class WireBackendProfile:
     """Wire projection of [`meerkat_core::BackendProfile`]."""
-    backend_kind: str
+    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible', 'other_api']
     id: str
-    provider: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     base_url: Optional[str] = None
-    options: Optional[Any] = None
 
 
 @dataclass
@@ -2599,10 +2599,10 @@ the server-side `auth.profile.get` RPC or the
 `GET /auth/bindings/{binding_id}` REST path; both return typed redacted
 shapes. `source_kind` is a
 discriminator for the credential-source variant."""
-    auth_method: str
+    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     id: str
-    provider: str
-    source_kind: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    source_kind: Literal['inline_secret', 'managed_store', 'env', 'external_resolver', 'platform_default', 'command', 'file_descriptor']
 
 
 @dataclass
@@ -2644,10 +2644,10 @@ slug form for wire consumers that key by string."""
 class WireAuthProfileCreated:
     """`POST /auth/profiles` (create) success body."""
     auth_binding: WireAuthBindingRef
-    auth_method: str
+    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     binding_id: str
     profile_id: str
-    provider: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     realm_id: str
     stored: bool
 
@@ -2676,7 +2676,7 @@ class WireAuthProfileCleared:
 class WireLoginStart:
     """`POST /auth/login/start` success body."""
     authorize_url: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     redirect_uri: str
     state: str
 
@@ -2693,7 +2693,7 @@ access_denied/expired/ready tagged protocol."""
     binding_id: str
     has_refresh_token: bool
     profile_id: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     scopes: list[str]
     expires_at: Optional[str] = None
@@ -2706,7 +2706,7 @@ class WireDeviceStart:
     device_code: str
     expires_in: int
     interval: int
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     user_code: str
     verification_uri: str
     verification_uri_complete: Optional[str] = None
@@ -2781,9 +2781,9 @@ auth, and binding profiles."""
 class WireAuthStatus:
     """Wire projection of the auth-profile status. Returned from
 `auth.status.get` / `GET /auth/bindings/{binding_id}/status`."""
-    auth_method: str
+    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     profile_id: str
-    provider: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
@@ -2798,11 +2798,11 @@ class WireAuthStatusDetail:
 `auth_binding` / `has_refresh_token` so the caller can key by
 binding directly."""
     auth_binding: WireAuthBindingRef
-    auth_method: str
+    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     binding_id: str
     has_refresh_token: bool
     profile_id: str
-    provider: str
+    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
     realm_id: str
     state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None
@@ -2876,10 +2876,14 @@ class WireContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
+class WireContentBlockJson(TypedDict, total=False):
+    type: Required[Literal['json']]
+    value: Required[Any]
+
 class WireContentBlockUnknown(TypedDict, total=False):
     type: Required[Literal['unknown']]
 
-WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown
+WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockJson | WireContentBlockUnknown
 
 # Wire-safe content input (mirrors `ContentInput`).
 WireContentInput = str | list[WireContentBlock]
@@ -3451,10 +3455,9 @@ class WireAssistantBlockToolUse(TypedDict, total=False):
     data: Required[WireAssistantBlockToolUseData]
 
 class WireAssistantBlockServerToolContentData(TypedDict, total=False):
-    content: Required[Any]
+    content: Required[dict[str, Any]]
     id: NotRequired[str]
     meta: NotRequired[dict[str, Any]]
-    name: Required[str]
 
 class WireAssistantBlockServerToolContent(TypedDict, total=False):
     block_type: Required[Literal['server_tool_content']]
@@ -3775,7 +3778,11 @@ class ContentBlockVideo(TypedDict, total=False):
     media_type: Required[str]
     type: Required[Literal['video']]
 
-ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo
+class ContentBlockJson(TypedDict, total=False):
+    type: Required[Literal['json']]
+    value: Required[Any]
+
+ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockJson
 
 # Input content that can be either a plain text string or multimodal content blocks.
 #
@@ -3863,10 +3870,11 @@ CommsSendResult = CommsSendResultInputAccepted | CommsSendResultPeerMessageSent 
 # Closed discriminator carried in [`CommsChecksumTokenResult`].
 CommsChecksumTokenResultIntent = Literal['checksum_token']
 
-# Closed public request-intent contract for `peer_request`.
+# Closed core request-intent contract for correlated peer requests.
 #
-# Unknown strings fail during deserialization and cannot fall through to a
-# local match/default path.
+# Public surfaces may keep provider- or feature-specific payload structs in
+# their own crates, but once a request enters core it is classified by this
+# enum rather than by re-reading a raw intent string.
 CommsPeerRequestIntent = Literal['supervisor.bridge', 'checksum_token']
 
 # Typed params for public `peer_request`.

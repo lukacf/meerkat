@@ -313,7 +313,7 @@ case "${command}" in
   e2e-smoke-rbe)
     command="build"
     config="${BUILDBUDDY_BAZEL_CONFIG:-buildbuddy-macos-rbe}"
-    default_target="@wasm_pack_darwin_arm64//:wasm-pack @wasm_pack_linux_x86_64//:wasm-pack //tests/integration:e2e_smoke_lane_test //tests/integration:e2e_artifacts_bin //meerkat-cli:rkat //meerkat-cli:cli_mobpack_live_smoke_test //meerkat-cli:live_smoke_cli_test //meerkat-mcp-server:rkat_mcp_bin //meerkat-mob:smoke_mob_flow_runtime_test //meerkat-mob:smoke_mob_pictionary_test //meerkat-mob:smoke_mob_resume_test //meerkat-rest:rkat_rest_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:live_smoke_rpc_test //tests/integration:smoke_shared_realm_test"
+    default_target="@wasm_pack_darwin_arm64//:wasm-pack @wasm_pack_linux_x86_64//:wasm-pack //tests/integration:e2e_smoke_lane_test //tests/integration:e2e_artifacts_bin //meerkat-cli:rkat //meerkat-cli:cli_mobpack_live_smoke_test //meerkat-cli:live_smoke_cli_test //meerkat-comms:e2e_test //meerkat-mcp-server:rkat_mcp_bin //meerkat-mob:smoke_mob_flow_runtime_test //meerkat-mob:smoke_mob_generated_image_comms_test //meerkat-mob:smoke_mob_pictionary_test //meerkat-mob:smoke_mob_resume_test //meerkat-rest:rkat_rest_bin //meerkat-rpc:rkat_rpc_bin //meerkat-rpc:live_smoke_rpc_test //tests/integration:smoke_shared_realm_test"
     extra_args+=(
       --remote_download_outputs=toplevel
       --color=no

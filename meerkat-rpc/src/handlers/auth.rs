@@ -13,9 +13,10 @@ use serde_json::value::RawValue;
 use meerkat_anthropic::runtime::oauth as a_oauth;
 use meerkat_contracts::{
     BindingIdParams, CreateProfileParams, DeviceCompleteParams, DeviceStartParams,
-    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams, WireAuthProfile,
-    WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity, WireDeviceCompleteResult,
-    WireProviderBinding, WireProvisionApiKeyResult, WireRealmConnectionSet,
+    LoginCompleteParams, LoginStartParams, ProvisionApiKeyParams, RealmIdParams, WireAuthMethod,
+    WireAuthProfile, WireAuthStatusDetail, WireBackendProfile, WireBindingIdentity,
+    WireConnectionProjectionError, WireDeviceCompleteResult, WireProviderBinding,
+    WireProvisionApiKeyResult, WireRealmConnectionSet,
 };
 use meerkat_core::handles::LeaseKey;
 use meerkat_core::{
@@ -28,11 +29,10 @@ use meerkat_providers::auth_oauth::{
 };
 use meerkat_providers::auth_store::{
     PersistedAuthMode, PersistedTokens, TokenKey, TokenStore,
-    credential_source_uses_persisted_store, persisted_auth_mode_for_auth_method,
-    persisted_auth_mode_is_oauth_login,
+    credential_source_uses_persisted_store, persisted_auth_mode_is_oauth_login,
 };
 use meerkat_providers::oauth_flow::{
-    OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider,
+    OAuthDevicePollLease, OAuthFlowError, OAuthProviderIdentity, resolve_oauth_provider_identity,
     validate_oauth_login_binding, validate_oauth_target_binding_for_auth_mode,
 };
 
@@ -78,6 +78,17 @@ async fn resolve_realm(
             format!("Realm config invalid: {e}"),
         )
     })
+}
+
+fn connection_projection_error(
+    id: Option<RpcId>,
+    error: WireConnectionProjectionError,
+) -> RpcResponse {
+    RpcResponse::error(
+        id,
+        error::INTERNAL_ERROR,
+        format!("Connection projection invalid: {error}"),
+    )
 }
 
 async fn resolve_binding_identity(
@@ -738,7 +749,10 @@ pub async fn handle_realm_get(
         Ok(r) => r,
         Err(r) => return r.with_id(id),
     };
-    let wire = WireRealmConnectionSet::from(&realm);
+    let wire = match WireRealmConnectionSet::try_from(&realm) {
+        Ok(wire) => wire,
+        Err(error) => return connection_projection_error(id, error),
+    };
     match serde_json::to_value(wire) {
         Ok(v) => RpcResponse::success(id, v),
         Err(e) => RpcResponse::error(id, error::INTERNAL_ERROR, format!("Serialize error: {e}")),
@@ -760,16 +774,24 @@ pub async fn handle_auth_profile_list(
         Ok(r) => r,
         Err(r) => return r.with_id(id),
     };
-    let profiles: Vec<WireAuthProfile> = realm
+    let profiles: Vec<WireAuthProfile> = match realm
         .auth_profiles
         .values()
-        .map(WireAuthProfile::from)
-        .collect();
-    let backends: Vec<WireBackendProfile> = realm
+        .map(WireAuthProfile::try_from)
+        .collect()
+    {
+        Ok(profiles) => profiles,
+        Err(error) => return connection_projection_error(id, error),
+    };
+    let backends: Vec<WireBackendProfile> = match realm
         .backends
         .values()
-        .map(WireBackendProfile::from)
-        .collect();
+        .map(WireBackendProfile::try_from)
+        .collect()
+    {
+        Ok(backends) => backends,
+        Err(error) => return connection_projection_error(id, error),
+    };
     let bindings: Vec<WireProviderBinding> = realm
         .bindings
         .values()
@@ -803,15 +825,21 @@ pub async fn handle_auth_profile_get(
     )
     .await
     {
-        Ok((auth_binding, binding, auth_profile)) => RpcResponse::success(
-            id,
-            serde_json::json!({
-                "auth_binding": &auth_binding,
-                "binding_id": &binding.id,
-                "profile_id": &auth_profile.id,
-                "auth_profile": WireAuthProfile::from(&auth_profile),
-            }),
-        ),
+        Ok((auth_binding, binding, auth_profile)) => {
+            let wire_auth_profile = match WireAuthProfile::try_from(&auth_profile) {
+                Ok(auth_profile) => auth_profile,
+                Err(error) => return connection_projection_error(id, error),
+            };
+            RpcResponse::success(
+                id,
+                serde_json::json!({
+                    "auth_binding": &auth_binding,
+                    "binding_id": &binding.id,
+                    "profile_id": &auth_profile.id,
+                    "auth_profile": wire_auth_profile,
+                }),
+            )
+        }
         Err(r) => r.with_id(id),
     }
 }
@@ -825,15 +853,15 @@ pub async fn handle_auth_profile_create(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let auth_mode = match parsed.auth_method.as_str() {
-        "api_key" => PersistedAuthMode::ApiKey,
-        "static_bearer" => PersistedAuthMode::StaticBearer,
+    let auth_mode = match parsed.auth_method {
+        PersistedAuthMode::ApiKey => PersistedAuthMode::ApiKey,
+        PersistedAuthMode::StaticBearer => PersistedAuthMode::StaticBearer,
         other => {
             return RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
                 format!(
-                    "auth_method '{other}' cannot be created via RPC. \
+                    "auth_method '{other:?}' cannot be created via RPC. \
                      OAuth methods use auth/login/start + auth/login/complete; \
                      managed_store and external_resolver are configured via TOML."
                 ),
@@ -851,12 +879,12 @@ pub async fn handle_auth_profile_create(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    if parsed.auth_method != auth_profile.auth_method {
+    if Some(parsed.auth_method) != auth_profile.persisted_auth_mode() {
         return RpcResponse::error(
             id,
             error::INVALID_PARAMS,
             format!(
-                "binding {} resolves auth_method '{}' not '{}'",
+                "binding {} resolves auth_method '{}' not '{:?}'",
                 parsed.binding_id, auth_profile.auth_method, parsed.auth_method,
             ),
         );
@@ -892,6 +920,11 @@ pub async fn handle_auth_profile_create(
         auth_method = %auth_profile.auth_method,
         "binding-scoped auth credentials stored via RPC"
     );
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(id, error),
+        };
     RpcResponse::success(
         id,
         serde_json::json!({
@@ -899,8 +932,8 @@ pub async fn handle_auth_profile_create(
             "binding_id": auth_binding.binding.as_str(),
             "auth_binding": &auth_binding,
             "profile_id": &auth_profile.id,
-            "provider": auth_profile.provider.as_str(),
-            "auth_method": &auth_profile.auth_method,
+            "provider": auth_profile.provider,
+            "auth_method": auth_method,
             "stored": true,
         }),
     )
@@ -964,12 +997,7 @@ pub async fn handle_auth_login_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-        }
-    };
+    let resolved = resolve_oauth_provider_identity(parsed.provider, &parsed.redirect_uri);
     let target = match resolve_oauth_target(
         runtime,
         resolved.provider,
@@ -1037,12 +1065,7 @@ pub async fn handle_auth_login_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, &parsed.redirect_uri) {
-        Ok(v) => v,
-        Err(e) => {
-            return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string());
-        }
-    };
+    let resolved = resolve_oauth_provider_identity(parsed.provider, &parsed.redirect_uri);
     let provider = resolved.provider;
     let target = match resolve_oauth_target(
         runtime,
@@ -1215,10 +1238,7 @@ pub async fn handle_auth_login_device_start(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, "") {
-        Ok(v) => v,
-        Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
-    };
+    let resolved = resolve_oauth_provider_identity(parsed.provider, "");
     if resolved.endpoints.device_code_url.is_none() {
         return RpcResponse::error(
             id,
@@ -1304,10 +1324,7 @@ pub async fn handle_auth_login_device_complete(
         Ok(v) => v,
         Err(r) => return r.with_id(id),
     };
-    let resolved = match resolve_oauth_provider(&parsed.provider, "") {
-        Ok(v) => v,
-        Err(e) => return RpcResponse::error(id, error::INVALID_PARAMS, e.to_string()),
-    };
+    let resolved = resolve_oauth_provider_identity(parsed.provider, "");
     let provider = resolved.provider;
     if resolved.endpoints.device_code_url.is_none() {
         return RpcResponse::error(
@@ -1605,8 +1622,8 @@ pub async fn handle_auth_login_provision_api_key(
                 WireProvisionApiKeyResult {
                     identity: WireBindingIdentity::from(&auth_binding),
                     profile_id: auth_profile.id,
-                    provider: "anthropic".to_string(),
-                    auth_mode: "oauth_to_api_key".to_string(),
+                    provider: provision_provider,
+                    auth_mode: PersistedAuthMode::OauthToApiKey,
                     has_api_key: tokens.primary_secret.is_some(),
                     scopes: tokens.scopes,
                 },
@@ -1652,7 +1669,7 @@ pub async fn handle_auth_status_get(
     let lease_key = LeaseKey::from_auth_binding(&auth_binding);
     let mut snapshot = auth_lease.snapshot(&lease_key);
     let now = chrono::Utc::now();
-    let expected_mode = persisted_auth_mode_for_auth_method(&auth_profile.auth_method);
+    let expected_mode = auth_profile.persisted_auth_mode();
     let source_uses_store = credential_source_uses_persisted_store(&auth_profile.source);
     let oauth_mode = expected_mode
         .map(persisted_auth_mode_is_oauth_login)
@@ -1740,13 +1757,18 @@ pub async fn handle_auth_status_get(
     let projection =
         meerkat_core::project_published_auth_status(now, projection_tokens, projection_snapshot);
     let tokens = projection.tokens;
+    let auth_method =
+        match WireAuthMethod::from_provider_raw(auth_profile.provider, &auth_profile.auth_method) {
+            Ok(auth_method) => auth_method,
+            Err(error) => return connection_projection_error(id, error),
+        };
     RpcResponse::success(
         id,
         WireAuthStatusDetail {
             identity: WireBindingIdentity::from(&auth_binding),
             profile_id: auth_profile.id,
-            provider: auth_profile.provider.as_str().to_string(),
-            auth_method: auth_profile.auth_method,
+            provider: auth_profile.provider,
+            auth_method,
             state: projection.phase,
             expires_at: projection.expires_at.map(|e| e.to_rfc3339()),
             last_refresh_at: tokens.and_then(|t| t.last_refresh.map(|e| e.to_rfc3339())),

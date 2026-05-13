@@ -33,7 +33,6 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `run_step_target_counts_flat`: `Map<RunStepKey, u64>`
 - `run_step_target_success_counts_flat`: `Map<RunStepKey, u64>`
 - `run_step_target_terminal_failure_counts_flat`: `Map<RunStepKey, u64>`
-- `run_target_retry_counts`: `Map<RunId, Map<String, u64>>`
 - `run_target_retry_counts_flat`: `Map<RunStepKey, u64>`
 - `run_failure_count`: `Map<RunId, u64>`
 - `run_consecutive_failure_count`: `Map<RunId, u64>`
@@ -111,7 +110,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RecordLoopBodyFrameCompleted`(loop_instance_id: LoopInstanceId, iteration: u64)
 - `RecordLoopUntilConditionMet`(loop_instance_id: LoopInstanceId, iteration: u64)
 - `RecordLoopUntilConditionFailed`(loop_instance_id: LoopInstanceId, iteration: u64)
-- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, run_step_key: Option<RunStepKey>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>, retry_key: Option<String>)
+- `AuthorizeFlowRunReducerCommand`(run_id: RunId, command: FlowRunReducerCommandKind, step_id: Option<StepId>, run_step_key: Option<RunStepKey>, step_status: Option<StepRunStatus>, target_count: Option<u64>, frame_id: Option<FrameId>, node_id: Option<FlowNodeId>, loop_instance_id: Option<LoopInstanceId>)
 - `AuthorizeFlowFrameReducerCommand`(frame_id: FrameId, command: FlowFrameReducerCommandKind, node_id: Option<FlowNodeId>, frame_node_key: Option<FrameNodeKey>, node_status: Option<NodeRunStatus>, terminal_status: Option<FrameStatus>)
 - `AuthorizeLoopIterationReducerCommand`(loop_instance_id: LoopInstanceId, command: LoopIterationReducerCommandKind, body_frame_id: Option<FrameId>, body_frame_iteration: Option<u64>)
 - `CancelFlow`(run_id: RunId)
@@ -974,7 +973,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandStartRun`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `start_run_command`
@@ -984,7 +983,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandDispatchStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -998,7 +997,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandCompleteStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1012,7 +1011,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordStepOutput`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1025,7 +1024,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandConditionPassed`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1038,7 +1037,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandConditionRejected`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1051,7 +1050,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandFailStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1065,7 +1064,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandSkipStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1079,7 +1078,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandProjectFrameStepStatus`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1099,7 +1098,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandCancelStep`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1113,7 +1112,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterTargets`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1127,7 +1126,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetSuccess`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1140,7 +1139,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1153,7 +1152,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetCanceled`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1166,21 +1165,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRecordTargetFailure`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
   - `record_target_failure_command`
   - `has_step_id`
   - `has_run_step_key`
-  - `has_retry_key`
   - `step_tracked`
 - Emits: `EmitRunLifecycleNotice`
 - To: `Running`
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1193,7 +1191,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1206,7 +1204,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandPumpNodeScheduler`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1220,7 +1218,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1233,7 +1231,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandPumpFrameScheduler`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1247,7 +1245,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandNodeExecutionReleased`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1259,7 +1257,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminated`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1271,7 +1269,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1283,7 +1281,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalCompleted`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1293,7 +1291,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalFailed`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`
@@ -1303,7 +1301,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `AuthorizeFlowRunReducerCommandTerminalCanceled`
 - From: `Running`, `Stopped`, `Completed`
-- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key)
+- On: `AuthorizeFlowRunReducerCommand`(run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id)
 - Guards:
   - `known_run`
   - `run_running`

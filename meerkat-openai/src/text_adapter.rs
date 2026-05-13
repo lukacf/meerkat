@@ -28,7 +28,7 @@ use async_trait::async_trait;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
-    StopReason, ToolResult, Usage, UserMessage,
+    Provider, StopReason, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmStream};
 
@@ -407,10 +407,8 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
         })
     }
 
-    fn provider(&self) -> &'static str {
-        // Share the "openai" provider label so factory-level provider
-        // inference / logging treats realtime sessions uniformly.
-        "openai"
+    fn provider(&self) -> Provider {
+        Provider::OpenAI
     }
 
     fn provider_id(&self) -> meerkat_core::Provider {
@@ -693,8 +691,8 @@ mod tests {
     use super::*;
     use meerkat_core::{
         AssistantImageId, AssistantMessage, BlobId, BlobRef, BlockAssistantMessage, ImageData,
-        MediaType, ProviderImageMetadata, RevisedPromptDisposition, SystemMessage, ToolCall,
-        ToolResult, UserMessage,
+        MediaType, OpenAiServerToolItemKind, ProviderImageMetadata, RevisedPromptDisposition,
+        ServerToolContent, SystemMessage, ToolCall, ToolResult, UserMessage,
     };
 
     fn sys(text: &str) -> Message {
@@ -754,8 +752,10 @@ mod tests {
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search".to_string(),
-                        content: serde_json::json!({"type": "web_search_call"}),
+                        content: ServerToolContent::OpenAiResponseItem {
+                            item_kind: OpenAiServerToolItemKind::WebSearchCall,
+                            item: serde_json::json!({"type": "web_search_call"}),
+                        },
                         meta: None,
                     },
                     assistant_image_block(),
@@ -1051,6 +1051,6 @@ mod tests {
     #[test]
     fn provider_is_openai() {
         let adapter = OpenAiRealtimeTextAdapter::new("sk-test");
-        assert_eq!(adapter.provider(), "openai");
+        assert_eq!(adapter.provider(), Provider::OpenAI);
     }
 }

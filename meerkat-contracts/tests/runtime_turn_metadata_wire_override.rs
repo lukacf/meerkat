@@ -4,6 +4,7 @@ use meerkat_contracts::wire::WireAuthBindingRef;
 use meerkat_contracts::wire::runtime::{
     WireProviderParamsOverride, WireRuntimeTurnMetadata, WireTurnMetadataOverride,
 };
+use meerkat_core::Provider;
 use meerkat_core::lifecycle::run_primitive::{
     ProviderParamsOverride, RuntimeTurnMetadata, TurnMetadataOverride,
 };
@@ -148,7 +149,7 @@ fn wire_metadata_malformed_tagged_override_payloads_fail_at_boundary() {
 #[test]
 fn wire_metadata_provider_tag_preserves_provider_native_fields() {
     let provider_params = ProviderParamsOverride::from_legacy_provider_value(
-        "anthropic",
+        Provider::Anthropic,
         &serde_json::json!({
             "effort": "xhigh",
             "web_search": null,
@@ -193,7 +194,7 @@ fn wire_metadata_provider_tag_preserves_provider_native_fields() {
 fn wire_metadata_openai_reasoning_effort_none_and_xhigh_round_trip() {
     for effort in ["none", "xhigh"] {
         let provider_params = ProviderParamsOverride::from_legacy_provider_value(
-            "openai",
+            Provider::OpenAI,
             &serde_json::json!({ "reasoning_effort": effort }),
         );
         let meta = RuntimeTurnMetadata {

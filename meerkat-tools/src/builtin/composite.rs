@@ -543,22 +543,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
                 let async_ops = tool.async_ops_for_output(&output);
                 let result = match output {
                     ToolOutput::Json(value) => {
-                        let content = match &value {
-                            Value::String(s) => s.clone(),
-                            _ => serde_json::to_string(&value).unwrap_or_default(),
-                        };
-                        ToolResult::new(call.id.to_string(), content, false)
+                        ToolResult::from_json_value(call.id.to_string(), value, false)
                     }
                     ToolOutput::JsonWithEffects {
                         value,
                         session_effects,
                     } => {
-                        let content = match &value {
-                            Value::String(s) => s.clone(),
-                            _ => serde_json::to_string(&value).unwrap_or_default(),
-                        };
                         return Ok(ToolDispatchOutcome::new(
-                            ToolResult::new(call.id.to_string(), content, false),
+                            ToolResult::from_json_value(call.id.to_string(), value, false),
                             async_ops,
                             session_effects,
                         ));
@@ -596,22 +588,14 @@ impl AgentToolDispatcher for CompositeDispatcher {
                     let async_ops = tool.async_ops_for_output(&output);
                     let result = match output {
                         ToolOutput::Json(value) => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
-                            ToolResult::new(call.id.to_string(), content, false)
+                            ToolResult::from_json_value(call.id.to_string(), value, false)
                         }
                         ToolOutput::JsonWithEffects {
                             value,
                             session_effects,
                         } => {
-                            let content = match &value {
-                                Value::String(s) => s.clone(),
-                                _ => serde_json::to_string(&value).unwrap_or_default(),
-                            };
                             return Ok(ToolDispatchOutcome::new(
-                                ToolResult::new(call.id.to_string(), content, false),
+                                ToolResult::from_json_value(call.id.to_string(), value, false),
                                 async_ops,
                                 session_effects,
                             ));
@@ -1106,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_json_string_produces_text_result() {
+    async fn dispatch_json_object_produces_typed_json_result() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = CompositeDispatcher::new(
             store,
@@ -1119,8 +1103,6 @@ mod tests {
         )
         .expect("composite dispatcher should build");
 
-        // Builtin JSON outputs should be serialized into text content without
-        // losing object structure.
         let call_json = serde_json::value::RawValue::from_string(r"{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-str",
@@ -1132,13 +1114,14 @@ mod tests {
             .await
             .expect("dispatch should succeed");
         assert!(!result.result.is_error);
-        let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
-            .expect("content should be valid JSON");
-        assert!(parsed["iso8601"].is_string());
+        assert!(matches!(
+            &result.result.content[..],
+            [meerkat_core::ContentBlock::Json { value }] if value["iso8601"].is_string()
+        ));
     }
 
     #[tokio::test]
-    async fn dispatch_json_object_produces_serialized_text() {
+    async fn dispatch_json_object_text_content_is_projection_only() {
         let store = Arc::new(MemoryTaskStore::new());
         let dispatcher = CompositeDispatcher::new(
             store,
@@ -1151,7 +1134,6 @@ mod tests {
         )
         .expect("composite dispatcher should build");
 
-        // datetime returns a JSON object - verify it's serialized to text
         let call_json = serde_json::value::RawValue::from_string("{}".to_string()).unwrap();
         let call = ToolCallView {
             id: "test-obj",
@@ -1164,7 +1146,7 @@ mod tests {
             .expect("dispatch should succeed");
         assert!(!result.result.is_error);
         let parsed: serde_json::Value = serde_json::from_str(&result.result.text_content())
-            .expect("content should be valid JSON");
+            .expect("text projection should be valid JSON");
         assert!(
             parsed.get("iso8601").is_some(),
             "should contain iso8601 field"

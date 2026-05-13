@@ -1950,6 +1950,25 @@ def _contract_string_list(source: dict[str, Any], key: str) -> list[str]:
     return values
 
 
+def _schema_string_enum_values(root: dict[str, Any], name: str) -> list[str]:
+    candidates: list[dict[str, Any]] = []
+    schema = _lookup_named_schema(root, name)
+    if schema:
+        candidates.append(schema)
+    for value in root.values():
+        if isinstance(value, dict):
+            defs = value.get("$defs", {})
+            nested = defs.get(name) if isinstance(defs, dict) else None
+            if isinstance(nested, dict):
+                candidates.append(nested)
+
+    for candidate in candidates:
+        values = candidate.get("enum")
+        if isinstance(values, list) and all(isinstance(value, str) for value in values):
+            return values
+    raise KeyError(f"schema `{name}` must be a string enum")
+
+
 def _contract_string_map(
     source: dict[str, Any],
     key: str,
@@ -2094,6 +2113,8 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
         "provider_auth_methods",
         providers,
     )
+    oauth_provider_identities = _schema_string_enum_values(params_schema, "OAuthProviderIdentity")
+    persisted_auth_modes = _schema_string_enum_values(wire_schema, "PersistedAuthMode")
     source_kinds = _contract_string_list(contracts, "credential_source_kinds")
     status_states = _contract_string_list(contracts, "auth_status_states")
     device_states = _contract_string_list(contracts, "device_complete_states")
@@ -2112,11 +2133,17 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
     lines.extend(_ts_const_array("WIRE_AUTH_PROVIDERS", providers))
     lines.append("export type WireAuthProvider = typeof WIRE_AUTH_PROVIDERS[number];")
     lines.append("")
+    lines.extend(_ts_const_array("OAUTH_PROVIDER_IDENTITIES", oauth_provider_identities))
+    lines.append("export type OAuthProviderIdentity = typeof OAUTH_PROVIDER_IDENTITIES[number];")
+    lines.append("")
     lines.extend(_ts_const_array("WIRE_BACKEND_KINDS", backend_kinds))
     lines.append("export type WireBackendKind = typeof WIRE_BACKEND_KINDS[number];")
     lines.append("")
     lines.extend(_ts_const_array("WIRE_AUTH_METHODS", auth_methods))
     lines.append("export type WireAuthMethod = typeof WIRE_AUTH_METHODS[number];")
+    lines.append("")
+    lines.extend(_ts_const_array("PERSISTED_AUTH_MODES", persisted_auth_modes))
+    lines.append("export type PersistedAuthMode = typeof PERSISTED_AUTH_MODES[number];")
     lines.append("")
     lines.extend(
         _ts_const_array_record(
@@ -2175,28 +2202,28 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "}",
             "",
             "export interface CreateProfileParams extends BindingIdParams {",
-            "  auth_method: WireAuthMethod;",
+            "  auth_method: PersistedAuthMode;",
             "  secret: string;",
             "}",
             "",
             "export interface LoginStartParams extends BindingIdParams {",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "  redirect_uri: string;",
             "}",
             "",
             "export interface LoginCompleteParams extends BindingIdParams {",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "  code: string;",
             "  state: string;",
             "  redirect_uri: string;",
             "}",
             "",
             "export interface DeviceStartParams extends BindingIdParams {",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "}",
             "",
             "export interface DeviceCompleteParams extends BindingIdParams {",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "  device_code: string;",
             "}",
             "",
@@ -2212,7 +2239,6 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  provider: WireAuthProvider;",
             "  backend_kind: WireBackendKind;",
             "  base_url?: string | null;",
-            "  options?: unknown;",
             "}",
             "",
             "export interface WireAuthProfile {",
@@ -2269,13 +2295,13 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  authorize_url: string;",
             "  state: string;",
             "  redirect_uri: string;",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "}",
             "",
             "export interface WireLoginReady extends WireBindingIdentity {",
             "  state?: typeof WIRE_LOGIN_READY_STATE | null;",
             "  profile_id: string;",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "  expires_at?: string | null;",
             "  has_refresh_token: boolean;",
             "  scopes: string[];",
@@ -2288,7 +2314,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  verification_uri_complete?: string | null;",
             "  expires_in: number;",
             "  interval: number;",
-            "  provider: WireAuthProvider;",
+            "  provider: OAuthProviderIdentity;",
             "}",
             "",
             "export type WireDeviceCompletePending = { state: \"pending\" };",
@@ -2305,8 +2331,8 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "",
             "export interface WireProvisionApiKeyResult extends WireBindingIdentity {",
             "  profile_id: string;",
-            "  provider: WireAuthProvider;",
-            "  auth_mode: WireAuthMethod;",
+            "  provider: OAuthProviderIdentity;",
+            "  auth_mode: PersistedAuthMode;",
             "  has_api_key: boolean;",
             "  scopes: string[];",
             "}",
@@ -2441,12 +2467,20 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  return parseLiteral(value, WIRE_AUTH_PROVIDERS, path, 'wire auth provider');",
             "}",
             "",
+            "export function parseOAuthProviderIdentity(value: unknown, path = 'provider'): OAuthProviderIdentity {",
+            "  return parseLiteral(value, OAUTH_PROVIDER_IDENTITIES, path, 'oauth provider identity');",
+            "}",
+            "",
             "export function parseWireBackendKind(value: unknown, path = 'backend_kind'): WireBackendKind {",
             "  return parseLiteral(value, WIRE_BACKEND_KINDS, path, 'wire backend kind');",
             "}",
             "",
             "export function parseWireAuthMethod(value: unknown, path = 'auth_method'): WireAuthMethod {",
             "  return parseLiteral(value, WIRE_AUTH_METHODS, path, 'wire auth method');",
+            "}",
+            "",
+            "export function parsePersistedAuthMode(value: unknown, path = 'auth_mode'): PersistedAuthMode {",
+            "  return parseLiteral(value, PERSISTED_AUTH_MODES, path, 'persisted auth mode');",
             "}",
             "",
             "function validateProviderBackendKind(",
@@ -2623,7 +2657,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  expectString(record.authorize_url, `${path}.authorize_url`);",
             "  expectString(record.state, `${path}.state`);",
             "  expectString(record.redirect_uri, `${path}.redirect_uri`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  parseOAuthProviderIdentity(record.provider, `${path}.provider`);",
             "  return value as WireLoginStart;",
             "}",
             "",
@@ -2634,7 +2668,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  }",
             "  validateBindingIdentity(record, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  parseOAuthProviderIdentity(record.provider, `${path}.provider`);",
             "  optionalString(record, 'expires_at', `${path}.expires_at`);",
             "  expectBoolean(record.has_refresh_token, `${path}.has_refresh_token`);",
             "  expectStringArray(record.scopes, `${path}.scopes`);",
@@ -2649,7 +2683,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  optionalString(record, 'verification_uri_complete', `${path}.verification_uri_complete`);",
             "  expectNumber(record.expires_in, `${path}.expires_in`);",
             "  expectNumber(record.interval, `${path}.interval`);",
-            "  parseWireAuthProvider(record.provider, `${path}.provider`);",
+            "  parseOAuthProviderIdentity(record.provider, `${path}.provider`);",
             "  return value as WireDeviceStart;",
             "}",
             "",
@@ -2672,9 +2706,8 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  const record = expectRecord(value, path);",
             "  validateBindingIdentity(record, path);",
             "  expectString(record.profile_id, `${path}.profile_id`);",
-            "  const provider = parseWireAuthProvider(record.provider, `${path}.provider`);",
-            "  const authMode = parseWireAuthMethod(record.auth_mode, `${path}.auth_mode`);",
-            "  validateProviderAuthMethod(provider, authMode, `${path}.auth_mode`);",
+            "  parseOAuthProviderIdentity(record.provider, `${path}.provider`);",
+            "  parsePersistedAuthMode(record.auth_mode, `${path}.auth_mode`);",
             "  expectBoolean(record.has_api_key, `${path}.has_api_key`);",
             "  expectStringArray(record.scopes, `${path}.scopes`);",
             "  return value as WireProvisionApiKeyResult;",
@@ -2768,14 +2801,14 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  expectString(record.realm_id, 'create_profile.params.realm_id');",
             "  expectString(record.binding_id, 'create_profile.params.binding_id');",
             "  optionalString(record, 'profile_id', 'create_profile.params.profile_id');",
-            "  parseWireAuthMethod(record.auth_method, 'create_profile.params.auth_method');",
+            "  parsePersistedAuthMode(record.auth_method, 'create_profile.params.auth_method');",
             "  expectString(record.secret, 'create_profile.params.secret');",
             "  return params;",
             "}",
             "",
             "export function parseLoginStartParams(params: LoginStartParams): LoginStartParams {",
             "  const record = expectRecord(params, 'login_start.params');",
-            "  parseWireAuthProvider(record.provider, 'login_start.params.provider');",
+            "  parseOAuthProviderIdentity(record.provider, 'login_start.params.provider');",
             "  expectString(record.redirect_uri, 'login_start.params.redirect_uri');",
             "  expectString(record.realm_id, 'login_start.params.realm_id');",
             "  expectString(record.binding_id, 'login_start.params.binding_id');",
@@ -2785,7 +2818,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "",
             "export function parseLoginCompleteParams(params: LoginCompleteParams): LoginCompleteParams {",
             "  const record = expectRecord(params, 'login_complete.params');",
-            "  parseWireAuthProvider(record.provider, 'login_complete.params.provider');",
+            "  parseOAuthProviderIdentity(record.provider, 'login_complete.params.provider');",
             "  expectString(record.code, 'login_complete.params.code');",
             "  expectString(record.state, 'login_complete.params.state');",
             "  expectString(record.redirect_uri, 'login_complete.params.redirect_uri');",
@@ -2797,7 +2830,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "",
             "export function parseDeviceStartParams(params: DeviceStartParams): DeviceStartParams {",
             "  const record = expectRecord(params, 'device_start.params');",
-            "  parseWireAuthProvider(record.provider, 'device_start.params.provider');",
+            "  parseOAuthProviderIdentity(record.provider, 'device_start.params.provider');",
             "  expectString(record.realm_id, 'device_start.params.realm_id');",
             "  expectString(record.binding_id, 'device_start.params.binding_id');",
             "  optionalString(record, 'profile_id', 'device_start.params.profile_id');",
@@ -2808,7 +2841,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  params: DeviceCompleteParams,",
             "): DeviceCompleteParams {",
             "  const record = expectRecord(params, 'device_complete.params');",
-            "  parseWireAuthProvider(record.provider, 'device_complete.params.provider');",
+            "  parseOAuthProviderIdentity(record.provider, 'device_complete.params.provider');",
             "  expectString(record.device_code, 'device_complete.params.device_code');",
             "  expectString(record.realm_id, 'device_complete.params.realm_id');",
             "  expectString(record.binding_id, 'device_complete.params.binding_id');",

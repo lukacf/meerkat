@@ -2,6 +2,7 @@
 // refactored from the original "absorbed into MeerkatMachine"
 // design after review).
 use super::OptionValueExt;
+use meerkat_core::OAuthProviderIdentity;
 //
 // Each binding_key (format: "<realm_id>:<binding_id>") has its own
 // AuthMachine instance, tracked by the runtime-level registry in
@@ -38,11 +39,11 @@ macro_rules! auth_catalog_machine_dsl {
                 refresh_attempt: u64,
                 credential_present: bool,
                 oauth_browser_flow_ids: Set<String>,
-                oauth_browser_flow_providers: Map<String, String>,
+                oauth_browser_flow_providers: Map<String, Enum<OAuthProviderIdentity>>,
                 oauth_browser_flow_redirect_uris: Map<String, String>,
                 oauth_browser_flow_expires_at_millis: Map<String, u64>,
                 oauth_device_flow_ids: Set<String>,
-                oauth_device_flow_providers: Map<String, String>,
+                oauth_device_flow_providers: Map<String, Enum<OAuthProviderIdentity>>,
                 oauth_device_flow_expires_at_millis: Map<String, u64>,
                 oauth_device_poll_ids: Set<String>,
                 oauth_outstanding_flow_count: u64,
@@ -84,15 +85,15 @@ macro_rules! auth_catalog_machine_dsl {
                 MarkReauthRequired,
                 ClearCredentialLifecycle,
                 Release,
-                AdmitOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64 },
-                VerifyOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
-                ConsumeOAuthBrowserFlow { flow_id: String, provider: String, redirect_uri: String, now_millis: u64 },
+                AdmitOAuthBrowserFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64 },
+                VerifyOAuthBrowserFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, redirect_uri: String, now_millis: u64 },
+                ConsumeOAuthBrowserFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, redirect_uri: String, now_millis: u64 },
                 ExpireOAuthBrowserFlow { flow_id: String },
-                AdmitOAuthDeviceFlow { flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64 },
-                VerifyOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
-                BeginOAuthDevicePoll { flow_id: String, provider: String, now_millis: u64 },
+                AdmitOAuthDeviceFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, expires_at_millis: u64, max_outstanding_flows: u64 },
+                VerifyOAuthDeviceFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, now_millis: u64 },
+                BeginOAuthDevicePoll { flow_id: String, provider: Enum<OAuthProviderIdentity>, now_millis: u64 },
                 FinishOAuthDevicePoll { flow_id: String },
-                ConsumeOAuthDeviceFlow { flow_id: String, provider: String, now_millis: u64 },
+                ConsumeOAuthDeviceFlow { flow_id: String, provider: Enum<OAuthProviderIdentity>, now_millis: u64 },
                 ExpireOAuthDeviceFlow { flow_id: String },
             }
 

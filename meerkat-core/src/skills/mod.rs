@@ -151,6 +151,78 @@ impl std::fmt::Display for SkillName {
     }
 }
 
+/// Function identifier exposed by a skill.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, PartialOrd, Ord)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(try_from = "String", into = "String")]
+pub struct SkillFunctionName(String);
+
+impl SkillFunctionName {
+    pub fn parse(value: &str) -> Result<Self, SkillError> {
+        if value.is_empty() {
+            return Err(SkillError::Parse("function_name cannot be empty".into()));
+        }
+
+        if value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Ok(Self(value.to_string()));
+        }
+
+        Err(SkillError::Parse(
+            format!("invalid function_name '{value}': expected ASCII identifier [A-Za-z0-9_-]")
+                .into(),
+        ))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SkillFunctionName {
+    type Error = SkillError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(&value)
+    }
+}
+
+impl From<SkillFunctionName> for String {
+    fn from(value: SkillFunctionName) -> Self {
+        value.0
+    }
+}
+
+impl std::fmt::Display for SkillFunctionName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Structured result returned by a skill-defined function.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(transparent)]
+pub struct SkillFunctionResult(
+    #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))] serde_json::Value,
+);
+
+impl SkillFunctionResult {
+    pub fn new(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+
+    pub fn as_value(&self) -> &serde_json::Value {
+        &self.0
+    }
+
+    pub fn into_value(self) -> serde_json::Value {
+        self.0
+    }
+}
+
 /// Canonical runtime identity for a skill.
 ///
 /// This is the single identity carried across every surface — the wire parses
@@ -824,9 +896,9 @@ pub trait SkillSource: Send + Sync {
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionResult, SkillError>> + Send {
         let missing = key.clone();
         let _ = function_name;
         let _ = arguments;
@@ -854,11 +926,11 @@ pub trait SkillSource: Send + Sync {
         }
     }
 
-    /// Load a skill from a specific named source, bypassing first-wins resolution.
+    /// Load a skill from a specific source UUID, bypassing first-wins resolution.
     fn load_from_source(
         &self,
         key: &SkillKey,
-        _source_name: Option<&str>,
+        _source_uuid: Option<&SourceUuid>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
         async move { self.load(key).await }
     }
@@ -917,9 +989,9 @@ where
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &SkillFunctionName,
+        arguments: crate::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionResult, SkillError>> + Send {
         async move {
             (**self)
                 .invoke_function(key, function_name, arguments)
@@ -937,10 +1009,10 @@ where
     fn load_from_source(
         &self,
         key: &SkillKey,
-        source_name: Option<&str>,
+        source_uuid: Option<&SourceUuid>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
-        let source_name = source_name.map(ToString::to_string);
-        async move { (**self).load_from_source(key, source_name.as_deref()).await }
+        let source_uuid = source_uuid.cloned();
+        async move { (**self).load_from_source(key, source_uuid.as_ref()).await }
     }
 }
 
@@ -991,9 +1063,9 @@ pub trait SkillEngine: Send + Sync {
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send;
+        function_name: &SkillFunctionName,
+        arguments: crate::ToolCallArguments,
+    ) -> impl Future<Output = Result<SkillFunctionResult, SkillError>> + Send;
 
     /// List all skills with provenance and shadow information.
     fn list_all_with_provenance(
@@ -1016,13 +1088,13 @@ pub trait SkillEngine: Send + Sync {
         }
     }
 
-    /// Load a skill from a specific named source, bypassing first-wins resolution.
+    /// Load a skill from a specific source UUID, bypassing first-wins resolution.
     fn load_from_source(
         &self,
         key: &SkillKey,
-        _source_name: Option<&str>,
+        _source_uuid: Option<&SourceUuid>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
-        let _ = _source_name;
+        let _ = _source_uuid;
         let missing = key.clone();
         async move { Err(SkillError::NotFound { key: missing }) }
     }
@@ -1056,13 +1128,17 @@ type HealthSnapshotFn = dyn Fn() -> OwnedSkillFuture<SourceHealthSnapshot> + Sen
 type ListArtifactsFn = dyn Fn(SkillKey) -> OwnedSkillFuture<Vec<SkillArtifact>> + Send + Sync;
 type ReadArtifactFn =
     dyn Fn(SkillKey, String) -> OwnedSkillFuture<SkillArtifactContent> + Send + Sync;
-type InvokeFunctionFn = dyn Fn(SkillKey, String, serde_json::Value) -> OwnedSkillFuture<serde_json::Value>
+type InvokeFunctionFn = dyn Fn(
+        SkillKey,
+        SkillFunctionName,
+        crate::ToolCallArguments,
+    ) -> OwnedSkillFuture<SkillFunctionResult>
     + Send
     + Sync;
 type ListAllWithProvenanceFn =
     dyn Fn(SkillFilter) -> OwnedSkillFuture<Vec<SkillIntrospectionEntry>> + Send + Sync;
 type LoadFromSourceFn =
-    dyn Fn(SkillKey, Option<String>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
+    dyn Fn(SkillKey, Option<SourceUuid>) -> OwnedSkillFuture<SkillDocument> + Send + Sync;
 type CanonicalSkillKeyFn = dyn Fn(SkillKey) -> OwnedSkillFuture<SkillKey> + Send + Sync;
 
 #[derive(Clone)]
@@ -1134,7 +1210,9 @@ impl SkillRuntime {
                 Box::pin(async move { engine.read_artifact(&key, &artifact_path).await })
             }),
             invoke_function_fn: Arc::new(
-                move |key: SkillKey, function_name: String, arguments: serde_json::Value| {
+                move |key: SkillKey,
+                      function_name: SkillFunctionName,
+                      arguments: crate::ToolCallArguments| {
                     let engine = Arc::clone(&invoke_function_engine);
                     Box::pin(async move {
                         engine
@@ -1147,9 +1225,9 @@ impl SkillRuntime {
                 let engine = Arc::clone(&provenance_engine);
                 Box::pin(async move { engine.list_all_with_provenance(&filter).await })
             }),
-            load_from_source_fn: Arc::new(move |key: SkillKey, source_name: Option<String>| {
+            load_from_source_fn: Arc::new(move |key: SkillKey, source_uuid: Option<SourceUuid>| {
                 let engine = Arc::clone(&load_from_source_engine);
-                Box::pin(async move { engine.load_from_source(&key, source_name.as_deref()).await })
+                Box::pin(async move { engine.load_from_source(&key, source_uuid.as_ref()).await })
             }),
             canonical_skill_key_fn: Arc::new(move |key: SkillKey| {
                 let engine = Arc::clone(&canonical_engine);
@@ -1205,10 +1283,10 @@ impl SkillRuntime {
     pub async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
-        (self.invoke_function_fn)(key.clone(), function_name.to_string(), arguments).await
+        function_name: &SkillFunctionName,
+        arguments: crate::ToolCallArguments,
+    ) -> Result<SkillFunctionResult, SkillError> {
+        (self.invoke_function_fn)(key.clone(), function_name.clone(), arguments).await
     }
 
     pub async fn list_all_with_provenance(
@@ -1221,9 +1299,9 @@ impl SkillRuntime {
     pub async fn load_from_source(
         &self,
         key: &SkillKey,
-        source_name: Option<&str>,
+        source_uuid: Option<&SourceUuid>,
     ) -> Result<SkillDocument, SkillError> {
-        (self.load_from_source_fn)(key.clone(), source_name.map(ToString::to_string)).await
+        (self.load_from_source_fn)(key.clone(), source_uuid.cloned()).await
     }
 
     /// Apply the engine's source-identity lineage remap chain to `key`.

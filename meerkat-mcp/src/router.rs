@@ -21,6 +21,7 @@ use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
 use meerkat_core::ExternalToolUpdate;
 use meerkat_core::McpServerConfig;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolCatalogCapabilities;
 use meerkat_core::ToolCatalogEntry;
 use meerkat_core::error::ToolError;
@@ -2389,6 +2390,20 @@ impl McpRouter {
 
     /// Call a tool by name, returning multimodal content blocks.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
+        let args = ToolCallArguments::from_value(args.clone()).map_err(|error| {
+            McpError::InvalidToolArguments {
+                tool: name.to_string(),
+                reason: error.to_string(),
+            }
+        })?;
+        self.call_tool_arguments(name, &args).await
+    }
+
+    pub async fn call_tool_arguments(
+        &self,
+        name: &str,
+        args: &ToolCallArguments,
+    ) -> Result<Vec<ContentBlock>, McpError> {
         let snapshot = Arc::clone(&self.projection);
         let server_name = snapshot
             .tool_to_server
@@ -2431,7 +2446,7 @@ impl McpRouter {
             .ok_or_else(|| McpError::ServerNotFound(server_name.clone()))?;
 
         let _guard = InflightCallGuard::new(&entry.active_calls);
-        let result = conn.call_tool(name, args).await;
+        let result = conn.call_tool_arguments(name, args).await;
 
         if let Err(error) = self
             .surface_owner
@@ -2543,13 +2558,16 @@ impl AgentToolDispatcher for McpRouter {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ops::ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let args = ToolCallArguments::from_raw_json(call.args)
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
         let blocks = self
-            .call_tool(call.name, &args)
+            .call_tool_arguments(call.name, &args)
             .await
             .map_err(|e| match e {
                 McpError::ToolNotFound(name) => ToolError::NotFound { name },
+                McpError::InvalidToolArguments { reason, .. } => {
+                    ToolError::invalid_arguments(call.name, reason)
+                }
                 other => ToolError::ExecutionFailed {
                     message: other.to_string(),
                 },
@@ -2838,6 +2856,21 @@ mod tests {
         };
         assert_eq!(cause, ExternalToolSurfaceFailureCause::PendingFailed);
         assert_eq!(cause.as_str(), "pending_failed");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_rejects_non_object_tool_arguments_before_mcp_routing() {
+        let router = McpRouter::new();
+        let args = serde_json::value::RawValue::from_string("\"legacy string args\"".to_string())
+            .expect("valid raw JSON string");
+        let call = ToolCallView {
+            id: "mcp-string",
+            name: "echo",
+            args: &args,
+        };
+
+        let result = AgentToolDispatcher::dispatch(&router, call).await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
     }
 
     fn complete_add(router: &mut McpRouter, server_name: &str) {

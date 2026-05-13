@@ -234,7 +234,7 @@ export interface MobListResult {
 
 export interface MobStatusResult {
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobLifecycleParams {
@@ -488,7 +488,7 @@ export interface MobAppendSystemContextParams {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: string;
+  status: "applied" | "staged" | "duplicate";
 }
 
 export interface MobFlowsResult {
@@ -632,9 +632,9 @@ export interface MobMemberStatusResult {
 }
 
 export interface MobSnapshotResult {
-  members: unknown[];
+  members: MobMemberListEntryWire[];
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobDestroyResult {
@@ -1200,11 +1200,16 @@ export interface WireContentBlockVideo {
   type: "video";
 }
 
+export interface WireContentBlockJson {
+  type: "json";
+  value: unknown;
+}
+
 export interface WireContentBlockUnknown {
   type: "unknown";
 }
 
-export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
+export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockJson | WireContentBlockUnknown;
 
 export type WireContentInput = string | WireContentBlock[];
 
@@ -1911,7 +1916,12 @@ export interface ContentBlockVideo {
   type: "video";
 }
 
-export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo;
+export interface ContentBlockJson {
+  type: "json";
+  value: unknown;
+}
+
+export type ContentBlock = ContentBlockText | ContentBlockImage | ContentBlockVideo | ContentBlockJson;
 
 export type ContentInput = string | ContentBlock[];
 
@@ -2771,7 +2781,7 @@ export interface CatalogModelEntry {
 export interface ProviderCatalog {
   default_model_id: string;
   models: Record<string, unknown>[];
-  provider: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
 }
 
 export interface ModelsCatalogResponse {
@@ -2787,6 +2797,7 @@ export interface WireModelProfile {
   inline_video?: boolean;
   model_family: string;
   params_schema: unknown;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
   realtime?: boolean;
   supports_reasoning: boolean;
   supports_temperature: boolean;
@@ -2839,18 +2850,17 @@ export interface WireAuthBindingRef {
 }
 
 export interface WireBackendProfile {
-  backend_kind: string;
+  backend_kind: "open_ai_api" | "chatgpt_backend" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible" | "other_api";
   base_url?: string;
   id: string;
-  options?: unknown;
-  provider: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
 }
 
 export interface WireAuthProfile {
-  auth_method: string;
+  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   id: string;
-  provider: string;
-  source_kind: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  source_kind: "inline_secret" | "managed_store" | "env" | "external_resolver" | "platform_default" | "command" | "file_descriptor";
 }
 
 export interface WireProviderBinding {
@@ -2879,10 +2889,10 @@ export interface WireBindingIdentity {
 
 export interface WireAuthProfileCreated {
   auth_binding: WireAuthBindingRef;
-  auth_method: string;
+  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   binding_id: string;
   profile_id: string;
-  provider: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
   realm_id: string;
   stored: boolean;
 }
@@ -2904,7 +2914,7 @@ export interface WireAuthProfileCleared {
 
 export interface WireLoginStart {
   authorize_url: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   redirect_uri: string;
   state: string;
 }
@@ -2915,7 +2925,7 @@ export interface WireLoginReady {
   expires_at?: string;
   has_refresh_token: boolean;
   profile_id: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
   scopes: string[];
   state?: string;
@@ -2925,7 +2935,7 @@ export interface WireDeviceStart {
   device_code: string;
   expires_in: number;
   interval: number;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   user_code: string;
   verification_uri: string;
   verification_uri_complete?: string;
@@ -2993,25 +3003,25 @@ export interface WireAuthProfilesList {
 
 export interface WireAuthStatus {
   account_id?: string;
-  auth_method: string;
+  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   expires_at?: string;
   last_error?: Record<string, unknown>;
   last_refresh_at?: string;
   profile_id: string;
-  provider: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
   state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }
 
 export interface WireAuthStatusDetail {
   account_id?: string;
   auth_binding: WireAuthBindingRef;
-  auth_method: string;
+  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   binding_id: string;
   expires_at?: string;
   has_refresh_token: boolean;
   last_refresh_at?: string;
   profile_id: string;
-  provider: string;
+  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
   realm_id: string;
   state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }
@@ -3115,7 +3125,7 @@ export interface WireAssistantBlockToolUse {
 
 export interface WireAssistantBlockServerToolContent {
   block_type: "server_tool_content";
-  data: { content: unknown; id?: string; meta?: Record<string, unknown>; name: string };
+  data: { content: Record<string, unknown>; id?: string; meta?: Record<string, unknown> };
 }
 
 export interface WireAssistantBlockImage {

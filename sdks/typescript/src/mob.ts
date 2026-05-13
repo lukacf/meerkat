@@ -15,7 +15,7 @@ import type {
   SpawnManySpec,
   SpawnSpec,
 } from "./types.js";
-import type { MobSpawnManyResultEntry } from "./generated/types.js";
+import type { MobAppendSystemContextResult, MobSpawnManyResultEntry } from "./generated/types.js";
 import type { MeerkatClient } from "./client.js";
 
 export type MobHandlingMode = "queue" | "steer";
@@ -231,7 +231,7 @@ export class Mob {
     agentIdentity: string,
     text: string,
     options?: { source?: string; idempotencyKey?: string },
-  ): Promise<Record<string, unknown>> {
+  ): Promise<MobAppendSystemContextResult> {
     return this.client.appendMobSystemContext(this.mobId, agentIdentity, text, options);
   }
 

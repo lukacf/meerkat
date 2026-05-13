@@ -337,16 +337,6 @@ impl BackgroundJobTerminalStatus {
     }
 }
 
-fn deserialize_legacy_background_job_status<'de, D>(
-    deserializer: D,
-) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = Option::<Value>::deserialize(deserializer)?;
-    Ok(value.and_then(|value| value.as_str().map(str::to_owned)))
-}
-
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -402,8 +392,21 @@ impl ToolCallArguments {
         &self.0
     }
 
+    pub fn to_object_map(&self) -> serde_json::Map<String, Value> {
+        match &self.0 {
+            Value::Object(object) => object.clone(),
+            _ => serde_json::Map::new(),
+        }
+    }
+
     pub fn into_value(self) -> Value {
         self.0
+    }
+}
+
+impl Default for ToolCallArguments {
+    fn default() -> Self {
+        Self(Value::Object(serde_json::Map::new()))
     }
 }
 
@@ -736,7 +739,7 @@ impl TurnErrorMetadata {
                     TurnTerminalOutcome::Failed,
                     message.clone(),
                 );
-                metadata.provider = Some((*provider).to_string());
+                metadata.provider = Some(provider.to_string());
                 metadata.retryable = Some(error.is_recoverable());
                 if let LlmFailureReason::InvalidModel(model) = reason {
                     metadata.model = Some(model.clone());
@@ -1301,10 +1304,9 @@ impl Serialize for ToolConfigChangedPayload {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ToolConfigChangedPayload", 8)?;
+        let mut state = serializer.serialize_struct("ToolConfigChangedPayload", 7)?;
         state.serialize_field("operation", &self.operation)?;
         state.serialize_field("target", &self.target)?;
-        state.serialize_field("status", &self.status_text())?;
         state.serialize_field("status_info", &self.status_info)?;
         state.serialize_field("persisted", &self.persisted)?;
         if let Some(applied_at_turn) = self.applied_at_turn {
@@ -1329,10 +1331,7 @@ impl<'de> Deserialize<'de> for ToolConfigChangedPayload {
         struct WirePayload {
             operation: ToolConfigChangeOperation,
             target: String,
-            #[serde(default)]
-            status: Option<String>,
-            #[serde(default)]
-            status_info: Option<ToolConfigChangeStatus>,
+            status_info: ToolConfigChangeStatus,
             persisted: bool,
             #[serde(default)]
             applied_at_turn: Option<u32>,
@@ -1343,15 +1342,10 @@ impl<'de> Deserialize<'de> for ToolConfigChangedPayload {
         }
 
         let wire = WirePayload::deserialize(deserializer)?;
-        let status_info = wire
-            .status_info
-            .or_else(|| wire.status.map(ToolConfigChangeStatus::legacy_status))
-            .ok_or_else(|| de::Error::missing_field("status_info"))?;
-
         Ok(Self {
             operation: wire.operation,
             target: wire.target,
-            status_info,
+            status_info: wire.status_info,
             persisted: wire.persisted,
             applied_at_turn: wire.applied_at_turn,
             domain: wire.domain,
@@ -1373,9 +1367,7 @@ impl schemars::JsonSchema for ToolConfigChangedPayload {
         struct ToolConfigChangedPayloadSchema {
             operation: ToolConfigChangeOperation,
             target: String,
-            status: String,
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            status_info: Option<ToolConfigChangeStatus>,
+            status_info: ToolConfigChangeStatus,
             persisted: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             applied_at_turn: Option<u32>,
@@ -1468,9 +1460,6 @@ pub enum ToolConfigChangeStatus {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    LegacyStatus {
-        status: String,
-    },
 }
 
 impl ToolConfigChangeStatus {
@@ -1509,13 +1498,6 @@ impl ToolConfigChangeStatus {
     }
 
     #[must_use]
-    pub fn legacy_status(status: impl Into<String>) -> Self {
-        Self::LegacyStatus {
-            status: status.into(),
-        }
-    }
-
-    #[must_use]
     pub fn status_text(&self) -> String {
         match self {
             Self::BoundaryApplied {
@@ -1544,7 +1526,6 @@ impl ToolConfigChangeStatus {
                 }
                 status
             }
-            Self::LegacyStatus { status } => status.clone(),
         }
     }
 }
@@ -1674,8 +1655,6 @@ pub enum AgentEvent {
     RunFailed {
         session_id: SessionId,
         error_class: AgentErrorClass,
-        /// Display projection of `error_report.message`.
-        error: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         terminal_cause_kind: Option<TurnTerminalCauseKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1730,8 +1709,7 @@ pub enum AgentEvent {
     ServerToolContent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
-        name: String,
-        content: Value,
+        content: crate::types::ServerToolContent,
     },
 
     /// Canonical assistant image block appended to transcript history.
@@ -1748,7 +1726,6 @@ pub enum AgentEvent {
     ToolResultReceived {
         id: String,
         name: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ContentBlock>,
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1769,10 +1746,7 @@ pub enum AgentEvent {
     ToolExecutionCompleted {
         id: String,
         name: String,
-        /// Legacy text projection retained for existing event consumers.
-        result: String,
         /// Canonical typed tool-result content.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ContentBlock>,
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1840,14 +1814,7 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skill_key: Option<SkillKey>,
         /// Structured reason for the failure. Legacy payloads deserialize as `unknown`.
-        #[serde(default)]
         reason: SkillResolutionFailureReason,
-        /// Legacy display mirror for consumers still reading string references.
-        #[serde(default)]
-        reference: String,
-        /// Legacy display mirror for consumers still reading string errors.
-        #[serde(default)]
-        error: String,
     },
 
     // === Interaction-Scoped Streaming ===
@@ -1886,14 +1853,6 @@ pub enum AgentEvent {
     BackgroundJobCompleted {
         job_id: String,
         display_name: String,
-        /// Legacy display mirror for consumers still rendering string status.
-        #[serde(rename = "status")]
-        #[serde(
-            default,
-            skip_serializing_if = "Option::is_none",
-            deserialize_with = "deserialize_legacy_background_job_status"
-        )]
-        legacy_status: Option<String>,
         terminal_status: BackgroundJobTerminalStatus,
         detail: String,
     },
@@ -1918,7 +1877,6 @@ impl AgentEvent {
         Self::BackgroundJobCompleted {
             job_id: job_id.into(),
             display_name: display_name.into(),
-            legacy_status: Some(terminal_status.as_str().to_string()),
             terminal_status,
             detail: detail.into(),
         }
@@ -2062,13 +2020,14 @@ pub fn format_verbose_event_with_config(
         }
         AgentEvent::ToolExecutionCompleted {
             name,
-            result,
+            content,
             is_error,
             duration_ms,
             ..
         } => {
             let status = if *is_error { "✗" } else { "✓" };
-            let result_preview = truncate_preview(result, config.max_tool_result_bytes);
+            let result = crate::types::text_content(content);
+            let result_preview = truncate_preview(&result, config.max_tool_result_bytes);
             Some(format!(
                 "  {status} {name} ({duration_ms}ms): {result_preview}"
             ))
@@ -2279,7 +2238,6 @@ mod tests {
         let completed = AgentEvent::ToolExecutionCompleted {
             id: "tc_text".to_string(),
             name: "text_tool".to_string(),
-            result: "plain output".to_string(),
             content: content.clone(),
             is_error: false,
             error: None,
@@ -2316,7 +2274,6 @@ mod tests {
         let completed = AgentEvent::ToolExecutionCompleted {
             id: "tc_image".to_string(),
             name: "view_image".to_string(),
-            result: "[image: image/png]".to_string(),
             content: content.clone(),
             is_error: false,
             error: None,
@@ -2359,7 +2316,6 @@ mod tests {
         let completed = AgentEvent::ToolExecutionCompleted {
             id: "tc_mixed".to_string(),
             name: "mixed_tool".to_string(),
-            result: "before\n[image: image/png]\nafter".to_string(),
             content: content.clone(),
             is_error: false,
             error: None,
@@ -2420,7 +2376,6 @@ mod tests {
         let completed = AgentEvent::ToolExecutionCompleted {
             id: tool_result.tool_use_id.clone(),
             name: "structured_tool".to_string(),
-            result: tool_result.text_content(),
             content: tool_result.content.clone(),
             is_error: tool_result.is_error,
             error: tool_result.error.clone(),
@@ -2435,10 +2390,7 @@ mod tests {
         };
 
         let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
-        assert_eq!(
-            completed_json["result"],
-            "Tool execution failed: tool returned a structured failure"
-        );
+        assert!(completed_json.get("result").is_none());
         assert_eq!(completed_json["error"]["code"], "execution_failed");
         assert_eq!(completed_json["error"]["data"]["retryable"], false);
 
@@ -2452,8 +2404,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tool_result_event_payloads_deserialize_without_typed_content() {
-        let completed: AgentEvent = serde_json::from_value(serde_json::json!({
+    fn tool_result_event_payloads_require_typed_content() {
+        let completed = serde_json::from_value::<AgentEvent>(serde_json::json!({
             "type": "tool_execution_completed",
             "id": "tc_legacy",
             "name": "legacy_tool",
@@ -2461,42 +2413,26 @@ mod tests {
             "is_error": false,
             "duration_ms": 3,
             "has_images": true
-        }))
-        .expect("legacy tool_execution_completed payload should deserialize");
-        match completed {
-            AgentEvent::ToolExecutionCompleted {
-                result,
-                content,
-                is_error,
-                ..
-            } => {
-                assert_eq!(result, "legacy output");
-                assert!(content.is_empty());
-                assert!(!is_error);
-            }
-            other => unreachable!("unexpected event: {other:?}"),
-        }
+        }));
+        assert!(
+            completed.is_err(),
+            "legacy result-only tool_execution_completed payload must not deserialize"
+        );
 
-        let received: AgentEvent = serde_json::from_value(serde_json::json!({
+        let received = serde_json::from_value::<AgentEvent>(serde_json::json!({
             "type": "tool_result_received",
             "id": "tc_legacy",
             "name": "legacy_tool",
             "is_error": false
-        }))
-        .expect("legacy tool_result_received payload should deserialize");
-        match received {
-            AgentEvent::ToolResultReceived {
-                content, is_error, ..
-            } => {
-                assert!(content.is_empty());
-                assert!(!is_error);
-            }
-            other => unreachable!("unexpected event: {other:?}"),
-        }
+        }));
+        assert!(
+            received.is_err(),
+            "tool_result_received must carry typed content blocks"
+        );
     }
 
     #[test]
-    fn tool_config_changed_payload_carries_structured_status_with_legacy_mirror() {
+    fn tool_config_changed_payload_carries_structured_status_only() {
         let status_info = ToolConfigChangeStatus::boundary_applied(true, true, 42);
         let event = AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(
@@ -2510,10 +2446,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(event).unwrap();
-        assert_eq!(
-            json["payload"]["status"],
-            "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-        );
+        assert!(json["payload"].get("status").is_none());
         assert_eq!(json["payload"]["status_info"]["kind"], "boundary_applied");
         assert_eq!(json["payload"]["status_info"]["base_changed"], true);
         assert_eq!(json["payload"]["status_info"]["visible_changed"], true);
@@ -2521,7 +2454,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_config_changed_payload_derives_legacy_status_from_typed_status() {
+    fn tool_config_changed_payload_roundtrips_typed_status() {
         let status = ToolConfigChangeStatus::boundary_applied(true, false, 9);
         let event = AgentEvent::ToolConfigChanged {
             payload: ToolConfigChangedPayload::new(
@@ -2535,10 +2468,7 @@ mod tests {
         };
 
         let json = serde_json::to_value(event).unwrap();
-        assert_eq!(
-            json["payload"]["status"],
-            "boundary_applied(base_changed=true,visible_changed=false,revision=9)"
-        );
+        assert!(json["payload"].get("status").is_none());
         assert_eq!(json["payload"]["status_info"]["kind"], "boundary_applied");
 
         let event: AgentEvent = serde_json::from_value(json).unwrap();
@@ -2554,8 +2484,8 @@ mod tests {
     }
 
     #[test]
-    fn tool_config_changed_payload_deserializes_legacy_status_without_typed_data() {
-        let event: AgentEvent = serde_json::from_value(serde_json::json!({
+    fn tool_config_changed_payload_rejects_legacy_status_without_typed_data() {
+        let event = serde_json::from_value::<AgentEvent>(serde_json::json!({
             "type": "tool_config_changed",
             "payload": {
                 "operation": "reload",
@@ -2565,29 +2495,15 @@ mod tests {
                 "applied_at_turn": 3,
                 "domain": "tool_scope"
             }
-        }))
-        .unwrap();
-
+        }));
         assert!(
-            matches!(event, AgentEvent::ToolConfigChanged { .. }),
-            "expected tool_config_changed, got {event:?}"
+            event.is_err(),
+            "legacy status-only tool_config_changed payload must not deserialize"
         );
-        if let AgentEvent::ToolConfigChanged { payload } = event {
-            assert_eq!(
-                payload.status_text(),
-                "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-            );
-            assert_eq!(
-                payload.status_info(),
-                &ToolConfigChangeStatus::legacy_status(
-                    "boundary_applied(base_changed=true,visible_changed=true,revision=42)"
-                )
-            );
-        }
     }
 
     #[test]
-    fn tool_config_changed_payload_prefers_typed_status_over_legacy_mirror() {
+    fn tool_config_changed_payload_ignores_stale_legacy_status_mirror() {
         let event: AgentEvent = serde_json::from_value(serde_json::json!({
             "type": "tool_config_changed",
             "payload": {
@@ -2622,17 +2538,20 @@ mod tests {
 
     #[cfg(feature = "schema")]
     #[test]
-    fn tool_config_changed_payload_schema_allows_legacy_status_only_replays() {
+    fn tool_config_changed_payload_schema_requires_typed_status_info() {
         let schema = serde_json::to_value(schemars::schema_for!(ToolConfigChangedPayload)).unwrap();
         let required = schema["required"].as_array().expect("required array");
 
         assert!(
-            required.iter().any(|field| field == "status"),
-            "legacy status mirror remains required while it is emitted publicly"
+            !schema["properties"]
+                .as_object()
+                .unwrap()
+                .contains_key("status"),
+            "legacy status mirror must not be part of the schema"
         );
         assert!(
-            !required.iter().any(|field| field == "status_info"),
-            "legacy status-only event replays must remain schema-compatible"
+            required.iter().any(|field| field == "status_info"),
+            "typed status_info is the required boundary field"
         );
         assert!(
             schema["properties"]["status_info"].is_object(),
@@ -2694,7 +2613,6 @@ mod tests {
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Budget,
-                error: "Budget exceeded".to_string(),
                 terminal_cause_kind: None,
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Budget,
@@ -2736,7 +2654,10 @@ mod tests {
                 payload: ToolConfigChangedPayload::new(
                     ToolConfigChangeOperation::Remove,
                     "filesystem",
-                    ToolConfigChangeStatus::legacy_status("staged"),
+                    ToolConfigChangeStatus::external_tool_delta(
+                        ExternalToolDeltaPhase::Pending,
+                        None,
+                    ),
                     false,
                 )
                 .with_applied_at_turn(Some(12)),
@@ -2776,17 +2697,14 @@ mod tests {
 
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "background_job_completed");
-        assert_eq!(json["status"], "failed");
+        assert!(json.get("status").is_none());
         assert_eq!(json["terminal_status"], "failed");
 
         let roundtrip: AgentEvent = serde_json::from_value(json).unwrap();
         match roundtrip {
             AgentEvent::BackgroundJobCompleted {
-                legacy_status,
-                terminal_status,
-                ..
+                terminal_status, ..
             } => {
-                assert_eq!(legacy_status.as_deref(), Some("failed"));
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
             }
             other => unreachable!("unexpected event: {other:?}"),
@@ -2844,13 +2762,11 @@ mod tests {
             AgentEvent::BackgroundJobCompleted {
                 job_id,
                 display_name,
-                legacy_status,
                 terminal_status,
                 detail,
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(legacy_status, None);
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
@@ -2870,13 +2786,11 @@ mod tests {
             AgentEvent::BackgroundJobCompleted {
                 job_id,
                 display_name,
-                legacy_status,
                 terminal_status,
                 detail,
             } => {
                 assert_eq!(job_id, "j_123");
                 assert_eq!(display_name, "sleep 2");
-                assert_eq!(legacy_status.as_deref(), Some("completed"));
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
@@ -2894,12 +2808,10 @@ mod tests {
         let event: AgentEvent = serde_json::from_value(malformed_legacy_json).unwrap();
         match event {
             AgentEvent::BackgroundJobCompleted {
-                legacy_status,
                 terminal_status,
                 detail,
                 ..
             } => {
-                assert_eq!(legacy_status, None);
                 assert_eq!(terminal_status, BackgroundJobTerminalStatus::Failed);
                 assert_eq!(detail, "exit_code: 1");
             }
@@ -3049,15 +2961,13 @@ mod tests {
     }
 
     #[test]
-    fn skill_resolution_failed_carries_typed_key_and_reason_with_legacy_mirrors() {
+    fn skill_resolution_failed_carries_typed_key_and_reason() {
         let key = SkillKey::builtin(SkillName::parse("test-skill").unwrap());
         let error = SkillError::NotFound { key: key.clone() };
         let reason = SkillResolutionFailureReason::from_skill_error(&error);
         let event = AgentEvent::SkillResolutionFailed {
             skill_key: Some(key.clone()),
             reason,
-            reference: key.to_string(),
-            error: error.to_string(),
         };
 
         let value = serde_json::to_value(&event).unwrap();
@@ -3075,57 +2985,34 @@ mod tests {
             value["reason"]["key"]["skill_name"],
             key.skill_name.as_str()
         );
-        assert_eq!(value["reference"], key.to_string());
-        assert_eq!(value["error"], error.to_string());
+        assert!(value.get("reference").is_none());
+        assert!(value.get("error").is_none());
 
         let roundtrip: AgentEvent = serde_json::from_value(value).unwrap();
         match roundtrip {
-            AgentEvent::SkillResolutionFailed {
-                skill_key,
-                reason,
-                reference,
-                error: error_message,
-            } => {
+            AgentEvent::SkillResolutionFailed { skill_key, reason } => {
                 assert_eq!(skill_key, Some(key.clone()));
                 assert_eq!(
                     reason,
                     SkillResolutionFailureReason::NotFound { key: key.clone() }
                 );
-                assert_eq!(reference, key.to_string());
-                assert_eq!(error_message, error.to_string());
             }
             other => unreachable!("unexpected event: {other:?}"),
         }
     }
 
     #[test]
-    fn legacy_skill_resolution_failed_payload_deserializes() {
+    fn legacy_skill_resolution_failed_payload_rejects_string_mirrors() {
         let value = serde_json::json!({
             "type": "skill_resolution_failed",
             "reference": "legacy/ref",
             "error": "missing",
         });
 
-        let event: AgentEvent = serde_json::from_value(value).unwrap();
-        match event {
-            AgentEvent::SkillResolutionFailed {
-                skill_key,
-                reason,
-                reference,
-                error,
-            } => {
-                assert_eq!(skill_key, None);
-                assert_eq!(
-                    reason,
-                    SkillResolutionFailureReason::Unknown {
-                        message: String::new()
-                    }
-                );
-                assert_eq!(reference, "legacy/ref");
-                assert_eq!(error, "missing");
-            }
-            other => unreachable!("unexpected event: {other:?}"),
-        }
+        assert!(
+            serde_json::from_value::<AgentEvent>(value).is_err(),
+            "legacy string-only skill_resolution_failed payload must not deserialize"
+        );
     }
 
     #[test]
@@ -3238,7 +3125,6 @@ mod tests {
             AgentEvent::RunFailed {
                 session_id: SessionId::new(),
                 error_class: AgentErrorClass::Internal,
-                error: "failed".to_string(),
                 terminal_cause_kind: None,
                 error_report: Some(AgentErrorReport {
                     class: AgentErrorClass::Internal,
@@ -3317,7 +3203,6 @@ mod tests {
             AgentEvent::ToolExecutionCompleted {
                 id: "tool-1".to_string(),
                 name: "search".to_string(),
-                result: "ok".to_string(),
                 content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
                 error: None,
@@ -3359,8 +3244,6 @@ mod tests {
                 reason: SkillResolutionFailureReason::Unknown {
                     message: "missing".to_string(),
                 },
-                reference: "skill".to_string(),
-                error: "missing".to_string(),
             },
             AgentEvent::InteractionComplete {
                 interaction_id: crate::interaction::InteractionId(uuid::Uuid::new_v4()),

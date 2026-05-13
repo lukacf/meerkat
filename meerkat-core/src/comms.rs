@@ -56,6 +56,160 @@ impl CommsContentAuthority {
     }
 }
 
+/// Closed core request-intent contract for correlated peer requests.
+///
+/// Public surfaces may keep provider- or feature-specific payload structs in
+/// their own crates, but once a request enters core it is classified by this
+/// enum rather than by re-reading a raw intent string.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CommsPeerRequestIntent {
+    #[serde(rename = "supervisor.bridge")]
+    SupervisorBridge,
+    #[serde(rename = "checksum_token")]
+    ChecksumToken,
+}
+
+impl CommsPeerRequestIntent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
+            Self::ChecksumToken => "checksum_token",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownCommsPeerRequestIntent {
+    value: String,
+}
+
+impl UnknownCommsPeerRequestIntent {
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+impl std::fmt::Display for UnknownCommsPeerRequestIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown comms peer request intent `{}`", self.value)
+    }
+}
+
+impl std::error::Error for UnknownCommsPeerRequestIntent {}
+
+impl TryFrom<&str> for CommsPeerRequestIntent {
+    type Error = UnknownCommsPeerRequestIntent;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            SUPERVISOR_BRIDGE_INTENT => Ok(Self::SupervisorBridge),
+            "checksum_token" => Ok(Self::ChecksumToken),
+            other => Err(UnknownCommsPeerRequestIntent {
+                value: other.to_string(),
+            }),
+        }
+    }
+}
+
+impl TryFrom<String> for CommsPeerRequestIntent {
+    type Error = UnknownCommsPeerRequestIntent;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str()).map_err(|_| UnknownCommsPeerRequestIntent { value })
+    }
+}
+
+impl std::fmt::Display for CommsPeerRequestIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Typed params for the actionable checksum-token request used by peer
+/// request/response terminal-flow fixtures.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommsChecksumTokenParams {
+    pub subject: String,
+}
+
+/// Closed discriminator carried in [`CommsChecksumTokenResult`].
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CommsChecksumTokenResultIntent {
+    #[serde(rename = "checksum_token")]
+    ChecksumToken,
+}
+
+/// Typed result for a checksum-token peer response.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CommsChecksumTokenResult {
+    pub request_intent: CommsChecksumTokenResultIntent,
+    pub request_subject: String,
+    pub token: String,
+}
+
+/// Core-owned peer request payload.
+///
+/// Supervisor bridge payloads are contract-typed at the contracts crate
+/// boundary; core carries them under a closed semantic variant so request
+/// routing never falls back to a free intent string.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "intent", content = "params", rename_all = "snake_case")]
+pub enum PeerRequestPayload {
+    #[serde(rename = "supervisor.bridge")]
+    SupervisorBridge(
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))] serde_json::Value,
+    ),
+    #[serde(rename = "checksum_token")]
+    ChecksumToken(CommsChecksumTokenParams),
+}
+
+impl PeerRequestPayload {
+    pub const fn intent(&self) -> CommsPeerRequestIntent {
+        match self {
+            Self::SupervisorBridge(_) => CommsPeerRequestIntent::SupervisorBridge,
+            Self::ChecksumToken(_) => CommsPeerRequestIntent::ChecksumToken,
+        }
+    }
+
+    pub fn into_transport_parts(
+        self,
+    ) -> Result<(&'static str, serde_json::Value), serde_json::Error> {
+        match self {
+            Self::SupervisorBridge(params) => Ok((SUPERVISOR_BRIDGE_INTENT, params)),
+            Self::ChecksumToken(params) => serde_json::to_value(params)
+                .map(|params| (CommsPeerRequestIntent::ChecksumToken.as_str(), params)),
+        }
+    }
+}
+
+/// Core-owned peer response payload.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "result", rename_all = "snake_case")]
+pub enum PeerResponsePayload {
+    SupervisorBridge(
+        #[cfg_attr(feature = "schema", schemars(with = "serde_json::Value"))] serde_json::Value,
+    ),
+    ChecksumToken(CommsChecksumTokenResult),
+}
+
+impl PeerResponsePayload {
+    pub fn into_transport_value(self) -> Result<serde_json::Value, serde_json::Error> {
+        match self {
+            Self::SupervisorBridge(result) => Ok(result),
+            Self::ChecksumToken(result) => serde_json::to_value(result),
+        }
+    }
+}
+
 /// Canonical runtime identity for a peer.
 ///
 /// `PeerId` is the routing key: the router and trust store key by `PeerId`,
@@ -584,9 +738,7 @@ pub enum CommsCommandRequest {
     /// Send a request to a peer.
     PeerRequest {
         to: PeerId,
-        intent: String,
-        #[serde(default)]
-        params: serde_json::Value,
+        request: PeerRequestPayload,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -600,7 +752,7 @@ pub enum CommsCommandRequest {
         in_reply_to: InteractionId,
         status: ResponseStatus,
         #[serde(default)]
-        result: serde_json::Value,
+        result: Option<PeerResponsePayload>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         blocks: Option<Vec<ContentBlock>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -675,16 +827,14 @@ impl CommsCommandRequest {
             },
             CommsCommandRequest::PeerRequest {
                 to,
-                intent,
-                params,
+                request,
                 blocks,
                 handling_mode,
                 stream,
             } => CommsCommand::PeerRequest {
                 to: PeerRoute::new(to),
-                intent,
-                params,
                 blocks: CommsContentAuthority::normalize_blocks(blocks),
+                request,
                 handling_mode: handling_mode.unwrap_or_default(),
                 stream: stream.unwrap_or(InputStreamMode::None),
             },
@@ -798,8 +948,7 @@ pub enum CommsCommand {
     /// Send a request to a peer.
     PeerRequest {
         to: PeerRoute,
-        intent: String,
-        params: serde_json::Value,
+        request: PeerRequestPayload,
         blocks: Option<Vec<ContentBlock>>,
         handling_mode: HandlingMode,
         stream: InputStreamMode,
@@ -809,7 +958,7 @@ pub enum CommsCommand {
         to: PeerRoute,
         in_reply_to: InteractionId,
         status: ResponseStatus,
-        result: serde_json::Value,
+        result: Option<PeerResponsePayload>,
         blocks: Option<Vec<ContentBlock>>,
         handling_mode: Option<HandlingMode>,
     },

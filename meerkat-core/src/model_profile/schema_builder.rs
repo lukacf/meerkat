@@ -7,7 +7,7 @@
 //! etc.), which conflated unrelated models into the same bucket.
 
 use crate::Provider;
-use crate::model_profile::capabilities::{ModelCapabilities, ThinkingSupport};
+use crate::model_profile::capabilities::{ModelCapabilities, ModelEffortLevel, ThinkingSupport};
 use serde_json::{Value, json};
 
 /// Build the JSON Schema for a model's `provider_params`.
@@ -53,7 +53,7 @@ fn build_anthropic_schema(caps: &ModelCapabilities) -> Value {
     if !caps.effort_levels.is_empty() {
         props.insert(
             "effort".into(),
-            string_enum_schema("Output effort level.", caps.effort_levels),
+            effort_enum_schema("Output effort level.", caps.effort_levels),
         );
     }
     if caps.supports_inference_geo {
@@ -136,7 +136,7 @@ fn build_openai_schema(caps: &ModelCapabilities) -> Value {
     if caps.supports_reasoning && !caps.effort_levels.is_empty() {
         props.insert(
             "reasoning_effort".into(),
-            string_enum_schema("Reasoning effort level.", caps.effort_levels),
+            effort_enum_schema("Reasoning effort level.", caps.effort_levels),
         );
     }
     if caps.supports_legacy_penalties {
@@ -254,8 +254,11 @@ fn gemini_thinking_level_schema() -> Value {
     })
 }
 
-fn string_enum_schema(description: &str, values: &[&str]) -> Value {
-    let vs: Vec<Value> = values.iter().map(|s| Value::String((*s).into())).collect();
+fn effort_enum_schema(description: &str, values: &[ModelEffortLevel]) -> Value {
+    let vs: Vec<Value> = values
+        .iter()
+        .map(|level| Value::String(level.as_str().into()))
+        .collect();
     json!({
         "description": description,
         "type": "string",

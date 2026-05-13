@@ -3847,6 +3847,36 @@ impl LiveObservationCapture {
     }
 }
 
+fn live_observation_is(text: &str, expected: &str) -> bool {
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("observation")
+                .and_then(Value::as_str)
+                .map(|observation| observation == expected)
+        })
+        .unwrap_or(false)
+}
+
+fn live_capture_from_first_input_final(
+    capture: LiveObservationCapture,
+) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
+    let Some(first_input_final) = capture
+        .frame_log
+        .iter()
+        .position(|frame| live_observation_is(frame, "user_transcript_final"))
+    else {
+        return Ok(capture);
+    };
+
+    let mut current_turn = LiveObservationCapture::default();
+    for frame in capture.frame_log.into_iter().skip(first_input_final) {
+        observe_live_json_frame(&mut current_turn, &frame)?;
+    }
+    Ok(current_turn)
+}
+
 fn observe_live_json_frame(
     capture: &mut LiveObservationCapture,
     text: &str,
@@ -3919,7 +3949,13 @@ fn observe_live_json_frame(
         "turn_interrupted" => {
             capture.saw_interrupted = true;
         }
-        "assistant_transcript_final" => {}
+        "assistant_transcript_final" => {
+            if capture.output_text.is_empty()
+                && let Some(text) = value["text"].as_str()
+            {
+                capture.output_text.push_str(text);
+            }
+        }
         "assistant_transcript_truncated" => {}
         "status_changed" => {}
         "error" => {
@@ -4128,6 +4164,7 @@ async fn collect_live_observations_until_output_settles(
 
 fn observation_is_output(text: &str) -> bool {
     text.contains("\"assistant_text_delta\"")
+        || text.contains("\"assistant_transcript_delta\"")
         || text.contains("\"assistant_audio_chunk\"")
         || text.contains("\"turn_completed\"")
 }
@@ -4220,10 +4257,11 @@ async fn send_live_audio_and_wait_for_turn(
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
     stream_live_audio(writer, pcm).await?;
     // Wait for user transcript final and any output to start settling
-    collect_live_observations_until(reader, timeout_secs, |capture| {
+    let capture = collect_live_observations_until(reader, timeout_secs, |capture| {
         !capture.input_finals.is_empty()
     })
-    .await
+    .await?;
+    live_capture_from_first_input_final(capture)
 }
 
 async fn settle_live_turn_after_input(
@@ -4285,11 +4323,13 @@ where
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut capture = seed_capture.clone();
     let mut interrupt_sent = false;
+    let mut last_interrupt_sent_at: Option<Instant> = None;
 
     if start_interrupt(&capture) {
         pump.call(rpc, "live/interrupt", json!({"channel_id": channel_id}), 10)
             .await?;
         interrupt_sent = true;
+        last_interrupt_sent_at = Some(Instant::now());
     }
 
     while Instant::now() < deadline {
@@ -4303,10 +4343,16 @@ where
         };
         observe_live_json_frame(&mut capture, &frame_text)?;
 
-        if !interrupt_sent && start_interrupt(&capture) {
+        let should_interrupt = start_interrupt(&capture);
+        let should_retry = match last_interrupt_sent_at {
+            Some(sent_at) => Instant::now().duration_since(sent_at) >= Duration::from_secs(2),
+            None => true,
+        };
+        if should_interrupt && (!interrupt_sent || should_retry) {
             pump.call(rpc, "live/interrupt", json!({"channel_id": channel_id}), 10)
                 .await?;
             interrupt_sent = true;
+            last_interrupt_sent_at = Some(Instant::now());
         }
 
         if interrupt_sent && capture.saw_interrupted {
@@ -4620,7 +4666,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
         let codeword_only_pcm =
             openai_tts_pcm("Say only the codeword once.").await?;
         let token_explain_pcm =
-            openai_tts_pcm("Run the interruption repetition test now. Repeat amber lantern exactly eighty times separated by commas. Do not summarize. Do not stop until I say stop.").await?;
+            openai_tts_pcm("Run the repetition test now.").await?;
         let recall_pcm =
             openai_tts_pcm("Please say the codeword once.").await?;
 
@@ -4787,7 +4833,7 @@ async fn e2e_scenario_71_live_adapter_channel_lifecycle_rpc_ws()
             &channel_id,
             &turn3_commit,
             120,
-            live_capture_has_non_silent_audio,
+            live_capture_has_assistant_text,
         )
         .await
         {

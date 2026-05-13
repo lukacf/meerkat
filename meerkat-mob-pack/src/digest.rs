@@ -1,3 +1,4 @@
+use crate::archive_path::MobpackArchivePath;
 use crate::exec_bits::normalize_executable_bit;
 use serde::de::{Error as DeError, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -107,23 +108,21 @@ pub fn sha256_bytes(input: &[u8]) -> [u8; 32] {
 }
 
 pub fn canonical_digest(entries: &[CanonicalEntry]) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = entries
+    let mut index: Vec<(MobpackArchivePath, [u8; 32], bool)> = entries
         .iter()
         .map(|entry| {
-            (
-                normalize_path(&entry.path),
-                sha256_bytes(&entry.bytes),
-                normalize_executable_bit(&entry.path, &entry.bytes),
-            )
+            let path = MobpackArchivePath::for_digest_path(&entry.path);
+            let executable_bit = normalize_executable_bit(&path, &entry.bytes);
+            (path, sha256_bytes(&entry.bytes), executable_bit)
         })
-        .filter(|(path, _, _)| path != "signature.toml")
+        .filter(|(path, _, _)| !path.section().is_signature())
         .collect();
 
-    index.sort_by(|a, b| a.0.cmp(&b.0));
+    index.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
     let mut hasher = Sha256::new();
     for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
+        hasher.update(path.as_str().as_bytes());
         hasher.update([0]);
         hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update([0]);
@@ -135,22 +134,20 @@ pub fn canonical_digest(entries: &[CanonicalEntry]) -> MobpackDigest {
 }
 
 pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDigest {
-    let mut index: Vec<(String, [u8; 32], bool)> = files
+    let mut index: Vec<(MobpackArchivePath, [u8; 32], bool)> = files
         .iter()
         .map(|(path, bytes)| {
-            (
-                normalize_path(path),
-                sha256_bytes(bytes),
-                normalize_executable_bit(path, bytes),
-            )
+            let archive_path = MobpackArchivePath::for_digest_path(path);
+            let executable_bit = normalize_executable_bit(&archive_path, bytes);
+            (archive_path, sha256_bytes(bytes), executable_bit)
         })
-        .filter(|(path, _, _)| path != "signature.toml")
+        .filter(|(path, _, _)| !path.section().is_signature())
         .collect();
-    index.sort_by(|a, b| a.0.cmp(&b.0));
+    index.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
 
     let mut hasher = Sha256::new();
     for (path, file_digest, executable_bit) in index {
-        hasher.update(path.as_bytes());
+        hasher.update(path.as_str().as_bytes());
         hasher.update([0]);
         hasher.update(hex::encode(file_digest).as_bytes());
         hasher.update([0]);
@@ -158,14 +155,6 @@ pub fn canonical_digest_from_map(files: &BTreeMap<String, Vec<u8>>) -> MobpackDi
         hasher.update([b'\n']);
     }
     MobpackDigest(hasher.finalize().into())
-}
-
-fn normalize_path(path: &str) -> String {
-    let replaced = path.replace('\\', "/");
-    replaced
-        .trim_start_matches("./")
-        .trim_start_matches('/')
-        .to_string()
 }
 
 #[cfg(test)]

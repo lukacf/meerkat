@@ -130,8 +130,8 @@ impl AgentLlmClient for CatalogLoadRouteClient {
         Ok(response)
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &str {

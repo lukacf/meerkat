@@ -28,11 +28,11 @@ use meerkat_core::skills::{
     SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind, SourceUuid, apply_filter,
 };
 use meerkat_skills::{DefaultSkillEngine, InMemorySkillSource};
-use meerkat_tools::BuiltinTool;
 use meerkat_tools::builtin::skills::{
     BrowseSkillsTool, LoadSkillTool, SkillInvokeFunctionTool, SkillListResourcesTool,
     SkillReadResourceTool,
 };
+use meerkat_tools::{BuiltinTool, BuiltinToolError};
 
 fn skill_doc(source: &SourceUuid, skill: &str, display: &str, body: &str) -> SkillDocument {
     SkillDocument {
@@ -177,16 +177,18 @@ impl SkillSource for HarnessSkillSource {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, SkillError> {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<meerkat_core::skills::SkillFunctionResult, SkillError> {
         self.require_key(key)?;
-        if function_name != "echo" {
+        if function_name.as_str() != "echo" {
             return Err(SkillError::Load(
                 format!("missing function: {function_name}").into(),
             ));
         }
-        Ok(serde_json::json!({ "received": arguments }))
+        Ok(meerkat_core::skills::SkillFunctionResult::new(
+            serde_json::json!({ "received": arguments.into_value() }),
+        ))
     }
 }
 
@@ -502,7 +504,7 @@ async fn invoke_function_passes_typed_key_and_default_arguments() {
     let json = output.into_json().unwrap();
 
     assert_eq!(json["function_name"].as_str().unwrap(), "echo");
-    assert!(json["output"]["received"].is_null());
+    assert!(json["output"]["received"].as_object().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -525,4 +527,28 @@ async fn invoke_function_preserves_structured_arguments() {
         json["output"]["received"]["subject"].as_str().unwrap(),
         "typed"
     );
+}
+
+#[tokio::test]
+async fn invoke_function_rejects_non_object_arguments() {
+    let (runtime, source) = harness_runtime();
+    let tool = SkillInvokeFunctionTool::new(runtime);
+
+    let err = tool
+        .call(serde_json::json!({
+            "source_uuid": source.to_string(),
+            "skill_name": "alpha",
+            "function_name": "echo",
+            "arguments": "json text is not function arguments",
+        }))
+        .await
+        .expect_err("function arguments must be object-shaped");
+
+    match err {
+        BuiltinToolError::InvalidArgs(msg) => assert!(
+            msg.contains("tool call arguments must be a JSON object"),
+            "unexpected error: {msg}"
+        ),
+        other => panic!("expected InvalidArgs for non-object arguments; got {other:?}"),
+    }
 }

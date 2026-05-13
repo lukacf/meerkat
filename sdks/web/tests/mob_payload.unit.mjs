@@ -144,8 +144,6 @@ test('isKnownEvent fails closed for unknown skill resolution statuses', () => {
     isKnownEvent({
       type: 'skill_resolution_failed',
       reason: { reason_type: 'future_status', message: 'future details' },
-      reference: 'legacy/ref',
-      error: 'missing',
     }),
     false,
   );
@@ -153,8 +151,6 @@ test('isKnownEvent fails closed for unknown skill resolution statuses', () => {
     isKnownEvent({
       type: 'skill_resolution_failed',
       reason: { reason_type: 'unknown', message: 'future details' },
-      reference: 'legacy/ref',
-      error: 'missing',
     }),
     true,
   );
@@ -646,7 +642,6 @@ test('Mob.status projects only generated status truth', async () => {
 
   assert.equal(status.mob_id, 'mob-web-unit');
   assert.equal(status.status, 'Running');
-  assert.equal(status.state, 'Running');
 });
 
 test('MeerkatRuntime.listMobs projects only generated mob list status truth', async () => {
@@ -660,7 +655,6 @@ test('MeerkatRuntime.listMobs projects only generated mob list status truth', as
     {
       mob_id: 'mob-web-unit',
       status: 'Running',
-      state: 'Running',
     },
   ]);
 });
@@ -670,6 +664,7 @@ test('MeerkatRuntime.listMobs rejects malformed typed status rows instead of pro
     [{ mob_id: 'mob-web-unit', state: 'Running' }],
     { mobs: [{ mob_id: 'mob-web-unit', state: 'Running' }] },
     { mobs: [{ mob_id: 'mob-web-unit', status: '' }] },
+    { mobs: [{ mob_id: 'mob-web-unit', status: 'running' }] },
     { mobs: [{ status: 'Running' }] },
     { mobs: 'not-an-array' },
     {},

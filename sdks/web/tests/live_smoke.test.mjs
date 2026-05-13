@@ -484,11 +484,11 @@ test(
 
       await mob.lifecycle("stop");
       const stopped = await mob.status();
-      assert.equal(stopped.state, "Stopped");
+      assert.equal(stopped.status, "Stopped");
 
       await mob.lifecycle("resume");
       const resumed = await mob.status();
-      assert.equal(resumed.state, "Running");
+      assert.equal(resumed.status, "Running");
 
       const events = await mob.events("", 300);
       assert.ok(events.length >= 2);

@@ -14,13 +14,14 @@ use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 use meerkat_contracts::wire::{MobToolConfigInput, WireMobProfile, WireMobToolConfig};
 use meerkat_contracts::{
-    ErrorCode, MobCreateParams, MobCreateResult, MobEventsParams as WireMobEventsParams,
-    MobEventsResult as WireMobEventsResult, MobFlowStatusParams as WireMobFlowStatusParams,
-    MobFlowStatusResult as WireMobFlowStatusResult, MobMemberListEntryWire, MobProfileCreateParams,
-    MobProfileDeleteParams, MobProfileDeleteResult, MobProfileListResult, MobProfileLookupResult,
-    MobProfileNameParams, MobProfileUpdateParams, MobRotateSupervisorResult, MobSpawnManyResult,
-    MobSpawnManyResultEntry, SupervisorRotationReportWire, WireMemberState, WireMobBackendKind,
-    WireMobEvent, WireMobMemberStatus, WireMobRun, WireMobRuntimeMode,
+    ErrorCode, MobAppendSystemContextResult, MobCreateParams, MobCreateResult,
+    MobEventsParams as WireMobEventsParams, MobEventsResult as WireMobEventsResult,
+    MobFlowStatusParams as WireMobFlowStatusParams, MobFlowStatusResult as WireMobFlowStatusResult,
+    MobMemberListEntryWire, MobProfileCreateParams, MobProfileDeleteParams, MobProfileDeleteResult,
+    MobProfileListResult, MobProfileLookupResult, MobProfileNameParams, MobProfileUpdateParams,
+    MobRotateSupervisorResult, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
+    MobStatusResult, SupervisorRotationReportWire, WireMemberState, WireMobBackendKind,
+    WireMobEvent, WireMobMemberStatus, WireMobRun, WireMobRuntimeMode, WireMobState,
 };
 use meerkat_core::service::{AppendSystemContextRequest, TurnToolOverlay};
 use meerkat_core::skills::SkillRef;
@@ -42,6 +43,16 @@ fn invalid_params(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse 
 
 fn internal_error(id: Option<RpcId>, message: impl Into<String>) -> RpcResponse {
     RpcResponse::error(id, error::INTERNAL_ERROR, message.into())
+}
+
+fn wire_mob_state(state: meerkat_mob::MobState) -> WireMobState {
+    match state {
+        meerkat_mob::MobState::Creating => WireMobState::Creating,
+        meerkat_mob::MobState::Running => WireMobState::Running,
+        meerkat_mob::MobState::Stopped => WireMobState::Stopped,
+        meerkat_mob::MobState::Completed => WireMobState::Completed,
+        meerkat_mob::MobState::Destroyed => WireMobState::Destroyed,
+    }
 }
 
 fn mob_rotate_supervisor_error(id: Option<RpcId>, err: &MobError) -> RpcResponse {
@@ -404,7 +415,7 @@ pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResp
             let mobs = mobs
                 .into_iter()
                 .map(|(mob_id, status)| {
-                    serde_json::json!({"mob_id": mob_id, "status": status.to_string()})
+                    serde_json::json!({"mob_id": mob_id, "status": wire_mob_state(status)})
                 })
                 .collect::<Vec<_>>();
             RpcResponse::success(id, serde_json::json!({"mobs": mobs}))
@@ -434,7 +445,10 @@ pub async fn handle_status(
     match state.mob_status(&mob_id).await {
         Ok(status) => RpcResponse::success(
             id,
-            serde_json::json!({"mob_id": mob_id, "status": status.to_string()}),
+            MobStatusResult {
+                mob_id: mob_id.to_string(),
+                status: wire_mob_state(status),
+            },
         ),
         Err(err) => invalid_params(id, err.to_string()),
     }
@@ -1100,11 +1114,11 @@ pub async fn handle_append_system_context(
     {
         Ok((_bridge_session_id, result)) => RpcResponse::success(
             id,
-            serde_json::json!({
-                "mob_id": mob_id,
-                "agent_identity": agent_identity,
-                "status": result.status,
-            }),
+            MobAppendSystemContextResult {
+                mob_id: mob_id.to_string(),
+                agent_identity: agent_identity.to_string(),
+                status: result.status,
+            },
         ),
         Err(err) => RpcResponse::error(id, error::INVALID_PARAMS, err.to_string()),
     }
@@ -1512,20 +1526,24 @@ pub async fn handle_snapshot(
         Err(resp) => return resp,
     };
     let status = match state.mob_status(&mob_id).await {
-        Ok(status) => status.to_string(),
+        Ok(status) => wire_mob_state(status),
         Err(err) => return invalid_params(id, err.to_string()),
     };
     let members = match state.mob_list_members(&mob_id).await {
         Ok(members) => members,
         Err(err) => return invalid_params(id, err.to_string()),
     };
+    let members = members
+        .iter()
+        .map(|entry| member_list_entry_wire(&mob_id, entry))
+        .collect();
     RpcResponse::success(
         id,
-        serde_json::json!({
-            "mob_id": mob_id,
-            "status": status,
-            "members": members,
-        }),
+        MobSnapshotResult {
+            mob_id: mob_id.to_string(),
+            status,
+            members,
+        },
     )
 }
 

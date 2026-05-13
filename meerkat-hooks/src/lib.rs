@@ -33,12 +33,12 @@ inventory::submit! {
 
 use chrono::Utc;
 use futures::StreamExt;
-use meerkat_core::config::HookInProcessRuntimeConfig;
+use meerkat_core::config::{HookHttpMethod, HookRuntimeAdapterConfig};
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPatchEnvelope,
-    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, PlannedHookEntry, SessionId,
+    HookRevision, HookRunOverrides, HooksConfig, PlannedHookEntry, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -66,28 +66,6 @@ pub struct RuntimeHookResponse {
     /// non-empty legacy semantic patch payloads fail deserialization.
     #[serde(default)]
     pub patches: Vec<HookPatch>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CommandRuntimeConfig {
-    command: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default)]
-    env: HashMap<String, String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct HttpRuntimeConfig {
-    url: String,
-    #[serde(default = "default_http_method")]
-    method: String,
-    #[serde(default)]
-    headers: HashMap<String, String>,
-}
-
-fn default_http_method() -> String {
-    "POST".to_string()
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -386,28 +364,8 @@ impl DefaultHookEngine {
         entry: &HookEntryConfig,
         invocation: HookInvocation,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
-        let runtime_config =
-            entry
-                .runtime
-                .config_value()
-                .map_err(|err| HookEngineError::ExecutionFailed {
-                    hook_id: entry.id.clone(),
-                    reason: format!("invalid runtime config payload: {err}"),
-                })?;
-
-        match entry.runtime.kind {
-            HookRuntimeKind::InProcess => {
-                let cfg: HookInProcessRuntimeConfig = entry
-                    .runtime
-                    .in_process_config()
-                    .map_err(|err| HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: format!("invalid in_process runtime config: {err}"),
-                    })?
-                    .ok_or_else(|| HookEngineError::ExecutionFailed {
-                        hook_id: entry.id.clone(),
-                        reason: "runtime kind is not in_process".to_string(),
-                    })?;
+        match &entry.runtime.adapter {
+            HookRuntimeAdapterConfig::InProcess(cfg) => {
                 let handler = {
                     let handlers = self.in_process_handlers.read().map_err(|err| {
                         HookEngineError::ExecutionFailed {
@@ -429,27 +387,25 @@ impl DefaultHookEngine {
                         reason,
                     })
             }
-            HookRuntimeKind::Command => {
-                let cfg: CommandRuntimeConfig =
-                    serde_json::from_value(runtime_config).map_err(|err| {
-                        HookEngineError::ExecutionFailed {
-                            hook_id: entry.id.clone(),
-                            reason: format!("invalid command runtime config: {err}"),
-                        }
-                    })?;
-                self.invoke_command_runtime(entry, &cfg.command, &cfg.args, &cfg.env, invocation)
-                    .await
+            HookRuntimeAdapterConfig::Command(cfg) => {
+                self.invoke_command_runtime(
+                    entry,
+                    cfg.command.as_str(),
+                    &cfg.args,
+                    &cfg.env,
+                    invocation,
+                )
+                .await
             }
-            HookRuntimeKind::Http => {
-                let cfg: HttpRuntimeConfig =
-                    serde_json::from_value(runtime_config).map_err(|err| {
-                        HookEngineError::ExecutionFailed {
-                            hook_id: entry.id.clone(),
-                            reason: format!("invalid http runtime config: {err}"),
-                        }
-                    })?;
-                self.invoke_http_runtime(entry, &cfg.url, &cfg.method, &cfg.headers, invocation)
-                    .await
+            HookRuntimeAdapterConfig::Http(cfg) => {
+                self.invoke_http_runtime(
+                    entry,
+                    cfg.url.as_str(),
+                    cfg.method,
+                    &cfg.headers,
+                    invocation,
+                )
+                .await
             }
         }
     }
@@ -593,7 +549,7 @@ impl DefaultHookEngine {
         &self,
         entry: &HookEntryConfig,
         url: &str,
-        method: &str,
+        method: HookHttpMethod,
         headers: &HashMap<String, String>,
         invocation: HookInvocation,
     ) -> Result<RuntimeHookResponse, HookEngineError> {
@@ -614,16 +570,17 @@ impl DefaultHookEngine {
             });
         }
 
-        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|err| {
-            HookEngineError::ExecutionFailed {
-                hook_id: entry.id.clone(),
-                reason: format!("invalid HTTP method '{method}': {err}"),
-            }
-        })?;
+        let reqwest_method =
+            reqwest::Method::from_bytes(method.as_str().as_bytes()).map_err(|err| {
+                HookEngineError::ExecutionFailed {
+                    hook_id: entry.id.clone(),
+                    reason: format!("invalid HTTP method '{method}': {err}"),
+                }
+            })?;
 
         let http_client = self.http_client.get_or_init(reqwest::Client::new);
         let mut req = http_client
-            .request(method, url)
+            .request(reqwest_method, url)
             .header("content-type", "application/json")
             .body(payload);
 
@@ -809,7 +766,7 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::{
-        HookCapability, HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode,
+        ContentInput, HookCapability, HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode,
         HookRuntimeConfig, HookRuntimeKind, SessionId,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -896,10 +853,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -959,10 +914,8 @@ mod tests {
                     session_id: session_id.clone(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1015,10 +968,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -1096,10 +1047,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: Some(HookLlmRequest {
                         max_tokens: 256,
                         temperature: None,
@@ -1149,10 +1098,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1189,10 +1136,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1273,10 +1218,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1329,10 +1272,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1379,11 +1320,9 @@ mod tests {
                     point: HookPoint::RunStarted,
                     session_id: SessionId::new(),
                     turn_number: Some(0),
-                    prompt_input: None,
-                    prompt: Some("hi".to_string()),
+                    prompt_input: Some(ContentInput::Text("hi".to_string())),
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1417,10 +1356,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1459,10 +1396,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1502,10 +1437,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1579,10 +1512,8 @@ mod tests {
                     session_id: SessionId::new(),
                     turn_number: Some(1),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,

@@ -26,4 +26,4 @@ mod tools;
 
 pub use surface::CommsToolSurface;
 pub use tool_set::CommsToolSet;
-pub use tools::{PeersTool, SendTool};
+pub use tools::PeersTool;

@@ -16,8 +16,21 @@ Example::
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, TypedDict, TypeAlias
+
+from .types import ContentInput
+
+
+class ToolCallbackResult(TypedDict, total=False):
+    """Structured result returned from a callback tool."""
+
+    content: ContentInput
+    is_error: bool
+    isError: bool
+
+
+ToolCallbackReturn: TypeAlias = ContentInput | tuple[ContentInput, bool] | ToolCallbackResult
 
 
 @dataclass
@@ -27,7 +40,7 @@ class ToolRegistration:
     name: str
     description: str
     input_schema: dict[str, Any]
-    handler: Callable[[dict[str, Any]], Awaitable[str]]
+    handler: Callable[[dict[str, Any]], Awaitable[ToolCallbackReturn]]
 
 
 class ToolRegistry:
@@ -39,7 +52,7 @@ class ToolRegistry:
     def register(
         self,
         name: str,
-        handler: Callable[[dict[str, Any]], Awaitable[str]],
+        handler: Callable[[dict[str, Any]], Awaitable[ToolCallbackReturn]],
         *,
         description: str = "",
         input_schema: dict[str, Any] | None = None,
@@ -63,14 +76,21 @@ class ToolRegistry:
             for t in self._tools.values()
         ]
 
-    async def handle(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
+    async def handle(self, name: str, arguments: dict[str, Any]) -> tuple[ContentInput, bool]:
         """Execute a tool handler. Returns (content, is_error)."""
         tool = self._tools.get(name)
         if tool is None:
             return f"Unknown tool: {name}", True
         try:
             result = await tool.handler(arguments)
-            return str(result), False
+            if isinstance(result, tuple):
+                content, is_error = result
+                return content, bool(is_error)
+            if isinstance(result, dict) and "content" in result:
+                return result["content"], bool(
+                    result.get("is_error", result.get("isError", False))
+                )
+            return result, False
         except Exception as exc:
             return f"Tool error: {exc}", True
 

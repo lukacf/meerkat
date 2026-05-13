@@ -47,6 +47,8 @@ import type {
   DeviceStartParams,
   LoginCompleteParams,
   LoginStartParams,
+  OAuthProviderIdentity,
+  PersistedAuthMode,
   ProvisionApiKeyParams,
   WireAuthMethod,
   WireAuthProfile,
@@ -67,6 +69,8 @@ import type {
 import type { AuthBindingRef, SessionConfig } from './types.js';
 
 export type {
+  OAuthProviderIdentity,
+  PersistedAuthMode,
   WireAuthMethod,
   WireAuthProvider,
   WireBackendKind,

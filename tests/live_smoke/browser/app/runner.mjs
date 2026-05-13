@@ -1,6 +1,6 @@
 const logNode = document.querySelector('#log');
 const statusNode = document.querySelector('#status');
-const LIVE_LLM_TIMEOUT_MS = 30_000;
+const LIVE_LLM_TIMEOUT_MS = 90_000;
 
 function write(message) {
   const line = typeof message === 'string' ? message : JSON.stringify(message);

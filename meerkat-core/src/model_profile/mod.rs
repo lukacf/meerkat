@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 /// runtime policy. This ownership expansion is deliberate — see dogma rule §11.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelProfile {
-    /// Canonical provider string.
-    pub provider: String,
+    /// Typed provider owner.
+    pub provider: Provider,
     /// Model family identifier (e.g., `"claude-opus-4"`, `"gpt-5"`, `"gemini-3"`).
     pub model_family: String,
     /// Whether the model accepts a `temperature` parameter.
@@ -88,9 +88,9 @@ pub struct ModelBetaHeader {
 impl From<&BetaHeader> for ModelBetaHeader {
     fn from(value: &BetaHeader) -> Self {
         Self {
-            feature: value.feature.to_string(),
-            header_name: value.header_name.to_string(),
-            header_value: value.header_value.to_string(),
+            feature: value.feature().as_str().to_string(),
+            header_name: value.header_name().to_string(),
+            header_value: value.header_value().to_string(),
         }
     }
 }
@@ -116,7 +116,7 @@ pub fn inline_video_support_for(provider: Provider, model: &str) -> Option<bool>
 /// Project a capability record into the [`ModelProfile`] surface.
 pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
     ModelProfile {
-        provider: caps.provider.as_str().to_string(),
+        provider: caps.provider,
         model_family: caps.model_family.to_string(),
         supports_temperature: caps.supports_temperature,
         supports_thinking: caps.thinking != ThinkingSupport::None,
@@ -143,15 +143,10 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
 mod tests {
     use super::*;
 
-    fn provider_from_catalog(provider: &str) -> Provider {
-        Provider::parse_strict(provider)
-            .unwrap_or_else(|| panic!("catalog provider '{provider}' must parse"))
-    }
-
     #[test]
     fn profile_for_all_catalog_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
+            let profile = profile_for(entry.provider, entry.id);
             assert!(
                 profile.is_some(),
                 "catalog model '{}' (provider '{}') must have a profile",
@@ -273,10 +268,10 @@ mod tests {
     fn all_gemini_profiles_preserve_inline_video_support() {
         for entry in catalog::catalog()
             .iter()
-            .filter(|entry| entry.provider == "gemini")
+            .filter(|entry| entry.provider == Provider::Gemini)
         {
             assert!(
-                profile_for(provider_from_catalog(entry.provider), entry.id)
+                profile_for(entry.provider, entry.id)
                     .as_ref()
                     .is_some_and(|profile| profile.inline_video),
                 "Gemini model '{}' must support inline video",
@@ -304,7 +299,7 @@ mod tests {
     #[test]
     fn params_schema_non_empty_for_all_profiles() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
+            let profile = profile_for(entry.provider, entry.id);
             if let Some(p) = profile {
                 assert!(
                     p.params_schema.is_object(),
@@ -319,7 +314,7 @@ mod tests {
     #[test]
     fn call_timeout_secs_populated_for_known_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
+            let profile = profile_for(entry.provider, entry.id);
             if let Some(p) = profile {
                 assert!(
                     p.call_timeout_secs.is_some(),
@@ -374,7 +369,7 @@ mod tests {
     #[test]
     fn web_search_flag_populated_for_all_catalog_models() {
         for entry in crate::model_profile::catalog::catalog() {
-            let profile = profile_for(provider_from_catalog(entry.provider), entry.id);
+            let profile = profile_for(entry.provider, entry.id);
             assert!(
                 profile.is_some(),
                 "catalog model '{}' (provider '{}') must have a profile",

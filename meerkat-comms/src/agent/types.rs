@@ -84,9 +84,6 @@ pub fn drain_inbox_item(
 }
 
 /// Standard message intents for inter-agent communication.
-///
-/// This enum provides type-safe intent values for common operations,
-/// with a `Custom` variant for user-defined extensibility.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageIntent {
@@ -110,19 +107,11 @@ pub enum MessageIntent {
     /// Peer retired lifecycle event (mob.peer_retired)
     #[serde(rename = "mob.peer_retired")]
     PeerRetired,
-    /// Custom intent for user-defined operations
-    #[serde(untagged)]
-    Custom(String),
 }
 
 impl MessageIntent {
-    /// Create a custom intent from a string
-    pub fn custom(s: impl Into<String>) -> Self {
-        Self::Custom(s.into())
-    }
-
-    /// Get the intent as a string (for backward compatibility)
-    pub fn as_str(&self) -> &str {
+    /// Get the intent as its canonical wire literal.
+    pub const fn as_str(&self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
             Self::Status => "status",
@@ -133,31 +122,34 @@ impl MessageIntent {
             Self::Query => "query",
             Self::PeerAdded => "mob.peer_added",
             Self::PeerRetired => "mob.peer_retired",
-            Self::Custom(s) => s.as_str(),
         }
     }
 }
 
-impl From<String> for MessageIntent {
-    fn from(s: String) -> Self {
-        match s.as_str() {
-            "delegate" => Self::Delegate,
-            "status" => Self::Status,
-            "cancel" => Self::Cancel,
-            "ack" => Self::Ack,
-            "review" => Self::Review,
-            "calculate" => Self::Calculate,
-            "query" => Self::Query,
-            "mob.peer_added" => Self::PeerAdded,
-            "mob.peer_retired" => Self::PeerRetired,
-            _ => Self::Custom(s),
+impl TryFrom<&str> for MessageIntent {
+    type Error = String;
+
+    fn try_from(s: &str) -> Result<Self, Self::Error> {
+        match s {
+            "delegate" => Ok(Self::Delegate),
+            "status" => Ok(Self::Status),
+            "cancel" => Ok(Self::Cancel),
+            "ack" => Ok(Self::Ack),
+            "review" => Ok(Self::Review),
+            "calculate" => Ok(Self::Calculate),
+            "query" => Ok(Self::Query),
+            "mob.peer_added" => Ok(Self::PeerAdded),
+            "mob.peer_retired" => Ok(Self::PeerRetired),
+            other => Err(format!("unknown comms message intent `{other}`")),
         }
     }
 }
 
-impl From<&str> for MessageIntent {
-    fn from(s: &str) -> Self {
-        Self::from(s.to_string())
+impl TryFrom<String> for MessageIntent {
+    type Error = String;
+
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::try_from(s.as_str())
     }
 }
 
@@ -267,7 +259,7 @@ impl CommsMessage {
                 ..
             } => CommsContent::Request {
                 request_id: envelope.id,
-                intent: MessageIntent::from(intent.as_str()),
+                intent: MessageIntent::try_from(intent.as_str()).ok()?,
                 params: params.clone(),
                 blocks: blocks.clone(),
             },
@@ -568,12 +560,11 @@ mod tests {
     }
 
     #[test]
-    fn test_comms_message_from_inbox_item_request_custom_intent() {
+    fn test_comms_message_from_inbox_item_rejects_unknown_request_intent() {
         let sender = make_keypair();
         let receiver = make_keypair();
         let trusted = make_trusted_peers("requester", &sender.public_key());
 
-        // Custom intent should be preserved as Custom variant
         let envelope = make_envelope(
             &sender,
             receiver.public_key(),
@@ -586,15 +577,10 @@ mod tests {
         );
 
         let item = InboxItem::External { envelope };
-        let msg = CommsMessage::from_inbox_item(&item, &trusted, true).unwrap();
-
-        match msg.content {
-            CommsContent::Request { intent, params, .. } => {
-                assert_eq!(intent, MessageIntent::Custom("review-pr".to_string()));
-                assert_eq!(params["pr"], 456);
-            }
-            _ => unreachable!("expected Request"),
-        }
+        assert!(
+            CommsMessage::from_inbox_item(&item, &trusted, true).is_none(),
+            "agent compatibility projection must reject unknown request intents"
+        );
     }
 
     #[test]
@@ -803,40 +789,39 @@ mod tests {
     }
 
     #[test]
-    fn test_message_intent_custom_variant() {
-        let custom = MessageIntent::custom("my-custom-intent");
-        assert_eq!(custom.as_str(), "my-custom-intent");
+    fn test_message_intent_try_from_string() {
         assert_eq!(
-            custom,
-            MessageIntent::Custom("my-custom-intent".to_string())
+            MessageIntent::try_from("delegate").unwrap(),
+            MessageIntent::Delegate
         );
-    }
-
-    #[test]
-    fn test_message_intent_from_string() {
-        // Standard intents should map to enum variants
-        assert_eq!(MessageIntent::from("delegate"), MessageIntent::Delegate);
-        assert_eq!(MessageIntent::from("status"), MessageIntent::Status);
-        assert_eq!(MessageIntent::from("cancel"), MessageIntent::Cancel);
-        assert_eq!(MessageIntent::from("ack"), MessageIntent::Ack);
-        assert_eq!(MessageIntent::from("review"), MessageIntent::Review);
-        assert_eq!(MessageIntent::from("calculate"), MessageIntent::Calculate);
-        assert_eq!(MessageIntent::from("query"), MessageIntent::Query);
-
-        // Unknown strings should become Custom
         assert_eq!(
-            MessageIntent::from("unknown-intent"),
-            MessageIntent::Custom("unknown-intent".to_string())
+            MessageIntent::try_from("status").unwrap(),
+            MessageIntent::Status
         );
+        assert_eq!(
+            MessageIntent::try_from("cancel").unwrap(),
+            MessageIntent::Cancel
+        );
+        assert_eq!(MessageIntent::try_from("ack").unwrap(), MessageIntent::Ack);
+        assert_eq!(
+            MessageIntent::try_from("review").unwrap(),
+            MessageIntent::Review
+        );
+        assert_eq!(
+            MessageIntent::try_from("calculate").unwrap(),
+            MessageIntent::Calculate
+        );
+        assert_eq!(
+            MessageIntent::try_from("query").unwrap(),
+            MessageIntent::Query
+        );
+
+        assert!(MessageIntent::try_from("unknown-intent").is_err());
     }
 
     #[test]
     fn test_message_intent_display() {
         assert_eq!(format!("{}", MessageIntent::Review), "review");
-        assert_eq!(
-            format!("{}", MessageIntent::Custom("foo".to_string())),
-            "foo"
-        );
     }
 
     #[test]
@@ -847,10 +832,6 @@ mod tests {
 
         let json = serde_json::to_string(&MessageIntent::Review).unwrap();
         assert_eq!(json, "\"review\"");
-
-        // Custom variant serializes to the inner string
-        let json = serde_json::to_string(&MessageIntent::Custom("custom-op".to_string())).unwrap();
-        assert_eq!(json, "\"custom-op\"");
     }
 
     #[test]
@@ -862,9 +843,11 @@ mod tests {
         let intent: MessageIntent = serde_json::from_str("\"review\"").unwrap();
         assert_eq!(intent, MessageIntent::Review);
 
-        // Unknown strings deserialize to Custom
-        let intent: MessageIntent = serde_json::from_str("\"my-custom\"").unwrap();
-        assert_eq!(intent, MessageIntent::Custom("my-custom".to_string()));
+        let err = serde_json::from_str::<MessageIntent>("\"my-custom\"").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "unexpected error: {err}"
+        );
     }
 
     // === DrainedMessage / PlainMessage tests ===

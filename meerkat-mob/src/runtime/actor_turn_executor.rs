@@ -242,16 +242,20 @@ impl ActorFlowTurnExecutor {
                         return;
                     }
                     AgentEvent::RunFailed {
-                        error,
+                        error_class,
                         error_report,
                         ..
                     } => {
                         if let Some(tx) = completion_tx.take() {
+                            let reason = error_report
+                                .as_ref()
+                                .map(|report| report.message.clone())
+                                .unwrap_or_else(|| format!("run failed ({error_class:?})"));
                             let metadata = error_report.as_ref().and_then(|report| {
-                                TurnErrorMetadata::from_agent_error_report(report, error.clone())
+                                TurnErrorMetadata::from_agent_error_report(report, reason.clone())
                             });
                             let _ = tx.send(FlowTurnOutcome::Failed {
-                                reason: error,
+                                reason,
                                 error_report,
                                 error: metadata,
                             });
@@ -689,7 +693,6 @@ mod tests {
             .send(AgentEvent::RunFailed {
                 session_id: meerkat_core::SessionId::new(),
                 error_class: AgentErrorClass::Terminal,
-                error: "LLM failure terminal turn".to_string(),
                 terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::LlmFailure),
                 error_report: Some(report.clone()),
             })

@@ -157,11 +157,15 @@ impl BrowserMobpackCapabilityDecision {
 pub fn browser_mobpack_capability_decision(
     requirement: MobpackCapabilityRequirement<'_>,
 ) -> BrowserMobpackCapabilityDecision {
-    match requirement.id() {
+    browser_mobpack_capability_decision_for_id(requirement.id())
+}
+
+pub fn browser_mobpack_capability_decision_for_id(
+    capability: MobpackCapabilityId,
+) -> BrowserMobpackCapabilityDecision {
+    match capability {
         MobpackCapabilityId::Known(CapabilityId::Shell) | MobpackCapabilityId::HostProcess(_) => {
-            BrowserMobpackCapabilityDecision::Forbidden {
-                capability: requirement.id(),
-            }
+            BrowserMobpackCapabilityDecision::Forbidden { capability }
         }
         MobpackCapabilityId::Known(_)
         | MobpackCapabilityId::Runtime(_)

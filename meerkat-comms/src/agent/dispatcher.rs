@@ -8,6 +8,7 @@ use crate::runtime::CommsRuntime;
 use crate::{Router, TrustedPeers};
 use async_trait::async_trait;
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ToolCallArguments;
 use meerkat_core::ToolCallability;
 use meerkat_core::ToolCatalogCapabilities;
 use meerkat_core::ToolCatalogEntry;
@@ -17,7 +18,6 @@ use meerkat_core::agent::ExternalToolUpdate;
 use meerkat_core::error::ToolError;
 use meerkat_core::types::{ToolCallView, ToolDef, ToolProvenance, ToolResult, ToolSourceKind};
 use parking_lot::RwLock;
-use serde_json::Value;
 use std::sync::Arc;
 
 /// Tool dispatcher that provides comms tools.
@@ -99,7 +99,7 @@ impl AgentToolDispatcher for NoOpDispatcher {
 fn is_comms_tool(name: &str) -> bool {
     matches!(
         name,
-        "send" | "send_message" | "send_request" | "send_response" | "peers"
+        "send_message" | "send_request" | "send_response" | "peers"
     )
 }
 
@@ -163,19 +163,23 @@ impl<T: AgentToolDispatcher + 'static> AgentToolDispatcher for CommsToolDispatch
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
+            let args = ToolCallArguments::from_raw_json(call.args)
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
             if let Some(reason) =
                 callability_for_context(&self.tool_context, call.name).unavailable_reason()
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result =
-                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
+            let result = handle_tools_call_with_context(
+                &self.tool_context,
+                call.name,
+                args.as_value(),
+                context,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            Ok(ToolResult::from_json_value(call.id.to_string(), result, false).into())
         } else if let Some(inner) = &self.inner {
             inner.dispatch_with_context(call, context).await
         } else {
@@ -308,19 +312,23 @@ impl AgentToolDispatcher for DynCommsToolDispatcher {
         call: ToolCallView<'_>,
         context: &ToolDispatchContext,
     ) -> Result<ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
         if is_comms_tool(call.name) {
+            let args = ToolCallArguments::from_raw_json(call.args)
+                .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
             if let Some(reason) =
                 callability_for_context(&self.tool_context, call.name).unavailable_reason()
             {
                 return Err(ToolError::unavailable(call.name, reason));
             }
-            let result =
-                handle_tools_call_with_context(&self.tool_context, call.name, &args, context)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed { message: e })?;
-            Ok(ToolResult::new(call.id.to_string(), result.to_string(), false).into())
+            let result = handle_tools_call_with_context(
+                &self.tool_context,
+                call.name,
+                args.as_value(),
+                context,
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed { message: e })?;
+            Ok(ToolResult::from_json_value(call.id.to_string(), result, false).into())
         } else {
             self.inner.dispatch_with_context(call, context).await
         }
@@ -606,6 +614,63 @@ mod tests {
         let payload: serde_json::Value = serde_json::from_str(&outcome.result.text_content())
             .expect("tool result should be JSON");
         assert_eq!(payload["saw_context_image"], true);
+    }
+
+    #[tokio::test]
+    async fn comms_dispatcher_returns_peers_as_typed_json_block() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+        let args_raw = serde_json::value::RawValue::from_string("{}".to_string())
+            .expect("empty object should be valid raw JSON");
+        let call = ToolCallView {
+            id: "peers-1",
+            name: "peers",
+            args: &args_raw,
+        };
+
+        let outcome = dispatcher.dispatch(call).await.expect("peers should run");
+        assert!(matches!(
+            &outcome.result.content[..],
+            [meerkat_core::ContentBlock::Json { value }] if value["peers"].is_array()
+        ));
+    }
+
+    #[tokio::test]
+    async fn comms_dispatcher_rejects_non_object_tool_arguments() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = CommsToolDispatcher::new(router, trusted_peers);
+        let args_raw =
+            serde_json::value::RawValue::from_string("\"legacy string args\"".to_string())
+                .expect("valid raw JSON string");
+        let call = ToolCallView {
+            id: "bad-comms-args",
+            name: "send_message",
+            args: &args_raw,
+        };
+
+        let result = dispatcher.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
+    }
+
+    #[tokio::test]
+    async fn dyn_comms_dispatcher_rejects_non_object_tool_arguments() {
+        let (router, trusted_peers) = test_router();
+        let dispatcher = DynCommsToolDispatcher::new(
+            router,
+            trusted_peers,
+            Arc::new(ContextAwareDispatcher::new()),
+        );
+        let args_raw =
+            serde_json::value::RawValue::from_string("\"legacy string args\"".to_string())
+                .expect("valid raw JSON string");
+        let call = ToolCallView {
+            id: "bad-dyn-comms-args",
+            name: "send_message",
+            args: &args_raw,
+        };
+
+        let result = dispatcher.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
     }
 
     #[tokio::test]

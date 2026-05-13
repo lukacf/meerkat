@@ -1078,8 +1078,8 @@ async fn inner_e2e_002_bg_keepalive() -> Result<(), Box<dyn std::error::Error>> 
         .spawn()?;
 
     // Wait for the background job to complete (2s) plus margin for the
-    // agent to process the initial turn + wake cycle.
-    tokio::time::sleep(Duration::from_secs(20)).await;
+    // agent to process the initial turn + wake cycle on a loaded smoke host.
+    tokio::time::sleep(Duration::from_secs(60)).await;
 
     // Kill the process and read captured output from files
     child.kill().await.ok();

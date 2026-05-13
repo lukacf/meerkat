@@ -969,7 +969,10 @@ impl ProviderParamsOverride {
         merge_provider_tag(&mut self.provider_tag, &explicit.provider_tag);
     }
 
-    pub fn from_legacy_provider_value(provider: &str, value: &serde_json::Value) -> Self {
+    pub fn from_legacy_provider_value(
+        provider: crate::Provider,
+        value: &serde_json::Value,
+    ) -> Self {
         let Some(obj) = value.as_object() else {
             if value.is_null() {
                 return Self::default();
@@ -1030,6 +1033,72 @@ impl ProviderParamsOverride {
             let provider_value = serde_json::Value::Object(remaining);
             override_params.provider_tag =
                 Some(project_legacy_provider_tag(provider, &provider_value));
+        }
+
+        override_params
+    }
+
+    pub fn from_legacy_namespace_value(namespace: &str, value: &serde_json::Value) -> Self {
+        let Some(obj) = value.as_object() else {
+            if value.is_null() {
+                return Self::default();
+            }
+            return Self {
+                provider_tag: Some(unknown_provider_tag_namespace(namespace, value)),
+                ..Default::default()
+            };
+        };
+
+        let mut remaining = serde_json::Map::new();
+        let mut override_params = Self::default();
+
+        for (key, item) in obj {
+            match key.as_str() {
+                "temperature" => {
+                    if let Some(value) = item.as_f64() {
+                        override_params.temperature = Some(value as f32);
+                    } else {
+                        remaining.insert(key.clone(), item.clone());
+                    }
+                }
+                "top_p" => {
+                    if let Some(value) = item.as_f64() {
+                        override_params.top_p = Some(value as f32);
+                    } else {
+                        remaining.insert(key.clone(), item.clone());
+                    }
+                }
+                "max_output_tokens" => {
+                    if let Some(value) = item.as_u64().and_then(|value| u32::try_from(value).ok()) {
+                        override_params.max_output_tokens = Some(value);
+                    } else {
+                        remaining.insert(key.clone(), item.clone());
+                    }
+                }
+                "reasoning" => {
+                    if let Some(value) = item.as_str().and_then(parse_reasoning_mode) {
+                        override_params.reasoning = Some(value);
+                    } else {
+                        remaining.insert(key.clone(), item.clone());
+                    }
+                }
+                "thinking_budget_tokens" => {
+                    if let Some(value) = item.as_u64().and_then(|value| u32::try_from(value).ok()) {
+                        override_params.thinking_budget_tokens = Some(value);
+                    } else {
+                        remaining.insert(key.clone(), item.clone());
+                    }
+                }
+                _ => {
+                    remaining.insert(key.clone(), item.clone());
+                }
+            }
+        }
+
+        if !remaining.is_empty() {
+            let provider_value = serde_json::Value::Object(remaining);
+            override_params.provider_tag =
+                Some(unknown_provider_tag_namespace(namespace, &provider_value));
         }
 
         override_params
@@ -1154,25 +1223,34 @@ fn parse_reasoning_mode(value: &str) -> Option<ReasoningMode> {
     }
 }
 
-fn project_legacy_provider_tag(provider: &str, value: &serde_json::Value) -> ProviderTag {
+fn project_legacy_provider_tag(
+    provider: crate::Provider,
+    value: &serde_json::Value,
+) -> ProviderTag {
     match provider {
-        "anthropic" => AnthropicProviderTag::from_legacy_value(value)
+        crate::Provider::Anthropic => AnthropicProviderTag::from_legacy_value(value)
             .map(ProviderTag::Anthropic)
-            .unwrap_or_else(|_| unknown_provider_tag("anthropic", value)),
-        "openai" => OpenAiProviderTag::from_legacy_value(value)
+            .unwrap_or_else(|_| unknown_provider_tag(provider, value)),
+        crate::Provider::OpenAI => OpenAiProviderTag::from_legacy_value(value)
             .map(ProviderTag::OpenAi)
-            .unwrap_or_else(|_| unknown_provider_tag("openai", value)),
-        "gemini" | "google" => GeminiProviderTag::from_legacy_value(value)
+            .unwrap_or_else(|_| unknown_provider_tag(provider, value)),
+        crate::Provider::Gemini => GeminiProviderTag::from_legacy_value(value)
             .map(ProviderTag::Gemini)
-            .unwrap_or_else(|_| unknown_provider_tag("gemini", value)),
-        other => unknown_provider_tag(other, value),
+            .unwrap_or_else(|_| unknown_provider_tag(provider, value)),
+        crate::Provider::SelfHosted | crate::Provider::Other => {
+            unknown_provider_tag(provider, value)
+        }
     }
 }
 
-fn unknown_provider_tag(provider: &str, value: &serde_json::Value) -> ProviderTag {
+fn unknown_provider_tag(provider: crate::Provider, value: &serde_json::Value) -> ProviderTag {
+    unknown_provider_tag_namespace(provider.as_str(), value)
+}
+
+fn unknown_provider_tag_namespace(namespace: &str, value: &serde_json::Value) -> ProviderTag {
     ProviderTag::Unknown {
         bag: StructuredProviderExtension {
-            namespace: provider.to_string(),
+            namespace: namespace.to_string(),
             key: "provider_params".to_string(),
             body: value.to_string(),
         },
@@ -2474,7 +2552,8 @@ mod tests {
             "effort": "xhigh",
             "web_search": null,
         });
-        let params = ProviderParamsOverride::from_legacy_provider_value("anthropic", &legacy);
+        let params =
+            ProviderParamsOverride::from_legacy_provider_value(crate::Provider::Anthropic, &legacy);
 
         let projected = params.to_legacy_provider_value();
 

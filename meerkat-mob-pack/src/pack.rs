@@ -1,10 +1,11 @@
+use crate::archive_path::{MobpackArchivePath, MobpackArchiveSection};
 use crate::digest::{MobpackDigest, canonical_digest_from_map};
 use crate::manifest::MobpackManifest;
 use crate::signing::{
     MobpackPublicKey, MobpackSignatureBytes, MobpackSignatureTimestamp, MobpackSignerId,
     PackSignature, sign_digest,
 };
-use crate::targz::{create_targz, extract_targz_safe, normalize_for_archive};
+use crate::targz::{create_targz, extract_targz_safe};
 use crate::validate::PackValidationError;
 use ed25519_dalek::SigningKey;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
@@ -76,7 +77,10 @@ pub fn pack_directory_with_excludes(
             timestamp: MobpackSignatureTimestamp::now(),
         })
         .map_err(|err| PackValidationError::Archive(err.to_string()))?;
-        files.insert("signature.toml".to_string(), signature_toml.into_bytes());
+        files.insert(
+            MobpackArchivePath::SIGNATURE_FILE.to_string(),
+            signature_toml.into_bytes(),
+        );
     }
 
     let archive_bytes = create_targz(&files)?;
@@ -127,7 +131,7 @@ fn parse_manifest(
     files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<MobpackManifest, PackValidationError> {
     let bytes = files
-        .get("manifest.toml")
+        .get(MobpackArchivePath::MANIFEST_FILE)
         .ok_or(PackValidationError::MissingManifest)?;
     let manifest_text = String::from_utf8(bytes.clone())
         .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;
@@ -139,7 +143,7 @@ fn parse_definition(
     files: &BTreeMap<String, Vec<u8>>,
 ) -> Result<MobDefinition, PackValidationError> {
     let bytes = files
-        .get("definition.json")
+        .get(MobpackArchivePath::DEFINITION_FILE)
         .ok_or(PackValidationError::MissingDefinition)?;
     serde_json::from_slice(bytes).map_err(|err| PackValidationError::BadDefinition(err.to_string()))
 }
@@ -179,26 +183,31 @@ fn validate_skill_paths(
         let SkillSource::Path { path } = source else {
             continue;
         };
-        let normalized_path =
-            normalize_for_archive(path).map_err(|err| PackValidationError::InvalidSkillPath {
+        let archive_path = MobpackArchivePath::parse(path).map_err(|err| {
+            PackValidationError::InvalidSkillPath {
                 skill_name: skill_name.clone(),
                 path: path.clone(),
                 reason: err.to_string(),
-            })?;
-        if normalized_path != *path {
+            }
+        })?;
+        if archive_path.as_str() != path {
             return Err(PackValidationError::InvalidSkillPath {
                 skill_name: skill_name.clone(),
                 path: path.clone(),
-                reason: format!("must use canonical archive path `{normalized_path}`"),
+                reason: format!(
+                    "must use canonical archive path `{}`",
+                    archive_path.as_str()
+                ),
             });
         }
-        if !normalized_path.starts_with("skills/") {
+        if !matches!(archive_path.section(), MobpackArchiveSection::Skills) {
             return Err(PackValidationError::InvalidSkillPath {
                 skill_name: skill_name.clone(),
                 path: path.clone(),
                 reason: "must be under skills/".to_string(),
             });
         }
+        let normalized_path = archive_path.into_string();
         let Some(bytes) = files.get(&normalized_path) else {
             return Err(PackValidationError::MissingSkillFile {
                 skill_name: skill_name.clone(),
@@ -215,10 +224,10 @@ fn validate_skill_paths(
 }
 
 fn validate_required_files(files: &BTreeMap<String, Vec<u8>>) -> Result<(), PackValidationError> {
-    if !files.contains_key("manifest.toml") {
+    if !files.contains_key(MobpackArchivePath::MANIFEST_FILE) {
         return Err(PackValidationError::MissingManifest);
     }
-    if !files.contains_key("definition.json") {
+    if !files.contains_key(MobpackArchivePath::DEFINITION_FILE) {
         return Err(PackValidationError::MissingDefinition);
     }
     Ok(())
@@ -226,7 +235,7 @@ fn validate_required_files(files: &BTreeMap<String, Vec<u8>>) -> Result<(), Pack
 
 fn ensure_no_trust_section(files: &BTreeMap<String, Vec<u8>>) -> Result<(), PackValidationError> {
     let bytes = files
-        .get("manifest.toml")
+        .get(MobpackArchivePath::MANIFEST_FILE)
         .ok_or(PackValidationError::MissingManifest)?;
     let manifest_text = String::from_utf8(bytes.clone())
         .map_err(|err| PackValidationError::InvalidManifest(err.to_string()))?;

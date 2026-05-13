@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use meerkat_core::ToolDef;
-use meerkat_core::skills::{SkillKey, SkillName, SkillRuntime, SourceUuid};
+use meerkat_core::skills::{SkillFunctionName, SkillKey, SkillName, SkillRuntime, SourceUuid};
 use meerkat_core::types::{ToolProvenance, ToolSourceKind};
+use meerkat_core::{ToolCallArguments, ToolDef};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,9 +23,11 @@ struct SkillKeyInput {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct SkillInvokeFunctionArgs {
     skill_key: SkillKeyInput,
-    function_name: String,
+    #[schemars(with = "String")]
+    function_name: SkillFunctionName,
     #[serde(default)]
-    arguments: Value,
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    arguments: ToolCallArguments,
 }
 
 pub struct SkillInvokeFunctionTool {
@@ -91,8 +93,8 @@ impl BuiltinTool for SkillInvokeFunctionTool {
 
         Ok(ToolOutput::Json(json!({
             "skill_key": &key,
-            "function_name": args.function_name,
-            "output": output,
+            "function_name": args.function_name.as_str(),
+            "output": output.into_value(),
         })))
     }
 }

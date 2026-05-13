@@ -2219,8 +2219,12 @@ fn bazel_rust_test_path(
             "tests/integration/smoke_shared_realm_test"
         }
         "meerkat-mob:smoke_mob_flow_runtime" => "meerkat-mob/smoke_mob_flow_runtime_test",
+        "meerkat-mob:smoke_mob_generated_image_comms" => {
+            "meerkat-mob/smoke_mob_generated_image_comms_test"
+        }
         "meerkat-mob:smoke_mob_pictionary" => "meerkat-mob/smoke_mob_pictionary_test",
         "meerkat-mob:smoke_mob_resume" => "meerkat-mob/smoke_mob_resume_test",
+        "meerkat-comms:e2e" => "meerkat-comms/e2e_test",
         "meerkat-rpc:live_smoke_rpc" => "meerkat-rpc/live_smoke_rpc_test",
         "rkat:cli_mobpack_live_smoke" => "meerkat-cli/cli_mobpack_live_smoke_test",
         "rkat:live_smoke_cli" => "meerkat-cli/live_smoke_cli_test",
@@ -4907,10 +4911,11 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
 mod tests {
     use super::{
         ArtifactManifest, ArtifactRequirement, CommandLockMode, E2eSelection, ExecutionMode, Lane,
-        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, build_commands_for_mode,
-        normalize_command_with_env, order_smoke_specs_for_runtime, plan_for_selection,
-        pre_command_lock_mode, repo_cargo, sanitize_artifact_key, scenario_spec,
-        smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key, suite_spec,
+        SMOKE_ENTRIES, SmokeRuntimeClass, SmokeScheduler, bazel_rust_test_path,
+        build_commands_for_mode, normalize_command_with_env, order_smoke_specs_for_runtime,
+        plan_for_selection, pre_command_lock_mode, repo_cargo, sanitize_artifact_key,
+        scenario_spec, smoke_runtime_class, smoke_test_filter_for_selection, source_revision_key,
+        suite_spec,
     };
     use std::collections::BTreeSet;
     use std::path::PathBuf;
@@ -5190,6 +5195,93 @@ mod tests {
                 if requirement.package == "rkat"
                     && requirement.test_target == "live_smoke_cli"
         )));
+    }
+
+    #[test]
+    fn bazel_prebuilt_mapping_covers_smoke_rust_tests() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts = [
+            (
+                "meerkat-comms:e2e",
+                temp.path().join("meerkat-comms").join("e2e_test"),
+            ),
+            (
+                "meerkat-integration-tests:smoke_shared_realm",
+                temp.path()
+                    .join("tests/integration")
+                    .join("smoke_shared_realm_test"),
+            ),
+            (
+                "meerkat-mob:smoke_mob_flow_runtime",
+                temp.path()
+                    .join("meerkat-mob")
+                    .join("smoke_mob_flow_runtime_test"),
+            ),
+            (
+                "meerkat-mob:smoke_mob_generated_image_comms",
+                temp.path()
+                    .join("meerkat-mob")
+                    .join("smoke_mob_generated_image_comms_test"),
+            ),
+            (
+                "meerkat-mob:smoke_mob_pictionary",
+                temp.path()
+                    .join("meerkat-mob")
+                    .join("smoke_mob_pictionary_test"),
+            ),
+            (
+                "meerkat-mob:smoke_mob_resume",
+                temp.path()
+                    .join("meerkat-mob")
+                    .join("smoke_mob_resume_test"),
+            ),
+            (
+                "meerkat-rpc:live_smoke_rpc",
+                temp.path().join("meerkat-rpc").join("live_smoke_rpc_test"),
+            ),
+            (
+                "rkat:cli_mobpack_live_smoke",
+                temp.path()
+                    .join("meerkat-cli")
+                    .join("cli_mobpack_live_smoke_test"),
+            ),
+            (
+                "rkat:live_smoke_cli",
+                temp.path().join("meerkat-cli").join("live_smoke_cli_test"),
+            ),
+        ];
+
+        for (_, artifact) in artifacts.iter() {
+            std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+            std::fs::write(artifact, "").unwrap();
+        }
+
+        let plan = plan_for_selection(&E2eSelection::Lane(Lane::Smoke)).unwrap();
+        let mut mapped = BTreeSet::new();
+        for requirement in plan.requirements.iter().filter_map(|requirement| {
+            if let ArtifactRequirement::RustTest(requirement) = requirement {
+                Some(requirement)
+            } else {
+                None
+            }
+        }) {
+            let artifact = bazel_rust_test_path(temp.path(), requirement).unwrap();
+            mapped.insert(requirement.key());
+            assert!(
+                artifacts
+                    .iter()
+                    .any(|(_, expected_artifact)| *expected_artifact == artifact),
+                "unexpected artifact path for {}: {}",
+                requirement.key(),
+                artifact.display()
+            );
+        }
+
+        let expected = artifacts
+            .iter()
+            .map(|(key, _)| key.to_string())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(mapped, expected);
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use crate::archive_path::MobpackArchivePath;
 use crate::digest::{MobpackDigest, canonical_digest_from_map};
 use crate::signing::{MobpackPublicKey, MobpackSignerId, PackSignature};
 use crate::validate::PackValidationError;
@@ -78,7 +79,7 @@ pub fn verify_pack_trust(
     trusted_signers: &TrustedSigners,
 ) -> Result<Vec<String>, PackValidationError> {
     let mut warnings = Vec::new();
-    let Some(signature_bytes) = files.get("signature.toml") else {
+    let Some(signature_bytes) = files.get(MobpackArchivePath::SIGNATURE_FILE) else {
         if trust_policy == TrustPolicy::Strict {
             return Err(PackValidationError::UnsignedStrict);
         }

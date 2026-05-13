@@ -443,8 +443,31 @@ enum LiveSessionAuthority {
     LiveAuthoritative,
     DurableAuthoritative {
         session: Box<Session>,
-        reason: &'static str,
+        reason: LiveSessionDurableAuthorityReason,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveSessionDurableAuthorityReason {
+    StoredArchived,
+    LiveUncommittedTranscript,
+    RuntimeSystemContextDiverged,
+    StoredHasMoreTranscript,
+}
+
+impl LiveSessionDurableAuthorityReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StoredArchived => "stored_archived",
+            Self::LiveUncommittedTranscript => "live_uncommitted_transcript",
+            Self::RuntimeSystemContextDiverged => "runtime_system_context_diverged",
+            Self::StoredHasMoreTranscript => "stored_has_more_transcript",
+        }
+    }
+
+    const fn requires_runtime_context_sync(self) -> bool {
+        matches!(self, Self::RuntimeSystemContextDiverged)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -891,13 +914,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         }
 
         let reason = if stored_is_archived {
-            "stored_archived"
+            LiveSessionDurableAuthorityReason::StoredArchived
         } else if live_has_uncommitted_transcript {
-            "live_uncommitted_transcript"
+            LiveSessionDurableAuthorityReason::LiveUncommittedTranscript
         } else if runtime_system_context_diverged {
-            "runtime_system_context_diverged"
+            LiveSessionDurableAuthorityReason::RuntimeSystemContextDiverged
         } else {
-            "stored_has_more_transcript"
+            LiveSessionDurableAuthorityReason::StoredHasMoreTranscript
         };
 
         Ok(LiveSessionAuthority::DurableAuthoritative {
@@ -935,7 +958,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             stored_updated_at = ?session.updated_at(),
             live_message_count = live.messages().len(),
             stored_message_count = session.messages().len(),
-            reason,
+            reason = reason.as_str(),
             "discarding stale live session in favor of newer durable session-store snapshot"
         );
         self.discard_live_session(id).await?;
@@ -946,7 +969,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionDurableAuthorityReason,
     ) -> Result<(), SessionError> {
         if self.runtime_store.is_none() {
             return Ok(());
@@ -982,7 +1005,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
             self.inner.sync_system_context_state(id).await?;
             tracing::debug!(
                 session_id = %id,
-                reason,
+                reason = reason.as_str(),
                 "synchronized live runtime-system-context state from durable realtime authority"
             );
         }
@@ -994,14 +1017,14 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionDurableAuthorityReason,
     ) -> Result<(), SessionError> {
         self.inner
             .sync_session_from_durable_snapshot(id, durable.clone())
             .await?;
         tracing::debug!(
             session_id = %id,
-            reason,
+            reason = reason.as_str(),
             "synchronized live session snapshot from durable realtime authority"
         );
         Ok(())
@@ -1011,13 +1034,13 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         &self,
         id: &SessionId,
         durable: &Session,
-        reason: &'static str,
+        reason: LiveSessionDurableAuthorityReason,
     ) -> Result<bool, SessionError> {
         if self.runtime_store.is_none() || self.session_archived_by_authority(id, durable).await? {
             return Ok(false);
         }
 
-        if reason == "runtime_system_context_diverged" {
+        if reason.requires_runtime_context_sync() {
             self.synchronize_live_runtime_context_state_from_durable(id, durable, reason)
                 .await?;
         } else {
@@ -1159,7 +1182,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 {
                     return Err(SessionError::NotFound { id: id.clone() });
                 }
-                if reason == "runtime_system_context_diverged" {
+                if reason.requires_runtime_context_sync() {
                     self.synchronize_live_runtime_context_state_from_durable(
                         id,
                         session.as_ref(),
@@ -1172,7 +1195,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
                 }
                 tracing::debug!(
                     session_id = %id,
-                    reason,
+                    reason = reason.as_str(),
                     "using durable session authority for realtime open snapshot"
                 );
                 Ok(*session)
@@ -1947,7 +1970,7 @@ impl<B: SessionAgentBuilder + 'static> PersistentSessionService<B> {
         let guard = recovery_gate.lock_owned().await;
         match self.live_session_authority(id).await? {
             LiveSessionAuthority::DurableAuthoritative { session, reason }
-                if reason == "runtime_system_context_diverged" =>
+                if reason.requires_runtime_context_sync() =>
             {
                 if self
                     .session_archived_by_authority(id, session.as_ref())
@@ -3727,6 +3750,24 @@ mod tests {
 
     fn memory_blob_store() -> Arc<dyn BlobStore> {
         Arc::new(MemoryBlobStore::new())
+    }
+
+    #[test]
+    fn live_authority_reason_owns_runtime_context_sync_semantics() {
+        assert!(
+            LiveSessionDurableAuthorityReason::RuntimeSystemContextDiverged
+                .requires_runtime_context_sync()
+        );
+        for reason in [
+            LiveSessionDurableAuthorityReason::StoredArchived,
+            LiveSessionDurableAuthorityReason::LiveUncommittedTranscript,
+            LiveSessionDurableAuthorityReason::StoredHasMoreTranscript,
+        ] {
+            assert!(
+                !reason.requires_runtime_context_sync(),
+                "only the typed runtime-context divergence reason may choose context-only sync"
+            );
+        }
     }
 
     struct RecordingEventStore {

@@ -441,7 +441,6 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::RunFailed {
             session_id,
             error_class: AgentErrorClass::Internal,
-            error: "boom".to_string(),
             error_report: None,
             terminal_cause_kind: None,
         },
@@ -502,7 +501,6 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::ToolExecutionCompleted {
             id: "tc2".to_string(),
             name: "shell".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             error: None,
@@ -544,8 +542,6 @@ fn agent_event_all_variants_roundtrip() {
             reason: SkillResolutionFailureReason::NotFound {
                 key: failed_skill_key.clone(),
             },
-            reference: failed_skill_key.to_string(),
-            error: format!("skill not found: {failed_skill_key}"),
         },
         // InteractionComplete and InteractionFailed are constructed via JSON
         // below to avoid a direct uuid crate dependency.
@@ -662,7 +658,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::RunFailed {
             session_id: SessionId::new(),
             error_class: AgentErrorClass::Internal,
-            error: "nope".to_string(),
             error_report: None,
             terminal_cause_kind: None,
         },
@@ -723,7 +718,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::ToolExecutionCompleted {
             id: "tool-1".to_string(),
             name: "search".to_string(),
-            result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
             error: None,
@@ -763,8 +757,6 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             reason: SkillResolutionFailureReason::Unknown {
                 message: "missing".to_string(),
             },
-            reference: "skill".to_string(),
-            error: "missing".to_string(),
         },
         AgentEvent::InteractionComplete {
             interaction_id: serde_json::from_value(serde_json::json!(

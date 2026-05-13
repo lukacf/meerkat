@@ -71,6 +71,7 @@ import {
   type McpLiveOpResponse,
   type McpReloadParams,
   type McpRemoveParams,
+  type MobAppendSystemContextResult,
   type MobSpawnManyFailureCause,
   type MobSpawnManyResultEntry,
   type WireAuthProfileCleared,
@@ -120,6 +121,7 @@ import type {
   MobCreateOptions,
   MobFlowStatus,
   MobLifecycleAction,
+  MobLifecycleStatus,
   MobMember,
   MobMemberRef,
   MobProfile,
@@ -158,6 +160,7 @@ import type {
   SpawnManySpec,
   SpawnSpec,
   ToolResultError,
+  ToolCallbackReturn,
   TranscriptEditOptions,
   TranscriptReplacement,
   UpdateScheduleRequest,
@@ -196,6 +199,13 @@ const MEERKAT_BINARY_CACHE_ROOT = path.join(
   "bin",
   MEERKAT_RELEASE_BINARY,
 );
+const MOB_LIFECYCLE_STATUSES = new Set<MobLifecycleStatus>([
+  "Creating",
+  "Running",
+  "Stopped",
+  "Completed",
+  "Destroyed",
+]);
 const MOB_SPAWN_MANY_FAILURE_CAUSES = new Set<string>([
   "profile_not_found",
   "member_not_found",
@@ -409,7 +419,7 @@ export class MeerkatClient {
     {
       description: string;
       inputSchema: Record<string, unknown>;
-      handler: (args: Record<string, unknown>) => Promise<string>;
+      handler: (args: Record<string, unknown>) => Promise<ToolCallbackReturn>;
     }
   >();
 
@@ -431,7 +441,7 @@ export class MeerkatClient {
     name: string,
     description: string,
     inputSchema: Record<string, unknown>,
-    handler: (args: Record<string, unknown>) => Promise<string>,
+    handler: (args: Record<string, unknown>) => Promise<ToolCallbackReturn>,
   ): void {
     this.toolHandlers.set(name, { description, inputSchema, handler });
     // If already connected, register the new tool with the server immediately.
@@ -1173,27 +1183,22 @@ export class MeerkatClient {
   async listMobs(): Promise<MobSummary[]> {
     this.requireCapability("mob");
     const result = await this.request("mob/list", {});
-    const mobs = (result.mobs as Array<Record<string, unknown>>) ?? [];
+    if (!Array.isArray(result.mobs)) {
+      throw new MeerkatError("INVALID_RESPONSE", "Invalid mob/list response: missing mobs");
+    }
+    const mobs = result.mobs as Array<Record<string, unknown>>;
     return mobs.map((mob) => ({
       mobId: String(mob.mob_id ?? mob.mobId ?? ""),
-      status: String(mob.status ?? ""),
+      status: MeerkatClient.parseMobLifecycleStatus(mob.status, "Invalid mob/list response"),
     }));
   }
 
-  async mobStatus(mobId: string): Promise<{ mobId: string; status: string }> {
+  async mobStatus(mobId: string): Promise<{ mobId: string; status: MobLifecycleStatus }> {
     const result = await this.request("mob/status", { mob_id: mobId });
-    const rawStatus = result.status;
-    const status = typeof rawStatus === "string"
-      ? rawStatus
-      : (typeof rawStatus === "object" && rawStatus !== null
-        ? Object.keys(rawStatus)[0]
-        : undefined);
-    if (!status) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/status response: missing status",
-      );
-    }
+    const status = MeerkatClient.parseMobLifecycleStatus(
+      result.status,
+      "Invalid mob/status response",
+    );
     return { mobId: String(result.mob_id ?? mobId), status };
   }
 
@@ -1966,14 +1971,15 @@ export class MeerkatClient {
     agentIdentity: string,
     text: string,
     options?: { source?: string; idempotencyKey?: string },
-  ): Promise<Record<string, unknown>> {
-    return this.request("mob/append_system_context", {
+  ): Promise<MobAppendSystemContextResult> {
+    const result = await this.request("mob/append_system_context", {
       mob_id: mobId,
       agent_identity: agentIdentity,
       text,
       source: options?.source,
       idempotency_key: options?.idempotencyKey,
     });
+    return MeerkatClient.parseMobAppendSystemContextResult(result);
   }
 
   async readMobEvents(
@@ -2888,6 +2894,46 @@ export class MeerkatClient {
       throw new MeerkatError("INVALID_RESPONSE", `${context}: missing ${field}`);
     }
     return value;
+  }
+
+  private static parseMobLifecycleStatus(raw: unknown, context: string): MobLifecycleStatus {
+    if (typeof raw !== "string" || raw.length === 0) {
+      throw new MeerkatError("INVALID_RESPONSE", `${context}: missing status`);
+    }
+    if (MOB_LIFECYCLE_STATUSES.has(raw as MobLifecycleStatus)) {
+      return raw as MobLifecycleStatus;
+    }
+    throw new MeerkatError("INVALID_RESPONSE", `${context}: invalid status`);
+  }
+
+  private static parseMobAppendSystemContextResult(
+    raw: unknown,
+  ): MobAppendSystemContextResult {
+    const record = MeerkatClient.requireRecord(
+      raw,
+      "response",
+      "Invalid mob/append_system_context response",
+    );
+    const status = record.status;
+    if (status !== "staged" && status !== "duplicate" && status !== "applied") {
+      throw new MeerkatError(
+        "INVALID_RESPONSE",
+        "Invalid mob/append_system_context response: invalid status",
+      );
+    }
+    return {
+      mob_id: MeerkatClient.requireStringField(
+        record,
+        "mob_id",
+        "Invalid mob/append_system_context response",
+      ),
+      agent_identity: MeerkatClient.requireStringField(
+        record,
+        "agent_identity",
+        "Invalid mob/append_system_context response",
+      ),
+      status,
+    };
   }
 
   private static requireNumberField(
@@ -3846,8 +3892,11 @@ export class MeerkatClient {
         const args = (params.arguments ?? {}) as Record<string, unknown>;
         handler
           .handler(args)
-          .then((content) => {
-            this.writeCallbackResponse(requestId, { content, is_error: false });
+          .then((result) => {
+            this.writeCallbackResponse(
+              requestId,
+              MeerkatClient.normalizeToolCallbackResult(result),
+            );
           })
           .catch((err: unknown) => {
             this.writeCallbackResponse(requestId, {
@@ -3874,10 +3923,27 @@ export class MeerkatClient {
 
   private writeCallbackResponse(
     requestId: unknown,
-    result: { content: string; is_error: boolean },
+    result: { content: string | readonly ContentBlock[]; is_error: boolean },
   ): void {
     const response = { jsonrpc: "2.0", id: requestId, result };
     this.process?.stdin?.write(JSON.stringify(response) + "\n");
+  }
+
+  private static normalizeToolCallbackResult(
+    result: ToolCallbackReturn,
+  ): { content: string | readonly ContentBlock[]; is_error: boolean } {
+    if (
+      typeof result === "object"
+      && result != null
+      && !Array.isArray(result)
+      && "content" in result
+    ) {
+      return {
+        content: result.content,
+        is_error: Boolean(result.is_error ?? result.isError ?? false),
+      };
+    }
+    return { content: result, is_error: false };
   }
 
   private static buildCreateParams(

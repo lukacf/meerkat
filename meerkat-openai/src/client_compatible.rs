@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage,
+    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, Provider, StopReason, Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -16,6 +16,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::client::{OpenAiReplayProjectionMode, project_openai_replay_messages};
+use crate::tool_schema::openai_function_parameters;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenAiCompatibleMode {
@@ -131,7 +132,7 @@ impl OpenAiCompatibleClient {
                             "function": {
                                 "name": tool.name,
                                 "description": tool.description,
-                                "parameters": tool.input_schema
+                                "parameters": openai_function_parameters(&tool.input_schema)
                             }
                         })
                     })
@@ -587,8 +588,8 @@ impl LlmClient for OpenAiCompatibleClient {
         }
     }
 
-    fn provider(&self) -> &'static str {
-        "self_hosted"
+    fn provider(&self) -> Provider {
+        Provider::SelfHosted
     }
 
     fn provider_id(&self) -> meerkat_core::Provider {

@@ -47,11 +47,11 @@ fn gemini_api_key() -> Option<String> {
     first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
-fn provider_api_key(provider: &str) -> Option<String> {
+fn provider_api_key(provider: Provider) -> Option<String> {
     match provider {
-        "anthropic" => anthropic_api_key(),
-        "openai" => openai_api_key(),
-        "gemini" => gemini_api_key(),
+        Provider::Anthropic => anthropic_api_key(),
+        Provider::OpenAI => openai_api_key(),
+        Provider::Gemini => gemini_api_key(),
         _ => None,
     }
 }
@@ -60,13 +60,13 @@ fn provider_api_key(provider: &str) -> Option<String> {
 // Provider client construction
 // ---------------------------------------------------------------------------
 
-fn build_client(provider: &str, api_key: String) -> Result<Arc<dyn LlmClient>, String> {
+fn build_client(provider: Provider, api_key: String) -> Result<Arc<dyn LlmClient>, String> {
     match provider {
-        "anthropic" => Ok(Arc::new(
+        Provider::Anthropic => Ok(Arc::new(
             AnthropicClient::new(api_key).map_err(|e| format!("AnthropicClient::new: {e:?}"))?,
         )),
-        "openai" => Ok(Arc::new(OpenAiClient::new(api_key))),
-        "gemini" => Ok(Arc::new(GeminiClient::new(api_key))),
+        Provider::OpenAI => Ok(Arc::new(OpenAiClient::new(api_key))),
+        Provider::Gemini => Ok(Arc::new(GeminiClient::new(api_key))),
         other => Err(format!("unknown provider '{other}'")),
     }
 }
@@ -94,9 +94,7 @@ fn for_each_catalog_model_with_key() -> impl Iterator<Item = (&'static CatalogEn
 }
 
 fn caps_for(entry: &CatalogEntry) -> &'static ModelCapabilities {
-    let provider = Provider::parse_strict(entry.provider)
-        .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
-    capabilities_for(provider, entry.id)
+    capabilities_for(entry.provider, entry.id)
         .unwrap_or_else(|| panic!("no capability row for {}", entry.id))
 }
 
@@ -123,13 +121,13 @@ async fn run_chat(
             AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
         };
         let tag = match client.provider() {
-            "anthropic" => AnthropicProviderTag::from_legacy_value(&params)
+            Provider::Anthropic => AnthropicProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::Anthropic),
-            "openai" => OpenAiProviderTag::from_legacy_value(&params)
+            Provider::OpenAI => OpenAiProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::OpenAi),
-            "gemini" | "google" => GeminiProviderTag::from_legacy_value(&params)
+            Provider::Gemini => GeminiProviderTag::from_legacy_value(&params)
                 .ok()
                 .map(ProviderTag::Gemini),
             _ => None,
@@ -214,10 +212,10 @@ async fn chat_roundtrip_all_models() {
 /// OpenAI: `{ reasoning_effort: <level> }` → client forwards into
 /// `reasoning.effort` on the Responses API.
 /// Gemini: effort levels are not a concept; this test is skipped for Gemini.
-fn effort_provider_params(provider: &str, level: &str) -> Option<serde_json::Value> {
+fn effort_provider_params(provider: Provider, level: &str) -> Option<serde_json::Value> {
     match provider {
-        "anthropic" => Some(serde_json::json!({ "effort": level })),
-        "openai" => Some(serde_json::json!({ "reasoning_effort": level })),
+        Provider::Anthropic => Some(serde_json::json!({ "effort": level })),
+        Provider::OpenAI => Some(serde_json::json!({ "reasoning_effort": level })),
         _ => None,
     }
 }
@@ -235,10 +233,11 @@ async fn effort_levels_accepted() {
         }
         // Skip `none` — sending reasoning_effort=none is redundant with the
         // default on GPT-5.4 and doesn't prove the enum advertises correctly.
-        let levels: Vec<&&str> = caps
+        let levels: Vec<&str> = caps
             .effort_levels
             .iter()
-            .filter(|lvl| **lvl != "none")
+            .map(|level| level.as_str())
+            .filter(|level| *level != "none")
             .collect();
         if levels.is_empty() {
             continue;
@@ -380,9 +379,7 @@ async fn thinking_modes_per_capability() {
 #[ignore = "lane:e2e-models"]
 fn every_catalog_model_has_capability_row() {
     for entry in catalog() {
-        let provider = Provider::parse_strict(entry.provider)
-            .unwrap_or_else(|| panic!("catalog provider '{}' must parse", entry.provider));
-        let caps = capabilities_for(provider, entry.id);
+        let caps = capabilities_for(entry.provider, entry.id);
         assert!(
             caps.is_some(),
             "catalog model {} has no capability row",

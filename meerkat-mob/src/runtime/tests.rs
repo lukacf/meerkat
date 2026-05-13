@@ -468,7 +468,8 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     envelope_id: uuid::Uuid::new_v4(),
                 })
             }
-            CommsCommand::PeerRequest { to, intent, .. } => {
+            CommsCommand::PeerRequest { to, request, .. } => {
+                let intent = request.intent().as_str();
                 let behavior = *self
                     .behavior
                     .read()
@@ -496,7 +497,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
                 }
                 drop(trusted);
 
-                self.sent_intents.write().await.push(intent);
+                self.sent_intents.write().await.push(intent.to_string());
                 Ok(SendReceipt::PeerRequestSent {
                     envelope_id: uuid::Uuid::new_v4(),
                     interaction_id: InteractionId(uuid::Uuid::new_v4()),
@@ -1327,7 +1328,6 @@ impl SessionService for MockSessionService {
                             AgentEvent::RunFailed {
                                 session_id,
                                 error_class: meerkat_core::event::AgentErrorClass::Internal,
-                                error: "mock flow turn failure".to_string(),
                                 terminal_cause_kind: None,
                                 error_report: None,
                             },
@@ -4054,7 +4054,9 @@ async fn spawn_live_external_peer(peer_name: &str) -> LiveExternalPeerHarness {
                                 to,
                                 in_reply_to: candidate.interaction.id,
                                 status: meerkat_core::interaction::ResponseStatus::Completed,
-                                result: response,
+                                result: Some(meerkat_core::PeerResponsePayload::SupervisorBridge(
+                                    response,
+                                )),
                                 blocks: None,
                                 handling_mode: None,
                             })
@@ -24507,8 +24509,11 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         &*requester_comms,
         CommsCommand::PeerRequest {
             to: test_peer_route(&*requester_comms, &test_comms_name("worker", "w-responder")).await,
-            intent: "interpret_image".to_string(),
-            params: serde_json::json!({"description":"tower with a light"}),
+            request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenParams {
+                    subject: "tower with a light".to_string(),
+                },
+            ),
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             stream: meerkat_core::InputStreamMode::ReserveInteraction,
@@ -24543,7 +24548,13 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
             to: test_peer_route(&*responder_comms, &test_comms_name("lead", "l-requester")).await,
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
-            result: serde_json::json!({"interpretation":"lighthouse"}),
+            result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenResult {
+                    request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                    request_subject: "tower with a light".to_string(),
+                    token: "lighthouse".to_string(),
+                },
+            )),
             blocks: None,
             handling_mode: None,
         },
@@ -24661,41 +24672,45 @@ async fn test_peer_response_reaches_requester_in_runtime_backed_real_comms() {
         meerkat_contracts::PeerResponseTerminalStatusWire::Completed,
         serde_json::json!({"interpretation":"lighthouse"}),
     );
-    service
+    let (duplicate_outcome, duplicate_completion) = service
         .runtime_adapter
         .accept_input_with_completion(&sid_requester, duplicate)
         .await
         .expect("duplicate terminal response should be accepted for idempotent apply");
-
-    tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            let snapshot = service
-                .runtime_adapter
-                .meerkat_machine_spine_snapshot(&sid_requester)
-                .await
-                .expect("requester snapshot should still exist after duplicate");
-            if snapshot.inputs.queue.is_empty()
-                && snapshot
-                    .inputs
-                    .admission_order
-                    .iter()
-                    .filter(|input| {
-                        input.content_shape.as_ref().is_some_and(|shape| {
-                            shape.kind()
-                                == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
-                        }) && input.lifecycle
-                            == Some(meerkat_runtime::InputLifecycleState::Consumed)
-                    })
-                    .count()
-                    >= 2
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("duplicate terminal response should be consumed without re-applying context");
+    assert!(
+        matches!(
+            duplicate_outcome,
+            meerkat_runtime::AcceptOutcome::Deduplicated { .. }
+        ),
+        "duplicate terminal response should resolve through input idempotency, got {duplicate_outcome:?}"
+    );
+    assert!(
+        duplicate_completion.is_none(),
+        "deduplicated terminal response should not register a second completion waiter"
+    );
+    let duplicate_snapshot = service
+        .runtime_adapter
+        .meerkat_machine_spine_snapshot(&sid_requester)
+        .await
+        .expect("requester snapshot should still exist after duplicate");
+    assert!(
+        duplicate_snapshot.inputs.queue.is_empty(),
+        "deduplicated terminal response should not enqueue duplicate work: {duplicate_snapshot:?}"
+    );
+    assert_eq!(
+        duplicate_snapshot
+            .inputs
+            .admission_order
+            .iter()
+            .filter(|input| {
+                input.content_shape.as_ref().is_some_and(|shape| {
+                    shape.kind() == meerkat_runtime::identifiers::InputKind::PeerResponseTerminal
+                }) && input.lifecycle == Some(meerkat_runtime::InputLifecycleState::Consumed)
+            })
+            .count(),
+        1,
+        "duplicate terminal response should reuse the consumed terminal input"
+    );
     assert_eq!(
         service
             .applied_runtime_context_appends(&sid_requester)
@@ -24815,8 +24830,11 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
                 &test_comms_name("worker", "w-running-responder"),
             )
             .await,
-            intent: "ping".to_string(),
-            params: serde_json::json!({"message":"ping"}),
+            request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenParams {
+                    subject: "ping".to_string(),
+                },
+            ),
             blocks: None,
             handling_mode: meerkat_core::types::HandlingMode::Steer,
             stream: meerkat_core::InputStreamMode::ReserveInteraction,
@@ -24835,7 +24853,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             if prompts.iter().skip(responder_baseline).any(|prompt| {
                 let text = prompt.text_content();
                 text.contains("Peer request from")
-                    && text.contains("Intent: ping")
+                    && text.contains("Intent: checksum_token")
                     && text.contains(&format!("Request ID: {request_id}"))
             }) {
                 break;
@@ -24856,7 +24874,13 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
             .await,
             in_reply_to: request_id,
             status: meerkat_core::ResponseStatus::Completed,
-            result: serde_json::json!({"message":"pong"}),
+            result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenResult {
+                    request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                    request_subject: "ping".to_string(),
+                    token: "pong".to_string(),
+                },
+            )),
             blocks: None,
             handling_mode: None,
         },
@@ -24875,7 +24899,7 @@ async fn test_default_peer_response_inherits_request_steer_while_requester_runni
                 .any(|append| {
                     append.text.contains("Peer terminal response from")
                         && append.text.contains(&format!("Request ID: {request_id}"))
-                        && append.text.contains("\"message\": \"pong\"")
+                        && append.text.contains("\"token\": \"pong\"")
                 })
             {
                 break;
@@ -25277,8 +25301,11 @@ async fn test_wire_enables_peer_request_delivery() {
 
     let cmd = meerkat_core::comms::CommsCommand::PeerRequest {
         to: test_peer_route(&*comms_a, &comms_name_b).await,
-        intent: "mob.test_ping".to_string(),
-        params: serde_json::json!({"test": true}),
+        request: meerkat_core::PeerRequestPayload::ChecksumToken(
+            meerkat_core::CommsChecksumTokenParams {
+                subject: "mob.test_ping".to_string(),
+            },
+        ),
         blocks: None,
         handling_mode: meerkat_core::types::HandlingMode::Queue,
         stream: meerkat_core::comms::InputStreamMode::None,
@@ -25302,8 +25329,8 @@ async fn test_wire_enables_peer_request_delivery() {
     );
     match &interactions[0].content {
         meerkat_core::InteractionContent::Request { intent, params, .. } => {
-            assert_eq!(intent, "mob.test_ping");
-            assert_eq!(params["test"], true);
+            assert_eq!(intent, "checksum_token");
+            assert_eq!(params["subject"], "mob.test_ping");
         }
         other => panic!("expected Request interaction, got: {other:?}"),
     }

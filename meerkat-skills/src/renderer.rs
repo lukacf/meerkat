@@ -2,7 +2,7 @@
 //!
 //! Produces XML-format output for system prompt injection:
 //! - `<available_skills>` inventory (flat or collection mode)
-//! - `<skill id="...">` injection blocks
+//! - `<skill source_uuid="..." skill_name="...">` injection blocks
 
 use meerkat_core::skills::{SkillCollection, SkillDescriptor, SkillKey};
 use regex::Regex;
@@ -81,11 +81,11 @@ fn escape_xml(s: &str) -> Cow<'_, str> {
 fn render_inventory_flat(skills: &[SkillDescriptor]) -> String {
     let mut output = String::from("<available_skills>\n");
     for skill in skills {
-        let rendered_id = format!("{}/{}", skill.key.source_uuid, skill.key.skill_name);
         let _ = write!(
             output,
-            "  <skill id=\"{}\">\n    <description>{}</description>\n  </skill>\n",
-            escape_xml(&rendered_id),
+            "  <skill source_uuid=\"{}\" skill_name=\"{}\">\n    <description>{}</description>\n  </skill>\n",
+            escape_xml(&skill.key.source_uuid.to_string()),
+            escape_xml(skill.key.skill_name.as_str()),
             escape_xml(&skill.description),
         );
     }
@@ -116,7 +116,7 @@ fn render_inventory_collections(collections: &[SkillCollection]) -> String {
 /// Render a per-turn skill injection block.
 ///
 /// Escapes `</skill>` variants in the body (case-insensitive, optional whitespace)
-/// before truncation. Returns the `<skill id="...">body</skill>` XML block.
+/// before truncation. Returns the `<skill source_uuid="..." skill_name="...">body</skill>` XML block.
 pub fn render_injection(key: &SkillKey, body: &str) -> String {
     render_injection_with_limit(key, body, MAX_INJECTION_BYTES)
 }
@@ -126,16 +126,21 @@ pub fn render_injection_with_limit(key: &SkillKey, body: &str, max_bytes: usize)
     // 1. Escape closing tags in the body BEFORE wrapping/truncating.
     let escaped_body = escape_closing_tags(body);
 
-    // 2. Wrap in <skill> tags (escape id to prevent attribute breakout).
-    let rendered_id = format!("{}/{}", key.source_uuid, key.skill_name);
-    let escaped_id = escape_xml(&rendered_id);
-    let mut content = format!("<skill id=\"{escaped_id}\">\n{escaped_body}\n</skill>");
+    // 2. Wrap in <skill> tags with typed identity fields.
+    let source_uuid = key.source_uuid.to_string();
+    let skill_name = key.skill_name.as_str();
+    let escaped_source_uuid = escape_xml(&source_uuid);
+    let escaped_skill_name = escape_xml(skill_name);
+    let mut content = format!(
+        "<skill source_uuid=\"{escaped_source_uuid}\" skill_name=\"{escaped_skill_name}\">\n{escaped_body}\n</skill>"
+    );
 
     // 3. Truncate if needed (after escaping). Use char boundary to avoid UTF-8 split.
     if content.len() > max_bytes {
         tracing::warn!(
-            "Skill injection for '{}' truncated from {} to {} bytes",
-            rendered_id,
+            source_uuid = %key.source_uuid,
+            skill_name = %key.skill_name,
+            "Skill injection truncated from {} to {} bytes",
             content.len(),
             max_bytes,
         );
@@ -217,6 +222,10 @@ mod tests {
         assert!(output.starts_with("<available_skills>"));
         assert!(output.ends_with("</available_skills>"));
         assert!(output.contains("email-extractor"));
+        assert!(output.contains("source_uuid=\"00000000-0000-4b11-8111-000000000001\""));
+        assert!(output.contains("skill_name=\"email-extractor\""));
+        assert!(!output.contains("<skill id=\""));
+        assert!(!output.contains("00000000-0000-4b11-8111-000000000001/email-extractor"));
         assert!(output.contains("<description>Extract entities from emails</description>"));
         assert!(output.contains("markdown"));
         assert!(!output.contains("mode="));
@@ -261,8 +270,12 @@ mod tests {
     fn test_render_injection_xml() {
         let key = test_key("email-extractor");
         let output = render_injection(&key, "# Email Extractor\n\nExtract entities.");
-        assert!(output.starts_with("<skill id=\""));
+        assert!(output.starts_with(
+            "<skill source_uuid=\"00000000-0000-4b11-8111-000000000001\" skill_name=\"email-extractor\">"
+        ));
         assert!(output.contains("email-extractor"));
+        assert!(!output.contains("<skill id=\""));
+        assert!(!output.contains("00000000-0000-4b11-8111-000000000001/email-extractor"));
         assert!(output.ends_with("</skill>"));
         assert!(output.contains("# Email Extractor"));
     }

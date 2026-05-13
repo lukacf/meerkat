@@ -885,7 +885,7 @@ fn typed_provider_params_for_request_policy(
     params_value
         .map(|value| {
             meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
-                legacy_provider_params_projection_namespace(provider),
+                legacy_provider_params_projection_provider(provider),
                 value,
             )
         })
@@ -901,10 +901,10 @@ fn legacy_config_provider_params_value(config: &Config) -> Option<serde_json::Va
         .filter(|value| value.as_object().is_none_or(|object| !object.is_empty()))
 }
 
-fn legacy_provider_params_projection_namespace(provider: Provider) -> &'static str {
+fn legacy_provider_params_projection_provider(provider: Provider) -> Provider {
     match provider {
-        Provider::SelfHosted => Provider::OpenAI.as_str(),
-        other => other.as_str(),
+        Provider::SelfHosted => Provider::OpenAI,
+        other => other,
     }
 }
 

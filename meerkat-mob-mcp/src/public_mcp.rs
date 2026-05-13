@@ -4,8 +4,7 @@ use crate::{McpToolError, MobMcpState, decode_public_mob_definition};
 use meerkat_contracts::{
     MobCreateParams, MobEventsResult, MobFlowStatusResult, MobLifecycleParams, MobLifecycleResult,
     MobMemberSendParams, WireContentInput, WireMemberRef, WireMobBackendKind, WireMobEvent,
-    WireMobRun, WireMobRuntimeMode, WireMobState, WireRuntimeBinding,
-    WireTrustedPeerIdentity,
+    WireMobRun, WireMobRuntimeMode, WireMobState, WireRuntimeBinding, WireTrustedPeerIdentity,
 };
 use schemars::{JsonSchema, schema_for};
 use serde::Deserialize;

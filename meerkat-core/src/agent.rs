@@ -75,7 +75,7 @@ pub trait AgentLlmClient: Send + Sync {
 
     /// Get the typed provider identity for policy/default resolution.
     fn provider_id(&self) -> crate::Provider {
-        crate::Provider::parse_strict(self.provider()).unwrap_or(crate::Provider::Other)
+        self.provider()
     }
 
     /// Get the current effective model identifier.

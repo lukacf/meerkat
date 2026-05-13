@@ -18,11 +18,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
 use meerkat_contracts::{
-    CreateProfileParams, LoginStartParams, WireAuthProfile, WireAuthProfileCleared,
+    CreateProfileParams, LoginStartParams, WireAuthMethod, WireAuthProfile, WireAuthProfileCleared,
     WireAuthProfileCreated, WireAuthProfileDetail, WireAuthProfilesList, WireAuthStatusDetail,
-    WireAuthMethod, WireBackendProfile, WireBindingIdentity, WireConnectionProjectionError,
-    WireDeviceStart, WireLoginReady,
-    WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList, WireRealmSummary,
+    WireBackendProfile, WireBindingIdentity, WireConnectionProjectionError, WireDeviceStart,
+    WireLoginReady, WireLoginStart, WireProviderBinding, WireRealmConnectionSet, WireRealmList,
+    WireRealmSummary,
 };
 use meerkat_core::connection::{BindingId, ConnectionTargetError, ProfileId, RealmId};
 use meerkat_core::handles::LeaseKey;

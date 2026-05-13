@@ -16,7 +16,6 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -2432,7 +2431,8 @@ mod tests {
         let config = Config::template().expect("template parses");
         assert_eq!(
             config.agent.model.as_str(),
-            crate::model_profile::catalog::default_model("openai").expect("openai catalog default")
+            crate::model_profile::catalog::default_model(Provider::OpenAI)
+                .expect("openai catalog default")
         );
     }
 

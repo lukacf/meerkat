@@ -38,7 +38,7 @@ use meerkat_core::time_compat::Duration;
 use meerkat_core::{
     HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPatchEnvelope,
-    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, PlannedHookEntry, SessionId,
+    HookRevision, HookRunOverrides, HooksConfig, PlannedHookEntry, SessionId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -766,8 +766,8 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::{
-        ContentInput, HookCapability, HookFailurePolicy, HookLlmRequest, HookPoint,
-        HookReasonCode, HookRuntimeConfig, HookRuntimeKind, SessionId,
+        ContentInput, HookCapability, HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode,
+        HookRuntimeConfig, HookRuntimeKind, SessionId,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 

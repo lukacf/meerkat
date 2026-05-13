@@ -235,13 +235,15 @@ impl HandleDslAuthority {
     pub fn apply_signal_with_effects_from_state(
         &self,
         context: &'static str,
-        build: impl FnOnce(&mm_dsl::MeerkatMachineState) -> mm_dsl::MeerkatMachineSignal,
+        build: impl FnOnce(
+            &mm_dsl::MeerkatMachineState,
+        ) -> Result<mm_dsl::MeerkatMachineSignal, DslTransitionError>,
     ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, DslTransitionError> {
         let mut guard = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let signal = build(&guard.state);
+        let signal = build(&guard.state)?;
         guard
             .apply_signal(signal)
             .map(|transition| transition.effects)

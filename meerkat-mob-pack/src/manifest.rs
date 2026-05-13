@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use meerkat_contracts::capability::{MobpackCapabilityId, MobpackCapabilityRequirement};
 use meerkat_mob::MobDefinition;
 
-use crate::targz::normalize_for_archive;
+use crate::archive_path::{MobpackArchivePath, MobpackArchiveSection};
 use crate::validate::PackValidationError;
 
 macro_rules! manifest_string_id {
@@ -277,8 +277,10 @@ fn valid_model_ref(value: &str) -> bool {
 }
 
 fn valid_manifest_skill_path(value: &str) -> bool {
-    match normalize_for_archive(value) {
-        Ok(normalized) => normalized == value && normalized.starts_with("skills/"),
+    match MobpackArchivePath::parse(value) {
+        Ok(path) => {
+            path.as_str() == value && matches!(path.section(), MobpackArchiveSection::Skills)
+        }
         Err(_) => false,
     }
 }

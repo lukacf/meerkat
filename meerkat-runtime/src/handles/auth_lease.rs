@@ -119,7 +119,7 @@ fn merge_oauth_membership(
 ) {
     for flow_id in &current.oauth_browser_flow_ids {
         restored.oauth_browser_flow_ids.insert(flow_id.clone());
-        if let Some(provider) = current.oauth_browser_flow_providers.get(flow_id).cloned() {
+        if let Some(provider) = current.oauth_browser_flow_providers.get(flow_id).copied() {
             restored
                 .oauth_browser_flow_providers
                 .insert(flow_id.clone(), provider);
@@ -145,7 +145,7 @@ fn merge_oauth_membership(
     }
     for flow_id in &current.oauth_device_flow_ids {
         restored.oauth_device_flow_ids.insert(flow_id.clone());
-        if let Some(provider) = current.oauth_device_flow_providers.get(flow_id).cloned() {
+        if let Some(provider) = current.oauth_device_flow_providers.get(flow_id).copied() {
             restored
                 .oauth_device_flow_providers
                 .insert(flow_id.clone(), provider);

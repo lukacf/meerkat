@@ -20,8 +20,9 @@ use chrono::Utc;
 #[cfg(not(feature = "mob"))]
 use meerkat::surface::NoopScheduleMobHost;
 use meerkat::surface::{
-    ScheduledPromptDispatch, SharedScheduleTargetAdapter, SurfaceScheduleMobHost,
-    SurfaceScheduleSessionHost, schedule_attempt_idempotency_key, schedule_host_supported,
+    AcceptedScheduledInput, ScheduledPromptDispatch, SharedScheduleTargetAdapter,
+    SurfaceScheduleMobHost, SurfaceScheduleSessionHost, build_dispatch_from_accepted,
+    immediate_delivery_failure, schedule_attempt_idempotency_key, schedule_host_supported,
     spawn_schedule_host,
 };
 use meerkat::{
@@ -9000,6 +9001,8 @@ struct CliScheduleSessionHost {
     runtime_adapter: Arc<meerkat_runtime::MeerkatMachine>,
 }
 
+const SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION: &str = "This is a scheduled run. After completing any side effects, produce a concise user-visible status line. Do not intentionally return an empty response.";
+
 #[cfg(feature = "session-store")]
 impl CliScheduleSessionHost {
     fn executor(&self, session_id: SessionId) -> CliRuntimeExecutor {
@@ -9194,6 +9197,9 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
     ) -> Result<meerkat::DeliveryDispatch, meerkat::ScheduleDomainError> {
         self.ensure_runtime_session_registered(session_id).await?;
 
+        let mut scheduled_instructions = dispatch.additional_instructions.clone();
+        scheduled_instructions.push(SCHEDULED_PROMPT_VISIBLE_COMPLETION_INSTRUCTION.to_string());
+
         let mut prompt_input = PromptInput::from_content_input(
             dispatch.prompt,
             Some(
@@ -9207,20 +9213,17 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                     // dispatch's `Vec<String>` into typed instructions with
                     // `System` kind (scheduled prompts originate from the
                     // runtime's schedule driver, not the user).
-                    additional_instructions: (!dispatch.additional_instructions.is_empty())
-                        .then(|| {
-                            dispatch
-                                .additional_instructions
-                                .iter()
-                                .cloned()
-                                .map(|body| {
-                                    meerkat_core::lifecycle::run_primitive::TurnInstruction {
-                                        kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
-                                        body,
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                        }),
+                    additional_instructions: Some(
+                        scheduled_instructions
+                            .into_iter()
+                            .map(|body| {
+                                meerkat_core::lifecycle::run_primitive::TurnInstruction {
+                                    kind: meerkat_core::lifecycle::run_primitive::TurnInstructionKind::System,
+                                    body,
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    ),
                     model: None,
                     provider: None,
                     provider_params: None,
@@ -9238,22 +9241,32 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
         prompt_input.header.correlation_id =
             Some(CorrelationId::from_uuid(occurrence.occurrence_id.0));
 
-        // Post-wave-a dogma (mirrors meerkat-rpc d.0): the
-        // `dispatch_from_admission` / `project_runtime_admission` helpers
-        // were retired along with `RuntimeAdmissionProjection`; the schedule
-        // surface must consume the runtime's typed `CompletionOutcome`
-        // directly. Until that plumbing exists on the CLI schedule host,
-        // surface a typed `Internal` error instead of synthesising a
-        // `DeliveryDispatch`. We still accept the input for side effects so
-        // the occurrence is not silently dropped.
-        let (_outcome, _handle) = self
+        let correlation_id = prompt_input
+            .header
+            .correlation_id
+            .as_ref()
+            .map(ToString::to_string);
+        let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, Input::Prompt(prompt_input))
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        let _ = dispatch.materialized_session_id;
-        Err(meerkat::ScheduleDomainError::Internal(
-            "cli deliver_prompt no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+        if let meerkat_runtime::accept::AcceptOutcome::Rejected { reason } = outcome {
+            return Ok(immediate_delivery_failure(
+                occurrence,
+                reason.to_string(),
+                meerkat::OccurrenceFailureClass::RuntimeRejected,
+                correlation_id,
+                dispatch.materialized_session_id,
+            ));
+        }
+        Ok(build_dispatch_from_accepted(
+            occurrence,
+            AcceptedScheduledInput {
+                correlation_id,
+                handle,
+            },
+            dispatch.materialized_session_id,
         ))
     }
 
@@ -9289,15 +9302,32 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
             handling_mode: meerkat_core::types::HandlingMode::Queue,
             render_metadata,
         });
-        // Post-wave-a dogma: see `deliver_prompt` for the mirror rationale.
-        let (_outcome, _handle) = self
+        let correlation_id = input
+            .header()
+            .correlation_id
+            .as_ref()
+            .map(ToString::to_string);
+        let (outcome, handle) = self
             .runtime_adapter
             .accept_input_with_completion(session_id, input)
             .await
             .map_err(|error| meerkat::ScheduleDomainError::Internal(error.to_string()))?;
-        let _ = materialized_session_id;
-        Err(meerkat::ScheduleDomainError::Internal(
-            "cli deliver_event no longer reinterprets runtime terminal classes into schedule-local failure classes; the schedule surface must consume the runtime's typed CompletionOutcome directly".to_string(),
+        if let meerkat_runtime::accept::AcceptOutcome::Rejected { reason } = outcome {
+            return Ok(immediate_delivery_failure(
+                occurrence,
+                reason.to_string(),
+                meerkat::OccurrenceFailureClass::RuntimeRejected,
+                correlation_id,
+                materialized_session_id,
+            ));
+        }
+        Ok(build_dispatch_from_accepted(
+            occurrence,
+            AcceptedScheduledInput {
+                correlation_id,
+                handle,
+            },
+            materialized_session_id,
         ))
     }
 }

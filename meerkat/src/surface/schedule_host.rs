@@ -4,7 +4,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Duration as ChronoDuration;
 use meerkat_core::{ContentInput, SessionId, skills::SkillRef, types::RenderMetadata};
-use meerkat_runtime::CompletionHandle;
+use meerkat_runtime::{CompletionHandle, completion::CompletionOutcome};
 use meerkat_schedule::{
     DeliveryCompletion, DeliveryDispatch, DeliveryReceipt, DeliveryReceiptStage, DeliveryTerminal,
     MobTargetBinding, Occurrence, OccurrenceFailureClass, OccurrencePhase, ScheduleDomainError,
@@ -386,27 +386,100 @@ pub fn build_dispatch_from_accepted(
     receipt.correlation_id = accepted.correlation_id.clone();
     receipt.materialized_session_id = materialized_session_id.clone();
 
-    let occurrence_id = occurrence.occurrence_id.clone();
-    let attempt_count = occurrence.attempt_count;
-    let correlation_id = accepted.correlation_id.clone();
-    let completed_materialized_session_id = materialized_session_id.clone();
-    let _ = accepted.handle;
-    let completion = Box::pin(async move {
-        let mut receipt = DeliveryReceipt::new(
-            occurrence_id,
-            attempt_count,
-            DeliveryReceiptStage::Completed,
-        );
-        receipt.correlation_id = correlation_id;
-        receipt.materialized_session_id = completed_materialized_session_id;
-        Ok(DeliveryTerminal::completed(Some(receipt)))
-    });
+    let completion =
+        schedule_completion_from_runtime_handle(accepted.handle, materialized_session_id.clone());
 
     DeliveryDispatch {
         receipt,
         correlation_id: accepted.correlation_id,
         materialized_session_id,
         completion,
+    }
+}
+
+fn schedule_completion_from_runtime_handle(
+    handle: Option<CompletionHandle>,
+    materialized_session_id: Option<SessionId>,
+) -> DeliveryCompletion {
+    Box::pin(async move {
+        let outcome = match handle {
+            Some(handle) => handle.wait().await,
+            None => CompletionOutcome::CompletedWithoutResult,
+        };
+        Ok(delivery_terminal_from_completion_outcome(
+            outcome,
+            materialized_session_id,
+        ))
+    })
+}
+
+fn delivery_terminal_from_completion_outcome(
+    outcome: CompletionOutcome,
+    materialized_session_id: Option<SessionId>,
+) -> DeliveryTerminal {
+    let mut terminal = match outcome {
+        CompletionOutcome::Completed(_) | CompletionOutcome::CompletedWithoutResult => {
+            DeliveryTerminal::completed(None)
+        }
+        CompletionOutcome::CallbackPending { tool_name, args } => {
+            let runtime_outcome =
+                meerkat_schedule::RuntimeDeliveryOutcome::CompletionCallbackPending {
+                    tool_name,
+                    payload: args,
+                };
+            delivery_failed_from_runtime_outcome(runtime_outcome)
+        }
+        CompletionOutcome::Cancelled => {
+            let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
+                detail: "request cancelled".to_string(),
+            };
+            delivery_failed_from_runtime_outcome(runtime_outcome)
+        }
+        CompletionOutcome::Abandoned(reason) => {
+            let runtime_outcome =
+                meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned { detail: reason };
+            delivery_failed_from_runtime_outcome(runtime_outcome)
+        }
+        CompletionOutcome::AbandonedWithError { reason, error } => {
+            let error_detail =
+                serde_json::to_string(&error).unwrap_or_else(|_| "<unserializable>".to_string());
+            let runtime_outcome = meerkat_schedule::RuntimeDeliveryOutcome::CompletionAbandoned {
+                detail: format!("{reason}; error={error_detail}"),
+            };
+            delivery_failed_from_runtime_outcome(runtime_outcome)
+        }
+        CompletionOutcome::CompletedWithFinalizationFailure { error, .. } => {
+            DeliveryTerminal::delivery_failed(
+                error
+                    .detail
+                    .unwrap_or_else(|| "turn finalization failed".to_string()),
+                OccurrenceFailureClass::InternalError,
+            )
+        }
+        CompletionOutcome::RuntimeTerminated(reason) => {
+            let runtime_outcome =
+                meerkat_schedule::RuntimeDeliveryOutcome::CompletionRuntimeTerminated {
+                    detail: reason,
+                };
+            delivery_failed_from_runtime_outcome(runtime_outcome)
+        }
+    };
+    terminal.materialized_session_id = materialized_session_id;
+    terminal
+}
+
+fn delivery_failed_from_runtime_outcome(
+    runtime_outcome: meerkat_schedule::RuntimeDeliveryOutcome,
+) -> DeliveryTerminal {
+    let detail = runtime_outcome.detail();
+    let failure_class = runtime_outcome.derived_failure_class();
+    DeliveryTerminal {
+        phase: OccurrencePhase::DeliveryFailed,
+        receipt: None,
+        detail: Some(detail),
+        failure_class: Some(failure_class),
+        runtime_outcome: Some(runtime_outcome),
+        materialized_session_id: None,
     }
 }
 
@@ -571,5 +644,54 @@ mod tests {
             terminal.failure_class,
             Some(OccurrenceFailureClass::MobRejected)
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_schedule_dispatch_waits_for_runtime_completion_failure() {
+        let occurrence = sample_occurrence();
+        let handle = CompletionHandle::already_resolved(CompletionOutcome::CallbackPending {
+            tool_name: "external_approval".to_string(),
+            args: serde_json::json!({"ticket": "INC-1"}),
+        });
+
+        let dispatch = build_dispatch_from_accepted(
+            &occurrence,
+            AcceptedScheduledInput {
+                correlation_id: Some("corr-1".to_string()),
+                handle: Some(handle),
+            },
+            None,
+        );
+
+        let terminal = dispatch.completion.await.expect("completion terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::DeliveryFailed);
+        assert_eq!(
+            terminal.failure_class,
+            Some(OccurrenceFailureClass::RuntimeRejected)
+        );
+        assert!(
+            terminal
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("external_approval")
+        );
+        assert!(terminal.runtime_outcome.is_some());
+    }
+
+    #[tokio::test]
+    async fn accepted_schedule_dispatch_without_runtime_result_completes() {
+        let occurrence = sample_occurrence();
+        let dispatch = build_dispatch_from_accepted(
+            &occurrence,
+            AcceptedScheduledInput {
+                correlation_id: Some("corr-1".to_string()),
+                handle: None,
+            },
+            None,
+        );
+
+        let terminal = dispatch.completion.await.expect("completion terminal");
+        assert_eq!(terminal.phase, OccurrencePhase::Completed);
     }
 }

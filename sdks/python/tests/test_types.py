@@ -293,7 +293,7 @@ def test_generated_mob_contract_types_include_spawn_and_turn_start_shapes():
         agent_identity="worker-1",
         prompt=[{"type": "text", "text": "continue"}],
         model="gpt-test",
-        clear_provider_params=True,
+        provider_params={"action": "clear"},
     )
     assert turn.prompt == [{"type": "text", "text": "continue"}]
     assert turn.model == "gpt-test"
@@ -2504,9 +2504,7 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
         output_schema={"type": "object"},
         structured_output_retries=2,
         provider_params={"temperature": 0.2},
-        clear_provider_params=True,
         auth_binding={"realm": "dev", "binding": "default_openai"},
-        clear_auth_binding=True,
     )
 
     assert calls == [
@@ -2535,10 +2533,11 @@ async def test_mob_turn_start_wrapper_uses_typed_prompt_and_overrides():
                 "system_prompt": "system",
                 "output_schema": {"type": "object"},
                 "structured_output_retries": 2,
-                "provider_params": {"temperature": 0.2},
-                "clear_provider_params": True,
-                "auth_binding": {"realm": "dev", "binding": "default_openai"},
-                "clear_auth_binding": True,
+                "provider_params": {"action": "set", "value": {"temperature": 0.2}},
+                "auth_binding": {
+                    "action": "set",
+                    "value": {"realm": "dev", "binding": "default_openai"},
+                },
             },
         )
     ]

@@ -2337,9 +2337,7 @@ describe("Parity wrappers", () => {
         outputSchema: { type: "object" },
         structuredOutputRetries: 2,
         providerParams: { temperature: 0.2 },
-        clearProviderParams: true,
         authBinding: { realm: "dev", binding: "default_openai" },
-        clearAuthBinding: true,
       },
     );
     const append = await client.appendMobSystemContext("mob-1", "worker-1", "remember this");
@@ -2426,10 +2424,8 @@ describe("Parity wrappers", () => {
       system_prompt: "system",
       output_schema: { type: "object" },
       structured_output_retries: 2,
-      provider_params: { temperature: 0.2 },
-      clear_provider_params: true,
-      auth_binding: { realm: "dev", binding: "default_openai" },
-      clear_auth_binding: true,
+      provider_params: { action: "set", value: { temperature: 0.2 } },
+      auth_binding: { action: "set", value: { realm: "dev", binding: "default_openai" } },
     });
     assert.equal(calls[4].params.after_cursor, 10);
     assert.equal(calls[4].params.limit, 5);

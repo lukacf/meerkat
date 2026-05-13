@@ -317,6 +317,24 @@ function setIfDefined<T extends object, K extends keyof T>(
   }
 }
 
+function turnMetadataOverride(
+  setField: string,
+  clearField: string,
+  value: unknown | undefined,
+  clear: boolean | undefined,
+): Record<string, unknown> | undefined {
+  if (value !== undefined && clear === true) {
+    throw new MeerkatError("INVALID_ARGS", `${clearField} cannot be combined with ${setField}`);
+  }
+  if (clear === true) {
+    return { action: "clear" };
+  }
+  if (value !== undefined) {
+    return { action: "set", value };
+  }
+  return undefined;
+}
+
 function mobSpawnPayload(mobId: string, spec: SpawnSpec): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     mob_id: mobId,
@@ -387,10 +405,24 @@ function mobTurnStartPayload(
   setIfDefined(payload, "system_prompt", options?.systemPrompt);
   setIfDefined(payload, "output_schema", options?.outputSchema);
   setIfDefined(payload, "structured_output_retries", options?.structuredOutputRetries);
-  setIfDefined(payload, "provider_params", options?.providerParams);
-  setIfDefined(payload, "clear_provider_params", options?.clearProviderParams);
-  setIfDefined(payload, "auth_binding", options?.authBinding);
-  setIfDefined(payload, "clear_auth_binding", options?.clearAuthBinding);
+  const providerParamsOverride = turnMetadataOverride(
+    "providerParams",
+    "clearProviderParams",
+    options?.providerParams,
+    options?.clearProviderParams,
+  );
+  if (providerParamsOverride) {
+    payload.provider_params = providerParamsOverride as MobTurnStartParams["provider_params"];
+  }
+  const authBindingOverride = turnMetadataOverride(
+    "authBinding",
+    "clearAuthBinding",
+    options?.authBinding,
+    options?.clearAuthBinding,
+  );
+  if (authBindingOverride) {
+    payload.auth_binding = authBindingOverride as MobTurnStartParams["auth_binding"];
+  }
   return payload;
 }
 

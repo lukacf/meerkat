@@ -1814,6 +1814,11 @@ class MeerkatClient:
         auth_binding: WireAuthBindingRef | dict[str, str] | None = None,
         clear_auth_binding: bool | None = None,
     ) -> dict[str, Any]:
+        if provider_params is not None and clear_provider_params:
+            raise ValueError("clear_provider_params cannot be combined with provider_params")
+        if auth_binding is not None and clear_auth_binding:
+            raise ValueError("clear_auth_binding cannot be combined with auth_binding")
+
         params = MobTurnStartParams(
             mob_id=mob_id,
             agent_identity=agent_identity,
@@ -1828,12 +1833,17 @@ class MeerkatClient:
             system_prompt=system_prompt,
             output_schema=output_schema,
             structured_output_retries=structured_output_retries,
-            provider_params=provider_params,
-            clear_provider_params=clear_provider_params,
-            auth_binding=auth_binding,
-            clear_auth_binding=clear_auth_binding,
         )
-        return await self._request("mob/turn_start", _wire_value(params))
+        wire_params = _wire_value(params)
+        if clear_provider_params:
+            wire_params["provider_params"] = {"action": "clear"}
+        elif provider_params is not None:
+            wire_params["provider_params"] = {"action": "set", "value": provider_params}
+        if clear_auth_binding:
+            wire_params["auth_binding"] = {"action": "clear"}
+        elif auth_binding is not None:
+            wire_params["auth_binding"] = {"action": "set", "value": _wire_value(auth_binding)}
+        return await self._request("mob/turn_start", wire_params)
 
     async def mob_member_status(
         self, mob_id: str, agent_identity: str

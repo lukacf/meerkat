@@ -256,8 +256,11 @@ const publicMobTurnStartOptions: MobTurnStartOptions = {
   outputSchema: { type: "object" },
   structuredOutputRetries: 2,
   providerParams: { temperature: 0.2 },
-  clearProviderParams: true,
   authBinding: { realm: "dev", binding: "default_openai" },
+};
+
+const publicMobTurnStartClearOptions: MobTurnStartOptions = {
+  clearProviderParams: true,
   clearAuthBinding: true,
 };
 
@@ -269,8 +272,6 @@ const publicMobTurnStartOptionsWithUnknown: MobTurnStartOptions = {
 
 type MobTurnStartSupportedWireOptionKeys =
   | "additional_instructions"
-  | "clear_auth_binding"
-  | "clear_provider_params"
   | "auth_binding"
   | "flow_tool_overlay"
   | "keep_alive"
@@ -299,6 +300,12 @@ void publicMobTurnStartClient.mobTurnStart(
   [{ type: "text", text: "continue" }],
   publicMobTurnStartOptions,
 );
+void publicMobTurnStartClient.mobTurnStart(
+  "mob-1",
+  "worker-1",
+  "clear turn metadata",
+  publicMobTurnStartClearOptions,
+);
 void publicMobTurnStartOptions;
 
 const authContractClient = null as unknown as MeerkatClient;
@@ -317,7 +324,7 @@ const authCreateProfileParams: CreateProfileParams = {
 const authLoginStartParams: LoginStartParams = {
   realm_id: "prod",
   binding_id: "claude-console",
-  provider: "anthropic",
+  provider: "anthropic_claude_ai",
   redirect_uri: "http://127.0.0.1:0/callback",
 };
 const authLoginCompleteParams: LoginCompleteParams = {
@@ -328,7 +335,7 @@ const authLoginCompleteParams: LoginCompleteParams = {
 const authDeviceStartParams: DeviceStartParams = {
   realm_id: "prod",
   binding_id: "claude-console",
-  provider: "anthropic",
+  provider: "anthropic_claude_ai",
 };
 const authDeviceCompleteParams: DeviceCompleteParams = {
   ...authDeviceStartParams,
@@ -615,7 +622,7 @@ const generatedMobTurnStart: MobTurnStartParams = {
   agent_identity: "worker-1",
   prompt: [{ type: "text", text: "continue" }],
   model: "gpt-test",
-  clear_provider_params: true,
+  provider_params: { action: "clear" },
 };
 
 void generatedMobTurnStart;

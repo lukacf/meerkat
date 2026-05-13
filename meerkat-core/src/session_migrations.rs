@@ -171,6 +171,8 @@ pub fn migrate_session_value(mut value: Value) -> Result<Session, SessionMigrati
         migrate_identity_object(ident, &mut legacy);
     }
 
+    migrate_legacy_server_tool_content_blocks(root);
+
     // Stamp envelope version forward. A blob missing `version` is the
     // pre-SESSION_VERSION shape; treat as v1 and bump to current.
     root.entry("version").or_insert_with(|| json!(1));
@@ -272,6 +274,136 @@ fn migrate_turn_metadata_object(tm: &mut Map<String, Value>) {
     // Provider string that no longer parses: leave it; serde will
     // surface the typed-Provider error on the way out and the deserialize
     // path will propagate. Fixture #11 exercises this.
+}
+
+fn migrate_legacy_server_tool_content_blocks(root: &mut Map<String, Value>) {
+    let Some(messages) = root.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for message in messages {
+        let Some(message_obj) = message.as_object_mut() else {
+            continue;
+        };
+        if message_obj.get("role").and_then(Value::as_str) != Some("block_assistant") {
+            continue;
+        }
+        let Some(blocks) = message_obj.get_mut("blocks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for block in blocks {
+            let Some(block_obj) = block.as_object_mut() else {
+                continue;
+            };
+            if block_obj.get("block_type").and_then(Value::as_str) != Some("server_tool_content") {
+                continue;
+            }
+            let Some(data) = block_obj.get_mut("data").and_then(Value::as_object_mut) else {
+                continue;
+            };
+            migrate_legacy_server_tool_content_data(data);
+        }
+    }
+}
+
+fn migrate_legacy_server_tool_content_data(data: &mut Map<String, Value>) {
+    if data
+        .get("content")
+        .and_then(Value::as_object)
+        .and_then(|content| content.get("kind"))
+        .is_some()
+    {
+        return;
+    }
+
+    let content = data.remove("content").unwrap_or(Value::Null);
+    let name = data
+        .remove("name")
+        .and_then(|value| value.as_str().map(str::to_string))
+        .or_else(|| {
+            content
+                .as_object()
+                .and_then(|object| object.get("type"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "legacy_server_tool_content".to_string());
+
+    data.insert(
+        "content".to_string(),
+        legacy_server_tool_content_value(&name, content),
+    );
+}
+
+fn legacy_server_tool_content_value(name: &str, content: Value) -> Value {
+    let normalized = name
+        .strip_prefix("openai.")
+        .or_else(|| name.strip_prefix("open_ai."))
+        .or_else(|| name.strip_prefix("anthropic."))
+        .or_else(|| name.strip_prefix("gemini."))
+        .unwrap_or(name);
+
+    match (name, normalized) {
+        ("openai.message_annotations" | "open_ai.message_annotations", _)
+        | (_, "message_annotations") => {
+            json!({"kind": "open_ai_message_annotations", "data": {"annotations": content}})
+        }
+        (
+            _,
+            "web_search_call"
+            | "web_search_result"
+            | "file_search_call"
+            | "computer_call"
+            | "code_interpreter_call"
+            | "image_generation_call"
+            | "mcp_call"
+            | "mcp_list_tools"
+            | "mcp_approval_request",
+        ) => {
+            json!({
+                "kind": "open_ai_response_item",
+                "data": {
+                    "item_kind": normalized,
+                    "item": content,
+                },
+            })
+        }
+        ("response.web_search_call.searching", _) => {
+            let mut data = Map::new();
+            data.insert("event_kind".to_string(), json!("searching"));
+            if let Some(object) = content.as_object() {
+                for key in ["item_id", "output_index", "sequence_number"] {
+                    if let Some(value) = object.get(key) {
+                        data.insert(key.to_string(), value.clone());
+                    }
+                }
+            }
+            json!({"kind": "open_ai_web_search_call_event", "data": data})
+        }
+        ("anthropic.text_citations", _) | (_, "text_citations") => {
+            json!({"kind": "anthropic_text_citations", "data": {"citations": content}})
+        }
+        ("anthropic.web_search_tool_result", _) | (_, "web_search_tool_result") => {
+            json!({"kind": "anthropic_web_search_tool_result", "data": {"result": content}})
+        }
+        ("gemini.grounding_metadata", _) | (_, "grounding_metadata") => {
+            json!({"kind": "gemini_grounding_metadata", "data": {"grounding_metadata": content}})
+        }
+        _ => {
+            let tool = if normalized == "web_search" {
+                json!("web_search")
+            } else {
+                json!({"provider_defined": {"name": normalized}})
+            };
+            json!({
+                "kind": "anthropic_server_tool_use",
+                "data": {
+                    "tool": tool,
+                    "input": content,
+                },
+            })
+        }
+    }
 }
 
 fn migrate_auth_binding_field(
@@ -389,6 +521,7 @@ fn slugify_if_needed(raw: &str) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{AssistantBlock, Message, ServerToolContent};
 
     #[test]
     fn slugify_passes_clean_slugs() {
@@ -413,5 +546,51 @@ mod tests {
             slugify_if_needed("Prod/Thing"),
             ("prod_thing".to_string(), true)
         );
+    }
+
+    #[test]
+    fn migrates_legacy_server_tool_content_blocks() -> Result<(), Box<dyn std::error::Error>> {
+        let envelope = json!({
+            "id": "00000000-0000-0000-0000-000000000013",
+            "messages": [{
+                "role": "block_assistant",
+                "blocks": [{
+                    "block_type": "server_tool_content",
+                    "data": {
+                        "id": "srv-1",
+                        "name": "gemini.grounding_metadata",
+                        "content": {
+                            "grounding_chunks": [{
+                                "web": { "uri": "https://example.com" }
+                            }]
+                        }
+                    }
+                }],
+                "stop_reason": "end_turn"
+            }],
+            "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "updated_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        });
+
+        let session = migrate_session_value(envelope)?;
+        let Some(Message::BlockAssistant(message)) = session.messages().first() else {
+            return Err("expected block assistant message".into());
+        };
+        let Some(AssistantBlock::ServerToolContent { id, content, .. }) = message.blocks.first()
+        else {
+            return Err("expected server-tool content block".into());
+        };
+
+        assert_eq!(id.as_deref(), Some("srv-1"));
+        let ServerToolContent::GeminiGroundingMetadata { grounding_metadata } = content else {
+            return Err("expected migrated Gemini grounding metadata".into());
+        };
+        assert_eq!(
+            grounding_metadata
+                .pointer("/grounding_chunks/0/web/uri")
+                .and_then(Value::as_str),
+            Some("https://example.com")
+        );
+        Ok(())
     }
 }

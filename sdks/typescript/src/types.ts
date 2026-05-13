@@ -500,10 +500,10 @@ export interface MobTurnStartOptions {
   readonly systemPrompt?: MobTurnStartWireOptions["system_prompt"];
   readonly outputSchema?: MobTurnStartWireOptions["output_schema"];
   readonly structuredOutputRetries?: MobTurnStartWireOptions["structured_output_retries"];
-  readonly providerParams?: MobTurnStartWireOptions["provider_params"];
-  readonly clearProviderParams?: MobTurnStartWireOptions["clear_provider_params"];
-  readonly authBinding?: MobTurnStartWireOptions["auth_binding"];
-  readonly clearAuthBinding?: MobTurnStartWireOptions["clear_auth_binding"];
+  readonly providerParams?: Record<string, unknown>;
+  readonly clearProviderParams?: boolean;
+  readonly authBinding?: WireAuthBindingRef;
+  readonly clearAuthBinding?: boolean;
 }
 
 export interface MobEventsOptions {

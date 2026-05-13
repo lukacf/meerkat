@@ -14,7 +14,7 @@ use meerkat_core::lifecycle::run_primitive::ProviderTag;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::web_search::{WebSearchRequest, WebSearchResult};
 use meerkat_core::{
-    AssistantImageRef, MediaType, Message, OutputSchema, StopReason, ToolDef, Usage,
+    AssistantImageRef, MediaType, Message, OutputSchema, Provider, StopReason, ToolDef, Usage,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -59,13 +59,12 @@ pub trait LlmClient: Send + Sync {
     /// model finishes (either with EndTurn or ToolUse).
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a>;
 
-    /// Get the provider name (for logging/debugging)
-    fn provider(&self) -> &'static str;
+    /// Get the typed provider identity.
+    fn provider(&self) -> Provider;
 
     /// Get the typed provider identity for policy/default resolution.
     fn provider_id(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::parse_strict(self.provider())
-            .unwrap_or(meerkat_core::Provider::Other)
+        self.provider()
     }
 
     /// Check if the client is healthy/connected
@@ -372,8 +371,7 @@ pub enum LlmEvent {
     /// grounding metadata that are not caller-dispatched tool calls.
     ServerToolContent {
         id: Option<String>,
-        name: String,
-        content: Value,
+        content: meerkat_core::ServerToolContent,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<Box<meerkat_core::ProviderMeta>>,
     },

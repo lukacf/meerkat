@@ -845,7 +845,6 @@ where
             AgentEvent::RunFailed {
                 session_id: self.session.id().clone(),
                 error_class: error_report.class,
-                error: error_report.message.clone(),
                 terminal_cause_kind,
                 error_report: Some(error_report),
             },
@@ -1259,8 +1258,6 @@ where
                             let event = AgentEvent::SkillResolutionFailed {
                                 skill_key: Some(key.clone()),
                                 reason: reason.clone(),
-                                reference: key.to_string(),
-                                error: e.to_string(),
                             };
                             if tx.send(event).await.is_err() {
                                 tracing::warn!(

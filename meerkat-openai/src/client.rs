@@ -10,8 +10,9 @@ use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
     ImageGenerationWarning, ImageOperationTerminalClass, Message, OpenAiImageMetadata,
-    OutputSchema, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
-    RevisedPromptSource, StopReason, ToolResult, Usage, UserMessage,
+    OpenAiReplayPhase, OpenAiServerToolItemKind, OpenAiWebSearchCallEventKind, OutputSchema,
+    Provider, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition, RevisedPromptSource,
+    ServerToolContent, StopReason, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::BlockAssembler;
 use meerkat_llm_core::LlmError;
@@ -31,6 +32,7 @@ use crate::image_generation::{
     OpenAiImageOutputOptions, OpenAiImageProviderParams, OpenAiImagesApiEndpoint,
     OpenAiImagesApiPlan, OpenAiImagesApiRequestShape, OpenAiResponsesImagePlan,
 };
+use crate::tool_schema::openai_function_parameters;
 
 /// Extract the typed OpenAI provider tag from a request.
 pub(crate) fn openai_tag(request: &LlmRequest) -> Option<&OpenAiProviderTag> {
@@ -119,23 +121,12 @@ fn openai_reasoning_replayable(
 
 fn openai_server_tool_content_replayable(
     mode: OpenAiReplayProjectionMode,
-    content: &Value,
+    content: &ServerToolContent,
 ) -> bool {
     match mode {
-        OpenAiReplayProjectionMode::Responses => matches!(
-            content.get("type").and_then(Value::as_str),
-            Some(
-                "web_search_call"
-                    | "web_search_result"
-                    | "file_search_call"
-                    | "computer_call"
-                    | "code_interpreter_call"
-                    | "image_generation_call"
-                    | "mcp_call"
-                    | "mcp_list_tools"
-                    | "mcp_approval_request"
-            )
-        ),
+        OpenAiReplayProjectionMode::Responses => {
+            matches!(content, ServerToolContent::OpenAiResponseItem { .. })
+        }
         OpenAiReplayProjectionMode::ChatCompletions => false,
     }
 }
@@ -474,7 +465,7 @@ impl OpenAiClient {
                         "type": "function",
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.input_schema
+                        "parameters": openai_function_parameters(&t.input_schema)
                     })
                 })
                 .collect();
@@ -581,7 +572,7 @@ impl OpenAiClient {
             item["encrypted_content"] = Value::String(encrypted_content.clone());
         }
         if let Some(phase) = phase {
-            item["phase"] = Value::String(phase.clone());
+            item["phase"] = Value::String(phase.as_str().to_string());
         }
 
         Some(item)
@@ -703,8 +694,11 @@ impl OpenAiClient {
                                     items.push(item);
                                 }
                             }
-                            AssistantBlock::ServerToolContent { content, .. } => {
-                                items.push(content.clone());
+                            AssistantBlock::ServerToolContent {
+                                content: ServerToolContent::OpenAiResponseItem { item, .. },
+                                ..
+                            } => {
+                                items.push(item.clone());
                             }
                             // Unknown future variants are omitted unless the
                             // OpenAI projection explicitly admits them above.
@@ -1506,11 +1500,9 @@ impl LlmClient for OpenAiClient {
                                                                                 id: item.get("id")
                                                                                     .and_then(|v| v.as_str())
                                                                                     .map(std::string::ToString::to_string),
-                                                                                name: "web_search_annotations".to_string(),
-                                                                                content: serde_json::json!({
-                                                                                    "type": "message_annotations",
-                                                                                    "annotations": annotations
-                                                                                }),
+                                                                                content: ServerToolContent::OpenAiMessageAnnotations {
+                                                                                    annotations: annotations.clone(),
+                                                                                },
                                                                                 meta: None,
                                                                             };
                                                                         }
@@ -1564,9 +1556,10 @@ impl LlmClient for OpenAiClient {
                                                     let encrypted = item.get("encrypted_content")
                                                         .and_then(|v| v.as_str())
                                                         .map(std::string::ToString::to_string);
-                                                    let phase = item.get("phase")
+                                                    let phase = item
+                                                        .get("phase")
                                                         .and_then(|v| v.as_str())
-                                                        .map(std::string::ToString::to_string);
+                                                        .and_then(OpenAiReplayPhase::from_wire);
 
                                                     let meta = Some(Box::new(ProviderMeta::OpenAi {
                                                         id: reasoning_id.to_string(),
@@ -1631,12 +1624,18 @@ impl LlmClient for OpenAiClient {
                                                         .or_else(|| item.get("call_id"))
                                                         .and_then(|v| v.as_str())
                                                         .map(std::string::ToString::to_string);
-                                                    yield LlmEvent::ServerToolContent {
-                                                        id,
-                                                        name: item_type.to_string(),
-                                                        content: item.clone(),
-                                                        meta: None,
-                                                    };
+                                                    if let Some(item_kind) =
+                                                        OpenAiServerToolItemKind::from_response_item_type(item_type)
+                                                    {
+                                                        yield LlmEvent::ServerToolContent {
+                                                            id,
+                                                            content: ServerToolContent::OpenAiResponseItem {
+                                                                item_kind,
+                                                                item: item.clone(),
+                                                            },
+                                                            meta: None,
+                                                        };
+                                                    }
                                                 }
                                                 _ => {}
                                             }
@@ -1842,9 +1841,10 @@ impl LlmClient for OpenAiClient {
                                 let encrypted = item.get("encrypted_content")
                                     .and_then(|v| v.as_str())
                                     .map(std::string::ToString::to_string);
-                                let phase = item.get("phase")
+                                let phase = item
+                                    .get("phase")
                                     .and_then(|v| v.as_str())
-                                    .map(std::string::ToString::to_string);
+                                    .and_then(OpenAiReplayPhase::from_wire);
 
                                 let meta = Some(Box::new(ProviderMeta::OpenAi {
                                     id: reasoning_id.to_string(),
@@ -1866,23 +1866,20 @@ impl LlmClient for OpenAiClient {
                             }
                         }
                         else if event.event_type.starts_with("response.web_search_call.") {
-                            let mut content = serde_json::Map::new();
-                            content.insert("type".to_string(), Value::String(event.event_type.clone()));
-                            if let Some(item_id) = &event.item_id {
-                                content.insert("item_id".to_string(), Value::String(item_id.clone()));
+                            if let Some(event_kind) =
+                                OpenAiWebSearchCallEventKind::from_event_type(&event.event_type)
+                            {
+                                yield LlmEvent::ServerToolContent {
+                                    id: event.item_id.clone(),
+                                    content: ServerToolContent::OpenAiWebSearchCallEvent {
+                                        event_kind,
+                                        item_id: event.item_id.clone(),
+                                        output_index: event.output_index,
+                                        sequence_number: event.sequence_number,
+                                    },
+                                    meta: None,
+                                };
                             }
-                            if let Some(output_index) = event.output_index {
-                                content.insert("output_index".to_string(), Value::from(output_index));
-                            }
-                            if let Some(sequence_number) = event.sequence_number {
-                                content.insert("sequence_number".to_string(), Value::from(sequence_number));
-                            }
-                            yield LlmEvent::ServerToolContent {
-                                id: event.item_id.clone(),
-                                name: "web_search".to_string(),
-                                content: Value::Object(content),
-                                meta: None,
-                            };
                         }
                         else if event.event_type == "response.done" {
                             // Final done event — always update usage
@@ -2018,8 +2015,8 @@ impl LlmClient for OpenAiClient {
         streaming::ensure_terminal_done(inner)
     }
 
-    fn provider(&self) -> &'static str {
-        "openai"
+    fn provider(&self) -> Provider {
+        Provider::OpenAI
     }
 
     fn provider_id(&self) -> meerkat_core::Provider {
@@ -2174,35 +2171,36 @@ mod tests {
                         meta: Some(Box::new(ProviderMeta::OpenAi {
                             id: "rs_1".to_string(),
                             encrypted_content: Some("ciphertext".to_string()),
-                            phase: Some("reasoning".to_string()),
+                            phase: Some(OpenAiReplayPhase::Reasoning),
                         })),
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_status".to_string()),
-                        name: "web_search".to_string(),
-                        content: serde_json::json!({
-                            "type": "response.web_search_call.searching",
-                            "item_id": "ws_status"
-                        }),
+                        content: ServerToolContent::OpenAiWebSearchCallEvent {
+                            event_kind: OpenAiWebSearchCallEventKind::Searching,
+                            item_id: Some("ws_status".to_string()),
+                            output_index: None,
+                            sequence_number: None,
+                        },
                         meta: None,
                     },
                     AssistantBlock::ServerToolContent {
                         id: Some("ws_1".to_string()),
-                        name: "web_search_call".to_string(),
-                        content: serde_json::json!({
-                            "type": "web_search_call",
-                            "id": "ws_1",
-                            "status": "completed"
-                        }),
+                        content: ServerToolContent::OpenAiResponseItem {
+                            item_kind: OpenAiServerToolItemKind::WebSearchCall,
+                            item: serde_json::json!({
+                                "type": "web_search_call",
+                                "id": "ws_1",
+                                "status": "completed"
+                            }),
+                        },
                         meta: None,
                     },
                     AssistantBlock::ServerToolContent {
                         id: None,
-                        name: "web_search_annotations".to_string(),
-                        content: serde_json::json!({
-                            "type": "message_annotations",
-                            "annotations": []
-                        }),
+                        content: ServerToolContent::OpenAiMessageAnnotations {
+                            annotations: serde_json::json!([]),
+                        },
                         meta: None,
                     },
                     assistant_image_block(),
@@ -2267,19 +2265,27 @@ mod tests {
         );
         assert!(assistant.blocks.iter().any(|block| matches!(
             block,
-            AssistantBlock::ServerToolContent { content, .. }
-                if content.get("type").and_then(Value::as_str) == Some("web_search_call")
+            AssistantBlock::ServerToolContent {
+                content: ServerToolContent::OpenAiResponseItem {
+                    item_kind: OpenAiServerToolItemKind::WebSearchCall,
+                    ..
+                },
+                ..
+            }
         )));
         assert!(!assistant.blocks.iter().any(|block| matches!(
             block,
-            AssistantBlock::ServerToolContent { content, .. }
-                if content.get("type").and_then(Value::as_str)
-                    == Some("response.web_search_call.searching")
+            AssistantBlock::ServerToolContent {
+                content: ServerToolContent::OpenAiWebSearchCallEvent { .. },
+                ..
+            }
         )));
         assert!(!assistant.blocks.iter().any(|block| matches!(
             block,
-            AssistantBlock::ServerToolContent { content, .. }
-                if content.get("type").and_then(Value::as_str) == Some("message_annotations")
+            AssistantBlock::ServerToolContent {
+                content: ServerToolContent::OpenAiMessageAnnotations { .. },
+                ..
+            }
         )));
         assert!(
             !assistant
@@ -2347,17 +2353,19 @@ mod tests {
                     meta: Some(Box::new(ProviderMeta::OpenAi {
                         id: "rs_1".to_string(),
                         encrypted_content: Some("enc".to_string()),
-                        phase: Some("reasoning".to_string()),
+                        phase: Some(OpenAiReplayPhase::Reasoning),
                     })),
                 },
                 AssistantBlock::ServerToolContent {
                     id: Some("ws_1".to_string()),
-                    name: "web_search_call".to_string(),
-                    content: serde_json::json!({
-                        "type": "web_search_call",
-                        "id": "ws_1",
-                        "status": "completed"
-                    }),
+                    content: ServerToolContent::OpenAiResponseItem {
+                        item_kind: OpenAiServerToolItemKind::WebSearchCall,
+                        item: serde_json::json!({
+                            "type": "web_search_call",
+                            "id": "ws_1",
+                            "status": "completed"
+                        }),
+                    },
                     meta: None,
                 },
                 AssistantBlock::Text {
@@ -4087,10 +4095,8 @@ mod tests {
         let mut server_blocks = Vec::new();
         while let Some(event) = stream.next().await {
             match event.expect("stream event") {
-                LlmEvent::ServerToolContent {
-                    id, name, content, ..
-                } => {
-                    server_blocks.push((id, name, content));
+                LlmEvent::ServerToolContent { id, content, .. } => {
+                    server_blocks.push((id, content));
                 }
                 LlmEvent::Done { .. } => break,
                 _ => {}
@@ -4100,22 +4106,23 @@ mod tests {
 
         assert_eq!(server_blocks.len(), 3);
         assert_eq!(server_blocks[0].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[0].1, "web_search");
-        assert_eq!(
-            server_blocks[0].2["type"],
-            "response.web_search_call.searching"
-        );
+        assert!(matches!(
+            &server_blocks[0].1,
+            ServerToolContent::OpenAiWebSearchCallEvent {
+                event_kind: OpenAiWebSearchCallEventKind::Searching,
+                ..
+            }
+        ));
         assert_eq!(server_blocks[1].0.as_deref(), Some("ws_123"));
-        assert_eq!(server_blocks[1].1, "web_search_call");
-        assert_eq!(
-            server_blocks[1].2["action"]["queries"][0],
-            "meerkat runtime"
-        );
-        assert_eq!(server_blocks[2].1, "web_search_annotations");
-        assert_eq!(
-            server_blocks[2].2["annotations"][0]["url"],
-            "https://example.com"
-        );
+        let ServerToolContent::OpenAiResponseItem { item, .. } = &server_blocks[1].1 else {
+            panic!("expected OpenAI response item");
+        };
+        assert_eq!(item["action"]["queries"][0], "meerkat runtime");
+        let ServerToolContent::OpenAiMessageAnnotations { annotations } = &server_blocks[2].1
+        else {
+            panic!("expected OpenAI message annotations");
+        };
+        assert_eq!(annotations[0]["url"], "https://example.com");
     }
 
     // =========================================================================
@@ -4737,6 +4744,43 @@ mod tests {
 
         // Should only get one ReasoningComplete, not duplicated from response.completed
         assert_eq!(reasoning_completes, 1);
+    }
+
+    #[tokio::test]
+    async fn test_stream_drops_unknown_openai_replay_phase() {
+        let payload = [
+            r#"data: {"type":"response.reasoning.done","item":{"id":"rs_unknown","phase":"provider_owned_string","summary":[{"type":"summary_text","text":"thinking..."}],"encrypted_content":"enc_xyz"}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = OpenAiClient::new_with_base_url("test-key".to_string(), base_url);
+        let request = LlmRequest::new(
+            "gpt-5-mini",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut captured_phase = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("stream event") {
+                LlmEvent::ReasoningComplete { meta, .. } => {
+                    let Some(meta) = meta else {
+                        panic!("reasoning should carry OpenAI replay metadata");
+                    };
+                    let ProviderMeta::OpenAi { phase, .. } = *meta else {
+                        panic!("expected OpenAI provider metadata");
+                    };
+                    captured_phase = Some(phase);
+                }
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(captured_phase, Some(None));
     }
 
     #[tokio::test]

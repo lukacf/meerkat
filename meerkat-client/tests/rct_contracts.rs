@@ -33,8 +33,8 @@ impl LlmClient for MockClient {
         Box::pin(futures::stream::iter(events.into_iter().map(Ok)))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

@@ -296,11 +296,15 @@ export interface ExternalPeerTarget {
 
 export type MobPeerTarget = string | ExternalPeerTarget;
 
+export type MobLifecycleStatus =
+  | 'Creating'
+  | 'Running'
+  | 'Stopped'
+  | 'Completed'
+  | 'Destroyed';
+
 /** Mob status. */
-export type MobStatus = GeneratedMobStatusResult & {
-  /** @deprecated Use `status`. Kept as an inert projection of generated status. */
-  state: string;
-};
+export type MobStatus = GeneratedMobStatusResult;
 
 /** Unreachable peer entry from a live member connectivity snapshot. */
 export interface MobUnreachablePeer {
@@ -456,9 +460,7 @@ function isKnownSkillResolutionEvent(event: { type: string }): boolean {
   if (event.type === 'skill_resolution_failed') {
     return (
       (value.skill_key == null || isWireSkillKey(value.skill_key)) &&
-      (value.reason == null || isSkillResolutionFailureReason(value.reason)) &&
-      (value.reference == null || typeof value.reference === 'string') &&
-      (value.error == null || typeof value.error === 'string')
+      isSkillResolutionFailureReason(value.reason)
     );
   }
 
@@ -480,7 +482,7 @@ export type JsonSchema = Record<string, unknown>;
 
 /** Result returned from a tool callback. */
 export interface ToolCallbackResult {
-  content: string;
+  content: ContentInput;
   is_error: boolean;
 }
 

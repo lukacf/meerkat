@@ -68,8 +68,8 @@ impl LlmClient for MockLlmClient {
         ]))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -106,8 +106,8 @@ impl AgentLlmClient for MockAgentLlmClient {
         ))
     }
 
-    fn provider(&self) -> &'static str {
-        "mock"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Other
     }
 
     fn model(&self) -> &str {
@@ -136,7 +136,7 @@ impl AgentLlmClient for CountingAgentLlmClient {
             .await
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> meerkat_core::Provider {
         self.inner.provider()
     }
 
@@ -209,7 +209,7 @@ impl LlmClient for CaptureClient {
         self.inner.stream(request)
     }
 
-    fn provider(&self) -> &'static str {
+    fn provider(&self) -> meerkat_core::Provider {
         self.inner.provider()
     }
 
@@ -2434,8 +2434,8 @@ impl LlmClient for ParamsCaptureClient {
             }),
         ]))
     }
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
     }
     async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
         Ok(())

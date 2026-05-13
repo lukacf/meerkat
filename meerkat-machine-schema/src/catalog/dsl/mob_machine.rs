@@ -35,7 +35,6 @@ macro_rules! mob_catalog_machine_dsl {
             run_step_target_counts_flat: Map<RunStepKey, u64>,
             run_step_target_success_counts_flat: Map<RunStepKey, u64>,
             run_step_target_terminal_failure_counts_flat: Map<RunStepKey, u64>,
-            run_target_retry_counts: Map<RunId, Map<String, u64>>,
             run_target_retry_counts_flat: Map<RunStepKey, u64>,
             run_failure_count: Map<RunId, u64>,
             run_consecutive_failure_count: Map<RunId, u64>,
@@ -150,7 +149,6 @@ macro_rules! mob_catalog_machine_dsl {
             run_step_target_counts_flat = EmptyMap,
             run_step_target_success_counts_flat = EmptyMap,
             run_step_target_terminal_failure_counts_flat = EmptyMap,
-            run_target_retry_counts = EmptyMap,
             run_target_retry_counts_flat = EmptyMap,
             run_failure_count = EmptyMap,
             run_consecutive_failure_count = EmptyMap,
@@ -310,7 +308,6 @@ macro_rules! mob_catalog_machine_dsl {
                 frame_id: Option<FrameId>,
                 node_id: Option<FlowNodeId>,
                 loop_instance_id: Option<LoopInstanceId>,
-                retry_key: Option<String>,
             },
             AuthorizeFlowFrameReducerCommand {
                 frame_id: FrameId,
@@ -1486,7 +1483,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.run_step_target_counts.insert(run_id, EmptyMap);
                 self.run_step_target_success_counts.insert(run_id, EmptyMap);
                 self.run_step_target_terminal_failure_counts.insert(run_id, EmptyMap);
-                self.run_target_retry_counts.insert(run_id, EmptyMap);
                 self.run_failure_count.insert(run_id, 0);
                 self.run_consecutive_failure_count.insert(run_id, 0);
                 self.run_escalation_threshold.insert(run_id, escalation_threshold);
@@ -1526,7 +1522,6 @@ macro_rules! mob_catalog_machine_dsl {
                 self.run_step_target_counts.insert(run_id, EmptyMap);
                 self.run_step_target_success_counts.insert(run_id, EmptyMap);
                 self.run_step_target_terminal_failure_counts.insert(run_id, EmptyMap);
-                self.run_target_retry_counts.insert(run_id, EmptyMap);
                 self.run_failure_count.insert(run_id, 0);
                 self.run_consecutive_failure_count.insert(run_id, 0);
                 self.run_escalation_threshold.insert(run_id, escalation_threshold);
@@ -1715,7 +1710,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandStartRun {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "start_run_command" { command == FlowRunReducerCommandKind::StartRun }
@@ -1728,7 +1723,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandDispatchStep {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1745,7 +1740,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandCompleteStep {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1763,7 +1758,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRecordStepOutput {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1779,7 +1774,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandConditionPassed {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1795,7 +1790,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandConditionRejected {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1811,7 +1806,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandFailStep {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1831,7 +1826,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandSkipStep {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1848,7 +1843,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandProjectFrameStepStatus {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1890,7 +1885,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandCancelStep {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1907,7 +1902,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRegisterTargets {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1926,7 +1921,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRecordTargetSuccess {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1942,7 +1937,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRecordTargetTerminalFailure {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1958,7 +1953,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRecordTargetCanceled {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -1972,14 +1967,13 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRecordTargetFailure {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
             guard "record_target_failure_command" { command == FlowRunReducerCommandKind::RecordTargetFailure }
             guard "has_step_id" { step_id != None }
             guard "has_run_step_key" { run_step_key != None }
-            guard "has_retry_key" { retry_key != None }
             guard "step_tracked" { self.run_tracked_steps.get_cloned(run_id).get("value").contains(step_id.get("value")) }
             update {
                 self.run_target_retry_counts_flat.increment(run_step_key.get("value"), 1);
@@ -1989,7 +1983,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRegisterReadyFrame {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2005,7 +1999,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRegisterReadyFrameAlreadyReady {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2019,7 +2013,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandPumpNodeScheduler {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2045,7 +2039,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandRegisterPendingBodyFrame {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2061,7 +2055,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandPumpFrameScheduler {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2088,7 +2082,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandNodeExecutionReleased {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2103,7 +2097,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandFrameTerminated {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2118,7 +2112,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandFrameTerminatedNoActiveFrame {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2131,7 +2125,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandTerminalCompleted {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2144,7 +2138,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandTerminalFailed {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }
@@ -2157,7 +2151,7 @@ macro_rules! mob_catalog_machine_dsl {
         }
 
         transition AuthorizeFlowRunReducerCommandTerminalCanceled {
-            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id, retry_key }
+            on input AuthorizeFlowRunReducerCommand { run_id, command, step_id, run_step_key, step_status, target_count, frame_id, node_id, loop_instance_id }
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped || self.lifecycle_phase == Phase::Completed }
             guard "known_run" { self.run_status.contains_key(run_id) == true }
             guard "run_running" { self.run_status.get_cloned(run_id) == Some(FlowRunStatus::Running) }

@@ -1023,8 +1023,8 @@ mod tests {
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "blocking-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), meerkat_client::LlmError> {
@@ -1051,8 +1051,8 @@ mod tests {
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "terminal-failure-test"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {

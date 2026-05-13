@@ -276,7 +276,7 @@ fn render_event(
 
         AgentEvent::ToolExecutionCompleted {
             name,
-            result,
+            content,
             is_error,
             duration_ms,
             ..
@@ -301,9 +301,10 @@ fn render_event(
                     reset(ansi)
                 ),
             );
+            let result = meerkat_core::types::text_content(content);
             if !result.is_empty() {
                 let preview = preview_tool_result(
-                    result,
+                    &result,
                     (!verbose).then_some(ToolResultPreviewLimits {
                         max_lines: MAX_TOOL_RESULT_LINES,
                         max_line_bytes: MAX_TOOL_RESULT_LINE_BYTES,
@@ -460,7 +461,15 @@ fn render_event(
             );
         }
 
-        AgentEvent::RunFailed { error, .. } => {
+        AgentEvent::RunFailed {
+            error_class,
+            error_report,
+            ..
+        } => {
+            let error = error_report
+                .as_ref()
+                .map(|report| report.message.clone())
+                .unwrap_or_else(|| format!("run failed ({error_class:?})"));
             end_text_block(state);
             end_thinking_block(mux, scope_id, state);
             chrome_line(
@@ -500,25 +509,12 @@ fn render_event(
             }
         }
 
-        AgentEvent::SkillResolutionFailed {
-            skill_key,
-            reason,
-            reference,
-            error,
-        } => {
-            let reference_display = if reference.is_empty() {
-                skill_key
-                    .as_ref()
-                    .map(std::string::ToString::to_string)
-                    .unwrap_or_else(|| "<unknown>".to_string())
-            } else {
-                reference.clone()
-            };
-            let error_display = if error.is_empty() {
-                reason.to_string()
-            } else {
-                error.clone()
-            };
+        AgentEvent::SkillResolutionFailed { skill_key, reason } => {
+            let reference_display = skill_key
+                .as_ref()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let error_display = reason.to_string();
             chrome_line(
                 mux,
                 scope_id,

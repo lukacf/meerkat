@@ -1,3 +1,4 @@
+use crate::archive_path::MobpackArchivePath;
 use crate::exec_bits::normalize_executable_bit;
 use crate::validate::PackValidationError;
 use flate2::Compression;
@@ -13,20 +14,20 @@ pub fn create_targz(files: &BTreeMap<String, Vec<u8>>) -> Result<Vec<u8>, PackVa
         let mut builder = Builder::new(&mut encoder);
         let mut normalized_paths = BTreeSet::new();
         for (path, bytes) in files {
-            let normalized_path = normalize_for_archive(path)?;
-            if !normalized_paths.insert(normalized_path.clone()) {
+            let archive_path = MobpackArchivePath::parse(path)?;
+            if !normalized_paths.insert(archive_path.as_str().to_string()) {
                 return Err(PackValidationError::DuplicateArchiveEntry {
-                    path: normalized_path,
+                    path: archive_path.as_str().to_string(),
                 });
             }
-            let exec = normalize_executable_bit(&normalized_path, bytes);
+            let exec = normalize_executable_bit(&archive_path, bytes);
             let mut header = Header::new_gnu();
             header.set_size(bytes.len() as u64);
             header.set_entry_type(EntryType::Regular);
             header.set_mode(if exec { 0o755 } else { 0o644 });
             header.set_cksum();
             builder
-                .append_data(&mut header, normalized_path, Cursor::new(bytes))
+                .append_data(&mut header, archive_path.as_str(), Cursor::new(bytes))
                 .map_err(|err| PackValidationError::Archive(err.to_string()))?;
         }
         builder
@@ -75,59 +76,18 @@ pub fn extract_targz_safe(input: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, Pac
             });
         }
 
-        let normalized_path = normalize_for_archive(&raw_path_string)?;
-        if out.contains_key(&normalized_path) {
+        let archive_path = MobpackArchivePath::parse(&raw_path_string)?;
+        if out.contains_key(archive_path.as_str()) {
             return Err(PackValidationError::DuplicateArchiveEntry {
-                path: normalized_path,
+                path: archive_path.as_str().to_string(),
             });
         }
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes)?;
-        out.insert(normalized_path, bytes);
+        out.insert(archive_path.into_string(), bytes);
     }
 
     Ok(out)
-}
-
-pub(crate) fn normalize_for_archive(path: &str) -> Result<String, PackValidationError> {
-    let replaced = path.replace('\\', "/");
-    if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
-        return Err(PackValidationError::UnsafeEntry {
-            path: path.to_string(),
-            reason: "absolute paths are not allowed".to_string(),
-        });
-    }
-
-    let mut parts = Vec::new();
-    for segment in replaced.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return Err(PackValidationError::UnsafeEntry {
-                path: path.to_string(),
-                reason: "path traversal is not allowed".to_string(),
-            });
-        }
-        parts.push(segment);
-    }
-
-    if parts.is_empty() {
-        return Err(PackValidationError::UnsafeEntry {
-            path: path.to_string(),
-            reason: "empty archive paths are not allowed".to_string(),
-        });
-    }
-
-    Ok(parts.join("/"))
-}
-
-fn looks_like_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 #[cfg(test)]

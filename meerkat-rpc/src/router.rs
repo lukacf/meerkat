@@ -3547,8 +3547,8 @@ args = [{}]
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -3624,8 +3624,8 @@ args = [{}]
             }))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -6348,11 +6348,13 @@ args = [{}]
                 ),
                 in_reply_to,
                 status: meerkat_core::ResponseStatus::Completed,
-                result: serde_json::json!({
-                    "request_intent": "checksum_token",
-                    "request_subject": "alpha beta gamma",
-                    "token": "birch seventeen",
-                }),
+                result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                    meerkat_core::CommsChecksumTokenResult {
+                        request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                        request_subject: "alpha beta gamma".to_string(),
+                        token: "birch seventeen".to_string(),
+                    },
+                )),
                 blocks: None,
                 handling_mode: None,
             },
@@ -6747,7 +6749,6 @@ args = [{}]
             AgentEvent::ToolExecutionCompleted {
                 id: "tool-call-1".to_string(),
                 name: "slow_tool".to_string(),
-                result: tool_outcome.result.text_content(),
                 content: tool_outcome.result.content.clone(),
                 is_error: tool_outcome.result.is_error,
                 error: tool_outcome.result.error.clone(),
@@ -6765,14 +6766,24 @@ args = [{}]
         assert_eq!(notification.method, "session/stream_event");
         let payload = &notification.params["event"]["payload"];
         assert_eq!(payload["type"], "tool_execution_completed");
-        assert_eq!(payload["result"], "Tool 'slow_tool' timed out after 50ms");
+        assert!(
+            payload.get("result").is_none(),
+            "legacy result mirror should not be present"
+        );
+        assert_eq!(
+            payload["content"],
+            serde_json::json!([{"type": "text", "text": "Tool 'slow_tool' timed out after 50ms"}])
+        );
         assert_eq!(payload["is_error"], true);
         assert_eq!(payload["error"]["code"], "timeout");
         assert_eq!(
             payload["error"]["message"],
             "Tool 'slow_tool' timed out after 50ms"
         );
-        assert_eq!(payload["error"]["data"], serde_json::Value::Null);
+        assert!(
+            payload["error"].get("data").is_none(),
+            "optional error data should be absent when the timeout has no structured detail"
+        );
     }
 
     #[tokio::test]

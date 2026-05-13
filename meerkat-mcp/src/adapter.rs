@@ -11,10 +11,9 @@ use meerkat_core::{
     ExternalToolDelta, ExternalToolSurfaceBaseState, ExternalToolSurfaceDeltaOperation,
     ExternalToolSurfaceEntrySnapshot, ExternalToolSurfaceFailureCause,
     ExternalToolSurfacePendingOp, ExternalToolSurfaceSnapshot, ExternalToolSurfaceStagedOp,
-    ExternalToolUpdate, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry, ToolDef,
-    ToolResult, agent::AgentToolDispatcher,
+    ExternalToolUpdate, ToolCallArguments, ToolCallView, ToolCatalogCapabilities, ToolCatalogEntry,
+    ToolDef, ToolResult, agent::AgentToolDispatcher,
 };
-use serde_json::Value;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
@@ -726,12 +725,19 @@ impl AgentToolDispatcher for McpRouterAdapter {
         let guard = self.router.read().await;
         match &*guard {
             Some(router) => {
-                let args: Value = serde_json::from_str(call.args.get())
-                    .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
-                let blocks = router
-                    .call_tool(call.name, &args)
-                    .await
-                    .map_err(|e| ToolError::execution_failed(e.to_string()))?;
+                let args = ToolCallArguments::from_raw_json(call.args)
+                    .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                let blocks =
+                    router
+                        .call_tool_arguments(call.name, &args)
+                        .await
+                        .map_err(|e| match e {
+                            crate::McpError::ToolNotFound(name) => ToolError::not_found(name),
+                            crate::McpError::InvalidToolArguments { reason, .. } => {
+                                ToolError::invalid_arguments(call.name, reason)
+                            }
+                            other => ToolError::execution_failed(other.to_string()),
+                        })?;
                 Ok(ToolResult::with_blocks(call.id.to_string(), blocks, false).into())
             }
             None => Err(ToolError::execution_failed("MCP router has been shut down")),
@@ -911,6 +917,21 @@ mod tests {
             vec![],
             HashMap::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn adapter_dispatch_rejects_non_object_tool_arguments() {
+        let adapter = McpRouterAdapter::new(McpRouter::new());
+        let args = serde_json::value::RawValue::from_string("\"legacy string args\"".to_string())
+            .expect("valid raw JSON string");
+        let call = ToolCallView {
+            id: "mcp-string",
+            name: "echo",
+            args: &args,
+        };
+
+        let result = adapter.dispatch(call).await;
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
     }
 
     struct RejectingExternalToolSurfaceHandle;

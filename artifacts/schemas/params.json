@@ -1074,7 +1074,7 @@
         "type": "object"
       },
       "CommsPeerRequestIntent": {
-        "description": "Closed public request-intent contract for `peer_request`.\n\nUnknown strings fail during deserialization and cannot fall through to a\nlocal match/default path.",
+        "description": "Closed core request-intent contract for correlated peer requests.\n\nPublic surfaces may keep provider- or feature-specific payload structs in\ntheir own crates, but once a request enters core it is classified by this\nenum rather than by re-reading a raw intent string.",
         "enum": [
           "supervisor.bridge",
           "checksum_token"
@@ -1217,6 +1217,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content.",
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -4083,11 +4098,33 @@
     "type": "object"
   },
   "CreateProfileParams": {
+    "$defs": {
+      "PersistedAuthMode": {
+        "description": "Kind of credential material persisted.",
+        "enum": [
+          "api_key",
+          "static_bearer",
+          "chatgpt_oauth",
+          "claude_ai_oauth",
+          "oauth_to_api_key",
+          "google_oauth",
+          "adc",
+          "compute_adc",
+          "bedrock",
+          "vertex",
+          "foundry",
+          "external_tokens",
+          "external_authorizer",
+          "command"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/profile/create`.",
     "properties": {
       "auth_method": {
-        "type": "string"
+        "$ref": "#/$defs/PersistedAuthMode"
       },
       "binding_id": {
         "type": "string"
@@ -5301,6 +5338,18 @@
     "type": "object"
   },
   "DeviceCompleteParams": {
+    "$defs": {
+      "OAuthProviderIdentity": {
+        "description": "Concrete OAuth login/provisioning authority.\n\nThis intentionally distinguishes product login flows from the broader\nprovider family. For example, OpenAI API-key auth and ChatGPT OAuth are\nboth `Provider::OpenAI`, but only `OpenAiChatGpt` owns the ChatGPT OAuth\nendpoints, token mode, and target backend contract.",
+        "enum": [
+          "anthropic_claude_ai",
+          "anthropic_console_api_key",
+          "open_ai_chat_gpt",
+          "google_code_assist"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_complete`.",
     "properties": {
@@ -5317,7 +5366,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/OAuthProviderIdentity"
       },
       "realm_id": {
         "type": "string"
@@ -5333,6 +5382,18 @@
     "type": "object"
   },
   "DeviceStartParams": {
+    "$defs": {
+      "OAuthProviderIdentity": {
+        "description": "Concrete OAuth login/provisioning authority.\n\nThis intentionally distinguishes product login flows from the broader\nprovider family. For example, OpenAI API-key auth and ChatGPT OAuth are\nboth `Provider::OpenAI`, but only `OpenAiChatGpt` owns the ChatGPT OAuth\nendpoints, token mode, and target backend contract.",
+        "enum": [
+          "anthropic_claude_ai",
+          "anthropic_console_api_key",
+          "open_ai_chat_gpt",
+          "google_code_assist"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/device_start`.",
     "properties": {
@@ -5346,7 +5407,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/OAuthProviderIdentity"
       },
       "realm_id": {
         "type": "string"
@@ -7259,6 +7320,18 @@
     "type": "object"
   },
   "LoginCompleteParams": {
+    "$defs": {
+      "OAuthProviderIdentity": {
+        "description": "Concrete OAuth login/provisioning authority.\n\nThis intentionally distinguishes product login flows from the broader\nprovider family. For example, OpenAI API-key auth and ChatGPT OAuth are\nboth `Provider::OpenAI`, but only `OpenAiChatGpt` owns the ChatGPT OAuth\nendpoints, token mode, and target backend contract.",
+        "enum": [
+          "anthropic_claude_ai",
+          "anthropic_console_api_key",
+          "open_ai_chat_gpt",
+          "google_code_assist"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/complete`.",
     "properties": {
@@ -7275,7 +7348,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/OAuthProviderIdentity"
       },
       "realm_id": {
         "type": "string"
@@ -7299,6 +7372,18 @@
     "type": "object"
   },
   "LoginStartParams": {
+    "$defs": {
+      "OAuthProviderIdentity": {
+        "description": "Concrete OAuth login/provisioning authority.\n\nThis intentionally distinguishes product login flows from the broader\nprovider family. For example, OpenAI API-key auth and ChatGPT OAuth are\nboth `Provider::OpenAI`, but only `OpenAiChatGpt` owns the ChatGPT OAuth\nendpoints, token mode, and target backend contract.",
+        "enum": [
+          "anthropic_claude_ai",
+          "anthropic_console_api_key",
+          "open_ai_chat_gpt",
+          "google_code_assist"
+        ],
+        "type": "string"
+      }
+    },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Request payload for `auth/login/start`.",
     "properties": {
@@ -7312,7 +7397,7 @@
         ]
       },
       "provider": {
-        "type": "string"
+        "$ref": "#/$defs/OAuthProviderIdentity"
       },
       "realm_id": {
         "type": "string"
@@ -8849,6 +8934,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -9479,6 +9578,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -9990,6 +10103,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -10418,6 +10545,20 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           },
@@ -12252,6 +12393,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -12503,6 +12658,20 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           },
@@ -12857,6 +13026,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -13130,6 +13313,20 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           },
@@ -13846,6 +14043,20 @@
             "type": "object"
           },
           {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
             "description": "Forward-compatibility for unknown block types.",
             "properties": {
               "type": {
@@ -14132,6 +14343,20 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           },
@@ -17615,6 +17840,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content.",
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }

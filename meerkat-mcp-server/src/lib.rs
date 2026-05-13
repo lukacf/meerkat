@@ -29,7 +29,8 @@ use meerkat_core::service::{
 use meerkat_core::{
     AgentEvent, BlobId, Config, ConfigDelta, ConfigEnvelope, ConfigEnvelopePolicy,
     ConfigRuntimeError, ConfigStore, EventEnvelope, FileConfigStore, HookRunOverrides, Provider,
-    RealmSelection, RuntimeBootstrap, ToolCallView, ToolCategoryOverride, format_verbose_event,
+    RealmSelection, RuntimeBootstrap, ToolCallArguments, ToolCallView, ToolCategoryOverride,
+    format_verbose_event,
 };
 use meerkat_mcp::{McpReloadTarget, McpRouter};
 use schemars::JsonSchema;
@@ -322,14 +323,98 @@ pub enum ConfigAction {
 
 /// Input schema for meerkat_config tool
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct MeerkatConfigInput {
     pub action: ConfigAction,
     #[serde(default)]
-    pub config: Option<Value>,
+    pub config: Option<MeerkatConfigPayload>,
     #[serde(default)]
-    pub patch: Option<Value>,
+    pub patch: Option<MeerkatConfigPatch>,
     #[serde(default)]
     pub expected_generation: Option<u64>,
+}
+
+/// Typed complete config payload for `meerkat_config` set operations.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct MeerkatConfigPayload(Config);
+
+impl MeerkatConfigPayload {
+    fn into_inner(self) -> Config {
+        self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for MeerkatConfigPayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Value::deserialize(deserializer)?;
+        let config: Config =
+            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
+        validate_config_payload_matches_typed_shape(&raw, &config)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self(config))
+    }
+}
+
+impl JsonSchema for MeerkatConfigPayload {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MeerkatConfigPayload".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "Complete typed Meerkat config payload.",
+            "type": "object",
+            "additionalProperties": true
+        })
+    }
+}
+
+/// Typed JSON merge patch for `meerkat_config` patch operations.
+#[derive(Debug, Clone, Serialize)]
+#[serde(transparent)]
+pub struct MeerkatConfigPatch(Value);
+
+impl MeerkatConfigPatch {
+    fn apply_to(&self, config: &Config) -> Result<Config, ToolCallError> {
+        apply_patch_preview(config, self.0.clone())
+    }
+
+    fn into_delta(self) -> ConfigDelta {
+        ConfigDelta(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for MeerkatConfigPatch {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = Value::deserialize(deserializer)?;
+        if !raw.is_object() {
+            return Err(serde::de::Error::custom(
+                "patch must be a JSON object merge patch",
+            ));
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl JsonSchema for MeerkatConfigPatch {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "MeerkatConfigPatch".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "description": "JSON object merge patch applied to the typed Meerkat config.",
+            "type": "object",
+            "additionalProperties": true
+        })
+    }
 }
 
 /// Structured MCP tool-call error payload.
@@ -1191,9 +1276,9 @@ pub struct MeerkatSkillsInput {
     /// Typed skill identity for the `inspect` action.
     #[serde(default)]
     pub skill_key: Option<meerkat_core::skills::SkillKey>,
-    /// Optional source selector for inspect action.
-    #[serde(default)]
-    pub source: Option<String>,
+    /// Optional exact source UUID for inspecting a shadowed source.
+    #[serde(default, alias = "source")]
+    pub source_uuid: Option<meerkat_core::skills::SourceUuid>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1562,7 +1647,7 @@ fn base_tools_list() -> Vec<Value> {
         }),
         json!({
             "name": "meerkat_skills",
-            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source UUID selector to see full content.",
+            "description": "List or inspect available skills. Use action 'list' to see all skills, or 'inspect' with a typed skill_key and optional source_uuid selector to see full content.",
             "inputSchema": meerkat_tools::schema_for::<MeerkatSkillsInput>()
         }),
         json!({
@@ -1971,7 +2056,7 @@ async fn handle_meerkat_skills(
                 .await
                 .map_err(|e| format!("skill canonicalization failed: {e}"))?;
             let doc = runtime
-                .load_from_source(&canonical, input.source.as_deref())
+                .load_from_source(&canonical, input.source_uuid.as_ref())
                 .await
                 .map_err(|e| format!("skill inspect failed: {e}"))?;
             serde_json::to_value(meerkat_contracts::SkillInspectResponse {
@@ -2027,12 +2112,10 @@ async fn handle_meerkat_config(
             config_envelope_value(snapshot, state.expose_paths())
         }
         ConfigAction::Set => {
-            let config_value = input.config.ok_or_else(|| {
+            let config = input.config.ok_or_else(|| {
                 ToolCallError::invalid_params("config is required for action=set")
             })?;
-            let config: Config = serde_json::from_value(config_value.clone())
-                .map_err(|e| ToolCallError::invalid_params(format!("Invalid config: {e}")))?;
-            reject_config_payload_defaulting(&config_value, &config)?;
+            let config = config.into_inner();
             validate_config_for_commit(&config)?;
             let snapshot = state
                 .config_runtime
@@ -2050,11 +2133,11 @@ async fn handle_meerkat_config(
                 .get()
                 .await
                 .map_err(map_config_runtime_error)?;
-            let preview = apply_patch_preview(&current.config, patch.clone())?;
+            let preview = patch.apply_to(&current.config)?;
             validate_config_for_commit(&preview)?;
             let snapshot = state
                 .config_runtime
-                .patch(ConfigDelta(patch), input.expected_generation)
+                .patch(patch.into_delta(), input.expected_generation)
                 .await
                 .map_err(map_config_runtime_error)?;
             config_envelope_value(snapshot, state.expose_paths())
@@ -2088,34 +2171,29 @@ fn validate_config_for_commit(config: &Config) -> Result<(), ToolCallError> {
     Ok(())
 }
 
-fn reject_config_payload_defaulting(raw: &Value, config: &Config) -> Result<(), ToolCallError> {
-    let typed = serde_json::to_value(config).map_err(|e| {
-        ToolCallError::internal(format!(
-            "Failed to serialize typed config for validation: {e}"
-        ))
-    })?;
+fn validate_config_payload_matches_typed_shape(raw: &Value, config: &Config) -> Result<(), String> {
+    let typed = serde_json::to_value(config)
+        .map_err(|e| format!("Failed to serialize typed config for validation: {e}"))?;
     compare_config_payload_shape(raw, &typed, "config")
 }
 
-fn compare_config_payload_shape(
-    raw: &Value,
-    typed: &Value,
-    path: &str,
-) -> Result<(), ToolCallError> {
+fn reject_config_payload_defaulting(raw: &Value, config: &Config) -> Result<(), ToolCallError> {
+    validate_config_payload_matches_typed_shape(raw, config).map_err(ToolCallError::invalid_params)
+}
+
+fn compare_config_payload_shape(raw: &Value, typed: &Value, path: &str) -> Result<(), String> {
     match (raw, typed) {
         (Value::Object(raw_obj), Value::Object(typed_obj)) => {
             for key in raw_obj.keys() {
                 if !typed_obj.contains_key(key) {
-                    return Err(ToolCallError::invalid_params(format!(
-                        "Invalid config: unknown field `{path}.{key}`"
-                    )));
+                    return Err(format!("Invalid config: unknown field `{path}.{key}`"));
                 }
             }
             for (key, typed_value) in typed_obj {
                 let Some(raw_value) = raw_obj.get(key) else {
-                    return Err(ToolCallError::invalid_params(format!(
+                    return Err(format!(
                         "Invalid config: missing field `{path}.{key}`; action=set requires a complete typed config payload"
-                    )));
+                    ));
                 };
                 compare_config_payload_shape(raw_value, typed_value, &format!("{path}.{key}"))?;
             }
@@ -4198,8 +4276,8 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        let args: Value = serde_json::from_str(call.args.get())
-            .unwrap_or_else(|_| Value::String(call.args.get().to_string()));
+        let args = ToolCallArguments::from_raw_json(call.args)
+            .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
         let call_name = meerkat_core::types::ToolName::from(call.name);
         let Some(expected_provenance) = self.callback_tools.get(&call_name) else {
             return Err(ToolError::not_found(call.name));
@@ -4209,7 +4287,7 @@ impl AgentToolDispatcher for MpcToolDispatcher {
         };
         if tool.provenance.as_ref() == Some(expected_provenance) {
             // Return a special error that signals the agent loop should pause
-            Err(ToolError::callback_pending(call.name, args))
+            Err(ToolError::callback_pending(call.name, args.into_value()))
         } else {
             Err(ToolError::not_found(call.name))
         }
@@ -4259,8 +4337,8 @@ mod tests {
             ]))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
         }
 
         async fn health_check(&self) -> Result<(), LlmError> {
@@ -4799,6 +4877,8 @@ mod tests {
 
         let config_tool = find_tool("meerkat_config");
         assert!(config_tool["inputSchema"]["properties"]["action"].is_object());
+        assert!(config_tool["inputSchema"]["properties"]["config"].is_object());
+        assert!(config_tool["inputSchema"]["properties"]["patch"].is_object());
 
         let capabilities_tool = find_tool("meerkat_capabilities");
         assert_eq!(capabilities_tool["name"], "meerkat_capabilities");
@@ -5149,6 +5229,28 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_mpc_tool_dispatcher_rejects_non_object_callback_arguments() {
+        let mcp_tools = vec![McpToolDef {
+            name: "get_weather".into(),
+            description: "Get weather".to_string(),
+            input_schema: meerkat_tools::empty_object_schema(),
+            handler: McpToolHandler::Callback,
+        }];
+
+        let dispatcher = MpcToolDispatcher::new(&mcp_tools);
+        let args_raw =
+            serde_json::value::RawValue::from_string("\"legacy string args\"".to_string()).unwrap();
+        let call = ToolCallView {
+            id: "test-string-args",
+            name: "get_weather",
+            args: &args_raw,
+        };
+        let result = dispatcher.dispatch(call).await;
+
+        assert!(matches!(result, Err(ToolError::InvalidArguments { .. })));
+    }
+
     #[test]
     fn test_tools_list_has_tools_parameter() {
         let tools = tools_list();
@@ -5200,8 +5302,29 @@ mod tests {
         let skills_tool = tools.iter().find(|t| t["name"] == "meerkat_skills");
         let skills_tool = skills_tool.expect("meerkat_skills tool must exist");
         assert!(
-            skills_tool["inputSchema"]["properties"]["source"].is_object(),
-            "skills inspect should expose optional source selector"
+            skills_tool["inputSchema"]["properties"]["source_uuid"].is_object(),
+            "skills inspect should expose optional typed source_uuid selector"
+        );
+    }
+
+    #[test]
+    fn test_skills_inspect_source_selector_is_typed_uuid() {
+        let source_uuid = "dc256086-0d2f-4f61-a307-320d4148107f";
+        let input: MeerkatSkillsInput = serde_json::from_value(serde_json::json!({
+            "action": "inspect",
+            "source_uuid": source_uuid
+        }))
+        .expect("source_uuid should deserialize as typed SourceUuid");
+        assert_eq!(input.source_uuid.unwrap().to_string(), source_uuid);
+
+        let err = serde_json::from_value::<MeerkatSkillsInput>(serde_json::json!({
+            "action": "inspect",
+            "source": "legacy-name"
+        }))
+        .expect_err("legacy source alias must still be a typed SourceUuid, not a free selector");
+        assert!(
+            err.to_string().contains("invalid source_uuid"),
+            "unexpected error: {err}"
         );
     }
 
@@ -6910,6 +7033,64 @@ mod tests {
         );
         assert_eq!(messages[4]["role"], "tool_results");
         assert_eq!(messages[4]["results"][0]["tool_use_id"], "tool-2");
+    }
+
+    #[test]
+    fn meerkat_config_input_carries_typed_config_and_patch_payloads() {
+        let config_value = serde_json::to_value(Config::default()).expect("config serializes");
+        let input: MeerkatConfigInput = serde_json::from_value(json!({
+            "action": "set",
+            "config": config_value,
+            "expected_generation": 7
+        }))
+        .expect("typed config payload parses");
+        assert!(matches!(input.action, ConfigAction::Set));
+        assert!(input.config.is_some());
+        assert_eq!(input.expected_generation, Some(7));
+
+        let input: MeerkatConfigInput = serde_json::from_value(json!({
+            "action": "patch",
+            "patch": {"agent": {"max_tokens_per_turn": 64}}
+        }))
+        .expect("typed merge patch parses");
+        assert!(matches!(input.action, ConfigAction::Patch));
+        assert!(input.patch.is_some());
+    }
+
+    #[test]
+    fn meerkat_config_input_rejects_json_string_tunnels() {
+        let err = serde_json::from_value::<MeerkatConfigInput>(json!({
+            "action": "set",
+            "config": "{\"agent\":{\"max_tokens_per_turn\":64}}"
+        }))
+        .expect_err("config JSON text must not deserialize as typed config");
+        assert!(err.to_string().contains("invalid type"));
+
+        let err = serde_json::from_value::<MeerkatConfigInput>(json!({
+            "action": "patch",
+            "patch": "{\"agent\":{\"max_tokens_per_turn\":64}}"
+        }))
+        .expect_err("patch JSON text must not deserialize as typed patch");
+        assert!(
+            err.to_string()
+                .contains("patch must be a JSON object merge patch")
+        );
+    }
+
+    #[test]
+    fn meerkat_config_set_rejects_unknown_config_fields_at_input_boundary() {
+        let mut config_value = serde_json::to_value(Config::default()).expect("config serializes");
+        config_value
+            .as_object_mut()
+            .expect("config is object")
+            .insert("folklore".to_string(), json!(true));
+
+        let err = serde_json::from_value::<MeerkatConfigInput>(json!({
+            "action": "set",
+            "config": config_value
+        }))
+        .expect_err("unknown config field must fail before handler dispatch");
+        assert!(err.to_string().contains("unknown field `config.folklore`"));
     }
 
     #[tokio::test]

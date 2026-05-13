@@ -18,6 +18,7 @@ pub mod live;
 pub mod runtime;
 #[cfg(all(not(target_arch = "wasm32"), feature = "realtime"))]
 pub mod text_adapter;
+mod tool_schema;
 pub mod web_search;
 
 pub use client::OpenAiClient;

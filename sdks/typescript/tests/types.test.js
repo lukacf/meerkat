@@ -195,7 +195,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "s1",
       error_class: "terminal",
-      error: "display text changed by caller",
       error_report: {
         class: "llm",
         message: "machine terminalized LLM failure",
@@ -209,7 +208,6 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "run_failed");
     if (event.type === "run_failed") {
-      assert.equal(event.error, "display text changed by caller");
       assert.equal(event.errorReport?.class, "llm");
       assert.equal(event.errorReport?.message, "machine terminalized LLM failure");
       assert.equal(event.errorReport?.reason?.reasonType, "turn_terminal_cause");
@@ -225,7 +223,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "s1",
       error_class: "llm",
-      error: "LLM failure terminal turn",
       error_report: {
         class: "llm",
         message: "LLM failure terminal turn",
@@ -263,7 +260,12 @@ describe("Typed Events", () => {
           payload: {
             operation: "add",
             target: "filesystem",
-            status: "staged",
+            status_info: {
+              kind: "boundary_applied",
+              base_changed: false,
+              visible_changed: false,
+              revision: 1,
+            },
             persisted: "false",
           },
         },
@@ -275,11 +277,16 @@ describe("Typed Events", () => {
           payload: {
             operation: "bogus",
             target: 0,
-            status: 0,
+            status_info: {
+              kind: "boundary_applied",
+              base_changed: false,
+              visible_changed: false,
+              revision: 1,
+            },
             persisted: "false",
           },
         },
-        reason: "malformed operation/status semantics must not become an empty typed payload",
+        reason: "malformed operation/persistence semantics must not become an empty typed payload",
       },
       {
         raw: {
@@ -354,7 +361,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "session-1",
       error_class: "hook",
-      error: "denied",
       error_report: {
         class: "hook",
         message: "denied",
@@ -380,7 +386,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "session-1",
       error_class: "hook",
-      error: "denied",
       error_report: {
         class: "hook",
         message: "denied",
@@ -406,7 +411,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "session-1",
       error_class: "hook",
-      error: "denied",
       error_report: {
         class: "hook",
         message: "denied",
@@ -426,7 +430,6 @@ describe("Typed Events", () => {
       type: "run_failed",
       session_id: "session-1",
       error_class: "hook",
-      error: "timeout",
       error_report: {
         class: "hook",
         message: "timeout",
@@ -461,7 +464,6 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
       content: [
         { type: "text", text: "found it" },
         { type: "image", media_type: "image/png", source: "inline", data: "AAAA" },
@@ -532,7 +534,6 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
       content: "not blocks",
       is_error: false,
       duration_ms: 42,
@@ -549,13 +550,13 @@ describe("Typed Events", () => {
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
     });
     const malformed = parseEvent({
       type: "tool_execution_completed",
       id: "t1",
       name: "search",
-      result: "found it",
+      content: [{ type: "text", text: "found it" }],
       is_error: "false",
     });
 
@@ -670,8 +671,6 @@ describe("Typed Events", () => {
         reason_type: "not_found",
         key: { source_uuid: sourceUuid, skill_name: "email-extractor" },
       },
-      reference: `${sourceUuid}/email-extractor`,
-      error: `skill not found: ${sourceUuid}/email-extractor`,
     });
 
     assert.equal(event.type, "skill_resolution_failed");
@@ -687,47 +686,34 @@ describe("Typed Events", () => {
           skillName: "email-extractor",
         });
       }
-      assert.equal(event.reference, `${sourceUuid}/email-extractor`);
-      assert.equal(event.error, `skill not found: ${sourceUuid}/email-extractor`);
     }
   });
 
-  it("should parse legacy skill_resolution_failed payloads", () => {
+  it("should reject legacy skill_resolution_failed string mirrors", () => {
     const event = parseEvent({
       type: "skill_resolution_failed",
       reference: "legacy/ref",
       error: "missing",
     });
 
-    assert.equal(event.type, "skill_resolution_failed");
-    if (event.type === "skill_resolution_failed") {
-      assert.equal(event.skillKey, undefined);
-      assert.equal(event.reason, undefined);
-      assert.equal(event.reference, "legacy/ref");
-      assert.equal(event.error, "missing");
-    }
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "skill_resolution_failed");
   });
 
   it("should not fabricate skill resolution reasons from malformed semantics", () => {
     const event = parseEvent({
       type: "skill_resolution_failed",
       reason: { reason_type: 0, message: "bad" },
-      reference: "legacy/ref",
-      error: "missing",
     });
 
-    assert.equal(event.type, "skill_resolution_failed");
-    if (event.type === "skill_resolution_failed") {
-      assert.equal(event.reason, undefined);
-    }
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "skill_resolution_failed");
   });
 
   it("should preserve unknown skill resolution reason types as typed unknown", () => {
     const event = parseEvent({
       type: "skill_resolution_failed",
       reason: { reason_type: "future_status", message: "future details" },
-      reference: "legacy/ref",
-      error: "missing",
     });
 
     assert.equal(event.type, "skill_resolution_failed");
@@ -745,15 +731,10 @@ describe("Typed Events", () => {
     const event = parseEvent({
       type: "skill_resolution_failed",
       reason: { reason_type: "not_found" },
-      reference: "legacy/ref",
-      error: "missing",
     });
 
-    assert.equal(event.type, "skill_resolution_failed");
-    if (event.type === "skill_resolution_failed") {
-      assert.equal(event.skillKey, undefined);
-      assert.equal(event.reason, undefined);
-    }
+    assert.equal(event.type, "malformed_event");
+    assert.equal(event.rawType, "skill_resolution_failed");
   });
 
   it("should return UnknownEvent for unrecognised types", () => {
@@ -794,7 +775,6 @@ describe("Typed Events", () => {
       payload: {
         operation: "remove",
         target: "filesystem",
-        status: "staged",
         status_info: {
           kind: "boundary_applied",
           base_changed: true,
@@ -809,7 +789,6 @@ describe("Typed Events", () => {
     if (event.type === "tool_config_changed") {
       assert.equal(event.payload.operation, "remove");
       assert.equal(event.payload.target, "filesystem");
-      assert.equal(event.payload.status, "staged");
       assert.deepEqual(event.payload.status_info, {
         kind: "boundary_applied",
         base_changed: true,
@@ -1017,7 +996,12 @@ describe("Typed Events", () => {
       payload: {
         operation: "add",
         target: "filesystem",
-        status: "staged",
+        status_info: {
+          kind: "boundary_applied",
+          base_changed: false,
+          visible_changed: false,
+          revision: 1,
+        },
         persisted: true,
         applied_at_turn: "oops",
       },
@@ -1034,7 +1018,12 @@ describe("Typed Events", () => {
       payload: {
         operation: "add",
         target: "filesystem",
-        status: "staged",
+        status_info: {
+          kind: "boundary_applied",
+          base_changed: false,
+          visible_changed: false,
+          revision: 1,
+        },
         persisted: "false",
       },
     };
@@ -1066,7 +1055,6 @@ describe("Typed Events", () => {
       type: "background_job_completed",
       job_id: "j_123",
       display_name: "sleep 2",
-      status: "completed",
       terminal_status: "failed",
       detail: "exit_code: 1",
     });
@@ -1075,7 +1063,6 @@ describe("Typed Events", () => {
     if (event.type === "background_job_completed") {
       assert.equal(event.jobId, "j_123");
       assert.equal(event.displayName, "sleep 2");
-      assert.equal(event.legacyStatus, "completed");
       assert.equal(event.terminalStatus, "failed");
       assert.equal(event.detail, "exit_code: 1");
     }
@@ -1092,12 +1079,11 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "background_job_completed");
     if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
       assert.equal(event.terminalStatus, "failed");
     }
   });
 
-  it("should ignore malformed background_job_completed legacy status mirror", () => {
+  it("should ignore unrelated background_job_completed status mirror", () => {
     const event = parseEvent({
       type: "background_job_completed",
       job_id: "j_123",
@@ -1109,7 +1095,6 @@ describe("Typed Events", () => {
 
     assert.equal(event.type, "background_job_completed");
     if (event.type === "background_job_completed") {
-      assert.equal(event.legacyStatus, undefined);
       assert.equal(event.terminalStatus, "failed");
     }
   });

@@ -143,7 +143,7 @@ pub struct State {
     pub step_target_counts: std::collections::BTreeMap<StepId, u32>,
     pub step_target_success_counts: std::collections::BTreeMap<StepId, u32>,
     pub step_target_terminal_failure_counts: std::collections::BTreeMap<StepId, u32>,
-    pub target_retry_counts: std::collections::BTreeMap<String, u32>,
+    pub target_retry_counts: std::collections::BTreeMap<StepId, u32>,
     pub failure_count: u32,
     pub consecutive_failure_count: u32,
     pub escalation_threshold: u32,
@@ -248,7 +248,6 @@ pub(crate) mod inputs {
     pub struct RecordTargetFailure {
         pub step_id: StepId,
         pub target_id: MeerkatId,
-        pub retry_key: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RegisterReadyFrame {
@@ -977,7 +976,7 @@ pub(crate) fn transition<C: Context>(
             let mut next_state = state.clone();
             let entry = next_state
                 .target_retry_counts
-                .entry(payload.retry_key)
+                .entry(payload.step_id.clone())
                 .or_insert(0);
             *entry = entry.saturating_add(1);
             Ok(Outcome {

@@ -993,7 +993,7 @@ export interface MobMemberStatusResult {
 export interface MobSnapshotResult {
   members: unknown[];
   mob_id: string;
-  status: string;
+  status: "applied" | "staged" | "duplicate";
 }
 
 export interface MobDestroyResult {

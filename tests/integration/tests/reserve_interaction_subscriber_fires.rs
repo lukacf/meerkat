@@ -57,8 +57,11 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
                 b.public_key().to_peer_id(),
                 PeerName::new(name_b.clone()).expect("peer_name valid"),
             ),
-            intent: "reservation-contract-probe".to_string(),
-            params: serde_json::json!({"probe": true}),
+            request: meerkat_core::PeerRequestPayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenParams {
+                    subject: "reservation-contract-probe".to_string(),
+                },
+            ),
             blocks: None,
             handling_mode: HandlingMode::Queue,
             stream: InputStreamMode::ReserveInteraction,
@@ -115,7 +118,13 @@ async fn reserve_interaction_subscriber_fires_on_matching_response() {
             ),
             in_reply_to: InteractionId(envelope_id),
             status: ResponseStatus::Completed,
-            result: serde_json::json!({"probe_reply": true}),
+            result: Some(meerkat_core::PeerResponsePayload::ChecksumToken(
+                meerkat_core::CommsChecksumTokenResult {
+                    request_intent: meerkat_core::CommsChecksumTokenResultIntent::ChecksumToken,
+                    request_subject: "reservation-contract-probe".to_string(),
+                    token: "probe_reply".to_string(),
+                },
+            )),
             blocks: None,
             handling_mode: Some(HandlingMode::Queue),
         },

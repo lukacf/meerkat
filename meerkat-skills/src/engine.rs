@@ -8,7 +8,7 @@ use meerkat_core::skills::{
     CapabilityId, ResolvedSkill, SkillArtifact, SkillArtifactContent, SkillCollection,
     SkillDescriptor, SkillDocument, SkillEngine, SkillError, SkillFilter, SkillIntrospectionEntry,
     SkillKey, SkillQuarantineDiagnostic, SkillRef, SkillSource, SourceHealthSnapshot,
-    SourceIdentityRecord, SourceIdentityRegistry,
+    SourceIdentityRecord, SourceIdentityRegistry, SourceUuid,
 };
 use meerkat_core::skills_config::default_source_identity_records;
 
@@ -227,9 +227,10 @@ where
     fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> impl Future<Output = Result<serde_json::Value, SkillError>> + Send {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> impl Future<Output = Result<meerkat_core::skills::SkillFunctionResult, SkillError>> + Send
+    {
         async move {
             let canonical_key = self.resolve_key(key)?;
             self.source
@@ -276,13 +277,13 @@ where
     fn load_from_source(
         &self,
         key: &SkillKey,
-        source_name: Option<&str>,
+        source_uuid: Option<&SourceUuid>,
     ) -> impl Future<Output = Result<SkillDocument, SkillError>> + Send {
-        let source_name = source_name.map(ToString::to_string);
+        let source_uuid = source_uuid.cloned();
         async move {
             let canonical_key = self.resolve_key(key)?;
             self.source
-                .load_from_source(&canonical_key, source_name.as_deref())
+                .load_from_source(&canonical_key, source_uuid.as_ref())
                 .await
         }
     }

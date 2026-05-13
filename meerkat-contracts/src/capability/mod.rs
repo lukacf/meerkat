@@ -11,7 +11,7 @@ pub use meerkat_capabilities::{
     BrowserMobpackCapabilityDecision, CapabilityId, CapabilityProtocol, CapabilityRegistration,
     CapabilityScope, CapabilityStatus, FeatureCapabilityPolicy, HostProcessCapabilityId,
     MobpackCapabilityId, MobpackCapabilityRequirement, MobpackRuntimeCapabilityId,
-    available_capabilities, browser_mobpack_capability_decision, build_capabilities,
-    resolve_capabilities,
+    available_capabilities, browser_mobpack_capability_decision,
+    browser_mobpack_capability_decision_for_id, build_capabilities, resolve_capabilities,
 };
 pub use query::{CapabilitiesResponse, CapabilityEntry};

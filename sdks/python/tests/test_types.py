@@ -112,6 +112,7 @@ from meerkat.events import (
 from meerkat.generated.types import (
     RuntimeStateResult as GeneratedRuntimeStateResult,
 )
+from meerkat.tools import ToolRegistry
 
 
 def test_contract_version():
@@ -126,6 +127,24 @@ def test_contract_version_matches_package_version():
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     data = tomllib.loads(pyproject.read_text())
     assert CONTRACT_VERSION == data["project"]["version"]
+
+
+@pytest.mark.asyncio
+async def test_callback_tool_registry_preserves_typed_content_blocks():
+    registry = ToolRegistry()
+
+    async def handler(_arguments):
+        return {
+            "content": [{"type": "text", "text": "typed tool result"}],
+            "is_error": False,
+        }
+
+    registry.register("blocks", handler)
+
+    content, is_error = await registry.handle("blocks", {})
+
+    assert content == [{"type": "text", "text": "typed tool result"}]
+    assert is_error is False
 
 
 def test_model_profile_type_uses_wire_web_search_key():
@@ -1277,7 +1296,6 @@ def test_parse_tool_config_changed():
         "payload": {
             "operation": "remove",
             "target": "filesystem",
-            "status": "staged",
             "status_info": {
                 "kind": "boundary_applied",
                 "base_changed": True,
@@ -1292,7 +1310,6 @@ def test_parse_tool_config_changed():
     assert isinstance(event, ToolConfigChanged)
     assert event.payload.operation == "remove"
     assert event.payload.target == "filesystem"
-    assert event.payload.status == "staged"
     assert isinstance(event.payload.status_info, BoundaryAppliedToolConfigChangeStatus)
     assert event.payload.status_info.base_changed is True
     assert event.payload.status_info.visible_changed is False
@@ -1318,7 +1335,12 @@ def test_parse_tool_config_changed_with_bad_applied_at_turn():
         "payload": {
             "operation": "add",
             "target": "filesystem",
-            "status": "staged",
+            "status_info": {
+                "kind": "boundary_applied",
+                "base_changed": False,
+                "visible_changed": False,
+                "revision": 1,
+            },
             "persisted": True,
             "applied_at_turn": "oops",
         },
@@ -1334,7 +1356,12 @@ def test_parse_tool_config_changed_with_non_boolean_persisted():
         "payload": {
             "operation": "add",
             "target": "filesystem",
-            "status": "staged",
+            "status_info": {
+                "kind": "boundary_applied",
+                "base_changed": False,
+                "visible_changed": False,
+                "revision": 1,
+            },
             "persisted": "false",
         },
     }
@@ -1349,7 +1376,6 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
         "type": "background_job_completed",
         "job_id": "j_123",
         "display_name": "sleep 2",
-        "status": "completed",
         "terminal_status": "failed",
         "detail": "exit_code: 1",
     }
@@ -1357,22 +1383,22 @@ def test_parse_background_job_completed_uses_typed_terminal_status():
     assert isinstance(event, BackgroundJobCompleted)
     assert event.job_id == "j_123"
     assert event.display_name == "sleep 2"
-    assert event.legacy_status == "completed"
     assert event.terminal_status == "failed"
     assert event.detail == "exit_code: 1"
 
 
-def test_parse_background_job_completed_allows_absent_legacy_status():
+def test_parse_background_job_completed_ignores_stale_legacy_status():
     raw = {
         "type": "background_job_completed",
         "job_id": "j_123",
         "display_name": "sleep 2",
+        "status": "completed",
         "terminal_status": "failed",
         "detail": "exit_code: 1",
     }
     event = parse_event(raw)
     assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
+    assert not hasattr(event, "legacy_status")
     assert event.terminal_status == "failed"
 
 
@@ -1387,7 +1413,7 @@ def test_parse_background_job_completed_ignores_malformed_legacy_status():
     }
     event = parse_event(raw)
     assert isinstance(event, BackgroundJobCompleted)
-    assert event.legacy_status is None
+    assert not hasattr(event, "legacy_status")
     assert event.terminal_status == "failed"
 
 
@@ -1448,7 +1474,6 @@ def test_parse_run_failed_preserves_typed_terminal_cause_report():
         "type": "run_failed",
         "session_id": "s1",
         "error_class": "terminal",
-        "error": "display text changed by caller",
         "error_report": {
             "class": "llm",
             "message": "machine terminalized LLM failure",
@@ -1463,7 +1488,6 @@ def test_parse_run_failed_preserves_typed_terminal_cause_report():
     event = parse_event(raw)
 
     assert isinstance(event, RunFailed)
-    assert event.error == "display text changed by caller"
     assert isinstance(event.error_report, AgentErrorReport)
     assert event.error_report.class_ == "llm"
     assert event.error_report.message == "machine terminalized LLM failure"
@@ -1478,7 +1502,6 @@ def test_parse_run_failed_does_not_infer_terminal_cause_from_display_fields():
         "type": "run_failed",
         "session_id": "s1",
         "error_class": "llm",
-        "error": "LLM failure terminal turn",
         "error_report": {
             "class": "llm",
             "message": "LLM failure terminal turn",
@@ -1517,7 +1540,12 @@ def test_parse_malformed_known_events_preserves_raw_payload():
                 "payload": {
                     "operation": "add",
                     "target": "filesystem",
-                    "status": "staged",
+                    "status_info": {
+                        "kind": "boundary_applied",
+                        "base_changed": False,
+                        "visible_changed": False,
+                        "revision": 1,
+                    },
                     "persisted": "false",
                 },
             },
@@ -1529,7 +1557,12 @@ def test_parse_malformed_known_events_preserves_raw_payload():
                 "payload": {
                     "operation": "bogus",
                     "target": 0,
-                    "status": 0,
+                    "status_info": {
+                        "kind": "boundary_applied",
+                        "base_changed": False,
+                        "visible_changed": False,
+                        "revision": 1,
+                    },
                     "persisted": "false",
                 },
             },
@@ -1595,7 +1628,6 @@ def test_parse_run_failed_preserves_hook_denied_error_report():
         "type": "run_failed",
         "session_id": "session-1",
         "error_class": "hook",
-        "error": "denied",
         "error_report": {
             "class": "hook",
             "message": "denied",
@@ -1622,7 +1654,6 @@ def test_parse_run_failed_does_not_promote_string_only_hook_id_mirrors():
         "type": "run_failed",
         "session_id": "session-1",
         "error_class": "hook",
-        "error": "denied",
         "error_report": {
             "class": "hook",
             "message": "denied",
@@ -1647,7 +1678,6 @@ def test_parse_run_failed_does_not_promote_string_only_hook_id_mirrors():
         "type": "run_failed",
         "session_id": "session-1",
         "error_class": "hook",
-        "error": "denied",
         "error_report": {
             "class": "hook",
             "message": "denied",
@@ -1666,7 +1696,6 @@ def test_parse_run_failed_does_not_promote_string_only_hook_id_mirrors():
         "type": "run_failed",
         "session_id": "session-1",
         "error_class": "hook",
-        "error": "timeout",
         "error_report": {
             "class": "hook",
             "message": "timeout",
@@ -1686,7 +1715,6 @@ def test_parse_tool_execution_completed():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": [
             {"type": "text", "text": "found it"},
             {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
@@ -1753,7 +1781,6 @@ def test_parse_tool_execution_completed_preserves_malformed_content_blocks():
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
         "content": "not blocks",
         "is_error": False,
         "duration_ms": 42,
@@ -1769,13 +1796,13 @@ def test_parse_tool_execution_completed_does_not_coerce_missing_or_malformed_is_
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
     })
     malformed = parse_event({
         "type": "tool_execution_completed",
         "id": "t1",
         "name": "search",
-        "result": "found it",
+        "content": [{"type": "text", "text": "found it"}],
         "is_error": "false",
     })
     assert isinstance(missing, ToolExecutionCompleted)
@@ -1867,8 +1894,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
             "reason_type": "not_found",
             "key": {"source_uuid": source_uuid, "skill_name": "email-extractor"},
         },
-        "reference": f"{source_uuid}/email-extractor",
-        "error": f"skill not found: {source_uuid}/email-extractor",
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
@@ -1882,8 +1907,6 @@ def test_parse_skill_resolution_failed_with_typed_reason():
         source_uuid=source_uuid,
         skill_name="email-extractor",
     )
-    assert event.reference == f"{source_uuid}/email-extractor"
-    assert event.error == f"skill not found: {source_uuid}/email-extractor"
 
 
 def test_parse_legacy_skill_resolution_failed_payload():
@@ -1893,31 +1916,26 @@ def test_parse_legacy_skill_resolution_failed_payload():
         "error": "missing",
     }
     event = parse_event(raw)
-    assert isinstance(event, SkillResolutionFailed)
-    assert event.skill_key is None
-    assert event.reason is None
-    assert event.reference == "legacy/ref"
-    assert event.error == "missing"
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_skill_resolution_failed_does_not_fabricate_malformed_reason():
     raw = {
         "type": "skill_resolution_failed",
         "reason": {"reason_type": 0, "message": "bad"},
-        "reference": "legacy/ref",
-        "error": "missing",
     }
     event = parse_event(raw)
-    assert isinstance(event, SkillResolutionFailed)
-    assert event.reason is None
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_skill_resolution_failed_preserves_unknown_status_as_typed_unknown():
     raw = {
         "type": "skill_resolution_failed",
         "reason": {"reason_type": "future_status", "message": "future details"},
-        "reference": "legacy/ref",
-        "error": "missing",
     }
     event = parse_event(raw)
     assert isinstance(event, SkillResolutionFailed)
@@ -1932,13 +1950,11 @@ def test_parse_skill_resolution_failed_does_not_fabricate_empty_keyed_reason():
     raw = {
         "type": "skill_resolution_failed",
         "reason": {"reason_type": "not_found"},
-        "reference": "legacy/ref",
-        "error": "missing",
     }
     event = parse_event(raw)
-    assert isinstance(event, SkillResolutionFailed)
-    assert event.skill_key is None
-    assert event.reason is None
+    assert isinstance(event, UnknownEvent)
+    assert event.type == "malformed_event"
+    assert event.data == raw
 
 
 def test_parse_inline_video_content_block():
@@ -2604,9 +2620,9 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
         if method == "mob/create":
             return {"mob_id": "mob-1"}
         if method == "mob/list":
-            return {"mobs": [{"mob_id": "mob-1"}]}
+            return {"mobs": [{"mob_id": "mob-1", "status": "Running"}]}
         if method == "mob/status":
-            return {"mob_id": "mob-1", "status": "running"}
+            return {"mob_id": "mob-1", "status": "Running"}
         if method == "mob/members":
             return {
                 "members": [
@@ -2690,8 +2706,8 @@ async def test_client_mob_lifecycle_and_send_methods_use_explicit_rpc_methods():
 
     mob = await client.create_mob(definition={"id": "mob-1", "profiles": {"worker": {"model": "claude-sonnet-4-6"}}})
     assert mob.id == "mob-1"
-    assert await client.list_mobs() == [{"mob_id": "mob-1"}]
-    assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "running"}
+    assert await client.list_mobs() == [{"mob_id": "mob-1", "status": "Running"}]
+    assert await client.mob_status("mob-1") == {"mob_id": "mob-1", "status": "Running"}
     expected_agent_a_ref = _make_member_ref("mob-1", "agent-a")
     assert await client.list_mob_members("mob-1") == [
         {

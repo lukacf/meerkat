@@ -109,9 +109,11 @@ pub use budget::{
 };
 pub use checkpoint::{SessionCheckpointError, SessionCheckpointErrorKind, SessionCheckpointer};
 pub use comms::{
-    CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
-    PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, PeerRoute,
-    SUPERVISOR_BRIDGE_INTENT, SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
+    CommsChecksumTokenParams, CommsChecksumTokenResult, CommsChecksumTokenResultIntent,
+    CommsCommand, CommsPeerRequestIntent, EventStream, InputSource, InputStreamMode,
+    PeerDirectoryEntry, PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason,
+    PeerRequestPayload, PeerResponsePayload, PeerRoute, SUPERVISOR_BRIDGE_INTENT,
+    SendAndStreamError, SendError, SendReceipt, StreamError, StreamScope,
 };
 pub use compact::{
     CompactionConfig, CompactionContext, CompactionResult, Compactor,
@@ -142,11 +144,12 @@ pub use completion_feed::{
 };
 pub use config::{
     AgentConfig, BudgetConfig, CallTimeoutOverride, CommsAuthMode, CommsRuntimeConfig,
-    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookEntryConfig,
-    HookRunOverrides, HookRuntimeConfig, HookRuntimeKind, HooksConfig, LimitsConfig, ModelDefaults,
-    PlainEventSource, ProviderToolsConfig, RetryConfig, SelfHostedApiStyle, SelfHostedConfig,
-    SelfHostedModelConfig, SelfHostedServerConfig, SelfHostedTransport, ShellDefaults,
-    StorageConfig, StoreConfig, ToolsConfig,
+    CommsRuntimeMode, Config, ConfigDelta, ConfigError, ConfigScope, HookCommandProgram,
+    HookCommandRuntimeConfig, HookEntryConfig, HookHttpMethod, HookHttpRuntimeConfig, HookHttpUrl,
+    HookRunOverrides, HookRuntimeAdapterConfig, HookRuntimeConfig, HookRuntimeKind, HooksConfig,
+    LimitsConfig, ModelDefaults, PlainEventSource, ProviderToolsConfig, RetryConfig,
+    SelfHostedApiStyle, SelfHostedConfig, SelfHostedModelConfig, SelfHostedServerConfig,
+    SelfHostedTransport, ShellDefaults, StorageConfig, StoreConfig, ToolsConfig,
 };
 pub use config_contract::{
     ConfigEnvelope, ConfigEnvelopePolicy, ConfigResolvedPaths, ConfigSnapshot, ConfigStoreMetadata,
@@ -298,13 +301,14 @@ pub use turn_execution_authority::{
     TurnPrimitiveKind, TurnTerminalCauseKind, TurnTerminalOutcome,
 };
 pub use types::{
-    ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage, ContentBlock,
-    ContentInput, ExtractionError, HandlingMode, ImageData, Message, OutputSchema, ProviderMeta,
-    RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
-    SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
-    SystemNoticePeer, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName,
-    ToolNameSet, ToolProvenance, ToolResult, ToolResultError, ToolSourceId, ToolSourceKind,
-    TranscriptSource, Usage, UserMessage, VideoData,
+    AnthropicServerToolKind, ArtifactRef, AssistantBlock, AssistantMessage, BlockAssistantMessage,
+    ContentBlock, ContentInput, ExtractionError, HandlingMode, ImageData, Message,
+    OpenAiReplayPhase, OpenAiServerToolItemKind, OpenAiWebSearchCallEventKind, OutputSchema,
+    ProviderMeta, RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, ServerToolContent,
+    SessionId, StopReason, SystemMessage, SystemNoticeBlock, SystemNoticeDirection,
+    SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer, ToolCall, ToolCallIter, ToolCallView,
+    ToolDef, ToolIdentity, ToolName, ToolNameSet, ToolProvenance, ToolResult, ToolResultError,
+    ToolSourceId, ToolSourceKind, TranscriptSource, Usage, UserMessage, VideoData,
     assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
     has_video, is_supported_video_media_type, validate_inline_video_blocks,
 };
@@ -313,15 +317,15 @@ pub use web_search::*;
 // === Provider auth v2 (landed ahead of wiring — see
 // /Users/luka/.claude/plans/yes-make-a-plan-shimmying-bengio.md) ===
 pub use auth::{
-    AnthropicAuthMetadata, AnthropicRouteHints, AuthConstraints, AuthError, AuthErrorKind,
-    AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults, AuthRefreshReason,
-    AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata, GoogleRouteHints,
-    HttpAuthorizationRequest, HttpAuthorizer, OpenAiAuthMetadata, OpenAiRouteHints,
-    ProviderAuthMetadata, PublishedAuthStatus, ResolvedAuthEnvelope, ResolvedAuthKind,
-    TokenLifecycleClearError, clear_tokens_and_publish_lifecycle_released,
-    lease_snapshot_expires_at_datetime, mark_tokens_lifecycle_published,
-    mark_tokens_lifecycle_published_for_generation, mark_tokens_lifecycle_published_for_snapshot,
-    mark_tokens_lifecycle_published_for_transition,
+    AnthropicAuthMetadata, AnthropicRouteHints, AuthBackendKind, AuthConstraints, AuthError,
+    AuthErrorKind, AuthErrorSummary, AuthLease, AuthMetadata, AuthMetadataDefaults,
+    AuthRefreshReason, AuthRouteHints, AuthStatus, AuthStatusPhase, GoogleAuthMetadata,
+    GoogleRouteHints, HttpAuthorizationRequest, HttpAuthorizer, OAuthProviderIdentity,
+    OpenAiAuthMetadata, OpenAiRouteHints, PersistedAuthMode, ProviderAuthMetadata,
+    PublishedAuthStatus, ResolvedAuthEnvelope, ResolvedAuthKind, TokenLifecycleClearError,
+    clear_tokens_and_publish_lifecycle_released, lease_snapshot_expires_at_datetime,
+    mark_tokens_lifecycle_published, mark_tokens_lifecycle_published_for_generation,
+    mark_tokens_lifecycle_published_for_snapshot, mark_tokens_lifecycle_published_for_transition,
     oauth_status_projection_snapshot_from_newer_marker,
     persisted_auth_mode_uses_oauth_login_lifecycle, persisted_token_expires_at_epoch_secs,
     project_published_auth_status, publish_token_lifecycle_acquired,
@@ -339,7 +343,7 @@ pub use connection::{
     BindingId, BindingPolicy, ConnectionTargetError, CredentialSourceSpec, ExternalAuthResolverId,
     IdentityError, ProfileId, ProviderBinding, ProviderBindingConfig, ProviderBindingError,
     ProviderBindingSelection, RealmConfigSection, RealmConnectionSet, RealmId,
-    ResolvedConnectionTarget, resolve_auth_binding_candidates_for_provider,
-    resolve_auth_binding_or_default_for_provider, resolve_configured_provider_binding_for_provider,
-    resolve_realm_binding_target_for_provider,
+    ResolvedConnectionTarget, persisted_auth_mode_for_provider_auth_method,
+    resolve_auth_binding_candidates_for_provider, resolve_auth_binding_or_default_for_provider,
+    resolve_configured_provider_binding_for_provider, resolve_realm_binding_target_for_provider,
 };

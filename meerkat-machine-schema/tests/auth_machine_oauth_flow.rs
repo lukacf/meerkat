@@ -55,6 +55,50 @@ fn auth_machine_declares_oauth_flow_lifecycle_inputs() {
 }
 
 #[test]
+fn auth_machine_oauth_provider_membership_is_typed() {
+    let schema = dsl_auth_machine();
+    for field in [
+        "oauth_browser_flow_providers",
+        "oauth_device_flow_providers",
+    ] {
+        let state_field = schema
+            .state
+            .fields
+            .iter()
+            .find(|candidate| candidate.name.as_str() == field)
+            .unwrap_or_else(|| panic!("AuthMachine must declare state field `{field}`"));
+        let TypeRef::Map(_, value_ty) = &state_field.ty else {
+            panic!("`{field}` must be a map keyed by flow id");
+        };
+        let TypeRef::Enum(enum_id) = value_ty.as_ref() else {
+            panic!("`{field}` must store typed OAuth provider identity");
+        };
+        assert_eq!(enum_id.as_str(), "OAuthProviderIdentity");
+    }
+
+    for input in [
+        "AdmitOAuthBrowserFlow",
+        "VerifyOAuthBrowserFlow",
+        "ConsumeOAuthBrowserFlow",
+        "AdmitOAuthDeviceFlow",
+        "VerifyOAuthDeviceFlow",
+        "BeginOAuthDevicePoll",
+        "ConsumeOAuthDeviceFlow",
+    ] {
+        let field = schema
+            .inputs
+            .variant_named(input)
+            .unwrap_or_else(|_| panic!("AuthMachine must declare input `{input}`"))
+            .field_named("provider")
+            .unwrap_or_else(|_| panic!("`{input}` must carry provider"));
+        assert!(
+            matches!(&field.ty, TypeRef::Enum(enum_id) if enum_id.as_str() == "OAuthProviderIdentity"),
+            "`{input}.provider` must be typed OAuthProviderIdentity"
+        );
+    }
+}
+
+#[test]
 fn auth_machine_routes_oauth_flow_lifecycle_transitions() {
     let schema = dsl_auth_machine();
     let transition_prefixes = [

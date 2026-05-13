@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub mod archive;
+pub mod archive_path;
 pub mod digest;
 pub mod exec_bits;
 pub mod manifest;

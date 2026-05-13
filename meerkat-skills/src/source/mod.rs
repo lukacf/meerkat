@@ -17,7 +17,7 @@ pub(crate) mod remote;
 use meerkat_core::skills::{
     SkillArtifact, SkillArtifactContent, SkillCollection, SkillDescriptor, SkillDocument,
     SkillFilter, SkillIntrospectionEntry, SkillKey, SkillQuarantineDiagnostic, SkillSource,
-    SourceHealthSnapshot,
+    SourceHealthSnapshot, SourceUuid,
 };
 
 pub use composite::{CompositeSkillSource, NamedSource};
@@ -170,9 +170,9 @@ impl SkillSource for SourceNode {
     async fn invoke_function(
         &self,
         key: &SkillKey,
-        function_name: &str,
-        arguments: serde_json::Value,
-    ) -> Result<serde_json::Value, meerkat_core::skills::SkillError> {
+        function_name: &meerkat_core::skills::SkillFunctionName,
+        arguments: meerkat_core::ToolCallArguments,
+    ) -> Result<meerkat_core::skills::SkillFunctionResult, meerkat_core::skills::SkillError> {
         match self {
             Self::Embedded(source) => source.invoke_function(key, function_name, arguments).await,
             #[cfg(not(target_arch = "wasm32"))]
@@ -208,19 +208,19 @@ impl SkillSource for SourceNode {
     async fn load_from_source(
         &self,
         key: &SkillKey,
-        source_name: Option<&str>,
+        source_uuid: Option<&SourceUuid>,
     ) -> Result<SkillDocument, meerkat_core::skills::SkillError> {
         match self {
-            Self::Embedded(source) => source.load_from_source(key, source_name).await,
+            Self::Embedded(source) => source.load_from_source(key, source_uuid).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Filesystem(source) => source.load_from_source(key, source_name).await,
+            Self::Filesystem(source) => source.load_from_source(key, source_uuid).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::Git(source) => source.load_from_source(key, source_name).await,
-            Self::Memory(source) => source.load_from_source(key, source_name).await,
+            Self::Git(source) => source.load_from_source(key, source_uuid).await,
+            Self::Memory(source) => source.load_from_source(key, source_uuid).await,
             #[cfg(all(any(feature = "skills-http", test), not(target_arch = "wasm32")))]
-            Self::Http(source) => source.load_from_source(key, source_name).await,
+            Self::Http(source) => source.load_from_source(key, source_uuid).await,
             #[cfg(not(target_arch = "wasm32"))]
-            Self::External(source) => source.load_from_source(key, source_name).await,
+            Self::External(source) => source.load_from_source(key, source_uuid).await,
         }
     }
 }

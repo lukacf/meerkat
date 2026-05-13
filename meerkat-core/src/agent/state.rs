@@ -130,7 +130,7 @@ fn strip_provider_tool_defaults(params: &mut ProviderParamsOverride) {
 }
 
 fn inject_structured_output(
-    provider: &str,
+    provider: crate::Provider,
     params: &mut ProviderParamsOverride,
     output_schema: &crate::OutputSchema,
 ) {
@@ -139,7 +139,7 @@ fn inject_structured_output(
     };
 
     match provider {
-        "anthropic" => match params.provider_tag.take() {
+        crate::Provider::Anthropic => match params.provider_tag.take() {
             Some(ProviderTag::Anthropic(mut tag)) => {
                 tag.structured_output = Some(output_schema.clone());
                 params.provider_tag = Some(ProviderTag::Anthropic(tag));
@@ -153,7 +153,7 @@ fn inject_structured_output(
                 });
             }
         },
-        "gemini" | "google" => match params.provider_tag.take() {
+        crate::Provider::Gemini => match params.provider_tag.take() {
             Some(ProviderTag::Gemini(mut tag)) => {
                 tag.structured_output = Some(output_schema.clone());
                 params.provider_tag = Some(ProviderTag::Gemini(tag));
@@ -167,20 +167,22 @@ fn inject_structured_output(
                 });
             }
         },
-        _ => match params.provider_tag.take() {
-            Some(ProviderTag::OpenAi(mut tag)) => {
-                tag.structured_output = Some(output_schema.clone());
-                params.provider_tag = Some(ProviderTag::OpenAi(tag));
+        crate::Provider::OpenAI | crate::Provider::SelfHosted | crate::Provider::Other => {
+            match params.provider_tag.take() {
+                Some(ProviderTag::OpenAi(mut tag)) => {
+                    tag.structured_output = Some(output_schema.clone());
+                    params.provider_tag = Some(ProviderTag::OpenAi(tag));
+                }
+                other => {
+                    params.provider_tag = other.or_else(|| {
+                        Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                            structured_output: Some(output_schema.clone()),
+                            ..Default::default()
+                        }))
+                    });
+                }
             }
-            other => {
-                params.provider_tag = other.or_else(|| {
-                    Some(ProviderTag::OpenAi(OpenAiProviderTag {
-                        structured_output: Some(output_schema.clone()),
-                        ..Default::default()
-                    }))
-                });
-            }
-        },
+        }
     }
 }
 
@@ -558,10 +560,8 @@ where
                     session_id: self.session.id().clone(),
                     turn_number: Some(turn_count),
                     prompt_input: None,
-                    prompt: None,
                     error_report: None,
                     error_class: None,
-                    error: None,
                     llm_request: None,
                     llm_response: None,
                     tool_call: None,
@@ -1494,10 +1494,8 @@ where
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: Some(HookLlmRequest {
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
@@ -1656,10 +1654,8 @@ where
                         session_id: self.session.id().clone(),
                         turn_number: Some(turn_count),
                         prompt_input: None,
-                        prompt: None,
                         error_report: None,
                         error_class: None,
-                        error: None,
                         llm_request: None,
                         llm_response: Some(HookLlmResponse {
                             assistant_text: assistant_text.clone(),
@@ -1779,10 +1775,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: Some(HookToolCall {
@@ -1884,7 +1878,14 @@ where
                                 }) => {
                                     // Merge tool_use_id into args for external handler
                                     let mut merged_args =
-                                        callback_args.as_object().cloned().unwrap_or_default();
+                                        ToolCallArguments::from_value(callback_args)
+                                            .map_err(|error| {
+                                                tool_call_args_projection_error(
+                                                    &callback_tool,
+                                                    error,
+                                                )
+                                            })?
+                                            .to_object_map();
                                     merged_args.insert(
                                         "tool_use_id".to_string(),
                                         Value::String(tc.id.clone()),
@@ -1911,10 +1912,8 @@ where
                                         session_id: self.session.id().clone(),
                                         turn_number: Some(turn_count),
                                         prompt_input: None,
-                                        prompt: None,
                                         error_report: None,
                                         error_class: None,
-                                        error: None,
                                         llm_request: None,
                                         llm_response: None,
                                         tool_call: None,
@@ -1952,7 +1951,6 @@ where
                             emit_event!(AgentEvent::ToolExecutionCompleted {
                                 id: tc.id.clone(),
                                 name: tc.name.clone(),
-                                result: tool_result.text_content(),
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
                                 error: tool_result.error.clone(),
@@ -2563,7 +2561,6 @@ mod tests {
         ToolDef, ToolResult, Usage, UserMessage,
     };
     use async_trait::async_trait;
-    use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use tokio::sync::{Notify, mpsc};
 
@@ -2634,8 +2631,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -2798,9 +2795,11 @@ mod tests {
         fn invoke_function(
             &self,
             key: &SkillKey,
-            _function_name: &str,
-            _arguments: Value,
-        ) -> impl Future<Output = Result<Value, crate::skills::SkillError>> + Send {
+            _function_name: &crate::skills::SkillFunctionName,
+            _arguments: crate::ToolCallArguments,
+        ) -> impl Future<
+            Output = Result<crate::skills::SkillFunctionResult, crate::skills::SkillError>,
+        > + Send {
             let missing = key.clone();
             async move { Err(crate::skills::SkillError::NotFound { key: missing }) }
         }
@@ -2839,8 +2838,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "openai"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::OpenAI
         }
 
         fn model(&self) -> &'static str {
@@ -2893,8 +2892,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3008,8 +3007,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3619,8 +3618,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3671,8 +3670,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3744,8 +3743,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -3817,8 +3816,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5252,8 +5251,8 @@ mod tests {
             Ok(response)
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -5291,8 +5290,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6089,8 +6088,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6121,8 +6120,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6775,8 +6774,8 @@ mod tests {
             ))
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -6946,8 +6945,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7117,8 +7116,8 @@ mod tests {
             })
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {
@@ -7153,8 +7152,8 @@ mod tests {
             }
         }
 
-        fn provider(&self) -> &'static str {
-            "mock"
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
         }
 
         fn model(&self) -> &'static str {

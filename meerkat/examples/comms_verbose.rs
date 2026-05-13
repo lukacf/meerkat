@@ -140,7 +140,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                         }
                         LlmDoneOutcome::Error { error } => {
                             return Err(AgentError::llm(
-                                self.client.provider(),
+                                self.client.provider().as_str(),
                                 error.failure_reason(),
                                 error.to_string(),
                             ));
@@ -149,7 +149,7 @@ impl AgentLlmClient for LoggingLlmAdapter {
                 },
                 Err(e) => {
                     return Err(AgentError::llm(
-                        self.client.provider(),
+                        self.client.provider().as_str(),
                         e.failure_reason(),
                         e.to_string(),
                     ));
@@ -203,8 +203,8 @@ impl AgentLlmClient for LoggingLlmAdapter {
         Ok(LlmStreamResult::new(blocks, stop_reason, usage))
     }
 
-    fn provider(&self) -> &'static str {
-        "anthropic"
+    fn provider(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
     }
 
     fn model(&self) -> &str {

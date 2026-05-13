@@ -35,7 +35,7 @@ use tokio_with_wasm::alias::{
 };
 
 use crate::MobMcpState;
-use meerkat_core::comms::{CommsCommand, PeerId, PeerName, PeerRoute};
+use meerkat_core::comms::{CommsCommand, PeerId, PeerLifecycleKind, PeerName, PeerRoute};
 
 // ─── Tool name constants ─────────────────────────────────────────────────
 
@@ -153,17 +153,14 @@ impl AgentMobToolSurface {
             return false;
         };
         sender
-            .send(CommsCommand::PeerRequest {
+            .send(CommsCommand::PeerLifecycle {
                 to: route,
-                intent: "mob.peer_added".to_string(),
+                kind: PeerLifecycleKind::PeerAdded,
                 params: serde_json::json!({
                     "peer": peer,
                     "role": role,
                     "description": description,
                 }),
-                blocks: None,
-                handling_mode: meerkat_core::types::HandlingMode::Queue,
-                stream: meerkat_core::comms::InputStreamMode::None,
             })
             .await
             .is_ok()
@@ -2449,12 +2446,14 @@ mod tests {
             match cmd {
                 CommsCommand::PeerRequest {
                     to,
-                    intent,
-                    params,
+                    request,
                     blocks,
                     handling_mode: _,
                     stream: _,
                 } => {
+                    let (intent, params) = request
+                        .into_transport_parts()
+                        .map_err(|err| SendError::Validation(err.to_string()))?;
                     let trusted = self.trusted.read().await;
                     let peer_id = to.peer_id.as_str();
                     if !trusted.contains_key(&peer_id) {
@@ -2471,7 +2470,7 @@ mod tests {
                         from_route: Some(self.peer_id),
                         from: self.name.clone(),
                         content: InteractionContent::Request {
-                            intent,
+                            intent: intent.to_string(),
                             params,
                             blocks,
                         },
@@ -2484,6 +2483,36 @@ mod tests {
                         envelope_id: uuid::Uuid::new_v4(),
                         interaction_id: InteractionId(uuid::Uuid::new_v4()),
                         stream_reserved: false,
+                    })
+                }
+                CommsCommand::PeerLifecycle { to, kind, params } => {
+                    let trusted = self.trusted.read().await;
+                    let peer_id = to.peer_id.as_str();
+                    if !trusted.contains_key(&peer_id) {
+                        return Err(SendError::PeerNotFound(to.label()));
+                    }
+                    drop(trusted);
+                    let recipient = self
+                        .registry
+                        .get(&peer_id)
+                        .await
+                        .ok_or_else(|| SendError::PeerNotFound(to.label()))?;
+                    recipient.inbox.write().await.push(InboxInteraction {
+                        id: InteractionId(uuid::Uuid::new_v4()),
+                        from_route: Some(self.peer_id),
+                        from: self.name.clone(),
+                        content: InteractionContent::Request {
+                            intent: kind.to_string(),
+                            params,
+                            blocks: None,
+                        },
+                        rendered_text: String::new(),
+                        handling_mode: HandlingMode::Queue,
+                        render_metadata: None,
+                    });
+                    recipient.notify.notify_waiters();
+                    Ok(SendReceipt::PeerLifecycleSent {
+                        envelope_id: uuid::Uuid::new_v4(),
                     })
                 }
                 unsupported => Err(SendError::Unsupported(format!(

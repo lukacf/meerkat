@@ -75,6 +75,20 @@ fn response_status_to_dsl(
     }
 }
 
+fn request_class_for_intent(intent: &str) -> mm_dsl::PeerIngressRequestClass {
+    if intent == meerkat_core::SUPERVISOR_BRIDGE_INTENT {
+        mm_dsl::PeerIngressRequestClass::SupervisorBridge
+    } else if intent == meerkat_core::comms::PeerLifecycleKind::PeerAdded.as_str() {
+        mm_dsl::PeerIngressRequestClass::PeerAdded
+    } else if intent == meerkat_core::comms::PeerLifecycleKind::PeerRetired.as_str() {
+        mm_dsl::PeerIngressRequestClass::PeerRetired
+    } else if intent == meerkat_core::comms::PeerLifecycleKind::PeerUnwired.as_str() {
+        mm_dsl::PeerIngressRequestClass::PeerUnwired
+    } else {
+        mm_dsl::PeerIngressRequestClass::Other
+    }
+}
+
 fn lifecycle_peer_param(
     params: &serde_json::Value,
     context: &'static str,
@@ -127,11 +141,13 @@ fn terminality_from_dsl(
 
 fn external_envelope_signal(
     facts: &PeerIngressEnvelopeFacts,
+    state: &mm_dsl::MeerkatMachineState,
     context: &'static str,
 ) -> Result<mm_dsl::MeerkatMachineSignal, DslTransitionError> {
     let (
         envelope_kind,
-        request_intent,
+        request_class,
+        request_silent_override,
         lifecycle_kind,
         lifecycle_peer_param,
         response_status,
@@ -139,7 +155,8 @@ fn external_envelope_signal(
     ) = match &facts.kind {
         meerkat_core::PeerIngressEnvelopeKind::Message { .. } => (
             mm_dsl::PeerIngressEnvelopeClass::Message,
-            String::new(),
+            mm_dsl::PeerIngressRequestClass::Other,
+            false,
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
             None,
             mm_dsl::PeerIngressResponseStatus::Accepted,
@@ -147,7 +164,8 @@ fn external_envelope_signal(
         ),
         meerkat_core::PeerIngressEnvelopeKind::Request { intent, params } => (
             mm_dsl::PeerIngressEnvelopeClass::Request,
-            intent.clone(),
+            request_class_for_intent(intent),
+            state.silent_intent_overrides.contains(intent),
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
             lifecycle_peer_param(params, context)?,
             mm_dsl::PeerIngressResponseStatus::Accepted,
@@ -155,7 +173,8 @@ fn external_envelope_signal(
         ),
         meerkat_core::PeerIngressEnvelopeKind::Lifecycle { kind, params } => (
             mm_dsl::PeerIngressEnvelopeClass::Lifecycle,
-            String::new(),
+            mm_dsl::PeerIngressRequestClass::Other,
+            false,
             lifecycle_to_dsl(*kind),
             lifecycle_peer_param(params, context)?,
             mm_dsl::PeerIngressResponseStatus::Accepted,
@@ -167,7 +186,8 @@ fn external_envelope_signal(
             ..
         } => (
             mm_dsl::PeerIngressEnvelopeClass::Response,
-            String::new(),
+            mm_dsl::PeerIngressRequestClass::Other,
+            false,
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
             None,
             response_status_to_dsl(*status),
@@ -177,7 +197,8 @@ fn external_envelope_signal(
             in_reply_to: reply_to,
         } => (
             mm_dsl::PeerIngressEnvelopeClass::Ack,
-            String::new(),
+            mm_dsl::PeerIngressRequestClass::Other,
+            false,
             mm_dsl::PeerIngressLifecycleClass::PeerAdded,
             None,
             mm_dsl::PeerIngressResponseStatus::Accepted,
@@ -189,7 +210,8 @@ fn external_envelope_signal(
         item_id: facts.item_id.clone(),
         from_peer: facts.from_peer_id.as_str(),
         envelope_kind,
-        request_intent,
+        request_class,
+        request_silent_override,
         lifecycle_kind,
         lifecycle_peer_param,
         response_status,
@@ -301,8 +323,11 @@ impl PeerCommsHandle for RuntimePeerCommsHandle {
         facts: PeerIngressEnvelopeFacts,
     ) -> Result<PeerIngressAdmission, DslTransitionError> {
         let context = "PeerCommsHandle::classify_external_envelope";
-        let signal = external_envelope_signal(&facts, context)?;
-        let effects = self.dsl.apply_signal_with_effects(signal, context)?;
+        let effects = self
+            .dsl
+            .apply_signal_with_effects_from_state(context, |state| {
+                external_envelope_signal(&facts, state, context)
+            })?;
         let effect = classified_effect(effects, context)?;
         let classification = classification_from_effect(&effect);
         Ok(PeerIngressAdmission {

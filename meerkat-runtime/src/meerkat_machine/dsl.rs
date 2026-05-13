@@ -820,6 +820,17 @@ pub enum PeerIngressEnvelopeClass {
     Ack,
 }
 
+/// DSL-owned semantic request class for peer ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum PeerIngressRequestClass {
+    #[default]
+    Other,
+    SupervisorBridge,
+    PeerAdded,
+    PeerRetired,
+    PeerUnwired,
+}
+
 /// DSL-owned admitted ingress kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum PeerIngressAdmittedKind {
@@ -1598,6 +1609,19 @@ pub enum RuntimeNoticeKind {
     Stop,
     Exit,
     Recover,
+}
+
+/// Closed classifier for runtime events published through the runtime control
+/// plane. Mirrors the top-level `RuntimeEvent` variants used by the runtime
+/// shell when staging `PublishEvent` into the DSL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RuntimeEventKind {
+    #[default]
+    InputLifecycle,
+    RunLifecycle,
+    RuntimeStateChange,
+    Topology,
+    Projection,
 }
 
 /// Closed classifier for runtime-loop executor effects emitted as neutral DSL

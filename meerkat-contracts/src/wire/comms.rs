@@ -8,16 +8,16 @@
 //! `{ "session_id": "...", "kind": "<variant>", ... }`.
 
 pub use meerkat_core::comms::{
-    CommsCommandError, InputSource, InputStreamMode, PeerAddress, PeerCapabilitySet,
-    PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId, PeerLifecycleKind,
-    PeerName, PeerReachability, PeerReachabilityReason, PeerSendability, PeerTransport,
+    CommsChecksumTokenParams, CommsChecksumTokenResult, CommsChecksumTokenResultIntent,
+    CommsCommandError, CommsPeerRequestIntent, InputSource, InputStreamMode, PeerAddress,
+    PeerCapabilitySet, PeerDirectoryEntry, PeerDirectoryListing, PeerDirectorySource, PeerId,
+    PeerLifecycleKind, PeerName, PeerReachability, PeerReachabilityReason, PeerRequestPayload,
+    PeerResponsePayload, PeerSendability, PeerTransport,
 };
 pub use meerkat_core::interaction::ResponseStatus;
 pub use meerkat_core::types::HandlingMode;
 
-use super::supervisor_bridge::{
-    BridgeCommand, BridgePeerSpec, BridgeReply, SUPERVISOR_BRIDGE_INTENT,
-};
+use super::supervisor_bridge::{BridgeCommand, BridgePeerSpec, BridgeReply};
 use serde::{Deserialize, Serialize};
 
 /// Typed params for one-way peer lifecycle notifications.
@@ -45,55 +45,6 @@ impl CommsPeerLifecycleParams {
     }
 }
 
-/// Closed public request-intent contract for `peer_request`.
-///
-/// Unknown strings fail during deserialization and cannot fall through to a
-/// local match/default path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum CommsPeerRequestIntent {
-    #[serde(rename = "supervisor.bridge")]
-    SupervisorBridge,
-    #[serde(rename = "checksum_token")]
-    ChecksumToken,
-}
-
-impl CommsPeerRequestIntent {
-    pub const fn as_str(&self) -> &'static str {
-        match self {
-            Self::SupervisorBridge => SUPERVISOR_BRIDGE_INTENT,
-            Self::ChecksumToken => "checksum_token",
-        }
-    }
-}
-
-/// Typed params for the actionable checksum-token request used by peer
-/// request/response terminal-flow fixtures.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CommsChecksumTokenParams {
-    pub subject: String,
-}
-
-/// Closed discriminator carried in [`CommsChecksumTokenResult`].
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-pub enum CommsChecksumTokenResultIntent {
-    #[serde(rename = "checksum_token")]
-    ChecksumToken,
-}
-
-/// Typed result for a checksum-token peer response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[serde(deny_unknown_fields)]
-pub struct CommsChecksumTokenResult {
-    pub request_intent: CommsChecksumTokenResultIntent,
-    pub request_subject: String,
-    pub token: String,
-}
-
 /// Typed params for public `peer_request`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -117,10 +68,12 @@ impl CommsPeerRequestParams {
         )
     }
 
-    fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
+    fn into_core_payload(self) -> Result<PeerRequestPayload, serde_json::Error> {
         match self {
-            Self::SupervisorBridge(params) => serde_json::to_value(params),
-            Self::ChecksumToken(params) => serde_json::to_value(params),
+            Self::SupervisorBridge(params) => {
+                serde_json::to_value(params).map(PeerRequestPayload::SupervisorBridge)
+            }
+            Self::ChecksumToken(params) => Ok(PeerRequestPayload::ChecksumToken(params)),
         }
     }
 }
@@ -138,10 +91,12 @@ pub enum CommsPeerResponseResult {
 }
 
 impl CommsPeerResponseResult {
-    fn into_json_value(self) -> Result<serde_json::Value, serde_json::Error> {
+    fn into_core_payload(self) -> Result<PeerResponsePayload, serde_json::Error> {
         match self {
-            Self::SupervisorBridge(result) => serde_json::to_value(result),
-            Self::ChecksumToken(result) => serde_json::to_value(result),
+            Self::SupervisorBridge(result) => {
+                serde_json::to_value(result).map(PeerResponsePayload::SupervisorBridge)
+            }
+            Self::ChecksumToken(result) => Ok(PeerResponsePayload::ChecksumToken(result)),
         }
     }
 }
@@ -296,8 +251,7 @@ impl CommsCommandRequest {
                 }
                 meerkat_core::comms::CommsCommandRequest::PeerRequest {
                     to,
-                    intent: intent.as_str().to_string(),
-                    params: params.into_json_value().map_err(|source| {
+                    request: params.into_core_payload().map_err(|source| {
                         CommsCommandProjectionError::compatibility_json(
                             "peer_request.params",
                             source,
@@ -320,13 +274,13 @@ impl CommsCommandRequest {
                 in_reply_to,
                 status,
                 result: match result {
-                    Some(result) => result.into_json_value().map_err(|source| {
+                    Some(result) => Some(result.into_core_payload().map_err(|source| {
                         CommsCommandProjectionError::compatibility_json(
                             "peer_response.result",
                             source,
                         )
-                    })?,
-                    None => serde_json::Value::Null,
+                    })?),
+                    None => None,
                 },
                 blocks,
                 handling_mode,
@@ -717,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn public_peer_request_projects_typed_intent_and_params_to_core() {
+    fn public_peer_request_projects_typed_payload_to_core() {
         let params = serde_json::from_value::<CommsSendParams>(json!({
             "session_id": "sid_1",
             "kind": "peer_request",
@@ -736,8 +690,7 @@ mod tests {
             .expect("typed comms request should project to core command");
 
         let meerkat_core::comms::CommsCommand::PeerRequest {
-            intent,
-            params,
+            request,
             handling_mode,
             stream,
             ..
@@ -746,7 +699,9 @@ mod tests {
             panic!("expected core peer request");
         };
 
-        assert_eq!(intent, SUPERVISOR_BRIDGE_INTENT);
+        let meerkat_core::comms::PeerRequestPayload::SupervisorBridge(params) = request else {
+            panic!("expected supervisor bridge core payload");
+        };
         assert_eq!(params["command"], "observe_member");
         assert_eq!(handling_mode, HandlingMode::Queue);
         assert_eq!(stream, InputStreamMode::ReserveInteraction);
@@ -774,8 +729,7 @@ mod tests {
             .expect("typed checksum token request should project to core command");
 
         let meerkat_core::comms::CommsCommand::PeerRequest {
-            intent,
-            params,
+            request,
             handling_mode,
             stream,
             ..
@@ -784,8 +738,10 @@ mod tests {
             panic!("expected core peer request");
         };
 
-        assert_eq!(intent, "checksum_token");
-        assert_eq!(params["subject"], "alpha beta gamma");
+        let meerkat_core::comms::PeerRequestPayload::ChecksumToken(params) = request else {
+            panic!("expected checksum token core payload");
+        };
+        assert_eq!(params.subject, "alpha beta gamma");
         assert_eq!(handling_mode, HandlingMode::Steer);
         assert_eq!(stream, InputStreamMode::ReserveInteraction);
     }
@@ -838,6 +794,10 @@ mod tests {
             panic!("expected core peer response");
         };
 
+        let Some(meerkat_core::comms::PeerResponsePayload::SupervisorBridge(result)) = result
+        else {
+            panic!("expected supervisor bridge response payload");
+        };
         assert_eq!(result["result"], "ack");
         assert_eq!(result["ok"], true);
     }
@@ -868,9 +828,15 @@ mod tests {
             panic!("expected core peer response");
         };
 
-        assert_eq!(result["request_intent"], "checksum_token");
-        assert_eq!(result["request_subject"], "alpha beta gamma");
-        assert_eq!(result["token"], "birch seventeen");
+        let Some(meerkat_core::comms::PeerResponsePayload::ChecksumToken(result)) = result else {
+            panic!("expected checksum token response payload");
+        };
+        assert_eq!(
+            result.request_intent,
+            CommsChecksumTokenResultIntent::ChecksumToken
+        );
+        assert_eq!(result.request_subject, "alpha beta gamma");
+        assert_eq!(result.token, "birch seventeen");
     }
 
     #[test]

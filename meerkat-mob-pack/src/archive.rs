@@ -1,6 +1,7 @@
+use crate::archive_path::{MobpackArchivePath, MobpackArchiveSection};
 use crate::manifest::MobpackManifest;
 use crate::pack::{ValidatedPackFiles, validate_extracted_pack_files};
-use crate::targz::{extract_targz_safe, normalize_for_archive};
+use crate::targz::extract_targz_safe;
 use crate::validate::PackValidationError;
 use meerkat_mob::MobDefinition;
 use std::collections::BTreeMap;
@@ -53,14 +54,24 @@ impl MobpackArchive {
         let mut mcp = BTreeMap::new();
         let mut config = BTreeMap::new();
         for (path, bytes) in files {
-            if path.starts_with("skills/") {
-                skills.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("hooks/") {
-                hooks.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("mcp/") {
-                mcp.insert(path.clone(), bytes.clone());
-            } else if path.starts_with("config/") {
-                config.insert(path.clone(), bytes.clone());
+            let archive_path = MobpackArchivePath::from_normalized(path.clone());
+            match archive_path.section() {
+                MobpackArchiveSection::Skills => {
+                    skills.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Hooks => {
+                    hooks.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Mcp => {
+                    mcp.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Config => {
+                    config.insert(archive_path.into_string(), bytes.clone());
+                }
+                MobpackArchiveSection::Manifest
+                | MobpackArchiveSection::Definition
+                | MobpackArchiveSection::Signature
+                | MobpackArchiveSection::Other => {}
             }
         }
 
@@ -85,13 +96,13 @@ impl MobpackArchive {
             for skill_path in &profile.skills {
                 let profile_name = profile_name.as_str();
                 let skill_path = skill_path.as_str();
-                let normalized = normalize_for_archive(skill_path).map_err(|err| {
-                    PackValidationError::InvalidSkillPath {
+                let normalized = MobpackArchivePath::parse(skill_path)
+                    .map_err(|err| PackValidationError::InvalidSkillPath {
                         skill_name: profile_name.to_string(),
                         path: skill_path.to_string(),
                         reason: err.to_string(),
-                    }
-                })?;
+                    })?
+                    .into_string();
                 if normalized != skill_path {
                     return Err(PackValidationError::InvalidSkillPath {
                         skill_name: profile_name.to_string(),
@@ -169,7 +180,10 @@ mod tests {
                 "manifest.toml".to_string(),
                 b"[mobpack]\nname = \"fixture\"\nversion = \"1.0.0\"\n".to_vec(),
             ),
-            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#.to_vec(),
+            ),
             ("skills/review.md".to_string(), b"review".to_vec()),
             ("hooks/run.sh".to_string(), b"#!/bin/sh\necho hi\n".to_vec()),
             ("mcp/server.toml".to_string(), b"name='s'".to_vec()),
@@ -225,7 +239,7 @@ skills = ["skills/review.md"]
     }
 
     #[test]
-    fn test_manifest_profile_skill_texts_reject_missing_selector() {
+    fn test_archive_reader_rejects_manifest_missing_skill_file() {
         let files = BTreeMap::from([
             (
                 "manifest.toml".to_string(),
@@ -251,7 +265,7 @@ skills = ["skills/missing.md"]
             err,
             PackValidationError::InvalidManifestField { field, reason }
                 if field == "profiles.worker.skills[0]"
-                    && reason.contains("skill file 'skills/missing.md' missing from archive")
+                    && reason == "skill file 'skills/missing.md' missing from archive"
         ));
     }
 

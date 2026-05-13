@@ -38,6 +38,8 @@ import type {
   MobMemberSnapshot,
   MobHelperResult,
   FlowStatus,
+  OAuthProviderIdentity,
+  PersistedAuthMode,
   WireAuthMethod,
   WireAuthProvider,
   WireBackendKind,
@@ -114,7 +116,7 @@ const authDelete: Promise<AuthCredentialsCleared> = auth.deleteProfile(
   'openai',
 );
 const authLoginStart: Promise<OAuthLoginStart> = auth.loginStart({
-  provider: 'openai',
+  provider: 'open_ai_chat_gpt',
   redirect_uri: 'http://localhost:1455/callback',
   realm_id: 'default',
   binding_id: 'openai',
@@ -127,7 +129,7 @@ auth.loginStart({
   binding_id: 'openai',
 });
 const authLogin: Promise<AuthLoginReady> = auth.loginComplete({
-  provider: 'openai',
+  provider: 'open_ai_chat_gpt',
   code: 'oauth-code',
   state: 'oauth-state',
   redirect_uri: 'http://localhost:1455/callback',
@@ -169,16 +171,22 @@ const authStatusBody: AuthStatus = {
   has_refresh_token: false,
 };
 const validAuthProvider: WireAuthProvider = 'openai';
+const validOAuthProviderIdentity: OAuthProviderIdentity = 'open_ai_chat_gpt';
 const validBackendKind: WireBackendKind = 'chatgpt_backend';
 const validAuthMethod: WireAuthMethod = 'managed_chatgpt_oauth';
+const validPersistedAuthMode: PersistedAuthMode = 'chatgpt_oauth';
 const validSourceKind: WireCredentialSourceKind = 'external_resolver';
 const validAuthStatusState: WireAuthStatusState = 'reauth_required';
 // @ts-expect-error unknown providers are not behavior-driving Web auth truth.
 const rejectedAuthProvider: WireAuthProvider = 'future_provider';
+// @ts-expect-error OAuth provider identity is not the broad provider family.
+const rejectedOAuthProviderIdentity: OAuthProviderIdentity = 'openai';
 // @ts-expect-error unknown backend kinds are not behavior-driving Web auth truth.
 const rejectedBackendKind: WireBackendKind = 'future_backend';
 // @ts-expect-error unknown auth methods are not behavior-driving Web auth truth.
 const rejectedAuthMethod: WireAuthMethod = 'future_auth_method';
+// @ts-expect-error unknown persisted auth modes are not behavior-driving Web auth truth.
+const rejectedPersistedAuthMode: PersistedAuthMode = 'future_auth_mode';
 // @ts-expect-error unknown source kinds are not behavior-driving Web auth truth.
 const rejectedSourceKind: WireCredentialSourceKind = 'browser_local_storage';
 // @ts-expect-error unknown status states are not behavior-driving Web auth truth.
@@ -352,7 +360,7 @@ function handleEvent(event: AgentEvent): string {
     case 'text_complete':
       return event.content;
     case 'server_tool_content':
-      return `${event.name}:${event.id ?? ''}`;
+      return `${event.content.kind}:${event.id ?? ''}`;
     case 'assistant_image_appended':
       return event.image.image_id;
     case 'tool_call_requested':
@@ -370,9 +378,9 @@ function handleEvent(event: AgentEvent): string {
     case 'extraction_failed':
       return `${event.session_id}:${event.attempts}:${event.reason}`;
     case 'run_failed':
-      return event.error;
+      return event.error_report?.message ?? event.error_class;
     case 'server_tool_content':
-      return `${event.name}:${String(event.content)}`;
+      return `${event.id ?? ''}:${event.content.kind}`;
     case 'assistant_image_appended':
       return event.image.meta.provider;
     case 'tool_execution_started':
@@ -394,7 +402,7 @@ function handleEvent(event: AgentEvent): string {
     case 'skills_resolved':
       return `${event.skills.length}`;
     case 'skill_resolution_failed':
-      return event.reference ?? '';
+      return event.reason.reason_type;
     case 'interaction_complete':
       return event.result;
     case 'interaction_callback_pending':
@@ -426,11 +434,11 @@ const backgroundJobWithoutLegacyStatus: AgentEvent = {
   detail: 'exit_code: 1',
 };
 
-// @ts-expect-error terminal_status is required; status is only a legacy display mirror.
 const backgroundJobStringOnly: AgentEvent = {
   type: 'background_job_completed',
   job_id: 'j_123',
   display_name: 'sleep 2',
+  // @ts-expect-error status is not a semantic AgentEvent field.
   status: 'completed',
   detail: 'exit_code: 0',
 };
@@ -459,6 +467,11 @@ const myTool: ToolCallback = async (args: string) => {
   const parsed = JSON.parse(args) as { input: string };
   return { content: parsed.input.toUpperCase(), is_error: false };
 };
+const multimodalTool: ToolCallback = async (_args: string) => ({
+  content: [{ type: 'text', text: 'typed block result' }],
+  is_error: false,
+});
+void multimodalTool;
 
 const typedTurnResult: TurnResult = {
   text: 'done',

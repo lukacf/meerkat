@@ -13,11 +13,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `refresh_attempt`: `u64`
 - `credential_present`: `Bool`
 - `oauth_browser_flow_ids`: `Set<String>`
-- `oauth_browser_flow_providers`: `Map<String, String>`
+- `oauth_browser_flow_providers`: `Map<String, OAuthProviderIdentity>`
 - `oauth_browser_flow_redirect_uris`: `Map<String, String>`
 - `oauth_browser_flow_expires_at_millis`: `Map<String, u64>`
 - `oauth_device_flow_ids`: `Set<String>`
-- `oauth_device_flow_providers`: `Map<String, String>`
+- `oauth_device_flow_providers`: `Map<String, OAuthProviderIdentity>`
 - `oauth_device_flow_expires_at_millis`: `Map<String, u64>`
 - `oauth_device_poll_ids`: `Set<String>`
 - `oauth_outstanding_flow_count`: `u64`
@@ -32,15 +32,15 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `MarkReauthRequired`
 - `ClearCredentialLifecycle`
 - `Release`
-- `AdmitOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64)
-- `VerifyOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
-- `ConsumeOAuthBrowserFlow`(flow_id: String, provider: String, redirect_uri: String, now_millis: u64)
+- `AdmitOAuthBrowserFlow`(flow_id: String, provider: OAuthProviderIdentity, redirect_uri: String, expires_at_millis: u64, max_outstanding_flows: u64)
+- `VerifyOAuthBrowserFlow`(flow_id: String, provider: OAuthProviderIdentity, redirect_uri: String, now_millis: u64)
+- `ConsumeOAuthBrowserFlow`(flow_id: String, provider: OAuthProviderIdentity, redirect_uri: String, now_millis: u64)
 - `ExpireOAuthBrowserFlow`(flow_id: String)
-- `AdmitOAuthDeviceFlow`(flow_id: String, provider: String, expires_at_millis: u64, max_outstanding_flows: u64)
-- `VerifyOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
-- `BeginOAuthDevicePoll`(flow_id: String, provider: String, now_millis: u64)
+- `AdmitOAuthDeviceFlow`(flow_id: String, provider: OAuthProviderIdentity, expires_at_millis: u64, max_outstanding_flows: u64)
+- `VerifyOAuthDeviceFlow`(flow_id: String, provider: OAuthProviderIdentity, now_millis: u64)
+- `BeginOAuthDevicePoll`(flow_id: String, provider: OAuthProviderIdentity, now_millis: u64)
 - `FinishOAuthDevicePoll`(flow_id: String)
-- `ConsumeOAuthDeviceFlow`(flow_id: String, provider: String, now_millis: u64)
+- `ConsumeOAuthDeviceFlow`(flow_id: String, provider: OAuthProviderIdentity, now_millis: u64)
 - `ExpireOAuthDeviceFlow`(flow_id: String)
 
 ## Signals

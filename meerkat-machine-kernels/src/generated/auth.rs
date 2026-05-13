@@ -74,6 +74,64 @@ impl std::fmt::Display for AuthLifecyclePhase {
         f.write_str(self.as_str())
     }
 }
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum OAuthProviderIdentity {
+    #[default]
+    #[serde(rename = "AnthropicClaudeAi")]
+    AnthropicClaudeAi,
+    #[serde(rename = "AnthropicConsoleApiKey")]
+    AnthropicConsoleApiKey,
+    #[serde(rename = "OpenAiChatGpt")]
+    OpenAiChatGpt,
+    #[serde(rename = "GoogleCodeAssist")]
+    GoogleCodeAssist,
+}
+impl OAuthProviderIdentity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AnthropicClaudeAi => "AnthropicClaudeAi",
+            Self::AnthropicConsoleApiKey => "AnthropicConsoleApiKey",
+            Self::OpenAiChatGpt => "OpenAiChatGpt",
+            Self::GoogleCodeAssist => "GoogleCodeAssist",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for OAuthProviderIdentity {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AnthropicClaudeAi" => Ok(Self::AnthropicClaudeAi),
+            "AnthropicConsoleApiKey" => Ok(Self::AnthropicConsoleApiKey),
+            "OpenAiChatGpt" => Ok(Self::OpenAiChatGpt),
+            "GoogleCodeAssist" => Ok(Self::GoogleCodeAssist),
+            other => Err(format!("invalid OAuthProviderIdentity value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for OAuthProviderIdentity {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for OAuthProviderIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 pub trait Context {}
 pub struct EmptyContext;
@@ -97,11 +155,11 @@ pub struct State {
     pub refresh_attempt: u64,
     pub credential_present: bool,
     pub oauth_browser_flow_ids: std::collections::BTreeSet<String>,
-    pub oauth_browser_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_browser_flow_providers: std::collections::BTreeMap<String, OAuthProviderIdentity>,
     pub oauth_browser_flow_redirect_uris: std::collections::BTreeMap<String, String>,
     pub oauth_browser_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
     pub oauth_device_flow_ids: std::collections::BTreeSet<String>,
-    pub oauth_device_flow_providers: std::collections::BTreeMap<String, String>,
+    pub oauth_device_flow_providers: std::collections::BTreeMap<String, OAuthProviderIdentity>,
     pub oauth_device_flow_expires_at_millis: std::collections::BTreeMap<String, u64>,
     pub oauth_device_poll_ids: std::collections::BTreeSet<String>,
     pub oauth_outstanding_flow_count: u64,
@@ -141,7 +199,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthBrowserFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub redirect_uri: String,
         pub expires_at_millis: u64,
         pub max_outstanding_flows: u64,
@@ -149,14 +207,14 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthBrowserFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub redirect_uri: String,
         pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConsumeOAuthBrowserFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub redirect_uri: String,
         pub now_millis: u64,
     }
@@ -167,20 +225,20 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmitOAuthDeviceFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub expires_at_millis: u64,
         pub max_outstanding_flows: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct VerifyOAuthDeviceFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct BeginOAuthDevicePoll {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -190,7 +248,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ConsumeOAuthDeviceFlow {
         pub flow_id: String,
-        pub provider: String,
+        pub provider: OAuthProviderIdentity,
         pub now_millis: u64,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

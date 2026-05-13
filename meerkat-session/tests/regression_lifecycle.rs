@@ -80,7 +80,6 @@ impl SessionAgent for MockAgent {
                 .send(AgentEvent::RunFailed {
                     session_id: self.session_id.clone(),
                     error_class: meerkat_core::event::AgentErrorClass::Internal,
-                    error: "simulated failure".to_string(),
                     error_report: None,
                     terminal_cause_kind: None,
                 })

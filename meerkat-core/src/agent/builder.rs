@@ -3,6 +3,7 @@
 use crate::budget::{Budget, BudgetLimits};
 use crate::config::{AgentConfig, CallTimeoutOverride, HookRunOverrides};
 use crate::hooks::HookEngine;
+use crate::lifecycle::run_primitive::ProviderParamsOverride;
 use crate::model_defaults::ModelOperationalDefaultsResolver;
 use crate::ops::ConcurrencyLimits;
 #[cfg(not(target_arch = "wasm32"))]
@@ -19,7 +20,6 @@ use crate::tool_scope::{
     ToolVisibilityOwner, validate_inherited_filter_witnesses,
 };
 use crate::types::{Message, OutputSchema};
-use serde_json::Value;
 #[cfg(meerkat_internal_agent_factory_build)]
 use std::any::Any;
 #[cfg(meerkat_internal_agent_factory_build)]
@@ -256,14 +256,14 @@ impl AgentBuilder {
         self
     }
 
-    /// Set provider-specific parameters
-    pub fn provider_params(mut self, params: Value) -> Self {
+    /// Set typed provider-specific request parameters.
+    pub fn provider_params(mut self, params: ProviderParamsOverride) -> Self {
         self.config.provider_params = Some(params);
         self
     }
 
     /// Set provider-native tool defaults (resolved at build time, not persisted).
-    pub fn provider_tool_defaults(mut self, defaults: Value) -> Self {
+    pub fn provider_tool_defaults(mut self, defaults: ProviderParamsOverride) -> Self {
         self.config.provider_tool_defaults = Some(defaults);
         self
     }

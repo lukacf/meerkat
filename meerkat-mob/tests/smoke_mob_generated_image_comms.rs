@@ -152,7 +152,7 @@ async fn spawn_generated_image_comms_members(
                     "When asked to run the generated-image comms smoke, use tools, not prose. \
                      If a user says 'Turn 1', your only valid action is one generate_image tool call. \
                      If a user says 'Turn 2', do not generate a new image; send the prior generated blob. \
-                     Generate images with provider gemini and model gemini-3.1-flash-image-preview. \
+                     Generate images with request.target={\"target\":\"model\",\"provider\":\"gemini\",\"model\":\"gemini-3.1-flash-image-preview\"}. \
                      When sending a generated image through comms, use the comms tool's blob-backed image_ref block support."
                         .to_string(),
                 ]),
@@ -169,8 +169,7 @@ async fn spawn_generated_image_comms_members(
                 ))
                 .with_additional_instructions(vec![
                     "You are reviewer. When maker sends a checksum_token request about image_receipt_check that includes an image, \
-                     generate a tiny receipt image with generate_image using provider gemini and model \
-                     gemini-3.1-flash-image-preview, then call send_response to maker. Complete the checksum_token request \
+                     generate a tiny receipt image with generate_image using request.target={\"target\":\"model\",\"provider\":\"gemini\",\"model\":\"gemini-3.1-flash-image-preview\"}, then call send_response to maker. Complete the checksum_token request \
                      with token generated-image-response-ok and include your generated receipt image using the comms tool's \
                      blob-backed image_ref block support. \
                      Do not answer with prose only. Do not send any peer message until maker sends you a request."
@@ -541,10 +540,12 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
             ContentInput::Text(
                 "Turn 1 of the generated-image comms smoke. \
                  You MUST call the generate_image tool exactly once now. \
-                 Use request provider gemini, model gemini-3.1-flash-image-preview, \
-                 prompt 'a simple cyan square with a small magenta dot, no text', size square1024, \
-                 quality low, format png, count 1. After the tool returns, stop. Do not call send_request, \
-                 send_message, or send_response in this turn. Do not answer with prose instead of the tool call."
+                 Pass request.target={\"target\":\"model\",\"provider\":\"gemini\",\"model\":\"gemini-3.1-flash-image-preview\"}, \
+                 request.intent=\"generate\", request.prompt=\"a simple cyan square with a small magenta dot, no text\", \
+                 request.size=\"1024x1024\", request.quality=\"low\", request.format=\"png\", request.count=1. \
+                 After the tool returns, reply exactly \
+                 MAKER-GENERATED-IMAGE-TURN1-DONE. Do not call send_request, \
+                 send_message, or send_response in this turn. Do not answer with prose before the tool call."
                     .to_string(),
             ),
             HandlingMode::Queue,

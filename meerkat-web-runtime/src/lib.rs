@@ -69,8 +69,7 @@ pub mod external_auth;
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
-use std::io::Read;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -146,15 +145,6 @@ const SKILL_SEPARATOR: &str = "\n\n---\n\n";
 const MAX_SESSIONS: usize = 100_000;
 
 // ═══════════════════════════════════════════════════════════
-// Mobpack Types
-// ═══════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-struct MobDefinitionHeader {
-    id: String,
-}
-
-// ═══════════════════════════════════════════════════════════
 // Session Config (from JavaScript)
 // ═══════════════════════════════════════════════════════════
 
@@ -203,7 +193,7 @@ struct Credentials {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -212,14 +202,6 @@ struct Credentials {
     openai_base_url: Option<String>,
     #[serde(default)]
     gemini_base_url: Option<String>,
-}
-
-fn default_model() -> Option<String> {
-    Some(
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string(),
-    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -231,7 +213,7 @@ struct RuntimeConfig {
     openai_api_key: Option<String>,
     #[serde(default)]
     gemini_api_key: Option<String>,
-    #[serde(default = "default_model")]
+    #[serde(default)]
     model: Option<String>,
     /// Per-provider base URLs. Unset providers default to the upstream vendor URL.
     #[serde(default)]
@@ -242,6 +224,14 @@ struct RuntimeConfig {
     gemini_base_url: Option<String>,
     #[serde(default = "default_max_sessions")]
     max_sessions: usize,
+}
+
+fn bootstrap_config_with_model_override(model: Option<String>) -> Config {
+    let mut config = Config::default();
+    if let Some(model) = model {
+        config.agent.model = model;
+    }
+    config
 }
 
 fn default_max_sessions() -> usize {
@@ -284,37 +274,45 @@ struct RuntimeState {
 /// Populate `config.realm["default"]` with InlineSecret-backed bindings
 /// for each provider in `api_keys`. Plan §6.10 replacement for the
 /// deleted shared settings write path (plan §6.10).
-/// The first provider becomes the default binding; per-provider base
-/// URLs, when provided via `base_urls`, are applied to the matching
-/// backend profile.
+/// The default binding follows the registry-resolved model provider (or the
+/// only configured provider when unambiguous); per-provider base URLs, when
+/// provided via `base_urls`, are applied to the matching backend profile.
 fn populate_realm_from_api_keys(
     config: &mut meerkat_core::Config,
-    api_keys: &HashMap<String, String>,
-    base_urls: Option<&HashMap<String, String>>,
+    api_keys: &BTreeMap<meerkat_core::Provider, String>,
+    base_urls: Option<&BTreeMap<meerkat_core::Provider, String>>,
+    default_provider: Option<meerkat_core::Provider>,
 ) {
-    let mut entries: Vec<(&str, &str)> = api_keys
-        .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
-        .collect();
-    // Deterministic order: anthropic first (historical default), then
-    // openai, gemini, everything else alphabetically.
-    entries.sort_by_key(|(k, _)| match *k {
-        "anthropic" => 0,
-        "openai" => 1,
-        "gemini" | "google" => 2,
-        _ => 3,
-    });
+    let entries: Vec<(meerkat_core::Provider, &str)> = [
+        meerkat_core::Provider::Anthropic,
+        meerkat_core::Provider::OpenAI,
+        meerkat_core::Provider::Gemini,
+    ]
+    .into_iter()
+    .filter_map(|provider| api_keys.get(&provider).map(|key| (provider, key.as_str())))
+    .collect();
 
-    let mut section = meerkat_core::RealmConfigSection::from_inline_api_keys(&entries);
+    let mut section =
+        meerkat_core::RealmConfigSection::from_inline_provider_api_keys(&entries, default_provider);
     if let Some(urls) = base_urls {
         for (provider, url) in urls {
-            let id = format!("default_{provider}");
+            let id = format!("default_{}", provider.as_str());
             if let Some(bp) = section.backend.get_mut(&id) {
                 bp.base_url = Some(url.clone());
             }
         }
     }
     config.realm.insert("default".to_string(), section);
+}
+
+fn default_binding_provider_for_model(
+    config: &meerkat_core::Config,
+    model: &str,
+) -> Result<Option<meerkat_core::Provider>, JsValue> {
+    let registry = config
+        .model_registry()
+        .map_err(|e| err_str("invalid_model_registry", e))?;
+    Ok(registry.entry(model).map(|entry| entry.provider))
 }
 
 /// Resolve per-provider API keys into a map consumed by
@@ -327,7 +325,7 @@ fn build_provider_api_keys(
     anthropic_api_key: Option<&str>,
     openai_api_key: Option<&str>,
     gemini_api_key: Option<&str>,
-) -> Result<HashMap<String, String>, JsValue> {
+) -> Result<BTreeMap<meerkat_core::Provider, String>, JsValue> {
     // Treat blank keys as absent so misconfigured init fails fast.
     fn non_blank(s: Option<&str>) -> Option<&str> {
         match s {
@@ -336,15 +334,15 @@ fn build_provider_api_keys(
         }
     }
 
-    let mut keys = HashMap::new();
+    let mut keys = BTreeMap::new();
     if let Some(k) = non_blank(anthropic_api_key) {
-        keys.insert("anthropic".into(), k.to_string());
+        keys.insert(meerkat_core::Provider::Anthropic, k.to_string());
     }
     if let Some(k) = non_blank(openai_api_key) {
-        keys.insert("openai".into(), k.to_string());
+        keys.insert(meerkat_core::Provider::OpenAI, k.to_string());
     }
     if let Some(k) = non_blank(gemini_api_key) {
-        keys.insert("gemini".into(), k.to_string());
+        keys.insert(meerkat_core::Provider::Gemini, k.to_string());
     }
     if keys.is_empty() {
         return Err(err_js(
@@ -364,7 +362,7 @@ fn build_provider_base_urls(
     anthropic_base_url: Option<&str>,
     openai_base_url: Option<&str>,
     gemini_base_url: Option<&str>,
-) -> Option<HashMap<String, String>> {
+) -> Option<BTreeMap<meerkat_core::Provider, String>> {
     fn non_blank(s: Option<&str>) -> Option<&str> {
         match s {
             Some(v) if !v.trim().is_empty() => Some(v),
@@ -372,15 +370,15 @@ fn build_provider_base_urls(
         }
     }
 
-    let mut urls = HashMap::new();
+    let mut urls = BTreeMap::new();
     if let Some(url) = non_blank(anthropic_base_url) {
-        urls.insert("anthropic".into(), url.to_string());
+        urls.insert(meerkat_core::Provider::Anthropic, url.to_string());
     }
     if let Some(url) = non_blank(openai_base_url) {
-        urls.insert("openai".into(), url.to_string());
+        urls.insert(meerkat_core::Provider::OpenAI, url.to_string());
     }
     if let Some(url) = non_blank(gemini_base_url) {
-        urls.insert("gemini".into(), url.to_string());
+        urls.insert(meerkat_core::Provider::Gemini, url.to_string());
     }
     if urls.is_empty() { None } else { Some(urls) }
 }
@@ -640,32 +638,17 @@ async fn resolve_mob_member_bridge_session_id(
 #[derive(Debug)]
 struct ParsedMobpack {
     manifest: meerkat_mob_pack::manifest::MobpackManifest,
-    definition: MobDefinitionHeader,
+    definition: MobDefinition,
     skills: BTreeMap<String, String>,
 }
 
 fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
-    let files =
-        extract_targz_safe(bytes).map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+    let files = meerkat_mob_pack::targz::extract_targz_safe(bytes)
+        .map_err(|e| format!("failed to parse mobpack archive: {e}"))?;
+    let archive = meerkat_mob_pack::archive::MobpackArchive::from_extracted_files(&files)
+        .map_err(|e| format!("invalid mobpack: {e}"))?;
 
-    let manifest_text = std::str::from_utf8(
-        files
-            .get("manifest.toml")
-            .ok_or_else(|| "manifest.toml is missing".to_string())?,
-    )
-    .map_err(|e| format!("manifest.toml is not valid UTF-8: {e}"))?;
-
-    let manifest: meerkat_mob_pack::manifest::MobpackManifest =
-        toml::from_str(manifest_text).map_err(|e| format!("invalid manifest.toml: {e}"))?;
-
-    let definition: MobDefinitionHeader = serde_json::from_slice(
-        files
-            .get("definition.json")
-            .ok_or_else(|| "definition.json is missing".to_string())?,
-    )
-    .map_err(|e| format!("invalid definition.json: {e}"))?;
-
-    if let Some(requires) = &manifest.requires {
+    if let Some(requires) = &archive.manifest.requires {
         for capability in requires.typed_capabilities() {
             if meerkat_contracts::capability::browser_mobpack_capability_decision(capability)
                 .is_forbidden()
@@ -679,7 +662,7 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     }
 
     let mut skills = BTreeMap::new();
-    for (path, content) in &files {
+    for (path, content) in &archive.skills {
         if let Some(name) = path.strip_prefix("skills/") {
             let text = std::str::from_utf8(content)
                 .map_err(|e| format!("skill file '{path}' is not valid UTF-8: {e}"))?;
@@ -692,8 +675,8 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
     }
 
     Ok(ParsedMobpack {
-        manifest,
-        definition,
+        manifest: archive.manifest,
+        definition: archive.definition,
         skills,
     })
 }
@@ -722,69 +705,6 @@ fn compile_system_prompt(
     } else {
         joined
     }
-}
-
-// ═══════════════════════════════════════════════════════════
-// Archive Extraction
-// ═══════════════════════════════════════════════════════════
-
-fn extract_targz_safe(bytes: &[u8]) -> Result<BTreeMap<String, Vec<u8>>, String> {
-    let cursor = std::io::Cursor::new(bytes);
-    let decoder = flate2::read::GzDecoder::new(cursor);
-    let mut archive = tar::Archive::new(decoder);
-    let mut files = BTreeMap::new();
-    let entries = archive
-        .entries()
-        .map_err(|e| format!("failed to read archive entries: {e}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|e| format!("failed reading archive entry: {e}"))?;
-        let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
-            return Err("archive contains unsupported entry type".to_string());
-        }
-        let path = entry
-            .path()
-            .map_err(|e| format!("invalid archive path: {e}"))?;
-        if !kind.is_file() {
-            continue;
-        }
-        let normalized = normalize_for_archive(path.to_string_lossy().as_ref())?;
-        let mut contents = Vec::new();
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|e| format!("failed reading archive file '{normalized}': {e}"))?;
-        files.insert(normalized, contents);
-    }
-    Ok(files)
-}
-
-fn normalize_for_archive(path: &str) -> Result<String, String> {
-    let replaced = path.replace('\\', "/");
-    if replaced.starts_with('/') || looks_like_windows_absolute(&replaced) {
-        return Err("archive contains absolute path entry".to_string());
-    }
-    let mut parts = Vec::new();
-    for segment in replaced.split('/') {
-        if segment.is_empty() || segment == "." {
-            continue;
-        }
-        if segment == ".." {
-            return Err("archive contains parent directory traversal entry".to_string());
-        }
-        parts.push(segment);
-    }
-    if parts.is_empty() {
-        return Err("archive contains empty path entry".to_string());
-    }
-    Ok(parts.join("/"))
-}
-
-fn looks_like_windows_absolute(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'/' || bytes[2] == b'\\')
 }
 
 // Plan §6.14 deleted the legacy flat-path `create_llm_client` helper.
@@ -1114,21 +1034,19 @@ pub fn init_runtime(mobpack_bytes: &[u8], credentials_json: &str) -> Result<JsVa
         creds.gemini_api_key.as_deref(),
     )?;
 
-    let model = creds.model.unwrap_or_else(|| {
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string()
-    });
-
-    let providers: Vec<String> = api_keys.keys().cloned().collect();
+    let providers: Vec<String> = api_keys
+        .keys()
+        .map(|provider| provider.as_str().to_string())
+        .collect();
     let base_urls = build_provider_base_urls(
         creds.anthropic_base_url.as_deref(),
         creds.openai_base_url.as_deref(),
         creds.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    let mut config = bootstrap_config_with_model_override(creds.model);
+    let model = config.agent.model.clone();
+    let default_provider = default_binding_provider_for_model(&config, &model)?;
+    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref(), default_provider);
 
     let (session_service, mob_state) = build_service_infrastructure(config, MAX_SESSIONS)?;
 
@@ -1168,22 +1086,21 @@ pub fn init_runtime_from_config(config_json: &str) -> Result<JsValue, JsValue> {
         rt_config.gemini_api_key.as_deref(),
     )?;
 
-    let model = rt_config.model.unwrap_or_else(|| {
-        meerkat_models::default_model("anthropic")
-            .unwrap_or("claude-sonnet-4-5")
-            .to_string()
-    });
     let max_sessions = rt_config.max_sessions;
 
-    let providers: Vec<String> = api_keys.keys().cloned().collect();
+    let providers: Vec<String> = api_keys
+        .keys()
+        .map(|provider| provider.as_str().to_string())
+        .collect();
     let base_urls = build_provider_base_urls(
         rt_config.anthropic_base_url.as_deref(),
         rt_config.openai_base_url.as_deref(),
         rt_config.gemini_base_url.as_deref(),
     );
-    let mut config = Config::default();
-    config.agent.model.clone_from(&model);
-    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref());
+    let mut config = bootstrap_config_with_model_override(rt_config.model);
+    let model = config.agent.model.clone();
+    let default_provider = default_binding_provider_for_model(&config, &model)?;
+    populate_realm_from_api_keys(&mut config, &api_keys, base_urls.as_ref(), default_provider);
 
     let (session_service, mob_state) = build_service_infrastructure(config, max_sessions)?;
 
@@ -1298,13 +1215,14 @@ pub fn create_session(mobpack_bytes: &[u8], config_json: &str) -> Result<String,
     let parsed = parse_mobpack(mobpack_bytes).map_err(|e| err_str("invalid_mobpack", e))?;
     let config: SessionConfig =
         serde_json::from_str(config_json).map_err(|e| err_str("invalid_config", e))?;
+    let mob_id = parsed.definition.id.to_string();
     let system_prompt = compile_system_prompt(
-        &parsed.definition.id,
+        &mob_id,
         &parsed.manifest.mobpack.name,
         &parsed.skills,
         config.system_prompt.as_deref(),
     );
-    create_runtime_backed_session(config, Some(system_prompt), parsed.definition.id)
+    create_runtime_backed_session(config, Some(system_prompt), mob_id)
 }
 
 /// Create a standalone session through initialized runtime state.
@@ -1502,7 +1420,7 @@ pub fn inspect_mobpack(mobpack_bytes: &[u8]) -> Result<String, JsValue> {
             "version": parsed.manifest.mobpack.version,
             "description": parsed.manifest.mobpack.description,
         },
-        "definition": { "id": parsed.definition.id },
+        "definition": { "id": parsed.definition.id.to_string() },
         "skills": skills,
         "capabilities": parsed.manifest.requires.as_ref().map(|r| &r.capabilities),
     });
@@ -2594,9 +2512,9 @@ mod tests {
     use super::{helper_result_payload, spawn_member_result_payload};
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat::{SessionService, SessionServiceControlExt};
-    #[cfg(not(target_arch = "wasm32"))]
-    use meerkat_core::Config;
     use meerkat_core::time_compat::{Duration, SystemTime};
+    #[cfg(not(target_arch = "wasm32"))]
+    use meerkat_core::{Config, Provider};
     use meerkat_core::{
         PendingSystemContextAppend, SeenSystemContextKey, SeenSystemContextState,
         SessionSystemContextState,
@@ -2605,7 +2523,7 @@ mod tests {
     use meerkat_mob::{MobId, SpawnMemberSpec};
     use serde_json::json;
     #[cfg(not(target_arch = "wasm32"))]
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;
     #[cfg(not(target_arch = "wasm32"))]
@@ -2631,6 +2549,16 @@ capabilities = [{capability_values}]
         let mut builder = tar::Builder::new(encoder);
         append_test_mobpack_file(&mut builder, "manifest.toml", manifest.as_bytes());
         append_test_mobpack_file(&mut builder, "definition.json", br#"{"id":"browser-test"}"#);
+        builder.finish().expect("finish tar archive");
+        let encoder = builder.into_inner().expect("take gzip encoder");
+        encoder.finish().expect("finish gzip archive")
+    }
+
+    fn test_mobpack_bytes_with_manifest_definition(manifest: &str, definition: &str) -> Vec<u8> {
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_test_mobpack_file(&mut builder, "manifest.toml", manifest.as_bytes());
+        append_test_mobpack_file(&mut builder, "definition.json", definition.as_bytes());
         builder.finish().expect("finish tar archive");
         let encoder = builder.into_inner().expect("take gzip encoder");
         encoder.finish().expect("finish gzip archive")
@@ -2920,6 +2848,68 @@ capabilities = [{capability_values}]
     }
 
     #[test]
+    fn parse_mobpack_uses_manifest_contract_for_profile_selectors() {
+        let bytes = test_mobpack_bytes_with_manifest_definition(
+            r#"[mobpack]
+name = "browser-test"
+version = "1.0.0"
+
+[models]
+planner = "gpt-5"
+
+[profiles.ghost]
+model = "planner"
+"#,
+            r#"{"id":"browser-test","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        );
+
+        let error = parse_mobpack(&bytes)
+            .expect_err("browser mobpack parsing must share manifest contract validation");
+
+        assert!(
+            error.contains("profiles.ghost") && error.contains("profile selector is not defined"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn provider_bootstrap_uses_typed_provider_keys() {
+        let keys = super::build_provider_api_keys(
+            Some("anthropic-key"),
+            Some("openai-key"),
+            Some("gemini-key"),
+        )
+        .expect("keys");
+        assert_eq!(
+            keys.keys().copied().collect::<Vec<_>>(),
+            vec![Provider::Anthropic, Provider::OpenAI, Provider::Gemini]
+        );
+
+        let urls =
+            super::build_provider_base_urls(None, Some("http://openai.local"), None).expect("urls");
+        assert_eq!(
+            urls.get(&Provider::OpenAI).map(String::as_str),
+            Some("http://openai.local")
+        );
+
+        let mut config = Config::default();
+        config.agent.model = "gpt-5.4".to_string();
+        let default_provider =
+            super::default_binding_provider_for_model(&config, &config.agent.model)
+                .expect("registry lookup");
+        super::populate_realm_from_api_keys(&mut config, &keys, Some(&urls), default_provider);
+        assert_eq!(
+            config
+                .realm
+                .get("default")
+                .and_then(|realm| realm.default_binding.as_deref()),
+            Some("default_openai"),
+            "default binding should follow the model registry provider, not provider map order"
+        );
+    }
+
+    #[test]
     fn parse_mobpack_rejects_browser_forbidden_typed_capabilities() {
         for capability in ["shell", "mcp_stdio", "process_spawn"] {
             let bytes = test_mobpack_bytes(&[capability]);
@@ -2940,8 +2930,9 @@ capabilities = [{capability_values}]
         let mut config = Config::default();
         populate_realm_from_api_keys(
             &mut config,
-            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            &BTreeMap::from([(Provider::Anthropic, "sk-test".to_string())]),
             None,
+            Some(Provider::Anthropic),
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
@@ -3181,8 +3172,9 @@ capabilities = [{capability_values}]
         let mut config = Config::default();
         populate_realm_from_api_keys(
             &mut config,
-            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            &BTreeMap::from([(Provider::Anthropic, "sk-test".to_string())]),
             None,
+            Some(Provider::Anthropic),
         );
         let (_service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
@@ -3251,8 +3243,9 @@ capabilities = [{capability_values}]
         let mut config = Config::default();
         populate_realm_from_api_keys(
             &mut config,
-            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            &BTreeMap::from([(Provider::Anthropic, "sk-test".to_string())]),
             None,
+            Some(Provider::Anthropic),
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");
@@ -3295,8 +3288,9 @@ capabilities = [{capability_values}]
         let mut config = Config::default();
         populate_realm_from_api_keys(
             &mut config,
-            &HashMap::from([("anthropic".to_string(), "sk-test".to_string())]),
+            &BTreeMap::from([(Provider::Anthropic, "sk-test".to_string())]),
             None,
+            Some(Provider::Anthropic),
         );
         let (service, mob_state) =
             build_service_infrastructure(config, 8).expect("build runtime services");

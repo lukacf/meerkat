@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::lifecycle::run_primitive::TurnMetadataOverride;
 use crate::runtime_epoch::RuntimeBuildMode;
 use crate::service::{
     CreateSessionRequest, DeferredPromptPolicy, InitialTurnPolicy, ResumeOverrideMask,
@@ -25,10 +26,8 @@ pub const BUILD_ONLY_RECOVERY_OVERRIDE_ERROR: &str = "Cannot override max_tokens
 pub struct SurfaceSessionRecoveryOverrides {
     pub model: Option<String>,
     pub provider: Option<Provider>,
-    pub provider_params: Option<serde_json::Value>,
-    pub clear_provider_params: bool,
-    pub auth_binding: Option<AuthBindingRef>,
-    pub clear_auth_binding: bool,
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
+    pub auth_binding: Option<TurnMetadataOverride<AuthBindingRef>>,
     pub max_tokens: Option<u32>,
     pub system_prompt: Option<String>,
     pub output_schema: Option<OutputSchema>,
@@ -104,13 +103,28 @@ impl SessionDefaults {
 }
 
 #[derive(Clone, Default)]
+pub enum SurfaceRecoveryRuntimeBuildMode {
+    #[default]
+    StandaloneEphemeral,
+    Provided(Box<RuntimeBuildMode>),
+}
+
+impl SurfaceRecoveryRuntimeBuildMode {
+    fn into_runtime_build_mode(self) -> RuntimeBuildMode {
+        match self {
+            Self::StandaloneEphemeral => RuntimeBuildMode::StandaloneEphemeral,
+            Self::Provided(mode) => *mode,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct SurfaceSessionRecoveryContext {
     pub llm_client_override: Option<Arc<dyn Any + Send + Sync>>,
     pub agent_llm_client_decorator: Option<crate::AgentLlmClientDecorator>,
     pub external_tools: Option<Arc<dyn AgentToolDispatcher>>,
     pub checkpointer: Option<Arc<dyn SessionCheckpointer>>,
-    pub runtime_build_mode: Option<RuntimeBuildMode>,
-    pub require_runtime_build_mode: bool,
+    pub runtime_build_mode: SurfaceRecoveryRuntimeBuildMode,
     pub realm_id: Option<String>,
     pub instance_id: Option<String>,
     pub backend: Option<String>,
@@ -205,9 +219,7 @@ pub fn has_materialization_overrides(overrides: &SurfaceSessionRecoveryOverrides
     overrides.model.is_some()
         || overrides.provider.is_some()
         || overrides.provider_params.is_some()
-        || overrides.clear_provider_params
         || overrides.auth_binding.is_some()
-        || overrides.clear_auth_binding
         || has_build_only_turn_overrides(overrides)
         || overrides.hooks_override.is_some()
         || overrides.comms_name.is_some()
@@ -285,27 +297,11 @@ pub fn resolve_effective_turn_config(
             "provider override requires model on a session turn".to_string(),
         ));
     }
-    if overrides.clear_provider_params && overrides.provider_params.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_provider_params cannot be combined with provider_params".to_string(),
-        ));
-    }
-    if overrides.clear_auth_binding && overrides.auth_binding.is_some() {
-        return Err(SurfaceSessionRecoveryError::InvalidOverride(
-            "clear_auth_binding cannot be combined with auth_binding".to_string(),
-        ));
-    }
     if has_build_only_turn_overrides(overrides) && !allows_first_turn_build_overrides {
         return Err(SurfaceSessionRecoveryError::InvalidOverride(
             BUILD_ONLY_RECOVERY_OVERRIDE_ERROR.to_string(),
         ));
     }
-    if context.require_runtime_build_mode && context.runtime_build_mode.is_none() {
-        return Err(SurfaceSessionRecoveryError::MissingRuntimeBuildMode(
-            "runtime-backed session recovery requires canonical SessionRuntimeBindings; refusing StandaloneEphemeral fallback".to_string(),
-        ));
-    }
-
     let llm_binding = resolve_resume_llm_binding(
         metadata.provider,
         metadata.self_hosted_server_id.clone(),
@@ -317,8 +313,8 @@ pub fn resolve_effective_turn_config(
         provider: llm_binding.provider_overridden,
         max_tokens: overrides.max_tokens.is_some(),
         structured_output_retries: overrides.structured_output_retries.is_some(),
-        provider_params: overrides.provider_params.is_some() || overrides.clear_provider_params,
-        auth_binding: overrides.auth_binding.is_some() || overrides.clear_auth_binding,
+        provider_params: overrides.provider_params.is_some(),
+        auth_binding: overrides.auth_binding.is_some(),
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_comms: overrides.override_comms.is_some(),
@@ -379,13 +375,10 @@ pub fn resolve_effective_turn_config(
             .budget_limits
             .clone()
             .or_else(|| build_state.budget_limits.clone()),
-        provider_params: if overrides.clear_provider_params {
-            None
-        } else {
-            overrides
-                .provider_params
-                .clone()
-                .or_else(|| metadata.provider_params.clone())
+        provider_params: match &overrides.provider_params {
+            Some(TurnMetadataOverride::Set(provider_params)) => Some(provider_params.clone()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => metadata.provider_params.clone(),
         },
         external_tools: context.external_tools,
         recoverable_tool_defs: Some(recoverable_tool_defs.clone()),
@@ -440,13 +433,10 @@ pub fn resolve_effective_turn_config(
         // Phase 3: persisted auth_binding re-entered at resume time so
         // the binding re-resolves through the same realm entry unless this
         // recovery request explicitly sets or clears it.
-        auth_binding: if overrides.clear_auth_binding {
-            None
-        } else {
-            overrides
-                .auth_binding
-                .clone()
-                .or_else(|| metadata.auth_binding.clone())
+        auth_binding: match &overrides.auth_binding {
+            Some(TurnMetadataOverride::Set(auth_binding)) => Some(auth_binding.clone()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => metadata.auth_binding.clone(),
         },
         keep_alive,
         checkpointer: context.checkpointer,
@@ -466,9 +456,7 @@ pub fn resolve_effective_turn_config(
         call_timeout_override: build_state.call_timeout_override,
         resume_override_mask,
         mob_tools: None,
-        runtime_build_mode: context
-            .runtime_build_mode
-            .unwrap_or(RuntimeBuildMode::StandaloneEphemeral),
+        runtime_build_mode: context.runtime_build_mode.into_runtime_build_mode(),
         initial_turn_metadata: None,
     };
     build.apply_persisted_mob_operator_access(
@@ -674,7 +662,9 @@ mod tests {
             &SurfaceSessionRecoveryOverrides {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some(Provider::OpenAI),
-                provider_params: Some(json!({ "reasoning": { "effort": "medium" } })),
+                provider_params: Some(TurnMetadataOverride::Set(json!({
+                    "reasoning": { "effort": "medium" }
+                }))),
                 max_tokens: Some(2048),
                 system_prompt: Some("override system prompt".to_string()),
                 output_schema: Some(override_schema.clone()),
@@ -768,7 +758,7 @@ mod tests {
         let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides {
-                clear_provider_params: true,
+                provider_params: Some(TurnMetadataOverride::Clear),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -795,7 +785,7 @@ mod tests {
         let recovered = build_recovered_session(
             session.clone(),
             &SurfaceSessionRecoveryOverrides {
-                auth_binding: Some(override_ref.clone()),
+                auth_binding: Some(TurnMetadataOverride::Set(override_ref.clone())),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -811,7 +801,7 @@ mod tests {
         let recovered = build_recovered_session(
             session,
             &SurfaceSessionRecoveryOverrides {
-                clear_auth_binding: true,
+                auth_binding: Some(TurnMetadataOverride::Clear),
                 ..Default::default()
             },
             SurfaceSessionRecoveryContext::default(),
@@ -826,36 +816,22 @@ mod tests {
     }
 
     #[test]
-    fn build_recovered_session_rejects_invalid_set_and_clear_recovery_overrides() {
-        let provider_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                provider_params: Some(json!({ "temperature": 0.2 })),
-                clear_provider_params: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear provider params must be rejected");
-        assert!(
-            provider_error.to_string().contains("clear_provider_params"),
-            "unexpected error: {provider_error}"
-        );
+    fn recovery_overrides_encode_set_and_clear_as_single_facts() {
+        let set = SurfaceSessionRecoveryOverrides {
+            provider_params: Some(TurnMetadataOverride::Set(json!({ "temperature": 0.2 }))),
+            auth_binding: Some(TurnMetadataOverride::Set(auth_binding(
+                "override", "default",
+            ))),
+            ..Default::default()
+        };
+        assert!(has_materialization_overrides(&set));
 
-        let connection_error = build_recovered_session(
-            sample_session(),
-            &SurfaceSessionRecoveryOverrides {
-                auth_binding: Some(auth_binding("override", "default")),
-                clear_auth_binding: true,
-                ..Default::default()
-            },
-            SurfaceSessionRecoveryContext::default(),
-        )
-        .expect_err("set plus clear auth_binding must be rejected");
-        assert!(
-            connection_error.to_string().contains("clear_auth_binding"),
-            "unexpected error: {connection_error}"
-        );
+        let clear = SurfaceSessionRecoveryOverrides {
+            provider_params: Some(TurnMetadataOverride::Clear),
+            auth_binding: Some(TurnMetadataOverride::Clear),
+            ..Default::default()
+        };
+        assert!(has_materialization_overrides(&clear));
     }
 
     #[test]
@@ -996,23 +972,20 @@ mod tests {
     }
 
     #[test]
-    fn build_recovered_session_rejects_missing_runtime_build_mode_when_required() {
-        let error = build_recovered_session(
+    fn build_recovered_session_runtime_mode_is_context_owned() {
+        let recovered = build_recovered_session(
             sample_session(),
             &SurfaceSessionRecoveryOverrides::default(),
-            SurfaceSessionRecoveryContext {
-                require_runtime_build_mode: true,
-                ..Default::default()
-            },
+            SurfaceSessionRecoveryContext::default(),
         )
-        .expect_err("runtime-backed recovery must reject silent standalone fallback");
+        .expect("default recovery context should choose standalone explicitly");
 
         assert!(
             matches!(
-                error,
-                SurfaceSessionRecoveryError::MissingRuntimeBuildMode(_)
+                recovered.build.runtime_build_mode,
+                RuntimeBuildMode::StandaloneEphemeral
             ),
-            "missing runtime bindings should be called out explicitly"
+            "default recovery context owns the standalone runtime mode without a guard boolean"
         );
     }
 

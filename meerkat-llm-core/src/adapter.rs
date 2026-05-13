@@ -156,6 +156,34 @@ impl LlmClientAdapter {
             _ => tag,
         }
     }
+
+    fn merge_base_provider_policy(
+        explicit: Option<ProviderTag>,
+        base: Option<ProviderTag>,
+    ) -> Option<ProviderTag> {
+        let Some(mut explicit) = explicit else {
+            return base;
+        };
+
+        match (&mut explicit, base) {
+            (ProviderTag::Anthropic(explicit), Some(ProviderTag::Anthropic(base))) => {
+                if explicit.supports_temperature_override.is_none() {
+                    explicit.supports_temperature_override = base.supports_temperature_override;
+                }
+            }
+            (ProviderTag::OpenAi(explicit), Some(ProviderTag::OpenAi(base))) => {
+                if explicit.supports_temperature_override.is_none() {
+                    explicit.supports_temperature_override = base.supports_temperature_override;
+                }
+                if explicit.supports_reasoning_override.is_none() {
+                    explicit.supports_reasoning_override = base.supports_reasoning_override;
+                }
+            }
+            _ => {}
+        }
+
+        Some(explicit)
+    }
 }
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -177,6 +205,8 @@ impl AgentLlmClient for LlmClientAdapter {
         let effective_params = provider_params
             .and_then(|params| params.provider_tag.clone())
             .or_else(|| self.provider_params.clone());
+        let effective_params =
+            Self::merge_base_provider_policy(effective_params, self.provider_params.clone());
         let effective_params =
             self.apply_generic_provider_overrides(effective_params, provider_params);
         let effective_params = effective_params.map(Self::strip_non_object_provider_tool_overrides);
@@ -366,6 +396,10 @@ impl AgentLlmClient for LlmClientAdapter {
         self.client.provider()
     }
 
+    fn provider_id(&self) -> meerkat_core::Provider {
+        self.client.provider_id()
+    }
+
     fn model(&self) -> &str {
         &self.model
     }
@@ -486,5 +520,32 @@ mod tests {
         assert_eq!(projected.len(), 1);
         assert!(matches!(projected[0], Message::User(_)));
         Ok(())
+    }
+
+    #[test]
+    fn adapter_preserves_catalog_policy_flags_when_turn_params_override() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiProviderTag, ProviderTag, ReasoningEffort,
+        };
+
+        let explicit = ProviderTag::OpenAi(OpenAiProviderTag {
+            reasoning_effort: Some(ReasoningEffort::High),
+            ..Default::default()
+        });
+        let base = ProviderTag::OpenAi(OpenAiProviderTag {
+            supports_temperature_override: Some(false),
+            supports_reasoning_override: Some(true),
+            ..Default::default()
+        });
+
+        let merged = LlmClientAdapter::merge_base_provider_policy(Some(explicit), Some(base))
+            .expect("merged provider tag");
+        let ProviderTag::OpenAi(tag) = merged else {
+            panic!("expected OpenAI tag");
+        };
+
+        assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(tag.supports_temperature_override, Some(false));
+        assert_eq!(tag.supports_reasoning_override, Some(true));
     }
 }

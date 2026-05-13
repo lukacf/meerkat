@@ -586,6 +586,17 @@ impl AgentBuildConfig {
         }
     }
 
+    /// Create a build config from a public surface's optional model override.
+    ///
+    /// Transport handlers should pass the raw caller override here instead of
+    /// resolving absent model policy themselves. The config/profile seam remains
+    /// the named owner of the inherited default.
+    pub fn from_config_model(config: &Config, model_override: Option<String>) -> Self {
+        let mut build = Self::new(model_override.unwrap_or_else(|| config.agent.model.clone()));
+        build.provider_params = legacy_config_provider_params_value(config);
+        build
+    }
+
     /// Stage a session-local tool filter to apply once the agent's tool
     /// catalog is fully composed.
     pub fn set_initial_tool_filter(
@@ -800,8 +811,7 @@ struct RegistryBackedDefaultsResolver {
 }
 
 impl meerkat_core::ModelOperationalDefaultsResolver for RegistryBackedDefaultsResolver {
-    fn call_timeout_for(&self, provider: &str, model: &str) -> Option<std::time::Duration> {
-        let provider = Provider::parse_strict(provider)?;
+    fn call_timeout_for(&self, provider: Provider, model: &str) -> Option<std::time::Duration> {
         self.registry
             .profile_for_provider(provider, model)
             .and_then(|p| p.call_timeout_secs)
@@ -813,22 +823,130 @@ fn provider_tool_defaults_for(
     provider: Provider,
     config: &Config,
     model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
-) -> Option<serde_json::Value> {
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride> {
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicProviderTag, GeminiProviderTag, OpaqueProviderBody, OpenAiProviderTag,
+        ProviderParamsOverride, ProviderTag,
+    };
+
     if !model_profile.is_some_and(|profile| profile.supports_web_search) {
         return None;
     }
 
     match provider {
-        Provider::Anthropic if config.provider_tools.anthropic.web_search => Some(
-            serde_json::json!({"web_search": {"type": "web_search_20250305", "name": "web_search"}}),
-        ),
+        Provider::Anthropic if config.provider_tools.anthropic.web_search => {
+            Some(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({
+                        "type": "web_search_20250305",
+                        "name": "web_search"
+                    }))),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        }
         Provider::OpenAI if config.provider_tools.openai.web_search => {
-            Some(serde_json::json!({"web_search": {"type": "web_search"}}))
+            Some(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": "web_search"}),
+                    )),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
         }
         Provider::Gemini if config.provider_tools.gemini.google_search => {
-            Some(serde_json::json!({"google_search": {}}))
+            Some(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::Gemini(GeminiProviderTag {
+                    google_search: Some(OpaqueProviderBody::from_value(&serde_json::json!({}))),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
         }
         _ => None,
+    }
+}
+
+fn typed_provider_params_for_request_policy(
+    provider: Provider,
+    params_value: Option<&serde_json::Value>,
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderParamsOverride> {
+    params_value
+        .map(|value| {
+            meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::from_legacy_provider_value(
+                legacy_provider_params_projection_namespace(provider),
+                value,
+            )
+        })
+        .filter(|params| !params.is_empty())
+}
+
+fn legacy_config_provider_params_value(config: &Config) -> Option<serde_json::Value> {
+    config
+        .agent
+        .provider_params
+        .as_ref()
+        .map(meerkat_core::lifecycle::run_primitive::ProviderParamsOverride::to_legacy_provider_value)
+        .filter(|value| value.as_object().is_none_or(|object| !object.is_empty()))
+}
+
+fn legacy_provider_params_projection_namespace(provider: Provider) -> &'static str {
+    match provider {
+        Provider::SelfHosted => Provider::OpenAI.as_str(),
+        other => other.as_str(),
+    }
+}
+
+fn provider_tag_for_request_policy(
+    provider: Provider,
+    params: Option<&meerkat_core::lifecycle::run_primitive::ProviderParamsOverride>,
+    model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+) -> Option<meerkat_core::lifecycle::run_primitive::ProviderTag> {
+    use meerkat_core::lifecycle::run_primitive::{
+        AnthropicProviderTag, OpenAiProviderTag, ProviderTag,
+    };
+
+    let explicit_tag = params.and_then(|params| params.provider_tag.clone());
+    let tag = match provider {
+        Provider::Anthropic => match explicit_tag {
+            Some(ProviderTag::Anthropic(tag)) => Some(ProviderTag::Anthropic(tag)),
+            Some(other) => Some(other),
+            None => Some(ProviderTag::Anthropic(AnthropicProviderTag::default())),
+        },
+        Provider::OpenAI => match explicit_tag {
+            Some(ProviderTag::OpenAi(tag)) => Some(ProviderTag::OpenAi(tag)),
+            Some(other) => Some(other),
+            None => Some(ProviderTag::OpenAi(OpenAiProviderTag::default())),
+        },
+        Provider::Gemini | Provider::SelfHosted | Provider::Other => explicit_tag,
+    };
+
+    tag.map(|tag| stamp_model_request_policy(tag, model_profile))
+}
+
+fn stamp_model_request_policy(
+    tag: meerkat_core::lifecycle::run_primitive::ProviderTag,
+    model_profile: Option<&meerkat_core::model_profile::ModelProfile>,
+) -> meerkat_core::lifecycle::run_primitive::ProviderTag {
+    use meerkat_core::lifecycle::run_primitive::ProviderTag;
+
+    match tag {
+        ProviderTag::Anthropic(mut tag) => {
+            tag.supports_temperature_override
+                .get_or_insert(model_profile.is_some_and(|profile| profile.supports_temperature));
+            ProviderTag::Anthropic(tag)
+        }
+        ProviderTag::OpenAi(mut tag) => {
+            tag.supports_temperature_override
+                .get_or_insert(model_profile.is_some_and(|profile| profile.supports_temperature));
+            tag.supports_reasoning_override
+                .get_or_insert(model_profile.is_some_and(|profile| profile.supports_reasoning));
+            ProviderTag::OpenAi(tag)
+        }
+        other => other,
     }
 }
 
@@ -1114,8 +1232,7 @@ impl meerkat_core::ImageGenerationPlanner for CompositeImageGenerationPlanner {
             return Err(ImageOperationDenialReason::UnsupportedCount);
         }
 
-        let effective_provider =
-            meerkat_core::Provider::infer_from_model(status.effective_model.as_str());
+        let effective_provider = status.effective_provider;
         let (target_provider, profile) = match &request.target {
             ImageGenerationTargetPreference::Auto => {
                 let provider =
@@ -2494,9 +2611,13 @@ impl AgentFactory {
             .model_registry()
             .map_err(|err| FactoryError::ClientCreationFailed(err.to_string()))?;
         let model_profile = registry.profile_for_provider(identity.provider, &identity.model);
+        let provider_params = typed_provider_params_for_request_policy(
+            identity.provider,
+            identity.provider_params.as_ref(),
+        );
         Ok(meerkat_core::SessionLlmRequestPolicy {
             model: identity.model.clone(),
-            provider_params: identity.provider_params.clone(),
+            provider_params,
             provider_tool_defaults: provider_tool_defaults_for(
                 identity.provider,
                 config,
@@ -3104,6 +3225,9 @@ impl AgentFactory {
         let explicit_mob_override =
             !matches!(build_config.override_mob, ToolCategoryOverride::Inherit);
         let resumed_session_metadata = Self::apply_resumed_session_metadata(&mut build_config);
+        if build_config.provider_params.is_none() {
+            build_config.provider_params = legacy_config_provider_params_value(config);
+        }
 
         // Explicit build-time mob enablement should surface the generated
         // create-only authority shape when no typed authority was already
@@ -3452,6 +3576,10 @@ impl AgentFactory {
         // 4. Create LLM adapter (with optional provider_params, event channel, and shared event tap)
         let model = build_config.model.clone();
         let model_profile = registry.profile_for_provider(provider, &model);
+        let explicit_provider_params = typed_provider_params_for_request_policy(
+            provider,
+            build_config.provider_params.as_ref(),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let auto_web_search_executor: Option<Arc<dyn meerkat_llm_core::WebSearchExecutor>> = {
             let active_model_has_native_search = model_profile
@@ -3490,55 +3618,29 @@ impl AgentFactory {
                 .map_err(|err| BuildAgentError::Config(format!("model routing baseline: {err}")))?;
         }
         let event_tap = meerkat_core::new_event_tap();
-        let llm_adapter: Arc<dyn AgentLlmClient> = if let Some(agent_client) =
-            build_config.agent_llm_client_override.take()
-        {
-            agent_client
-        } else {
-            let llm_client = llm_client.ok_or_else(|| {
-                BuildAgentError::Config(
-                    "internal error: missing LLM client for adapter build".to_string(),
-                )
-            })?;
-            let mut llm_adapter_inner = match build_config.event_tx.clone() {
-                Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
-                None => LlmClientAdapter::new(llm_client, model.clone()),
-            };
-            llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
-            if let Some(params_value) = build_config.provider_params.as_ref() {
-                // Project the legacy `Option<serde_json::Value>` per-turn
-                // blob into the typed `ProviderTag` the adapter wants.
-                // Per-provider `from_legacy_value` maps well-known shapes;
-                // unknown keys surface as `LegacyProviderParamsError`
-                // (lossless round-trip via `ProviderTag::Unknown { bag }`
-                // is the runtime-boundary responsibility, not this seam).
-                use meerkat_core::lifecycle::run_primitive::{
-                    AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
-                };
-                let typed_tag = match provider {
-                    Provider::Anthropic => AnthropicProviderTag::from_legacy_value(params_value)
-                        .map(ProviderTag::Anthropic),
-                    Provider::OpenAI => {
-                        OpenAiProviderTag::from_legacy_value(params_value).map(ProviderTag::OpenAi)
-                    }
-                    Provider::Gemini => {
-                        GeminiProviderTag::from_legacy_value(params_value).map(ProviderTag::Gemini)
-                    }
-                    Provider::SelfHosted | Provider::Other => {
-                        // Self-hosted and Other route through OpenAI-compatible
-                        // APIs; use the OpenAI shape for per-turn overrides.
-                        OpenAiProviderTag::from_legacy_value(params_value).map(ProviderTag::OpenAi)
-                    }
-                }
-                .map_err(|e| {
-                    BuildAgentError::Config(format!(
-                        "invalid provider_params for provider {provider:?}: {e}"
-                    ))
+        let llm_adapter: Arc<dyn AgentLlmClient> =
+            if let Some(agent_client) = build_config.agent_llm_client_override.take() {
+                agent_client
+            } else {
+                let llm_client = llm_client.ok_or_else(|| {
+                    BuildAgentError::Config(
+                        "internal error: missing LLM client for adapter build".to_string(),
+                    )
                 })?;
-                llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
-            }
-            Arc::new(llm_adapter_inner)
-        };
+                let mut llm_adapter_inner = match build_config.event_tx.clone() {
+                    Some(tx) => LlmClientAdapter::with_event_channel(llm_client, model.clone(), tx),
+                    None => LlmClientAdapter::new(llm_client, model.clone()),
+                };
+                llm_adapter_inner = llm_adapter_inner.with_event_tap(event_tap.clone());
+                if let Some(typed_tag) = provider_tag_for_request_policy(
+                    provider,
+                    explicit_provider_params.as_ref(),
+                    model_profile.as_ref(),
+                ) {
+                    llm_adapter_inner = llm_adapter_inner.with_provider_params(Some(typed_tag));
+                }
+                Arc::new(llm_adapter_inner)
+            };
         let llm_adapter = Self::decorate_agent_llm_client(
             llm_adapter,
             build_config.agent_llm_client_decorator.as_ref(),
@@ -4512,7 +4614,7 @@ impl AgentFactory {
         {
             builder = builder.provider_tool_defaults(defaults);
         }
-        if let Some(params) = build_config.provider_params.clone() {
+        if let Some(params) = explicit_provider_params {
             builder = builder.provider_params(params);
         }
         if let Some(system_prompt) = system_prompt {
@@ -4851,14 +4953,16 @@ mod tests {
 
         assert_eq!(
             meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
-                &resolver, "openai", "gpt-5.4"
+                &resolver,
+                Provider::OpenAI,
+                "gpt-5.4"
             ),
             Some(std::time::Duration::from_secs(600))
         );
         assert_eq!(
             meerkat_core::ModelOperationalDefaultsResolver::call_timeout_for(
                 &resolver,
-                "anthropic",
+                Provider::Anthropic,
                 "gpt-5.4"
             ),
             None,
@@ -4985,10 +5089,17 @@ mod tests {
         let openai_policy = factory
             .request_policy_for_llm_identity(&config, &openai_identity)
             .expect("OpenAI request policy");
+        let Some(defaults) = openai_policy.provider_tool_defaults.as_ref() else {
+            panic!("owned OpenAI web-search defaults should still resolve");
+        };
+        let Some(meerkat_core::lifecycle::run_primitive::ProviderTag::OpenAi(tag)) =
+            defaults.provider_tag.as_ref()
+        else {
+            panic!("OpenAI defaults should use OpenAI provider tag");
+        };
         assert_eq!(
-            openai_policy.provider_tool_defaults,
-            Some(serde_json::json!({"web_search": {"type": "web_search"}})),
-            "owned OpenAI web-search defaults should still resolve"
+            tag.web_search.as_ref().map(|body| body.as_value()),
+            Some(serde_json::json!({"type": "web_search"}))
         );
 
         let mismatched_policy = factory
@@ -4998,6 +5109,113 @@ mod tests {
             mismatched_policy.provider_tool_defaults.is_none(),
             "Anthropic policy must not reuse OpenAI model defaults from model id alone"
         );
+    }
+
+    #[test]
+    fn request_policy_projects_provider_params_at_factory_seam() {
+        use meerkat_core::lifecycle::run_primitive::{
+            OpenAiProviderTag, ProviderTag, ReasoningEffort,
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let identity = SessionLlmIdentity {
+            model: "gpt-5.4".to_string(),
+            provider: Provider::OpenAI,
+            self_hosted_server_id: None,
+            provider_params: Some(serde_json::json!({
+                "temperature": 0.2,
+                "reasoning_effort": "high"
+            })),
+            auth_binding: None,
+        };
+
+        let policy = factory
+            .request_policy_for_llm_identity(&config, &identity)
+            .expect("request policy");
+        let params = policy
+            .provider_params
+            .expect("factory should project legacy JSON into typed provider params");
+
+        assert_eq!(params.temperature, Some(0.2));
+        assert_eq!(
+            params.provider_tag,
+            Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                reasoning_effort: Some(ReasoningEffort::High),
+                ..Default::default()
+            }))
+        );
+    }
+
+    #[test]
+    fn request_policy_projects_self_hosted_params_through_openai_compatible_tag() {
+        use meerkat_core::lifecycle::run_primitive::{ProviderTag, ReasoningEffort};
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let config = Config::default();
+        let identity = SessionLlmIdentity {
+            model: "custom-openai-compatible".to_string(),
+            provider: Provider::SelfHosted,
+            self_hosted_server_id: Some("local".to_string()),
+            provider_params: Some(serde_json::json!({
+                "reasoning_effort": "high",
+                "web_search": { "type": "web_search" }
+            })),
+            auth_binding: None,
+        };
+
+        let policy = factory
+            .request_policy_for_llm_identity(&config, &identity)
+            .expect("request policy");
+        let params = policy
+            .provider_params
+            .expect("factory should project self-hosted params");
+
+        let Some(ProviderTag::OpenAi(tag)) = params.provider_tag.as_ref() else {
+            panic!("self-hosted params should use the OpenAI-compatible provider tag");
+        };
+        assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            tag.web_search.as_ref().map(|body| body.as_value()),
+            Some(serde_json::json!({ "type": "web_search" }))
+        );
+
+        let adapter_tag =
+            provider_tag_for_request_policy(Provider::SelfHosted, Some(&params), None)
+                .expect("self-hosted OpenAI-compatible params should reach adapter policy");
+        let ProviderTag::OpenAi(adapter_tag) = adapter_tag else {
+            panic!("self-hosted adapter params should use the OpenAI-compatible provider tag");
+        };
+        assert_eq!(adapter_tag.reasoning_effort, Some(ReasoningEffort::High));
+        assert_eq!(
+            adapter_tag.web_search.as_ref().map(|body| body.as_value()),
+            Some(serde_json::json!({ "type": "web_search" }))
+        );
+    }
+
+    #[test]
+    fn provider_request_policy_stamps_model_catalog_capability_facts() {
+        use meerkat_core::lifecycle::run_primitive::ProviderTag;
+
+        let temp = tempfile::tempdir().unwrap();
+        let factory = AgentFactory::new(temp.path().join("sessions"));
+        let registry = factory
+            .model_registry(&Config::default())
+            .expect("registry");
+        let profile = registry
+            .profile_for_provider(Provider::OpenAI, "gpt-5.4")
+            .expect("OpenAI model profile");
+
+        let tag = provider_tag_for_request_policy(Provider::OpenAI, None, Some(&profile))
+            .expect("OpenAI tag");
+        let ProviderTag::OpenAi(tag) = tag else {
+            panic!("expected OpenAI tag");
+        };
+
+        assert_eq!(tag.supports_temperature_override, Some(false));
+        assert_eq!(tag.supports_reasoning_override, Some(true));
     }
 
     #[cfg(feature = "skills")]
@@ -7985,6 +8203,7 @@ mod tests {
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(NativeImageProfile)]);
         let status = meerkat_core::SessionModelRoutingStatus::new(
             meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-realtime-2"),
+            meerkat_core::Provider::OpenAI,
             None,
             None,
             None,
@@ -8027,6 +8246,83 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn image_planner_auto_uses_typed_status_provider_for_uncatalogued_session_model() {
+        use meerkat_core::ImageGenerationPlanner as _;
+
+        struct NativeImageProfile;
+
+        impl meerkat_core::ImageGenerationProviderProfile for NativeImageProfile {
+            fn canonical_provider(&self) -> meerkat_core::Provider {
+                meerkat_core::Provider::Gemini
+            }
+
+            fn resolve_execution_plan(
+                &self,
+                _operation_id: meerkat_core::ImageOperationId,
+                model: &meerkat_core::model_profile::catalog::ImageGenerationModelProfile,
+                _request: &meerkat_core::GenerateImageRequest,
+                capabilities: meerkat_core::ImageGenerationTargetCapabilities,
+                max_count: std::num::NonZeroU32,
+            ) -> Result<
+                meerkat_core::ImageGenerationProviderResolution,
+                meerkat_core::ImageOperationDenialReason,
+            > {
+                Ok(meerkat_core::ImageGenerationProviderResolution {
+                    provider_call_model: meerkat_core::lifecycle::run_primitive::ModelId::new(
+                        model.model_id,
+                    ),
+                    execution_plan: meerkat_core::GenerateImageExecutionPlan {
+                        provider: meerkat_core::ProviderId::new("gemini"),
+                        backend: meerkat_core::ImageGenerationBackendKind::NativeModel,
+                        max_count,
+                        capabilities,
+                        requires_scoped_override: true,
+                        provider_plan: serde_json::Value::Null,
+                    },
+                })
+            }
+        }
+
+        let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(NativeImageProfile)]);
+        let status = meerkat_core::SessionModelRoutingStatus::new(
+            meerkat_core::lifecycle::run_primitive::ModelId::new("custom-gemini-chat-model"),
+            meerkat_core::Provider::Gemini,
+            None,
+            None,
+            None,
+        );
+        let request = meerkat_core::GenerateImageRequest::new(
+            meerkat_core::ImageGenerationIntent::Generate {
+                prompt: meerkat_core::PromptText::new("draw a cat").unwrap(),
+                prompt_source: meerkat_core::PromptSource::ModelDistilled {
+                    tool_call_id: meerkat_core::ToolCallId::new("tool-call"),
+                },
+                reference_images: Vec::new(),
+            },
+            meerkat_core::ImageGenerationTargetPreference::Auto,
+            meerkat_core::ImageSizePreference::Square1024,
+            meerkat_core::ImageQualityPreference::Auto,
+            meerkat_core::ImageFormatPreference::Png,
+            std::num::NonZeroU32::MIN,
+        )
+        .unwrap();
+
+        let plan = planner
+            .resolve_image_generation_plan(
+                &status,
+                serde_json::from_str("\"00000000-0000-0000-0000-000000000000\"").unwrap(),
+                &request,
+            )
+            .unwrap();
+
+        assert_eq!(
+            plan.provider_model.as_str(),
+            "gemini-3.1-flash-image-preview"
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn image_planner_rejects_uncatalogued_model_before_provider_execution() {
         use meerkat_core::ImageGenerationPlanner as _;
 
@@ -8055,6 +8351,7 @@ mod tests {
         let planner = CompositeImageGenerationPlanner::new(vec![Arc::new(PanickingGeminiProfile)]);
         let status = meerkat_core::SessionModelRoutingStatus::new(
             meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            meerkat_core::Provider::OpenAI,
             None,
             None,
             None,
@@ -8100,6 +8397,7 @@ mod tests {
         let planner = CompositeImageGenerationPlanner::new(Vec::new());
         let status = meerkat_core::SessionModelRoutingStatus::new(
             meerkat_core::lifecycle::run_primitive::ModelId::new("gpt-5.5"),
+            meerkat_core::Provider::OpenAI,
             None,
             None,
             None,

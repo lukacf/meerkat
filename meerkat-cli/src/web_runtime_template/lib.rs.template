@@ -4,9 +4,10 @@
 //! No application-specific types or logic — behavior comes from mobpack skills.
 //! LLM provider calls are delegated to a JS bridge module.
 
-use serde::{Deserialize, Serialize};
+use serde::de;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Read;
 use wasm_bindgen::prelude::*;
 
@@ -16,7 +17,6 @@ use wasm_bindgen::prelude::*;
 
 const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 const MAX_SYSTEM_PROMPT_BYTES: usize = 100 * 1024;
-const FORBIDDEN_CAPABILITIES: &[&str] = &["shell", "mcp_stdio", "process_spawn"];
 const SKILL_SEPARATOR: &str = "\n\n---\n\n";
 
 // ═══════════════════════════════════════════════════════════
@@ -53,11 +53,108 @@ extern "C" {
 // Mobpack Types (generic)
 // ═══════════════════════════════════════════════════════════
 
+macro_rules! manifest_string_id {
+    ($name:ident, $parse_fn:path, $expectation:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        struct $name(String);
+
+        impl $name {
+            fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            fn parse(value: impl Into<String>) -> Result<Self, String> {
+                let value = value.into();
+                if $parse_fn(&value) {
+                    Ok(Self(value))
+                } else {
+                    Err($expectation.to_string())
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                let value = String::deserialize(deserializer)?;
+                Self::parse(value).map_err(de::Error::custom)
+            }
+        }
+    };
+}
+
+manifest_string_id!(
+    MobpackModelAlias,
+    valid_manifest_identifier,
+    "must be a non-empty identifier starting with a letter or underscore"
+);
+manifest_string_id!(
+    MobpackModelRef,
+    valid_model_ref,
+    "must be a non-empty model reference"
+);
+manifest_string_id!(
+    MobpackProfileSelector,
+    valid_manifest_identifier,
+    "must be a valid mob profile name"
+);
+manifest_string_id!(
+    MobpackSkillPath,
+    valid_manifest_skill_path,
+    "must be a canonical archive path under skills/"
+);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum MobpackSurfaceSelector {
+    Cli,
+    Rpc,
+    Rest,
+    Mcp,
+    Web,
+}
+
+impl MobpackSurfaceSelector {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "cli" => Ok(Self::Cli),
+            "rpc" => Ok(Self::Rpc),
+            "rest" => Ok(Self::Rest),
+            "mcp" => Ok(Self::Mcp),
+            "web" => Ok(Self::Web),
+            _ => Err("must be one of cli, rpc, rest, mcp, or web".to_string()),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for MobpackSurfaceSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(&value).map_err(de::Error::custom)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct WebManifest {
     mobpack: MobpackSection,
     #[serde(default)]
     requires: Option<RequiresSection>,
+    #[serde(default)]
+    models: BTreeMap<MobpackModelAlias, MobpackModelRef>,
+    #[serde(default)]
+    profiles: BTreeMap<MobpackProfileSelector, ProfileSection>,
+    #[serde(default)]
+    surfaces: BTreeSet<MobpackSurfaceSelector>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,9 +171,121 @@ struct RequiresSection {
     capabilities: Vec<String>,
 }
 
+impl RequiresSection {
+    fn typed_capabilities(&self) -> impl Iterator<Item = WebCapabilityRequirement<'_>> + '_ {
+        self.capabilities
+            .iter()
+            .map(|raw| WebCapabilityRequirement::parse(raw))
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ProfileSection {
+    #[serde(default)]
+    model: Option<MobpackModelAlias>,
+    #[serde(default)]
+    skills: Vec<MobpackSkillPath>,
+}
+
 #[derive(Debug, Deserialize)]
 struct MobDefinition {
     id: String,
+    #[serde(default)]
+    profiles: BTreeMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebCapabilityId {
+    Shell,
+    McpStdio,
+    ProcessSpawn,
+    Other,
+}
+
+struct WebCapabilityRequirement<'a> {
+    raw: &'a str,
+    id: WebCapabilityId,
+}
+
+impl<'a> WebCapabilityRequirement<'a> {
+    fn parse(raw: &'a str) -> Self {
+        let id = match raw {
+            "shell" => WebCapabilityId::Shell,
+            "mcp_stdio" => WebCapabilityId::McpStdio,
+            "process_spawn" => WebCapabilityId::ProcessSpawn,
+            _ => WebCapabilityId::Other,
+        };
+        Self { raw, id }
+    }
+}
+
+fn browser_mobpack_capability_forbidden(id: WebCapabilityId) -> bool {
+    matches!(
+        id,
+        WebCapabilityId::Shell | WebCapabilityId::McpStdio | WebCapabilityId::ProcessSpawn
+    )
+}
+
+fn validate_manifest_contract(
+    manifest: &WebManifest,
+    definition: &MobDefinition,
+    files: &BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    let _ = &manifest.surfaces;
+    for (profile_name, profile) in &manifest.profiles {
+        if !definition.profiles.contains_key(profile_name.as_str()) {
+            return Err(format!(
+                "manifest.toml field `profiles.{profile_name}` is invalid: profile selector is not defined in definition.json"
+            ));
+        }
+
+        if let Some(model_alias) = &profile.model {
+            if manifest.models.is_empty() {
+                return Err(format!(
+                    "manifest.toml field `profiles.{profile_name}.model` is invalid: profile model references require a [models] alias table"
+                ));
+            }
+            if !manifest.models.contains_key(model_alias) {
+                return Err(format!(
+                    "manifest.toml field `profiles.{profile_name}.model` is invalid: unknown model alias '{model_alias}'"
+                ));
+            }
+        }
+
+        for (index, skill_path) in profile.skills.iter().enumerate() {
+            let Some(bytes) = files.get(skill_path.as_str()) else {
+                return Err(format!(
+                    "manifest.toml field `profiles.{profile_name}.skills[{index}]` is invalid: skill file '{skill_path}' missing from archive"
+                ));
+            };
+            std::str::from_utf8(bytes).map_err(|err| {
+                format!(
+                    "manifest.toml field `profiles.{profile_name}.skills[{index}]` is invalid: skill file '{skill_path}' is not valid UTF-8: {err}"
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_manifest_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+}
+
+fn valid_model_ref(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed == value && !trimmed.chars().any(char::is_control)
+}
+
+fn valid_manifest_skill_path(value: &str) -> bool {
+    normalize_for_archive(value)
+        .map(|normalized| normalized == value && normalized.starts_with("skills/"))
+        .unwrap_or(false)
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -265,12 +474,14 @@ fn parse_mobpack(bytes: &[u8]) -> Result<ParsedMobpack, String> {
             .ok_or_else(|| "definition.json is missing".to_string())?,
     )
     .map_err(|e| format!("invalid definition.json: {e}"))?;
+    validate_manifest_contract(&manifest, &definition, &files)?;
 
     if let Some(requires) = &manifest.requires {
-        for cap in &requires.capabilities {
-            if FORBIDDEN_CAPABILITIES.contains(&cap.as_str()) {
+        for capability in requires.typed_capabilities() {
+            if browser_mobpack_capability_forbidden(capability.id) {
                 return Err(format!(
-                    "forbidden capability '{cap}' is not allowed in browser-safe mode"
+                    "forbidden capability '{}' is not allowed in browser-safe mode",
+                    capability.raw
                 ));
             }
         }
@@ -911,6 +1122,16 @@ mod tests {
         create_targz(&files)
     }
 
+    fn fixture_mobpack_with_manifest_definition(manifest: &str, definition: &str) -> Vec<u8> {
+        create_targz(&BTreeMap::from([
+            ("manifest.toml".to_string(), manifest.as_bytes().to_vec()),
+            (
+                "definition.json".to_string(),
+                definition.as_bytes().to_vec(),
+            ),
+        ]))
+    }
+
     fn create_single_entry_archive(path: &str) -> Vec<u8> {
         let mut tar_bytes = Vec::new();
         {
@@ -952,6 +1173,29 @@ mod tests {
         let pack = fixture_mobpack(true);
         let err = parse_mobpack(&pack).expect_err("should reject forbidden");
         assert!(err.contains("forbidden capability"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn parse_mobpack_rejects_unknown_manifest_profile_selector() {
+        let pack = fixture_mobpack_with_manifest_definition(
+            r#"[mobpack]
+name = "test"
+version = "1.0.0"
+
+[models]
+planner = "gpt-5"
+
+[profiles.ghost]
+model = "planner"
+"#,
+            r#"{"id":"test","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        );
+
+        let err = parse_mobpack(&pack).expect_err("should reject unknown manifest profile");
+        assert!(
+            err.contains("profiles.ghost") && err.contains("profile selector is not defined"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]

@@ -19,7 +19,7 @@ use meerkat_core::image_generation::{
 use meerkat_core::lifecycle::WaitRequestId;
 use meerkat_core::lifecycle::core_executor::CoreApplyOutput;
 use meerkat_core::lifecycle::core_executor::CoreExecutor;
-use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive};
+use meerkat_core::lifecycle::run_primitive::{ModelId, RunPrimitive, TurnMetadataOverride};
 use meerkat_core::lifecycle::{InputId, RunId};
 use meerkat_core::lifecycle::{RunBoundaryReceipt, RunId as LifecycleRunId};
 use meerkat_core::ops::OperationId;
@@ -52,27 +52,12 @@ pub struct SessionLlmReconfigureRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
-    /// Explicitly clear the session's durable provider params. This is
-    /// distinct from omitting `provider_params`, which inherits the current
-    /// value for compatibility.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_provider_params: bool,
+    pub provider_params: Option<TurnMetadataOverride<serde_json::Value>>,
     /// Optional realm-scoped connection override. When present, the
     /// hot-swap uses this binding to resolve credentials; when absent,
-    /// the session's existing `SessionLlmIdentity.auth_binding` is preserved
-    /// unless `clear_auth_binding` is true.
+    /// the session's existing `SessionLlmIdentity.auth_binding` is preserved.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// Explicitly clear the session's durable auth binding reference. This is
-    /// distinct from omitting `auth_binding`, which inherits the current
-    /// binding for compatibility.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub clear_auth_binding: bool,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
+    pub auth_binding: Option<TurnMetadataOverride<meerkat_core::AuthBindingRef>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]

@@ -1485,9 +1485,6 @@ impl LlmClient for GeminiClient {
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-            let mut projected_request = request.clone();
-            projected_request.messages = self.project_replay_messages(&request.messages)?;
-            let request = &projected_request;
             let body = self.build_stream_request_body(request)?;
             let url = self.stream_generate_content_url(&request.model);
 
@@ -1632,6 +1629,10 @@ impl LlmClient for GeminiClient {
 
     fn provider(&self) -> &'static str {
         "gemini"
+    }
+
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Gemini
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

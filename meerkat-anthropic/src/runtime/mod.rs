@@ -186,13 +186,21 @@ impl ProviderRuntime for AnthropicProviderRuntime {
                 {
                     let region = bedrock_region(binding)?;
                     let lookup = env.env_lookup.clone();
-                    let authorizer: Arc<dyn HttpAuthorizer> =
-                        Arc::new(meerkat_auth_core::authorizers::AwsStsAuthorizer::new(
-                            region.clone(),
-                            meerkat_auth_core::authorizers::AwsCredentialProvider::from_env(
-                                move |key| lookup(key),
+                    let mut authorizer = meerkat_auth_core::authorizers::AwsStsAuthorizer::new(
+                        region.clone(),
+                        meerkat_auth_core::authorizers::AwsCredentialProvider::from_env(
+                            move |key| lookup(key),
+                        ),
+                    );
+                    if let Some(handle) = env.auth_lease_handle.clone() {
+                        authorizer = authorizer.with_auth_lease_observer(
+                            handle,
+                            meerkat_core::handles::LeaseKey::from_auth_binding(
+                                binding.auth_binding_ref(),
                             ),
-                        ));
+                        );
+                    }
+                    let authorizer: Arc<dyn HttpAuthorizer> = Arc::new(authorizer);
                     let metadata = finalize_auth_metadata(
                         binding,
                         AuthMetadata {

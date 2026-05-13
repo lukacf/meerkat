@@ -159,9 +159,7 @@ async fn happy_path_drives_hydrate_resolve_apply_persist_in_order() {
         model: Some("gpt-target".into()),
         provider: None,
         provider_params: None,
-        clear_provider_params: false,
         auth_binding: None,
-        clear_auth_binding: false,
     };
 
     hot_swap_llm_client_on_idle_session(&host, &session_id, &request)
@@ -189,9 +187,7 @@ async fn persist_failure_triggers_rollback_to_previous_identity() {
         model: Some("gpt-target".into()),
         provider: None,
         provider_params: None,
-        clear_provider_params: false,
         auth_binding: None,
-        clear_auth_binding: false,
     };
 
     let err = hot_swap_llm_client_on_idle_session(&host, &session_id, &request)

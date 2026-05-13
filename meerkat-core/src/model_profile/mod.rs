@@ -127,7 +127,7 @@ pub(crate) fn project_to_profile(caps: &ModelCapabilities) -> ModelProfile {
         image_input: caps.vision,
         image_tool_results: caps.image_tool_results,
         realtime: caps.realtime,
-        image_generation: catalog::default_image_generation_model(caps.provider).is_some(),
+        image_generation: catalog::image_generation_model(caps.provider, caps.id).is_some(),
         params_schema: schema_builder::build_params_schema(caps),
         beta_headers: caps
             .beta_headers
@@ -243,6 +243,29 @@ mod tests {
         assert!(
             profile.inline_video,
             "Gemini models must support inline video"
+        );
+    }
+
+    #[test]
+    fn image_generation_profile_flag_is_model_owned_not_provider_default_owned() {
+        let openai = profile_for(Provider::OpenAI, "gpt-5.4").expect("gpt-5.4 profile");
+        assert!(
+            openai.image_generation,
+            "OpenAI catalog text models are explicitly routed through the hosted image tool"
+        );
+
+        let gemini_text =
+            profile_for(Provider::Gemini, "gemini-3-flash-preview").expect("gemini text profile");
+        assert!(
+            !gemini_text.image_generation,
+            "Gemini text models must not inherit image generation just because Gemini has an image default"
+        );
+
+        let anthropic =
+            profile_for(Provider::Anthropic, "claude-sonnet-4-5").expect("Anthropic profile");
+        assert!(
+            !anthropic.image_generation,
+            "providers without model-owned image routes must not publish image generation"
         );
     }
 

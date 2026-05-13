@@ -8,11 +8,11 @@
 
 use std::sync::Arc;
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 use chrono::{DateTime, Utc};
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::AuthError;
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 use meerkat_core::handles::{
     AUTH_LEASE_TTL_REFRESH_WINDOW_SECS, AuthLeaseHandle, AuthLeasePhase, DslTransitionError,
     LeaseKey,
@@ -25,23 +25,24 @@ use meerkat_core::handles::{
 pub type EnvLookup = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
 #[derive(Clone)]
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 pub(crate) struct LeaseFreshnessObserver {
     handle: Arc<dyn AuthLeaseHandle>,
     lease_key: LeaseKey,
 }
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 const AUTH_LEASE_REFRESH_WAIT_POLL_MS: u64 = 10;
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 const AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS: u64 = 30;
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 impl LeaseFreshnessObserver {
     pub(crate) fn new(handle: Arc<dyn AuthLeaseHandle>, lease_key: LeaseKey) -> Self {
         Self { handle, lease_key }
     }
 
+    #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
     pub(crate) fn cached_token_is_fresh(
         &self,
         authorizer_label: &str,
@@ -108,6 +109,75 @@ impl LeaseFreshnessObserver {
         Ok(lease_epoch_secs_is_fresh_at(lease_expires_at, now))
     }
 
+    #[cfg(feature = "aws-sigv4")]
+    pub(crate) async fn ensure_long_lived_credential_lease(
+        &self,
+        authorizer_label: &str,
+    ) -> Result<(), AuthError> {
+        let deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS);
+        loop {
+            let snapshot = self.handle.snapshot(&self.lease_key);
+            match snapshot.phase {
+                Some(AuthLeasePhase::Valid) if snapshot.credential_present => {
+                    let fresh = match snapshot.expires_at {
+                        Some(expires_at) => lease_epoch_secs_is_fresh_at(expires_at, Utc::now()),
+                        None => true,
+                    };
+                    if fresh {
+                        return Ok(());
+                    }
+                    self.handle.begin_refresh(&self.lease_key).map_err(|err| {
+                        self.observer_error(authorizer_label, "begin_refresh", err)
+                    })?;
+                    let now = Utc::now();
+                    self.handle
+                        .complete_refresh(&self.lease_key, u64::MAX, epoch_secs(now))
+                        .map_err(|err| {
+                            self.observer_error(authorizer_label, "complete_refresh", err)
+                        })?;
+                    return Ok(());
+                }
+                Some(AuthLeasePhase::Expiring) if snapshot.credential_present => {
+                    self.handle.begin_refresh(&self.lease_key).map_err(|err| {
+                        self.observer_error(authorizer_label, "begin_refresh", err)
+                    })?;
+                    let now = Utc::now();
+                    self.handle
+                        .complete_refresh(&self.lease_key, u64::MAX, epoch_secs(now))
+                        .map_err(|err| {
+                            self.observer_error(authorizer_label, "complete_refresh", err)
+                        })?;
+                    return Ok(());
+                }
+                Some(AuthLeasePhase::ReauthRequired) => return Err(AuthError::UserReauthRequired),
+                Some(AuthLeasePhase::Refreshing) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return Err(AuthError::RefreshFailed(format!(
+                            "{authorizer_label} auth lease {} remained refreshing for {AUTH_LEASE_REFRESH_WAIT_TIMEOUT_SECS}s",
+                            self.lease_key
+                        )));
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        AUTH_LEASE_REFRESH_WAIT_POLL_MS,
+                    ))
+                    .await;
+                }
+                Some(
+                    AuthLeasePhase::Valid | AuthLeasePhase::Expiring | AuthLeasePhase::Released,
+                )
+                | None => {
+                    self.handle
+                        .acquire_lease(&self.lease_key, u64::MAX)
+                        .map_err(|err| {
+                            self.observer_error(authorizer_label, "acquire_lease", err)
+                        })?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     pub(crate) fn expires_at(&self) -> Option<DateTime<Utc>> {
         let snapshot = self.handle.snapshot(&self.lease_key);
         snapshot
@@ -116,6 +186,7 @@ impl LeaseFreshnessObserver {
             .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
     }
 
+    #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
     pub(crate) async fn begin_refresh(
         &self,
         authorizer_label: &str,
@@ -141,6 +212,7 @@ impl LeaseFreshnessObserver {
         }
     }
 
+    #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
     fn try_begin_refresh(&self, authorizer_label: &str) -> Result<LeaseRefreshStart, AuthError> {
         match self.handle.snapshot(&self.lease_key).phase {
             Some(AuthLeasePhase::Valid | AuthLeasePhase::Expiring) => {
@@ -157,6 +229,7 @@ impl LeaseFreshnessObserver {
         }
     }
 
+    #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
     pub(crate) fn complete_refresh(
         &self,
         authorizer_label: &str,
@@ -178,6 +251,7 @@ impl LeaseFreshnessObserver {
         Ok(transition.generation)
     }
 
+    #[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
     pub(crate) fn refresh_failed(
         &self,
         authorizer_label: &str,
@@ -219,7 +293,7 @@ enum LeaseRefreshStart {
     WaitForInFlight,
 }
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 fn lease_epoch_secs_is_fresh_at(expires_at: u64, now: DateTime<Utc>) -> bool {
     let expires_at = i64::try_from(expires_at).unwrap_or(i64::MAX);
     expires_at.saturating_sub(now.timestamp()) > AUTH_LEASE_TTL_REFRESH_WINDOW_SECS as i64
@@ -278,7 +352,7 @@ fn body_mentions_any(body: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| body.contains(needle))
 }
 
-#[cfg(any(feature = "azure-ad", feature = "gcp-auth"))]
+#[cfg(any(feature = "aws-sigv4", feature = "azure-ad", feature = "gcp-auth"))]
 fn epoch_secs(ts: DateTime<Utc>) -> u64 {
     ts.timestamp().max(0) as u64
 }

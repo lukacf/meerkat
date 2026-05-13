@@ -114,6 +114,7 @@ pub(crate) fn validate_extracted_pack_files(
     let manifest = parse_manifest(files)?;
     validate_manifest_identity(&manifest)?;
     let definition = parse_definition(files)?;
+    manifest.validate_contract(&definition, files)?;
     reject_realm_refs(&definition)?;
     validate_skill_paths(&definition, files)?;
     Ok(ValidatedPackFiles {
@@ -443,6 +444,100 @@ mod tests {
         assert!(matches!(
             err,
             PackValidationError::InvalidManifestField { field, .. } if field == "mobpack.version"
+        ));
+    }
+
+    #[test]
+    fn test_pack_validates_manifest_selectors_at_manifest_contract_boundary() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            r#"surfaces = ["cli", "rpc"]
+
+[mobpack]
+name = "fixture"
+version = "1.0.0"
+
+[models]
+planner = "gpt-5"
+
+[profiles.worker]
+model = "planner"
+skills = ["skills/review.md"]
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        )
+        .unwrap();
+
+        pack_directory(temp.path(), None)
+            .expect("manifest-owned selectors should validate before deployment policy");
+    }
+
+    #[test]
+    fn test_pack_rejects_manifest_profile_model_alias_before_deploy_policy() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            r#"[mobpack]
+name = "fixture"
+version = "1.0.0"
+
+[models]
+planner = "gpt-5"
+
+[profiles.worker]
+model = "missing"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        )
+        .unwrap();
+
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidManifestField { field, reason }
+                if field == "profiles.worker.model"
+                    && reason.contains("unknown model alias 'missing'")
+        ));
+    }
+
+    #[test]
+    fn test_pack_rejects_manifest_profile_selector_not_owned_by_definition() {
+        let temp = fixture_mob_dir();
+        std::fs::write(
+            temp.path().join("manifest.toml"),
+            r#"[mobpack]
+name = "fixture"
+version = "1.0.0"
+
+[models]
+planner = "gpt-5"
+
+[profiles.ghost]
+model = "planner"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("definition.json"),
+            br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        )
+        .unwrap();
+
+        let err = pack_directory(temp.path(), None).unwrap_err();
+        assert!(matches!(
+            err,
+            PackValidationError::InvalidManifestField { field, reason }
+                if field == "profiles.ghost"
+                    && reason.contains("profile selector is not defined")
         ));
     }
 

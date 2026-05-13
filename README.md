@@ -117,7 +117,7 @@ The agent loops autonomously -- calling tools, reading results, reasoning, calli
 
 ```bash
 rkat run --model gpt-5.5 --allow-tool generate_image \
-  "Use generate_image with provider \"openai\" to create a square PNG icon for a release dashboard. Return the blob id."
+  "Use generate_image with request.target={\"target\":\"provider_default\",\"provider\":\"openai\"} to create a square PNG icon for a release dashboard. Return the blob id."
 rkat blob get <blob_id> --output release-dashboard.png
 ```
 

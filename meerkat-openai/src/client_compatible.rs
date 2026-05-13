@@ -404,8 +404,7 @@ impl LlmClient for OpenAiCompatibleClient {
                     return inner;
                 };
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-                    let mut translated = self.request_with_remote_model(request);
-                    translated.messages = self.project_replay_messages(&request.messages)?;
+                    let translated = self.request_with_remote_model(request);
                     let mut stream = delegate.stream(&translated);
                     while let Some(event) = stream.next().await {
                         yield event?;
@@ -415,9 +414,7 @@ impl LlmClient for OpenAiCompatibleClient {
             }
             OpenAiCompatibleMode::ChatCompletions => {
                 let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-                    let mut projected_request = request.clone();
-                    projected_request.messages = self.project_replay_messages(&request.messages)?;
-                    let body = self.build_chat_completions_body(&projected_request)?;
+                    let body = self.build_chat_completions_body(request)?;
                     let response = self
                         .apply_auth(
                             self.http.post(format!("{}/chat/completions", self.base_url)),
@@ -592,6 +589,10 @@ impl LlmClient for OpenAiCompatibleClient {
 
     fn provider(&self) -> &'static str {
         "self_hosted"
+    }
+
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::SelfHosted
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

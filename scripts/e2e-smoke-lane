@@ -202,6 +202,29 @@ if buildbuddy_enabled; then
   fi
 fi
 
+prebuild_web_wasm_for_browser_smoke() {
+  case "${MEERKAT_E2E_PREBUILD_WEB_WASM:-1}" in
+    1|true|TRUE|yes|YES|on|ON)
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  case "${MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT:-}" in
+    1|true|TRUE|yes|YES|on|ON)
+      return 0
+      ;;
+  esac
+
+  # Browser smoke scenarios share the same SDK WASM bundle. Build it once
+  # before nextest starts so an individual scenario does not spend its whole
+  # 1800s command budget waiting on the shared wasm-pack build lock.
+  export MEERKAT_WEB_WASM_PROFILE="${MEERKAT_WEB_WASM_PROFILE:-dev}"
+  npm --prefix "${root}/sdks/web" run build
+  export MEERKAT_E2E_ASSUME_WEB_WASM_PREBUILT=1
+}
+
 selection_count=0
 selection_args=()
 
@@ -263,11 +286,14 @@ test_args+=(
 )
 
 if [[ "${mode}" == "cargo" ]]; then
+  prebuild_web_wasm_for_browser_smoke
   if [[ "${selection_count}" -eq 0 ]]; then
     exec "${root}/scripts/repo-cargo" e2e-smoke
   fi
   exec "${root}/scripts/repo-cargo" "${test_args[@]}"
 fi
+
+prebuild_web_wasm_for_browser_smoke
 
 if [[ -z "${MEERKAT_E2E_ARTIFACT_MANIFEST:-}" ]]; then
   target_dir="$("${root}/scripts/repo-cargo" --print-env | awk -F= '$1 == "CARGO_TARGET_DIR" { print $2 }')"

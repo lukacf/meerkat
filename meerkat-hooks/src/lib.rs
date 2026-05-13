@@ -36,12 +36,12 @@ use futures::StreamExt;
 use meerkat_core::config::HookInProcessRuntimeConfig;
 use meerkat_core::time_compat::Duration;
 use meerkat_core::{
-    HookCapability, HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
+    HookDecision, HookEngine, HookEngineError, HookEntryConfig, HookExecutionMode,
     HookExecutionReport, HookId, HookInvocation, HookOutcome, HookPatch, HookPatchEnvelope,
-    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, SessionId,
+    HookRevision, HookRunOverrides, HookRuntimeKind, HooksConfig, PlannedHookEntry, SessionId,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -174,7 +174,6 @@ impl LocalHookPatchDelivery {
 #[derive(Clone)]
 pub struct DefaultHookEngine {
     config: HooksConfig,
-    base_entries: Arc<Vec<HookEntryConfig>>,
     base_validation_error: Option<String>,
     http_client: Arc<OnceLock<reqwest::Client>>,
     in_process_handlers:
@@ -186,15 +185,22 @@ pub struct DefaultHookEngine {
 
 impl DefaultHookEngine {
     pub fn new(config: HooksConfig) -> Self {
-        let base_validation_error = config
-            .entries
-            .iter()
-            .find_map(|entry| Self::validate_entry(entry).err())
-            .map(|err| err.to_string());
+        let base_validation_error = [
+            meerkat_core::HookPoint::RunStarted,
+            meerkat_core::HookPoint::RunCompleted,
+            meerkat_core::HookPoint::RunFailed,
+            meerkat_core::HookPoint::PreLlmRequest,
+            meerkat_core::HookPoint::PostLlmResponse,
+            meerkat_core::HookPoint::PreToolExecution,
+            meerkat_core::HookPoint::PostToolExecution,
+            meerkat_core::HookPoint::TurnBoundary,
+        ]
+        .into_iter()
+        .find_map(|point| config.execution_plan(point, None).err())
+        .map(|err| err.to_string());
         let background_max_concurrency = config.background_max_concurrency.max(1);
 
         Self {
-            base_entries: Arc::new(config.entries.clone()),
             config,
             base_validation_error,
             http_client: Arc::new(OnceLock::new()),
@@ -276,41 +282,17 @@ impl DefaultHookEngine {
         Ok(out)
     }
 
-    fn effective_entries<'a>(
-        &'a self,
-        overrides: Option<&'a HookRunOverrides>,
-    ) -> Result<std::borrow::Cow<'a, [HookEntryConfig]>, HookEngineError> {
+    fn hook_execution_plan(
+        &self,
+        point: meerkat_core::HookPoint,
+        overrides: Option<&HookRunOverrides>,
+    ) -> Result<meerkat_core::HookExecutionPlan, HookEngineError> {
         if let Some(reason) = &self.base_validation_error {
             return Err(HookEngineError::InvalidConfiguration(reason.clone()));
         }
-
-        if let Some(overrides) = overrides {
-            if overrides.disable.is_empty() && overrides.entries.is_empty() {
-                return Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()));
-            }
-
-            let mut entries = Vec::with_capacity(self.base_entries.len() + overrides.entries.len());
-            if overrides.disable.is_empty() {
-                entries.extend(self.base_entries.iter().cloned());
-            } else {
-                let disabled: HashSet<HookId> = overrides.disable.iter().cloned().collect();
-                entries.extend(
-                    self.base_entries
-                        .iter()
-                        .filter(|entry| !disabled.contains(&entry.id))
-                        .cloned(),
-                );
-            }
-            entries.extend(overrides.entries.clone());
-
-            for entry in &entries {
-                Self::validate_entry(entry)?;
-            }
-
-            return Ok(std::borrow::Cow::Owned(entries));
-        }
-
-        Ok(std::borrow::Cow::Borrowed(self.base_entries.as_slice()))
+        self.config
+            .execution_plan(point, overrides)
+            .map_err(|err| HookEngineError::InvalidConfiguration(err.to_string()))
     }
 
     async fn drain_published_patches_for_session(
@@ -331,40 +313,20 @@ impl DefaultHookEngine {
             .await;
     }
 
-    fn validate_entry(entry: &HookEntryConfig) -> Result<(), HookEngineError> {
-        if entry.id.0.trim().is_empty() {
-            return Err(HookEngineError::InvalidConfiguration(
-                "hook id cannot be empty".to_string(),
-            ));
-        }
-
-        if entry.mode == HookExecutionMode::Background
-            && entry.point.is_pre()
-            && entry.capability != HookCapability::Observe
-        {
-            return Err(HookEngineError::InvalidConfiguration(format!(
-                "pre_* background hooks must be observe-only: {}",
-                entry.id
-            )));
-        }
-
-        Ok(())
-    }
-
     async fn execute_one(
         &self,
-        entry: HookEntryConfig,
-        registration_index: usize,
+        planned: PlannedHookEntry,
         invocation: HookInvocation,
     ) -> Result<HookOutcome, HookEngineError> {
         let start = meerkat_core::time_compat::Instant::now();
-        let timeout_ms = entry.timeout_ms.unwrap_or(self.config.default_timeout_ms);
+        let timeout_ms = planned.timeout_ms;
+        let entry = planned.entry;
 
         let mut outcome = HookOutcome {
             hook_id: entry.id.clone(),
             point: entry.point,
             priority: entry.priority,
-            registration_index,
+            registration_index: planned.registration_index,
             decision: None,
             patches: Vec::new(),
             published_patches: Vec::new(),
@@ -743,12 +705,9 @@ impl HookEngine for DefaultHookEngine {
         invocation: &HookInvocation,
         overrides: Option<&HookRunOverrides>,
     ) -> Result<Vec<HookId>, HookEngineError> {
-        let entries = self.effective_entries(overrides)?;
-        Ok(entries
-            .iter()
-            .filter(|entry| entry.enabled && entry.point == invocation.point)
-            .map(|entry| entry.id.clone())
-            .collect())
+        Ok(self
+            .hook_execution_plan(invocation.point, overrides)?
+            .matching_hook_ids())
     }
 
     async fn execute(
@@ -756,38 +715,15 @@ impl HookEngine for DefaultHookEngine {
         invocation: HookInvocation,
         overrides: Option<&HookRunOverrides>,
     ) -> Result<HookExecutionReport, HookEngineError> {
-        let mut foreground = Vec::new();
-        let mut background = Vec::new();
-        let entries = self.effective_entries(overrides)?;
-        for (registration_index, entry) in entries
-            .iter()
-            .filter(|entry| entry.enabled && entry.point == invocation.point)
-            .cloned()
-            .enumerate()
-        {
-            if entry.mode == HookExecutionMode::Background {
-                background.push((registration_index, entry));
-            } else {
-                foreground.push((registration_index, entry));
-            }
-        }
+        let plan = self.hook_execution_plan(invocation.point, overrides)?;
 
-        if foreground.is_empty() && background.is_empty() {
+        if plan.is_empty() {
             return Ok(HookExecutionReport::empty());
         }
 
-        foreground.sort_by(|(a_idx, a_entry), (b_idx, b_entry)| {
-            a_entry
-                .priority
-                .cmp(&b_entry.priority)
-                .then_with(|| a_idx.cmp(b_idx))
-        });
-
         let mut merged = HookExecutionReport::empty();
-        for (registration_index, entry) in foreground {
-            let outcome = self
-                .execute_one(entry, registration_index, invocation.clone())
-                .await?;
+        for planned in plan.foreground {
+            let outcome = self.execute_one(planned, invocation.clone()).await?;
 
             if let Some(decision) = outcome.decision.clone() {
                 match &decision {
@@ -811,11 +747,11 @@ impl HookEngine for DefaultHookEngine {
         }
 
         if !matches!(merged.decision, Some(HookDecision::Deny { .. })) {
-            for (registration_index, entry) in background {
+            for planned in plan.background {
                 let permit = match self.background_slots.clone().try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        tracing::warn!("background hook queue full, skipping {}", entry.id);
+                        tracing::warn!("background hook queue full, skipping {}", planned.entry.id);
                         continue;
                     }
                 };
@@ -825,10 +761,7 @@ impl HookEngine for DefaultHookEngine {
                     let _permit = permit;
                     let delivery_target =
                         HookPatchDeliveryTarget::for_session(invocation_cloned.session_id.clone());
-                    let outcome = match engine
-                        .execute_one(entry, registration_index, invocation_cloned)
-                        .await
-                    {
+                    let outcome = match engine.execute_one(planned, invocation_cloned).await {
                         Ok(outcome) => outcome,
                         Err(error) => {
                             tracing::warn!(
@@ -876,8 +809,8 @@ impl HookEngine for DefaultHookEngine {
 mod tests {
     use super::*;
     use meerkat_core::{
-        HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode, HookRuntimeConfig,
-        HookRuntimeKind, SessionId,
+        HookCapability, HookFailurePolicy, HookLlmRequest, HookPoint, HookReasonCode,
+        HookRuntimeConfig, HookRuntimeKind, SessionId,
     };
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 

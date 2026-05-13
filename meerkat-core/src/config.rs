@@ -15,7 +15,7 @@ use crate::{
 };
 use schemars::JsonSchema;
 use serde::de::Deserializer;
-use serde::ser::{SerializeStruct, Serializer};
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -1360,9 +1360,8 @@ impl Default for CommsRuntimeConfig {
 ///
 /// This config is serialized/deserialized in realm config and mapped to
 /// `meerkat_core::CompactionConfig` when wiring the session compactor.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
-#[serde(default)]
 pub struct CompactionRuntimeConfig {
     /// Trigger compaction when input tokens for a turn reach this threshold.
     pub auto_compact_threshold: u64,
@@ -1370,6 +1369,7 @@ pub struct CompactionRuntimeConfig {
     ///
     /// This preserves the difference between inheriting Meerkat's default
     /// threshold and deliberately pinning that same numeric value.
+    #[cfg_attr(feature = "schema", schemars(skip))]
     pub auto_compact_threshold_explicit: bool,
     /// Number of recent complete turns to retain after compaction.
     pub recent_turn_budget: usize,
@@ -2499,7 +2499,8 @@ mod tests {
         let config = Config::template().expect("template parses");
         assert_eq!(
             config.agent.model.as_str(),
-            crate::model_profile::catalog::default_model("openai").expect("openai catalog default")
+            crate::model_profile::catalog::default_model(Provider::OpenAI)
+                .expect("openai catalog default")
         );
     }
 

@@ -3,7 +3,7 @@
 
 use async_trait::async_trait;
 use futures::stream;
-use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat::{AgentFactory, Config, FactoryAgentBuilder, Provider};
 use meerkat_client::{
     ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest,
     ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
@@ -157,8 +157,8 @@ impl LlmClient for ScriptedGeneratedImageCommsClient {
         Box::pin(stream::iter(events.into_iter().map(Ok)))
     }
 
-    fn provider(&self) -> &'static str {
-        "scripted-generated-image-comms"
+    fn provider(&self) -> Provider {
+        Provider::Other
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

@@ -130,7 +130,7 @@ fn strip_provider_tool_defaults(params: &mut ProviderParamsOverride) {
 }
 
 fn inject_structured_output(
-    provider: &str,
+    provider: crate::Provider,
     params: &mut ProviderParamsOverride,
     output_schema: &crate::OutputSchema,
 ) {
@@ -139,7 +139,7 @@ fn inject_structured_output(
     };
 
     match provider {
-        "anthropic" => match params.provider_tag.take() {
+        crate::Provider::Anthropic => match params.provider_tag.take() {
             Some(ProviderTag::Anthropic(mut tag)) => {
                 tag.structured_output = Some(output_schema.clone());
                 params.provider_tag = Some(ProviderTag::Anthropic(tag));
@@ -153,7 +153,7 @@ fn inject_structured_output(
                 });
             }
         },
-        "gemini" | "google" => match params.provider_tag.take() {
+        crate::Provider::Gemini => match params.provider_tag.take() {
             Some(ProviderTag::Gemini(mut tag)) => {
                 tag.structured_output = Some(output_schema.clone());
                 params.provider_tag = Some(ProviderTag::Gemini(tag));
@@ -167,20 +167,22 @@ fn inject_structured_output(
                 });
             }
         },
-        _ => match params.provider_tag.take() {
-            Some(ProviderTag::OpenAi(mut tag)) => {
-                tag.structured_output = Some(output_schema.clone());
-                params.provider_tag = Some(ProviderTag::OpenAi(tag));
+        crate::Provider::OpenAI | crate::Provider::SelfHosted | crate::Provider::Other => {
+            match params.provider_tag.take() {
+                Some(ProviderTag::OpenAi(mut tag)) => {
+                    tag.structured_output = Some(output_schema.clone());
+                    params.provider_tag = Some(ProviderTag::OpenAi(tag));
+                }
+                other => {
+                    params.provider_tag = other.or_else(|| {
+                        Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                            structured_output: Some(output_schema.clone()),
+                            ..Default::default()
+                        }))
+                    });
+                }
             }
-            other => {
-                params.provider_tag = other.or_else(|| {
-                    Some(ProviderTag::OpenAi(OpenAiProviderTag {
-                        structured_output: Some(output_schema.clone()),
-                        ..Default::default()
-                    }))
-                });
-            }
-        },
+        }
     }
 }
 

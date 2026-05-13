@@ -11407,7 +11407,7 @@ async fn execute_mob_web_build(
             if meerkat_contracts::capability::browser_mobpack_capability_decision_for_id(
                 requirement.id(),
             )
-                .is_forbidden()
+            .is_forbidden()
             {
                 anyhow::bail!(
                     "forbidden capability '{}' is not allowed for web builds",

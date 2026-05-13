@@ -16,10 +16,9 @@ use meerkat_contracts::wire::{MobToolConfigInput, WireMobProfile, WireMobToolCon
 use meerkat_contracts::{
     ErrorCode, MobAppendSystemContextResult, MobCreateParams, MobCreateResult,
     MobEventsParams as WireMobEventsParams, MobEventsResult as WireMobEventsResult,
-    MobFlowStatusParams as WireMobFlowStatusParams,
-    MobFlowStatusResult as WireMobFlowStatusResult, MobMemberListEntryWire,
-    MobProfileCreateParams, MobProfileDeleteParams, MobProfileDeleteResult, MobProfileListResult,
-    MobProfileLookupResult, MobProfileNameParams, MobProfileUpdateParams,
+    MobFlowStatusParams as WireMobFlowStatusParams, MobFlowStatusResult as WireMobFlowStatusResult,
+    MobMemberListEntryWire, MobProfileCreateParams, MobProfileDeleteParams, MobProfileDeleteResult,
+    MobProfileListResult, MobProfileLookupResult, MobProfileNameParams, MobProfileUpdateParams,
     MobRotateSupervisorResult, MobSnapshotResult, MobSpawnManyResult, MobSpawnManyResultEntry,
     MobStatusResult, SupervisorRotationReportWire, WireMemberState, WireMobBackendKind,
     WireMobEvent, WireMobMemberStatus, WireMobRun, WireMobRuntimeMode, WireMobState,

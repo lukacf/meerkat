@@ -64,8 +64,7 @@ pub trait LlmClient: Send + Sync {
 
     /// Get the typed provider identity for policy/default resolution.
     fn provider_id(&self) -> meerkat_core::Provider {
-        meerkat_core::Provider::parse_strict(self.provider())
-            .unwrap_or(meerkat_core::Provider::Other)
+        self.provider()
     }
 
     /// Check if the client is healthy/connected

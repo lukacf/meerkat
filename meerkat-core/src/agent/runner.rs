@@ -1258,8 +1258,6 @@ where
                             let event = AgentEvent::SkillResolutionFailed {
                                 skill_key: Some(key.clone()),
                                 reason: reason.clone(),
-                                reference: key.to_string(),
-                                error: e.to_string(),
                             };
                             if tx.send(event).await.is_err() {
                                 tracing::warn!(

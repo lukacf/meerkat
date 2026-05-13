@@ -5235,7 +5235,7 @@ mod tests {
             name: "get_weather".into(),
             description: "Get weather".to_string(),
             input_schema: meerkat_tools::empty_object_schema(),
-            handler: Some("callback".to_string()),
+            handler: McpToolHandler::Callback,
         }];
 
         let dispatcher = MpcToolDispatcher::new(&mcp_tools);

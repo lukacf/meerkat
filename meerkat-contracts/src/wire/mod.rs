@@ -127,11 +127,10 @@ pub use mob::{
     WireMobEventKind, WireMobFailureLedgerEntry, WireMobLifecycleAction,
     WireMobLoopIterationLedgerEntry, WireMobMemberSpawnedEvent, WireMobMemberStatus,
     WireMobProfile, WireMobProjectionError, WireMobReconcileStage, WireMobRun, WireMobRunStatus,
-    WireMobRuntimeMode, WireMobStepLedgerEntry, WireMobStepRunStatus, WireMobTaskStatus,
-    WireMobState, WireMobToolConfig, WireRenderClass, WireRenderMetadata, WireRenderSalience,
-    WireRuntimeBinding,
-    WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity, WireTrustedPeerSpec,
-    WireWorkOrigin,
+    WireMobRuntimeMode, WireMobState, WireMobStepLedgerEntry, WireMobStepRunStatus,
+    WireMobTaskStatus, WireMobToolConfig, WireRenderClass, WireRenderMetadata, WireRenderSalience,
+    WireRuntimeBinding, WireToolAccessPolicy, WireToolFilter, WireTrustedPeerIdentity,
+    WireTrustedPeerSpec, WireWorkOrigin,
 };
 pub use models::{
     CatalogModelEntry, ModelsCatalogResponse, ProviderCatalog, WireModelBetaHeader,

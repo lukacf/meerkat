@@ -824,6 +824,7 @@ Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you ca
             model: openaiStressModel(),
             provider: "openai",
             enableBuiltins: true,
+            providerParams: { reasoning_effort: "none" },
           },
         ),
         240000,

@@ -472,6 +472,7 @@ fn mob_error_is_missing_target(error: &MobError) -> bool {
             | MobError::FlowNotFound(_)
             | MobError::RunNotFound(_)
             | MobError::WorkNotFound(_)
+            | MobError::BridgeSessionMissingFromLiveAuthority(_)
     ) || matches!(error, MobError::Internal(detail) if detail.starts_with("mob not found:"))
 }
 
@@ -481,7 +482,10 @@ fn mob_error_failure_class(error: &MobError) -> OccurrenceFailureClass {
         | MobError::MemberNotFound(_)
         | MobError::FlowNotFound(_)
         | MobError::RunNotFound(_)
-        | MobError::WorkNotFound(_) => OccurrenceFailureClass::TargetMissing,
+        | MobError::WorkNotFound(_)
+        | MobError::BridgeSessionMissingFromLiveAuthority(_) => {
+            OccurrenceFailureClass::TargetMissing
+        }
         MobError::MemberAlreadyExists(_) => OccurrenceFailureClass::TargetBusy,
         MobError::StorageError(_)
         | MobError::SessionError(_)
@@ -490,7 +494,9 @@ fn mob_error_failure_class(error: &MobError) -> OccurrenceFailureClass {
         | MobError::KickoffWaitTimedOut { .. }
         | MobError::ReadyWaitTimedOut { .. }
         | MobError::FlowTurnTimedOut => OccurrenceFailureClass::TransportError,
-        MobError::Internal(_) => OccurrenceFailureClass::InternalError,
+        MobError::ActorTaskDropped | MobError::ActorReplyDropped | MobError::Internal(_) => {
+            OccurrenceFailureClass::InternalError
+        }
         MobError::CallbackPending { .. } => OccurrenceFailureClass::RuntimeRejected,
         _ => OccurrenceFailureClass::MobRejected,
     }

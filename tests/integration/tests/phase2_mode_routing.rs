@@ -108,6 +108,7 @@ impl SessionService for MockSessionService {
         }
         Ok(RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: sid,
             usage: Usage::default(),
             turns: 1,
@@ -134,6 +135,7 @@ impl SessionService for MockSessionService {
             notifier.notified().await;
             return Ok(RunResult {
                 text: "Host loop interrupted".to_string(),
+                content: Vec::new(),
                 session_id: id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -147,6 +149,7 @@ impl SessionService for MockSessionService {
         }
         Ok(RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: id.clone(),
             usage: Usage::default(),
             turns: 1,

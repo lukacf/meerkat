@@ -25,7 +25,10 @@ pub(crate) async fn terminalize_async_stop(
 
     if let Some(completions) = completions {
         let mut reg = completions.lock().await;
-        reg.resolve_all_terminated("runtime stopped");
+        reg.resolve_all_terminated(
+            "runtime stopped",
+            crate::completion::CompletionRuntimeTerminationKind::RuntimeStopped,
+        );
     }
 
     Ok(())

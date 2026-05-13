@@ -1,5 +1,12 @@
 import { KNOWN_AGENT_EVENT_TYPES } from './generated/events.js';
-import type { AgentEvent, SkillKey, Usage } from './generated/events.js';
+import type {
+  AgentErrorReport,
+  AgentEvent,
+  SkillKey,
+  TurnTerminalCauseKind,
+  TurnTerminalOutcome,
+  Usage,
+} from './generated/events.js';
 import type { WireMobMemberStatus } from './generated/mob.js';
 
 // ─── Bootstrap config ───────────────────────────────────────────
@@ -159,6 +166,14 @@ export interface MobRespawnResult {
   failed_peer_ids?: string[];
 }
 
+/** Canonical terminal result for a direct browser turn. */
+export interface TurnTerminalResult {
+  outcome: TurnTerminalOutcome;
+  cause_kind?: TurnTerminalCauseKind;
+  error?: AgentErrorReport;
+  metadata?: unknown;
+}
+
 /** Result of a turn execution. */
 export interface TurnResult {
   /** Canonical text returned by the runtime. */
@@ -167,12 +182,15 @@ export interface TurnResult {
   response: string;
   usage: Usage;
   tool_calls: number;
+  terminal: TurnTerminalResult;
   turns?: number;
   session_id?: string;
-  status?: string;
+  /** @deprecated Use terminal.outcome. */
+  status?: TurnTerminalOutcome;
 }
 
 export type {
+  AgentErrorReport,
   AgentEvent,
   BudgetType,
   HookId,
@@ -202,7 +220,10 @@ export type {
   ToolExecutionCompletedEvent,
   ToolExecutionStartedEvent,
   ToolExecutionTimedOutEvent,
+  ToolResultError,
   ToolResultReceivedEvent,
+  TurnTerminalCauseKind,
+  TurnTerminalOutcome,
   TurnCompletedEvent,
   TurnStartedEvent,
   Usage,
@@ -326,6 +347,14 @@ export type MobMemberRef = string;
 
 /** Typed lifecycle action for the `mob/lifecycle` surface. */
 export type MobLifecycleAction = 'stop' | 'resume' | 'complete' | 'reset' | 'destroy';
+
+/** Result of a mob lifecycle action. */
+export interface MobLifecycleResult {
+  mob_id: string;
+  action: MobLifecycleAction;
+  ok: boolean;
+  destroy_report?: unknown;
+}
 
 /** Result of a spawn operation. */
 export interface SpawnResult {

@@ -37,6 +37,7 @@ use std::sync::{
 };
 
 use crate::BudgetDimension;
+use crate::event::AgentErrorClass;
 use crate::handles::{DslTransitionError, TurnStateHandle, TurnStateSnapshot};
 use crate::lifecycle::RunId;
 use crate::ops::OperationId;
@@ -69,6 +70,7 @@ struct LocalFields {
     cancel_after_boundary: bool,
     terminal_outcome: TurnTerminalOutcome,
     terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    terminal_failure_class: Option<AgentErrorClass>,
     extraction_attempts: u32,
     max_extraction_retries: u32,
     llm_retry_attempt: u32,
@@ -116,6 +118,7 @@ impl LocalFields {
             cancel_after_boundary: false,
             terminal_outcome: TurnTerminalOutcome::None,
             terminal_cause_kind: None,
+            terminal_failure_class: None,
             extraction_attempts: 0,
             max_extraction_retries: 0,
             llm_retry_attempt: 0,
@@ -243,6 +246,9 @@ impl LocalState {
                 if let Some(cause_kind) = fields.force_next_llm_terminal_failed_cause_kind.take() {
                     fields.terminal_outcome = TurnTerminalOutcome::Failed;
                     fields.terminal_cause_kind = cause_kind.into_optional();
+                    fields.terminal_failure_class = fields
+                        .terminal_cause_kind
+                        .map(TurnTerminalCauseKind::agent_error_class);
                     Failed
                 } else {
                     DrainingBoundary
@@ -420,6 +426,7 @@ impl LocalState {
                 }
                 fields.terminal_outcome = TurnTerminalOutcome::Failed;
                 fields.terminal_cause_kind = Some(reason.cause_kind);
+                fields.terminal_failure_class = Some(reason.class);
                 Failed
             }
             (
@@ -474,6 +481,7 @@ impl LocalState {
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::Failed;
                 fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
+                fields.terminal_failure_class = Some(AgentErrorClass::MaxTurns);
                 Failed
             }
             (
@@ -493,6 +501,7 @@ impl LocalState {
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::BudgetExhausted;
                 fields.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
+                fields.terminal_failure_class = Some(AgentErrorClass::Budget);
                 Completed
             }
             (
@@ -512,6 +521,7 @@ impl LocalState {
                 fields.boundary_count += 1;
                 fields.terminal_outcome = TurnTerminalOutcome::TimeBudgetExceeded;
                 fields.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
+                fields.terminal_failure_class = Some(AgentErrorClass::Budget);
                 Completed
             }
             (
@@ -536,6 +546,7 @@ impl LocalState {
                         TurnTerminalCauseKind::BudgetExhausted
                     }
                 });
+                fields.terminal_failure_class = Some(AgentErrorClass::Budget);
                 Completed
             }
             (
@@ -1021,6 +1032,14 @@ impl TurnStateHandle for TestTurnStateHandle {
                 None
             } else {
                 fields.terminal_cause_kind
+            },
+            terminal_failure_class: if self
+                .suppress_terminal_cause_snapshots
+                .load(Ordering::SeqCst)
+            {
+                None
+            } else {
+                fields.terminal_failure_class
             },
             extraction_attempts: u64::from(fields.extraction_attempts),
             max_extraction_retries: u64::from(fields.max_extraction_retries),

@@ -132,6 +132,7 @@ import type {
   SkillRuntimeDiagnostics,
   SpawnManySpec,
   SpawnSpec,
+  ToolResultError,
   TranscriptEditOptions,
   TranscriptReplacement,
   UpdateScheduleRequest,
@@ -3680,12 +3681,31 @@ export class MeerkatClient {
       stopReason: data.stop_reason != null ? String(data.stop_reason) : undefined,
       blocks: rawBlocks.map((block) => MeerkatClient.parseSessionAssistantBlock(block)),
       results: rawResults.map(
-        (result): SessionToolResult => ({
-          toolUseId: String(result.tool_use_id ?? ""),
-          content: MeerkatClient.parseContentInput(result.content),
-          isError: Boolean(result.is_error ?? false),
-        }),
+        (result): SessionToolResult => {
+          const error = MeerkatClient.parseToolResultError(result.error);
+          return {
+            toolUseId: String(result.tool_use_id ?? ""),
+            content: MeerkatClient.parseContentInput(result.content),
+            isError: Boolean(result.is_error ?? false),
+            ...(error !== undefined ? { error } : {}),
+          };
+        },
       ),
+    };
+  }
+
+  private static parseToolResultError(value: unknown): ToolResultError | null | undefined {
+    if (value === undefined) return undefined;
+    if (value === null) return null;
+    if (typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.code !== "string" || typeof record.message !== "string") {
+      return undefined;
+    }
+    return {
+      code: record.code,
+      message: record.message,
+      ...(Object.prototype.hasOwnProperty.call(record, "data") ? { data: record.data } : {}),
     };
   }
 

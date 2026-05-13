@@ -142,10 +142,9 @@ fn validate_response_text(
         }
     };
 
-    let normalized = unwrap_named_object_wrapper(parsed, output_schema);
-
     #[cfg(feature = "jsonschema")]
     {
+        let normalized = unwrap_named_object_wrapper(parsed, output_schema);
         let validator = jsonschema::Validator::new(compiled_schema)
             .map_err(|error| AgentError::InvalidOutputSchema(error.to_string()))?;
         if let Err(error) = validator.validate(&normalized) {
@@ -153,17 +152,19 @@ fn validate_response_text(
                 "Schema validation failed: {error}"
             )));
         }
+        Ok(ValidationOutcome::Passed(normalized))
     }
     #[cfg(not(feature = "jsonschema"))]
     {
+        let _ = parsed;
+        let _ = output_schema;
         let _ = compiled_schema;
-        tracing::warn!(
+        Err(AgentError::InvalidOutputSchema(
             "Structured output schema validation unavailable \
-            (jsonschema feature disabled). Accepting parsed JSON without schema validation."
-        );
+            (jsonschema feature disabled). Refusing schema-governed output without validation."
+                .to_string(),
+        ))
     }
-
-    Ok(ValidationOutcome::Passed(normalized))
 }
 
 fn invalid_validation(error: String) -> ValidationOutcome {
@@ -399,6 +400,23 @@ mod tests {
                 panic!("expected schema failure, got {value:?}")
             }
         }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "jsonschema"))]
+    #[test]
+    fn test_validate_response_text_fails_closed_without_jsonschema()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let schema = OutputSchema::new(json!({
+            "type": "object",
+            "properties": { "answer": { "type": "string" } },
+            "required": ["answer"]
+        }))?;
+
+        let error = validate_response_text(r#"{"answer":"ok"}"#, &schema, schema.schema.as_value())
+            .expect_err("schema-governed output must not pass without jsonschema");
+
+        assert!(matches!(error, AgentError::InvalidOutputSchema(_)));
         Ok(())
     }
 

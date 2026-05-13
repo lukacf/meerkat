@@ -1670,6 +1670,27 @@ impl Session {
         })
     }
 
+    /// Get the last assistant message as ordered assistant blocks.
+    ///
+    /// This preserves the terminal output's structured assistant payload while
+    /// keeping [`Self::last_assistant_text`] as a compatibility projection.
+    pub fn last_assistant_blocks(&self) -> Vec<AssistantBlock> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::BlockAssistant(a) => Some(a.blocks.clone()),
+                Message::Assistant(a) if !a.content.is_empty() => {
+                    Some(vec![AssistantBlock::Text {
+                        text: a.content.clone(),
+                        meta: None,
+                    }])
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
     /// Count tool calls made
     pub fn tool_call_count(&self) -> usize {
         self.messages
@@ -3892,6 +3913,29 @@ mod tests {
         let mut session = Session::new();
         session.push(Message::System(SystemMessage::new("system")));
         assert!(!session.has_pending_boundary());
+    }
+
+    #[test]
+    fn last_assistant_blocks_preserves_non_text_blocks() {
+        let mut session = Session::new();
+        let blocks = vec![
+            AssistantBlock::Text {
+                text: "visible".to_string(),
+                meta: None,
+            },
+            AssistantBlock::Reasoning {
+                text: "reasoning".to_string(),
+                meta: None,
+            },
+        ];
+
+        session.push(Message::BlockAssistant(BlockAssistantMessage::new(
+            blocks.clone(),
+            StopReason::EndTurn,
+        )));
+
+        assert_eq!(session.last_assistant_text().as_deref(), Some("visible"));
+        assert_eq!(session.last_assistant_blocks(), blocks);
     }
 
     #[test]

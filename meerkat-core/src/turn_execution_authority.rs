@@ -96,6 +96,7 @@ pub enum TurnTerminalCauseKind {
     RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
+    CheckpointPersistenceFailure,
     FatalFailure,
 }
 
@@ -115,6 +116,7 @@ impl TurnTerminalCauseKind {
             }
             AgentError::TimeBudgetExceeded { .. } => Self::TimeBudgetExceeded,
             AgentError::MaxTurnsReached { .. } => Self::TurnLimitReached,
+            AgentError::SessionCheckpointFailed(_) => Self::CheckpointPersistenceFailure,
             AgentError::TerminalFailure { cause_kind, .. } => *cause_kind,
             _ => Self::FatalFailure,
         }
@@ -130,6 +132,7 @@ impl TurnTerminalCauseKind {
             }
             AgentErrorClass::Budget => Self::BudgetExhausted,
             AgentErrorClass::MaxTurns => Self::TurnLimitReached,
+            AgentErrorClass::Store => Self::CheckpointPersistenceFailure,
             _ => Self::FatalFailure,
         }
     }
@@ -143,6 +146,7 @@ impl TurnTerminalCauseKind {
             Self::BudgetExhausted | Self::TimeBudgetExceeded => AgentErrorClass::Budget,
             Self::RetryExhausted => AgentErrorClass::Llm,
             Self::TurnLimitReached => AgentErrorClass::MaxTurns,
+            Self::CheckpointPersistenceFailure => AgentErrorClass::Store,
             Self::RuntimeApplyFailure | Self::Unknown => AgentErrorClass::Internal,
             Self::FatalFailure => AgentErrorClass::Terminal,
         }
@@ -164,6 +168,7 @@ impl TurnTerminalCauseKind {
             Self::RetryExhausted => "retry exhausted",
             Self::TurnLimitReached => "turn limit reached",
             Self::RuntimeApplyFailure => "runtime apply failure",
+            Self::CheckpointPersistenceFailure => "checkpoint persistence failure",
             Self::FatalFailure => "fatal turn failure",
             Self::Unknown => "unknown terminal cause",
         }
@@ -747,6 +752,24 @@ pub fn terminal_outcome_for_budget_exceeded(exceeded: BudgetExceeded) -> TurnTer
         BudgetDimension::Tokens | BudgetDimension::ToolCalls => {
             TurnTerminalOutcome::BudgetExhausted
         }
+    }
+}
+
+/// Canonical terminal outcome implied by an agent error when a surface only
+/// receives `SessionError::Agent`.
+pub fn terminal_outcome_for_agent_error(error: &AgentError) -> TurnTerminalOutcome {
+    match error {
+        AgentError::TerminalFailure { outcome, .. } => *outcome,
+        AgentError::Cancelled => TurnTerminalOutcome::Cancelled,
+        AgentError::TokenBudgetExceeded { .. } | AgentError::ToolCallBudgetExceeded { .. } => {
+            TurnTerminalOutcome::BudgetExhausted
+        }
+        AgentError::TimeBudgetExceeded { .. } => TurnTerminalOutcome::TimeBudgetExceeded,
+        AgentError::StructuredOutputValidationFailed { .. }
+        | AgentError::InvalidOutputSchema(_) => {
+            TurnTerminalOutcome::StructuredOutputValidationFailed
+        }
+        _ => TurnTerminalOutcome::Failed,
     }
 }
 

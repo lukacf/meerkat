@@ -114,6 +114,7 @@ fn runtime_execution_snapshot(
         cancel_after_boundary: snapshot.cancel_after_boundary,
         terminal_outcome,
         terminal_cause_kind: snapshot.terminal_cause_kind,
+        terminal_failure_class: snapshot.terminal_failure_class,
         extraction_attempts: u32::try_from(snapshot.extraction_attempts).ok()?,
         max_extraction_retries: u32::try_from(snapshot.max_extraction_retries).ok()?,
         applied_cursor,
@@ -696,11 +697,14 @@ where
 
     /// Persist the current session through the configured checkpointer after syncing control state.
     #[doc(hidden)]
-    pub async fn checkpoint_current_session(&mut self) {
+    pub async fn checkpoint_current_session(&mut self) -> Result<(), AgentError> {
         self.sync_system_context_state_to_session();
         if let Some(ref cp) = self.checkpointer {
-            cp.checkpoint(&self.session).await;
+            cp.checkpoint(&self.session)
+                .await
+                .map_err(AgentError::SessionCheckpointFailed)?;
         }
+        Ok(())
     }
 
     async fn run_started_hooks(
@@ -753,6 +757,7 @@ where
             AgentEvent::RunCompleted {
                 session_id: self.session.id().clone(),
                 result: result.text.clone(),
+                content: result.content.clone(),
                 structured_output: result.structured_output.clone(),
                 extraction_required,
                 usage: result.usage.clone(),
@@ -826,6 +831,9 @@ where
             {
                 Some(*cause_kind)
             }
+            AgentError::SessionCheckpointFailed(_) => Some(
+                crate::turn_execution_authority::TurnTerminalCauseKind::CheckpointPersistenceFailure,
+            ),
             _ => self
                 .execution_snapshot()
                 .and_then(|snapshot| snapshot.terminal_cause_kind)
@@ -1074,12 +1082,16 @@ where
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
+                if let Err(err) = self.checkpoint_current_session().await {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
+                    return Err(err);
+                }
                 if !self.run_completed_event_emitted {
                     self.emit_run_completed_event(&result, false, event_tx.as_ref())
                         .await;
                     self.run_completed_event_emitted = true;
                 }
-                self.checkpoint_current_session().await;
                 self.clear_runtime_execution_kind();
                 Ok(result)
             }
@@ -1152,12 +1164,16 @@ where
                     self.clear_runtime_execution_kind();
                     return Err(err);
                 }
+                if let Err(err) = self.checkpoint_current_session().await {
+                    self.handle_run_failure(&err, event_tx.as_ref()).await;
+                    self.clear_runtime_execution_kind();
+                    return Err(err);
+                }
                 if !self.run_completed_event_emitted {
                     self.emit_run_completed_event(&result, false, event_tx.as_ref())
                         .await;
                     self.run_completed_event_emitted = true;
                 }
-                self.checkpoint_current_session().await;
                 self.clear_runtime_execution_kind();
                 Ok(result)
             }
@@ -1237,10 +1253,28 @@ where
                     }
                 }
                 Err(e) => {
+                    let reason = crate::event::SkillResolutionFailureReason::from_skill_error(&e);
+                    if let Some(tx) = event_tx {
+                        for key in &canonical_keys {
+                            let event = AgentEvent::SkillResolutionFailed {
+                                skill_key: Some(key.clone()),
+                                reason: reason.clone(),
+                                reference: key.to_string(),
+                                error: e.to_string(),
+                            };
+                            if tx.send(event).await.is_err() {
+                                tracing::warn!(
+                                    "agent event stream receiver dropped while reporting skill resolution failure"
+                                );
+                                break;
+                            }
+                        }
+                    }
                     tracing::warn!(
                         error = %e,
                         "Failed to resolve source-pinned skill_references"
                     );
+                    self.pending_skill_references = Some(canonical_keys);
                 }
             }
         }

@@ -2,6 +2,7 @@
 //!
 //! These define the interface between surfaces and the runtime control-plane.
 
+use meerkat_core::handles::DslTransitionError;
 use meerkat_core::lifecycle::{InputId, RunId};
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +17,10 @@ use crate::runtime_state::RuntimeState;
 #[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum RuntimeDriverError {
+    /// Runtime was not found.
+    #[error("Runtime not found: {0}")]
+    NotFound(LogicalRuntimeId),
+
     /// The runtime is not in a state that can accept this operation.
     #[error("Runtime not ready: {state}")]
     NotReady { state: RuntimeState },
@@ -31,6 +36,10 @@ pub enum RuntimeDriverError {
     /// Durable recovery state could not be replayed through canonical runtime authority.
     #[error("Recovery corruption: {reason}")]
     RecoveryCorruption { reason: String },
+
+    /// Canonical runtime DSL rejected this driver operation.
+    #[error(transparent)]
+    DslRejected(#[from] DslTransitionError),
 
     /// Internal error.
     #[error("Internal error: {0}")]
@@ -48,6 +57,10 @@ pub enum RuntimeControlPlaneError {
     /// Invalid state for this operation.
     #[error("Invalid state for operation: {state}")]
     InvalidState { state: RuntimeState },
+
+    /// Canonical runtime DSL rejected this control-plane operation.
+    #[error(transparent)]
+    DslRejected(#[from] DslTransitionError),
 
     /// Store error.
     #[error("Store error: {0}")]
@@ -217,6 +230,9 @@ mod tests {
 
     #[test]
     fn runtime_driver_error_display() {
+        let err = RuntimeDriverError::NotFound(LogicalRuntimeId::new("missing"));
+        assert!(err.to_string().contains("missing"));
+
         let err = RuntimeDriverError::NotReady {
             state: RuntimeState::Initializing,
         };

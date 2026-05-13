@@ -79,16 +79,13 @@ fn turn_effects_from_dsl(
             mm_dsl::MeerkatMachineEffect::TurnRunFailed {
                 run_id,
                 terminal_cause_kind,
+                failure_class,
                 error,
             } => {
                 let cause_kind = terminal_cause_kind.into();
                 projected.push(TurnExecutionEffect::RunFailed {
                     run_id: domain_run_id_from_dsl(&run_id, context)?,
-                    reason: TurnFailureReason::with_cause(
-                        cause_kind,
-                        cause_kind.agent_error_class(),
-                        error,
-                    ),
+                    reason: TurnFailureReason::with_cause(cause_kind, failure_class.into(), error),
                 });
             }
             mm_dsl::MeerkatMachineEffect::TurnRunCancelled { run_id, .. } => {
@@ -222,6 +219,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             TurnExecutionInput::FatalFailure { reason, .. } => self.dsl.apply_input_with_effects(
                 mm_dsl::MeerkatMachineInput::FatalFailure {
                     terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
+                    failure_class: mm_dsl::TurnFailureClass::from(reason.class),
                     error: reason.message.clone(),
                 },
                 context,
@@ -517,6 +515,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
         self.dsl.apply_input(
             mm_dsl::MeerkatMachineInput::FatalFailure {
                 terminal_cause_kind: mm_dsl::TurnTerminalCauseKind::from(reason.cause_kind),
+                failure_class: mm_dsl::TurnFailureClass::from(reason.class),
                 error: reason.message,
             },
             "TurnStateHandle::fatal_failure",
@@ -673,6 +672,7 @@ impl TurnStateHandle for RuntimeTurnStateHandle {
             cancel_after_boundary: state.cancel_after_boundary,
             terminal_outcome: state.terminal_outcome.map(TurnTerminalOutcome::from),
             terminal_cause_kind: state.terminal_cause_kind.map(Into::into),
+            terminal_failure_class: state.terminal_failure_class.map(Into::into),
             extraction_attempts: state.extraction_attempts,
             max_extraction_retries: state.max_extraction_retries,
             llm_retry_attempt: u32::try_from(state.llm_retry_attempt).unwrap_or(u32::MAX),
@@ -948,6 +948,10 @@ mod tests {
         assert_eq!(
             handle.snapshot().terminal_cause_kind,
             Some(meerkat_core::TurnTerminalCauseKind::FatalFailure)
+        );
+        assert_eq!(
+            handle.snapshot().terminal_failure_class,
+            Some(meerkat_core::event::AgentErrorClass::Terminal)
         );
     }
 

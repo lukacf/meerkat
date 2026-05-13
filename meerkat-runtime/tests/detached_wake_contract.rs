@@ -98,6 +98,7 @@ impl CoreExecutor for ResultExecutor {
             None,
             RunResult {
                 text: "done".into(),
+                content: Vec::new(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
                 turns: 1,
@@ -147,6 +148,7 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                 None,
                 RunResult {
                     text: "done".into(),
+                    content: Vec::new(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
                     turns: 1,
@@ -186,11 +188,13 @@ async fn choke_004_feed_backed_idle_runtime_injects_continuation_without_manual_
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session registry should exist");
 
     let spec = background_spec("idle-feed");
@@ -263,13 +267,15 @@ async fn choke_004_idle_runtime_wakes_on_detached_op_completion() {
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // The runtime loop owns detached wake for registered sessions.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session registry should exist");
 
     let spec = background_spec("wake-on-complete");
@@ -363,13 +369,15 @@ async fn choke_004_five_completions_produce_one_coalesced_wake() {
                 apply_count: Arc::clone(&apply_count),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // The runtime loop owns detached wake for registered sessions.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session registry should exist");
 
     let mut op_ids = Vec::new();
@@ -470,6 +478,7 @@ async fn choke_004_completion_during_running_defers_wake() {
                 None,
                 RunResult {
                     text: "done".into(),
+                    content: Vec::new(),
                     session_id: SessionId::new(),
                     usage: Usage::default(),
                     turns: 1,
@@ -510,13 +519,15 @@ async fn choke_004_completion_during_running_defers_wake() {
                 first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // Waker task is spawned automatically during register_session_with_executor.
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session registry should exist");
 
     let spec = background_spec("deferred-wake");
@@ -607,6 +618,7 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
             self.apply_count.fetch_add(1, Ordering::SeqCst);
             let run_result = RunResult {
                 text: "done".into(),
+                content: Vec::new(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
                 turns: 1,
@@ -656,11 +668,13 @@ async fn choke_004_mob_member_child_completion_does_not_trigger_idle_wake() {
                 apply_count: apply_count.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session registry should exist");
 
     // Register and complete a MobMemberChild operation

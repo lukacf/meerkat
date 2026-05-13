@@ -9,6 +9,9 @@ use crate::types::{Message, ToolNameSet};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Core-owned default timeout for tool dispatch wrappers.
+pub const DEFAULT_TOOL_DISPATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Unique identifier for an operation
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct OperationId(pub Uuid);
@@ -247,14 +250,18 @@ pub fn terminal_tool_outcome_for_error(
     error: ToolError,
 ) -> ToolDispatchOutcome {
     let terminal_cause = ToolDispatchTerminalCause::runtime_tool_error(&error);
-    let payload = error.to_error_payload();
-    let serialized = serde_json::to_string(&payload)
-        .unwrap_or_else(|_| "{\"error\":\"tool_error\",\"message\":\"tool error\"}".to_string());
-    let mut outcome = ToolDispatchOutcome::sync_result(crate::types::ToolResult::new(
-        tool_use_id.into(),
-        serialized,
-        true,
-    ));
+    let result_error = crate::types::ToolResultError {
+        code: error.error_code().to_string(),
+        message: error.to_string(),
+        data: error.structured_data(),
+    };
+    // Keep the content/result text as a diagnostic projection. The
+    // machine-readable owner is `ToolResult.error`, which transcript wire and
+    // event-stream surfaces serialize alongside the legacy text fields.
+    let mut outcome = ToolDispatchOutcome::sync_result(
+        crate::types::ToolResult::new(tool_use_id.into(), result_error.message.clone(), true)
+            .with_error(result_error),
+    );
     outcome.terminal_cause = Some(terminal_cause);
     outcome
 }
@@ -665,6 +672,24 @@ mod tests {
         let outcome = terminal_tool_outcome_for_error("t1", ToolError::timeout("slow_tool", 50));
 
         assert!(outcome.result.is_error);
+        assert_eq!(
+            outcome.result.text_content(),
+            "Tool 'slow_tool' timed out after 50ms"
+        );
+        assert_eq!(
+            outcome
+                .result
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("timeout")
+        );
+        let serialized = serde_json::to_value(&outcome.result).expect("serialize tool result");
+        assert_eq!(
+            serialized["content"],
+            "Tool 'slow_tool' timed out after 50ms"
+        );
+        assert_eq!(serialized["error"]["code"], "timeout");
         assert!(outcome.is_runtime_tool_timeout());
         assert_eq!(
             outcome.terminal_cause(),

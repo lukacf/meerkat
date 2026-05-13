@@ -929,6 +929,7 @@ impl ContractSessionService {
 fn run_result(session_id: SessionId, text: &str) -> RunResult {
     RunResult {
         text: text.to_string(),
+        content: Vec::new(),
         session_id,
         usage: Usage::default(),
         turns: 1,

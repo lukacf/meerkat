@@ -280,7 +280,7 @@ where
             result.session_id.clone(),
             executor_factory(result.session_id.clone()),
         )
-        .await;
+        .await?;
 
     Ok(result)
 }
@@ -387,7 +387,7 @@ where
             result.session_id.clone(),
             executor_factory(result.session_id.clone()),
         )
-        .await;
+        .await?;
 
     Ok(result)
 }

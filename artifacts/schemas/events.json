@@ -310,6 +310,26 @@
           },
           {
             "properties": {
+              "kind": {
+                "$ref": "#/$defs/SessionCheckpointErrorKind"
+              },
+              "reason_type": {
+                "const": "session_checkpoint_failure",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "reason_type",
+              "session_id",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "args": true,
               "reason_type": {
                 "const": "callback_pending",
@@ -323,6 +343,23 @@
               "reason_type",
               "tool_name",
               "args"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "data": true,
+              "reason_type": {
+                "const": "tool_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "code"
             ],
             "type": "object"
           },
@@ -856,7 +893,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -992,6 +1029,16 @@
         ],
         "type": "object"
       },
+      "SessionCheckpointErrorKind": {
+        "description": "Machine-owned classifier for a failed session checkpoint.",
+        "enum": [
+          "blob_externalization",
+          "deferred_turn_externalization",
+          "deferred_turn_serialization",
+          "store_save"
+        ],
+        "type": "string"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -1013,7 +1060,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillResolutionFailureReason": {
@@ -1473,6 +1520,27 @@
         ],
         "type": "object"
       },
+      "ToolResultError": {
+        "description": "Structured, machine-readable error detail for a failed tool result.",
+        "properties": {
+          "code": {
+            "description": "Stable semantic error code, such as `timeout` or `access_denied`.",
+            "type": "string"
+          },
+          "data": {
+            "description": "Optional protocol/tool-specific structured detail."
+          },
+          "message": {
+            "description": "Human-readable diagnostic message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -1487,6 +1555,7 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"
@@ -1568,6 +1637,11 @@
       {
         "description": "Agent run completed successfully",
         "properties": {
+          "content": {
+            "description": "Ordered assistant blocks from the completed run.\n\n`result` remains as the compatibility text projection.",
+            "items": true,
+            "type": "array"
+          },
           "extraction_required": {
             "default": false,
             "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -1979,6 +2053,16 @@
             },
             "type": "array"
           },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolResultError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "type": "string"
           },
@@ -2057,6 +2141,16 @@
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/ToolResultError"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -2791,6 +2885,26 @@
           },
           {
             "properties": {
+              "kind": {
+                "$ref": "#/$defs/SessionCheckpointErrorKind"
+              },
+              "reason_type": {
+                "const": "session_checkpoint_failure",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "reason_type",
+              "session_id",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "args": true,
               "reason_type": {
                 "const": "callback_pending",
@@ -2804,6 +2918,23 @@
               "reason_type",
               "tool_name",
               "args"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "data": true,
+              "reason_type": {
+                "const": "tool_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "code"
             ],
             "type": "object"
           },
@@ -2881,6 +3012,11 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "content": {
+                "description": "Ordered assistant blocks from the completed run.\n\n`result` remains as the compatibility text projection.",
+                "items": true,
+                "type": "array"
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -3292,6 +3428,16 @@
                 },
                 "type": "array"
               },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolResultError"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -3370,6 +3516,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolResultError"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "id": {
                 "type": "string"
@@ -4275,7 +4431,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -4411,6 +4567,16 @@
         ],
         "type": "object"
       },
+      "SessionCheckpointErrorKind": {
+        "description": "Machine-owned classifier for a failed session checkpoint.",
+        "enum": [
+          "blob_externalization",
+          "deferred_turn_externalization",
+          "deferred_turn_serialization",
+          "store_save"
+        ],
+        "type": "string"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -4432,7 +4598,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillResolutionFailureReason": {
@@ -4935,6 +5101,27 @@
         ],
         "type": "object"
       },
+      "ToolResultError": {
+        "description": "Structured, machine-readable error detail for a failed tool result.",
+        "properties": {
+          "code": {
+            "description": "Stable semantic error code, such as `timeout` or `access_denied`.",
+            "type": "string"
+          },
+          "data": {
+            "description": "Optional protocol/tool-specific structured detail."
+          },
+          "message": {
+            "description": "Human-readable diagnostic message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -4949,6 +5136,7 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"

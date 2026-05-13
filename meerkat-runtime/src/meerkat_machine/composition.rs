@@ -44,9 +44,11 @@ use meerkat_machine_schema::identity::{
 use crate::composition::{
     CompositionSignalDispatcher, FieldValue, ProducerInstance, ProducerSignal, SignalPayload,
 };
-use crate::composition::{ConsumerSurface, OwnedFieldValue, SignalDispatchOutcome};
+use crate::composition::{
+    ConsumerRefusal, ConsumerSurface, OwnedFieldValue, SignalDispatchOutcome, SignalDispatchRefusal,
+};
 use crate::generated::meerkat_mob_seam as seam_facts;
-use crate::meerkat_machine::{MeerkatMachine, dsl as mm_dsl};
+use crate::meerkat_machine::{MeerkatMachine, RoutedMeerkatInputError, dsl as mm_dsl};
 
 /// Consumer-side surface for the `meerkat_mob_seam` composition.
 ///
@@ -184,7 +186,7 @@ pub fn lift_routed_signal(effect: &mm_dsl::MeerkatMachineEffect) -> Option<Meerk
 pub async fn dispatch_routed_signal(
     dispatcher: &MeerkatCompositionSignalDispatcher,
     signal: MeerkatSeamSignal,
-) -> Result<SignalDispatchOutcome, String> {
+) -> Result<SignalDispatchOutcome, SignalDispatchRefusal> {
     let variant = signal.variant_id();
     dispatcher
         .dispatch_signal(
@@ -195,7 +197,6 @@ pub async fn dispatch_routed_signal(
             },
         )
         .await
-        .map_err(|refusal| refusal.to_string())
 }
 
 impl std::fmt::Debug for MeerkatConsumerSurface {
@@ -231,7 +232,7 @@ impl MeerkatConsumerSurface {
         &self,
         variant: &InputVariantId,
         projected: &[(FieldId, OwnedFieldValue)],
-    ) -> Result<SessionId, String> {
+    ) -> Result<SessionId, ConsumerRefusal> {
         // Typed session_id is the canonical source (Shape 4 — producer DSL
         // emits `session_id: SessionId` alongside `agent_runtime_id`; see
         // `MobMachineEffect::RequestRuntimeBinding` in
@@ -245,25 +246,56 @@ impl MeerkatConsumerSurface {
             });
 
         match (&self.pinned_session, projected_session_id) {
-            (Some(pinned), Some(sid)) if sid != pinned.to_string() => Err(format!(
-                "routed session_id `{sid}` does not match pinned session `{pinned}`"
-            )),
+            (Some(pinned), Some(sid)) if sid != pinned.to_string() => {
+                Err(ConsumerRefusal::Projection {
+                    reason: format!(
+                        "routed session_id `{sid}` does not match pinned session `{pinned}`"
+                    ),
+                })
+            }
             (Some(pinned), _) => Ok(pinned.clone()),
-            (None, Some(sid)) => SessionId::parse(&sid)
-                .map_err(|e| format!("routed session_id `{sid}` is not a valid UUID: {e}")),
+            (None, Some(sid)) => SessionId::parse(&sid).map_err(|e| ConsumerRefusal::Projection {
+                reason: format!("routed session_id `{sid}` is not a valid UUID: {e}"),
+            }),
             (None, None) if variant == &seam_facts::inputs::ingest() => {
-                let runtime_id = project_str(projected, &seam_facts::fields::runtime_id())?;
+                let runtime_id = project_str(projected, &seam_facts::fields::runtime_id())
+                    .map_err(|reason| ConsumerRefusal::Projection { reason })?;
                 self.machine
                     .resolve_registered_session_for_runtime_id(&mm_dsl::AgentRuntimeId::from(
                         runtime_id.to_string(),
                     ))
                     .await
+                    .map_err(|reason| ConsumerRefusal::ConsumerUnavailable { reason })
             }
-            (None, None) => Err(
-                "routed input did not project `session_id` and surface is not pinned \
+            (None, None) => Err(ConsumerRefusal::Projection {
+                reason: "routed input did not project `session_id` and surface is not pinned \
                  to a session — no session can be resolved"
                     .into(),
-            ),
+            }),
+        }
+    }
+}
+
+impl From<RoutedMeerkatInputError> for ConsumerRefusal {
+    fn from(error: RoutedMeerkatInputError) -> Self {
+        match error {
+            RoutedMeerkatInputError::InvalidRoutedInput { reason } => Self::Projection { reason },
+            RoutedMeerkatInputError::SessionNotRegistered { session_id } => {
+                Self::SessionNotRegistered {
+                    session_id: session_id.to_string(),
+                }
+            }
+            RoutedMeerkatInputError::TransitionRefused { source } => match source {
+                mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { phase, trigger } => {
+                    Self::NoMatchingTransition { phase, trigger }
+                }
+                mm_dsl::MeerkatMachineTransitionError::GuardRejected { phase, trigger } => {
+                    Self::GuardRejected { phase, trigger }
+                }
+            },
+            RoutedMeerkatInputError::EffectDispatchFailed { reason } => {
+                Self::EffectDispatchFailed { reason }
+            }
         }
     }
 }
@@ -357,6 +389,10 @@ fn project_work_origin(
         })
 }
 
+fn projection_refusal(reason: String) -> ConsumerRefusal {
+    ConsumerRefusal::Projection { reason }
+}
+
 #[async_trait]
 impl ConsumerSurface for MeerkatConsumerSurface {
     fn instance_id(&self) -> &MachineInstanceId {
@@ -367,13 +403,17 @@ impl ConsumerSurface for MeerkatConsumerSurface {
         &self,
         variant: InputVariantId,
         projected: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConsumerRefusal> {
         let session_id = self.resolve_session(&variant, &projected).await?;
         let input = if variant == seam_facts::inputs::prepare_bindings() {
-            let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())?;
-            let fence = project_u64(&projected, &seam_facts::fields::fence_token())?;
-            let gen_ = project_u64(&projected, &seam_facts::fields::generation())?;
-            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            let rt = project_str(&projected, &seam_facts::fields::agent_runtime_id())
+                .map_err(projection_refusal)?;
+            let fence = project_u64(&projected, &seam_facts::fields::fence_token())
+                .map_err(projection_refusal)?;
+            let gen_ = project_u64(&projected, &seam_facts::fields::generation())
+                .map_err(projection_refusal)?;
+            let sid = project_str(&projected, &seam_facts::fields::session_id())
+                .map_err(projection_refusal)?;
             mm_dsl::MeerkatMachineInput::PrepareBindings {
                 agent_runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
                 fence_token: mm_dsl::FenceToken(fence),
@@ -385,36 +425,44 @@ impl ConsumerSurface for MeerkatConsumerSurface {
             // producer `agent_runtime_id` into the consumer's canonical
             // `runtime_id` field; producer `work_id` → consumer
             // `work_id`; producer `origin` → consumer `origin`.
-            let rt = project_str(&projected, &seam_facts::fields::runtime_id())?;
-            let work_id = project_str(&projected, &seam_facts::fields::work_id())?;
-            let origin = project_work_origin(&projected, &seam_facts::fields::origin())?;
+            let rt = project_str(&projected, &seam_facts::fields::runtime_id())
+                .map_err(projection_refusal)?;
+            let work_id = project_str(&projected, &seam_facts::fields::work_id())
+                .map_err(projection_refusal)?;
+            let origin = project_work_origin(&projected, &seam_facts::fields::origin())
+                .map_err(projection_refusal)?;
             mm_dsl::MeerkatMachineInput::Ingest {
                 runtime_id: mm_dsl::AgentRuntimeId::from(rt.to_string()),
                 work_id: mm_dsl::WorkId::from(work_id.to_string()),
                 origin,
             }
         } else if variant == seam_facts::inputs::retire() {
-            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            let sid = project_str(&projected, &seam_facts::fields::session_id())
+                .map_err(projection_refusal)?;
             mm_dsl::MeerkatMachineInput::Retire {
                 session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
         } else if variant == seam_facts::inputs::destroy() {
-            let sid = project_str(&projected, &seam_facts::fields::session_id())?;
+            let sid = project_str(&projected, &seam_facts::fields::session_id())
+                .map_err(projection_refusal)?;
             mm_dsl::MeerkatMachineInput::Destroy {
                 session_id: mm_dsl::SessionId::from(sid.to_string()),
             }
         } else {
-            return Err(format!(
-                "meerkat consumer surface does not accept routed input `{}`; \
+            return Err(ConsumerRefusal::Projection {
+                reason: format!(
+                    "meerkat consumer surface does not accept routed input `{}`; \
                      only PrepareBindings/Ingest/Retire/Destroy are declared in the \
                      `meerkat_mob_seam` schema",
-                variant.as_str()
-            ));
+                    variant.as_str()
+                ),
+            });
         };
 
         self.machine
             .apply_routed_meerkat_input(&session_id, input)
             .await
+            .map_err(ConsumerRefusal::from)
     }
 }
 
@@ -482,7 +530,7 @@ mod tests {
             )
             .await
             .expect_err("missing fence_token");
-        assert!(err.contains("fence_token"), "{err}");
+        assert!(err.to_string().contains("fence_token"), "{err}");
     }
 
     #[tokio::test]
@@ -498,7 +546,7 @@ mod tests {
             .apply_routed_input(iv("Recycle"), vec![])
             .await
             .expect_err("Recycle is not a routed variant");
-        assert!(err.contains("Recycle"), "{err}");
+        assert!(err.to_string().contains("Recycle"), "{err}");
     }
 
     #[tokio::test]
@@ -512,7 +560,7 @@ mod tests {
             .apply_routed_input(iv("Retire"), vec![])
             .await
             .expect_err("Retire without target");
-        assert!(err.contains("session_id"), "{err}");
+        assert!(err.to_string().contains("session_id"), "{err}");
     }
 
     #[tokio::test]
@@ -539,7 +587,70 @@ mod tests {
             )
             .await
             .expect_err("session_id disagrees with pinned session");
-        assert!(err.contains("pinned"), "{err}");
+        assert!(err.to_string().contains("pinned"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn routed_machine_transition_refusal_stays_typed() {
+        let machine = Arc::new(MeerkatMachine::ephemeral());
+        let surface = MeerkatConsumerSurface::new(Arc::clone(&machine));
+        let session_id = sid("00000000-0000-0000-0000-000000000001");
+        machine.register_session(session_id.clone()).await;
+
+        surface
+            .apply_routed_input(
+                iv("PrepareBindings"),
+                vec![
+                    (
+                        fld("agent_runtime_id"),
+                        OwnedFieldValue::Str("rt-before-destroy".into()),
+                    ),
+                    (fld("fence_token"), OwnedFieldValue::U64(1)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
+                    (
+                        fld("session_id"),
+                        OwnedFieldValue::Str(session_id.to_string()),
+                    ),
+                ],
+            )
+            .await
+            .expect("initial binding");
+        surface
+            .apply_routed_input(
+                iv("Destroy"),
+                vec![(
+                    fld("session_id"),
+                    OwnedFieldValue::Str(session_id.to_string()),
+                )],
+            )
+            .await
+            .expect("destroy session");
+
+        let err = surface
+            .apply_routed_input(
+                iv("PrepareBindings"),
+                vec![
+                    (
+                        fld("agent_runtime_id"),
+                        OwnedFieldValue::Str("rt-after-destroy".into()),
+                    ),
+                    (fld("fence_token"), OwnedFieldValue::U64(2)),
+                    (fld("generation"), OwnedFieldValue::U64(0)),
+                    (
+                        fld("session_id"),
+                        OwnedFieldValue::Str(session_id.to_string()),
+                    ),
+                ],
+            )
+            .await
+            .expect_err("destroyed session must reject routed binding");
+        match err {
+            ConsumerRefusal::GuardRejected { phase, trigger } => {
+                assert_eq!(phase, "Destroyed");
+                assert_eq!(trigger, "PrepareBindings");
+            }
+            other => panic!("expected typed machine transition refusal, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -616,7 +727,8 @@ mod tests {
             .await
             .expect_err("runtime_id has no registered owner");
         assert!(
-            err.contains("did not match any registered session"),
+            err.to_string()
+                .contains("did not match any registered session"),
             "{err}"
         );
     }
@@ -646,7 +758,7 @@ mod tests {
             )
             .await
             .expect_err("runtime_id is ambiguous");
-        assert!(err.contains("ambiguous delivery"), "{err}");
+        assert!(err.to_string().contains("ambiguous delivery"), "{err}");
     }
 
     #[derive(Default)]
@@ -665,7 +777,7 @@ mod tests {
             &self,
             variant: SignalVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), crate::composition::SignalConsumerRefusal> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }

@@ -124,7 +124,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
 
     let callback = Function::new_with_args(
         "args",
-        "return Promise.resolve(JSON.stringify({ content: args, is_error: false }));",
+        "return Promise.resolve({ content: args, is_error: false });",
     );
     let tool_error = register_tool_callback(
         "echo_browser".to_string(),
@@ -246,6 +246,7 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
             .expect("start turn"),
     );
     assert_eq!(turn["status"], "completed");
+    assert_eq!(turn["terminal"]["outcome"], "completed");
     assert_eq!(turn["session_id"], session_id);
     assert!(turn["tool_calls"].as_u64().unwrap_or_default() >= 1);
     assert_eq!(turn["text"], "browser tool contract ok");
@@ -306,6 +307,66 @@ async fn browser_contract_requires_bootstrap_and_uses_runtime_backed_sessions_to
     .await
     .expect_err("stale session mutation must fail through canonical session authority");
     assert_eq!(parse_js_error(stale_append)["code"], "SESSION_NOT_FOUND");
+}
+
+#[wasm_bindgen_test(async)]
+async fn browser_contract_rejects_agent_failures_with_typed_terminal_truth() {
+    let init = parse_js_result(
+        init_runtime_from_config(
+            &json!({
+                "anthropic_api_key": "sk-test",
+                "model": "claude-sonnet-4-5"
+            })
+            .to_string(),
+        )
+        .expect("init runtime"),
+    );
+    assert_eq!(init["status"], "initialized");
+
+    let callback = Function::new_with_args("args", "return Promise.resolve(args);");
+    register_tool_callback(
+        "echo_browser".to_string(),
+        "Echo browser payloads".to_string(),
+        json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" }
+            },
+            "required": ["value"]
+        })
+        .to_string(),
+        callback.into(),
+    )
+    .expect("register invalid terminal-shape tool");
+
+    install_tool_use_fetch_stub();
+
+    let handle = create_session_simple(
+        &json!({
+            "model": "claude-sonnet-4-5",
+            "api_key": "sk-test",
+            "base_url": "https://example.test/anthropic",
+            "anthropic_base_url": "https://example.test/anthropic"
+        })
+        .to_string(),
+    )
+    .expect("create direct session façade");
+
+    let failure = parse_js_error(
+        start_turn(handle, "Use the echo_browser tool, then answer.")
+            .await
+            .expect_err("agent failure must reject"),
+    );
+    assert_eq!(failure["code"], "agent_error");
+    assert_eq!(failure["terminal"]["outcome"], "failed");
+    assert_eq!(failure["terminal"]["error"]["class"], "tool");
+    assert_eq!(
+        failure["terminal"]["error"]["reason"]["reason_type"],
+        "tool_error"
+    );
+
+    clear_tool_callbacks();
+    destroy_session(handle).expect("destroy session");
 }
 
 #[wasm_bindgen_test]

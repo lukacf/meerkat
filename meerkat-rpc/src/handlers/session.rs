@@ -24,7 +24,7 @@ use crate::NOTIFICATION_CHANNEL_CAPACITY;
 use crate::error;
 use crate::protocol::{RpcId, RpcResponse};
 use crate::router::NotificationSink;
-use crate::session_runtime::SessionRuntime;
+use crate::session_runtime::{SessionRuntime, session_error_to_rpc};
 use meerkat::surface::{RequestContext, request_action};
 
 // ---------------------------------------------------------------------------
@@ -249,6 +249,14 @@ pub struct InjectSystemContextResult {
 // Handlers
 // ---------------------------------------------------------------------------
 
+fn session_error_response(id: Option<RpcId>, err: meerkat_core::SessionError) -> RpcResponse {
+    let rpc_err = session_error_to_rpc(err);
+    match rpc_err.data {
+        Some(data) => RpcResponse::error_with_data(id, rpc_err.code, rpc_err.message, data),
+        None => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+    }
+}
+
 /// Handle `session/create`.
 pub async fn handle_create(
     id: Option<RpcId>,
@@ -426,9 +434,13 @@ pub async fn handle_create(
             runtime.clone(),
             session_id.clone(),
         ));
-        runtime_adapter
+        if let Err(error) = runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(crate::session_runtime::runtime_driver_error_to_rpc)
+        {
+            return RpcResponse::error(id, error.code, error.message);
+        }
     }
 
     if let Some(context) = request_context.as_ref() {
@@ -541,6 +553,7 @@ pub async fn handle_create(
 
         meerkat_core::RunResult {
             text: String::new(),
+            content: Vec::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
             turns: 0,
@@ -627,17 +640,19 @@ pub async fn handle_list(
         ..Default::default()
     };
 
-    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> = runtime
-        .list_sessions_rich(query)
-        .await
-        .into_iter()
-        .map(|mut ws| {
-            ws.session_ref = runtime
-                .realm_id()
-                .map(|realm| meerkat_contracts::format_session_ref(&realm, &ws.session_id));
-            ws
-        })
-        .collect();
+    let mut sessions: Vec<meerkat_contracts::WireSessionSummary> =
+        match runtime.try_list_sessions_rich(query).await {
+            Ok(sessions) => sessions
+                .into_iter()
+                .map(|mut ws| {
+                    ws.session_ref = runtime
+                        .realm_id()
+                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &ws.session_id));
+                    ws
+                })
+                .collect(),
+            Err(err) => return session_error_response(id, err),
+        };
 
     // Apply pagination.
     let offset = list_params.offset.unwrap_or(0);
@@ -668,18 +683,19 @@ pub async fn handle_read(
         Err(resp) => return resp,
     };
 
-    match runtime.read_session_rich(&session_id).await {
-        Some(mut info) => {
+    match runtime.try_read_session_rich(&session_id).await {
+        Ok(Some(mut info)) => {
             info.session_ref = runtime
                 .realm_id()
                 .map(|realm| meerkat_contracts::format_session_ref(&realm, &info.session_id));
             RpcResponse::success(id, info)
         }
-        None => RpcResponse::error(
+        Ok(None) => RpcResponse::error(
             id,
             error::SESSION_NOT_FOUND,
             format!("Session not found: {session_id}"),
         ),
+        Err(err) => session_error_response(id, err),
     }
 }
 
@@ -693,6 +709,7 @@ mod tests {
     fn create_session_result_preserves_skill_diagnostics() {
         let run = meerkat_core::RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: meerkat_core::SessionId::new(),
             usage: Default::default(),
             turns: 1,

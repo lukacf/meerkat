@@ -1830,9 +1830,9 @@ fn interaction_terminal_event(
             interaction_id,
             error: "cancelled".to_string(),
         },
-        CompletionOutcome::Abandoned(reason)
+        CompletionOutcome::Abandoned { reason, .. }
         | CompletionOutcome::AbandonedWithError { reason, .. }
-        | CompletionOutcome::RuntimeTerminated(reason) => AgentEvent::InteractionFailed {
+        | CompletionOutcome::RuntimeTerminated { reason, .. } => AgentEvent::InteractionFailed {
             interaction_id,
             error: reason,
         },
@@ -2950,6 +2950,7 @@ mod tests {
             interaction_id,
             CompletionOutcome::Completed(Box::new(meerkat_core::RunResult {
                 text: "{\"answer\":42}".to_string(),
+                content: Vec::new(),
                 session_id: meerkat_core::SessionId::new(),
                 usage: meerkat_core::Usage::default(),
                 turns: 1,

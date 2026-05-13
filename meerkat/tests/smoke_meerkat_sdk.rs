@@ -1817,7 +1817,8 @@ mod scenario_22_runtime_host_comms {
         runtime_adapter.register_session(sid_a.clone()).await;
         runtime_adapter
             .register_session_with_executor(sid_a.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor attachment should succeed");
 
         // Run A's initial turn through runtime
         let input_a = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(

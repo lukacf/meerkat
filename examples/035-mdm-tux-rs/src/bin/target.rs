@@ -135,7 +135,12 @@ impl TargetScheduleSessionHost {
         let executor = Box::new(self.executor(session_id.clone()));
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "failed to attach target runtime executor for scheduled session {session_id}: {error}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -303,7 +308,13 @@ impl SurfaceScheduleSessionHost for TargetScheduleSessionHost {
                 result.session_id.clone(),
                 Box::new(self.executor(result.session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "failed to attach target runtime executor for materialized session {}: {error}",
+                    result.session_id
+                ))
+            })?;
 
         Ok(result.session_id)
     }
@@ -1033,7 +1044,10 @@ async fn setup_session(
     ));
     runtime_adapter
         .ensure_session_with_executor(session_id.clone(), executor)
-        .await;
+        .await
+        .with_context(|| {
+            format!("failed to attach target runtime executor for session {session_id}")
+        })?;
 
     // Enable peer ingress for this session so the hive can reach us via comms.
     // This is the one session the mob manages for this target — TUX resets go
@@ -2599,6 +2613,7 @@ mod tests {
                 .mob_state
                 .find_implicit_mob_for_bridge_session(&session_id.to_string())
                 .await
+                .expect("find implicit mob before cleanup")
                 .is_some()
         );
 
@@ -2610,6 +2625,7 @@ mod tests {
                 .mob_state
                 .find_implicit_mob_for_bridge_session(&session_id.to_string())
                 .await
+                .expect("find implicit mob after cleanup")
                 .is_none()
         );
     }

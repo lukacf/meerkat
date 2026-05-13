@@ -159,10 +159,15 @@ impl ArchiveRuntimeMobState for RpcMobStateAdapter {
             .map_err(|error| error.into_session_error("mob cleanup during archive incomplete"))
     }
 
-    async fn has_retained_cleanup(&self, session_id: &SessionId) -> bool {
+    async fn has_retained_cleanup(&self, session_id: &SessionId) -> Result<bool, SessionError> {
         self.state
             .has_bridge_session_scoped_mobs(&session_id.to_string())
             .await
+            .map_err(|error| {
+                SessionError::Agent(meerkat_core::error::AgentError::InternalError(format!(
+                    "failed to restore mob cleanup state during RPC archive for {session_id}: {error}"
+                )))
+            })
     }
 }
 
@@ -350,7 +355,13 @@ async fn await_session_archive_with_runtime_cleanup(
         let result = runtime_cleanup.archive_service(&service, &session_id).await;
         let service_not_found = matches!(&result, Err(SessionError::NotFound { .. }));
         let retained_mob_cleanup = if service_not_found {
-            runtime_cleanup.has_retained_mob_cleanup(&session_id).await
+            match runtime_cleanup.has_retained_mob_cleanup(&session_id).await {
+                Ok(retained) => retained,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                    return;
+                }
+            }
         } else {
             false
         };
@@ -823,7 +834,7 @@ impl SessionService for RpcMobSessionService {
             .await;
         let service_not_found = matches!(&result, Err(SessionError::NotFound { .. }));
         let retained_mob_cleanup = if service_not_found {
-            cleanup.has_retained_mob_cleanup(id).await
+            cleanup.has_retained_mob_cleanup(id).await?
         } else {
             false
         };
@@ -1094,11 +1105,16 @@ fn runtime_driver_error_to_session_error(err: RuntimeDriverError) -> SessionErro
     ))
 }
 
-fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
+pub(crate) fn runtime_driver_error_to_rpc(err: RuntimeDriverError) -> RpcError {
     match err {
         RuntimeDriverError::ValidationFailed { reason } => RpcError {
             code: error::INVALID_PARAMS,
             message: reason,
+            data: None,
+        },
+        RuntimeDriverError::NotFound(runtime_id) => RpcError {
+            code: error::SESSION_NOT_FOUND,
+            message: format!("runtime not found: {runtime_id}"),
             data: None,
         },
         RuntimeDriverError::NotReady { state } => RpcError {
@@ -2197,9 +2213,11 @@ impl SessionRuntime {
         outcome: &meerkat_runtime::CompletionOutcome,
     ) -> bool {
         match outcome {
-            meerkat_runtime::CompletionOutcome::Abandoned(reason)
-            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
-            | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
+            meerkat_runtime::CompletionOutcome::Abandoned { kind, .. } => {
+                *kind == meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed
+            }
+            meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. } => false,
+            meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. } => {
                 reason.contains("runtime boundary commit failed")
                     || reason.contains("runtime loop commit failed")
             }
@@ -2218,11 +2236,11 @@ impl SessionRuntime {
 
     fn completion_outcome_is_apply_failure(outcome: &meerkat_runtime::CompletionOutcome) -> bool {
         match outcome {
-            meerkat_runtime::CompletionOutcome::Abandoned(reason)
-            | meerkat_runtime::CompletionOutcome::AbandonedWithError { reason, .. }
-            | meerkat_runtime::CompletionOutcome::RuntimeTerminated(reason) => {
-                reason.starts_with("apply failed:")
+            meerkat_runtime::CompletionOutcome::Abandoned { kind, .. } => {
+                *kind == meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed
             }
+            meerkat_runtime::CompletionOutcome::AbandonedWithError { .. } => true,
+            meerkat_runtime::CompletionOutcome::RuntimeTerminated { .. } => false,
             meerkat_runtime::CompletionOutcome::CompletedWithFinalizationFailure { .. } => false,
             meerkat_runtime::CompletionOutcome::Completed(_)
             | meerkat_runtime::CompletionOutcome::CompletedWithoutResult
@@ -4029,12 +4047,18 @@ impl SessionRuntime {
                 });
             }
             #[cfg(feature = "mob")]
-            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
-                match self.mob_state().as_ref() {
-                    Some(mob_state)
-                        if mob_state.owns_live_bridge_session(session_id).await
-                            || mob_state.owns_persisted_bridge_session(session_id).await =>
-                    {
+            let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = {
+                let mob_state = self.mob_state();
+                if let Some(mob_state) = mob_state.as_ref() {
+                    let owns_live = mob_state
+                        .owns_live_bridge_session(session_id)
+                        .await
+                        .map_err(|err| RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: format!("failed to restore mob ownership state: {err}"),
+                            data: None,
+                        })?;
+                    if owns_live || mob_state.owns_persisted_bridge_session(session_id).await {
                         let sink = self
                             .notification_sink
                             .read()
@@ -4047,12 +4071,19 @@ impl SessionRuntime {
                             session_id.clone(),
                             sink,
                         ))
+                    } else {
+                        Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                            Arc::clone(self),
+                            session_id.clone(),
+                        ))
                     }
-                    _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                } else {
+                    Box::new(crate::session_executor::SessionRuntimeExecutor::new(
                         Arc::clone(self),
                         session_id.clone(),
-                    )),
-                };
+                    ))
+                }
+            };
             #[cfg(not(feature = "mob"))]
             let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> =
                 Box::new(crate::session_executor::SessionRuntimeExecutor::new(
@@ -4061,7 +4092,8 @@ impl SessionRuntime {
                 ));
             adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(runtime_driver_error_to_rpc)?;
         }
         Ok(())
     }
@@ -4093,32 +4125,49 @@ impl SessionRuntime {
             return Ok(());
         }
         let mob_state = self.mob_state();
-        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = match mob_state.as_ref() {
-            Some(mob_state)
-                if mob_state.owns_live_bridge_session(session_id).await
-                    || mob_state.owns_persisted_bridge_session(session_id).await =>
-            {
-                let sink = self
-                    .notification_sink
-                    .read()
-                    .ok()
-                    .map(|slot| slot.clone())
-                    .unwrap_or_else(crate::router::NotificationSink::noop);
-                Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
-                    mob_state.session_service(),
-                    Some(Arc::clone(self)),
+        let executor: Box<dyn meerkat_core::lifecycle::CoreExecutor> = {
+            if let Some(mob_state) = mob_state.as_ref() {
+                let owns_live =
+                    mob_state
+                        .owns_live_bridge_session(session_id)
+                        .await
+                        .map_err(|err| {
+                            SessionError::Agent(
+                                meerkat_core::error::AgentError::InternalError(format!(
+                                    "failed to restore mob ownership state during rotation for {session_id}: {err}"
+                                )),
+                            )
+                        })?;
+                if owns_live || mob_state.owns_persisted_bridge_session(session_id).await {
+                    let sink = self
+                        .notification_sink
+                        .read()
+                        .ok()
+                        .map(|slot| slot.clone())
+                        .unwrap_or_else(crate::router::NotificationSink::noop);
+                    Box::new(crate::session_executor::MobRpcRuntimeExecutor::new(
+                        mob_state.session_service(),
+                        Some(Arc::clone(self)),
+                        session_id.clone(),
+                        sink,
+                    ))
+                } else {
+                    Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                        Arc::clone(self),
+                        session_id.clone(),
+                    ))
+                }
+            } else {
+                Box::new(crate::session_executor::SessionRuntimeExecutor::new(
+                    Arc::clone(self),
                     session_id.clone(),
-                    sink,
                 ))
             }
-            _ => Box::new(crate::session_executor::SessionRuntimeExecutor::new(
-                Arc::clone(self),
-                session_id.clone(),
-            )),
         };
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(runtime_driver_error_to_session_error)?;
         Ok(())
     }
 
@@ -4432,9 +4481,11 @@ impl SessionRuntime {
         drop(runtime_registration_guard);
         drop(runtime_registration_lock);
         let outcome = completion_rx.await.unwrap_or_else(|_| {
-            meerkat_runtime::CompletionOutcome::RuntimeTerminated(
-                "runtime pre-admission cleanup task ended before reporting completion".to_string(),
-            )
+            meerkat_runtime::CompletionOutcome::RuntimeTerminated {
+                reason: "runtime pre-admission cleanup task ended before reporting completion"
+                    .to_string(),
+                kind: meerkat_runtime::completion::CompletionRuntimeTerminationKind::SurfaceCleanupFailed,
+            }
         });
         completion_outcome_to_rpc_result(outcome, session_id)
     }
@@ -6009,6 +6060,7 @@ impl SessionRuntime {
             Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })
+            | Err(RuntimeDriverError::NotFound(_))
             | Err(RuntimeDriverError::Destroyed) => {
                 if staged_is_promoting {
                     return Err(Self::promoting_session_busy_rpc(session_id));
@@ -6066,7 +6118,14 @@ impl SessionRuntime {
             if session_metadata_marks_mob_member(&session) {
                 #[cfg(feature = "mob")]
                 if let Some(mob_state) = self.mob_state() {
-                    let owns_mob_session = mob_state.owns_live_bridge_session(session_id).await
+                    let owns_mob_session = mob_state
+                        .owns_live_bridge_session(session_id)
+                        .await
+                        .map_err(|err| RpcError {
+                            code: error::INTERNAL_ERROR,
+                            message: format!("failed to restore mob ownership state: {err}"),
+                            data: None,
+                        })?
                         || mob_state.owns_persisted_bridge_session(session_id).await;
                     return Ok(interrupt_noop_target_for_presence(owns_mob_session));
                 }
@@ -6077,16 +6136,24 @@ impl SessionRuntime {
         }
 
         #[cfg(feature = "mob")]
-        if let Some(mob_state) = self.mob_state()
-            && (mob_state.owns_live_bridge_session(session_id).await
-                || mob_state.owns_persisted_bridge_session(session_id).await)
-        {
-            match mob_state.session_service().read(session_id).await {
-                Ok(_) => {
-                    return Ok(interrupt_noop_target_for_presence(true));
+        if let Some(mob_state) = self.mob_state() {
+            let owns_mob_session = mob_state
+                .owns_live_bridge_session(session_id)
+                .await
+                .map_err(|err| RpcError {
+                    code: error::INTERNAL_ERROR,
+                    message: format!("failed to restore mob ownership state: {err}"),
+                    data: None,
+                })?
+                || mob_state.owns_persisted_bridge_session(session_id).await;
+            if owns_mob_session {
+                match mob_state.session_service().read(session_id).await {
+                    Ok(_) => {
+                        return Ok(interrupt_noop_target_for_presence(true));
+                    }
+                    Err(SessionError::NotFound { .. }) => {}
+                    Err(err) => return Err(session_error_to_rpc(err)),
                 }
-                Err(SessionError::NotFound { .. }) => {}
-                Err(err) => return Err(session_error_to_rpc(err)),
             }
         }
 
@@ -6127,7 +6194,9 @@ impl SessionRuntime {
 
         match self.runtime_adapter.cancel_after_boundary(session_id).await {
             Ok(()) => Ok(()),
-            Err(RuntimeDriverError::NotReady { .. }) | Err(RuntimeDriverError::Destroyed)
+            Err(RuntimeDriverError::NotReady { .. })
+            | Err(RuntimeDriverError::NotFound(_))
+            | Err(RuntimeDriverError::Destroyed)
                 if staged_is_materializing =>
             {
                 Err(Self::promoting_session_busy_rpc(session_id))
@@ -6138,6 +6207,7 @@ impl SessionRuntime {
             Err(RuntimeDriverError::NotReady {
                 state: RuntimeState::Destroyed,
             })
+            | Err(RuntimeDriverError::NotFound(_))
             | Err(RuntimeDriverError::Destroyed) => {
                 match self.interrupt_noop_target(session_id).await? {
                     InterruptNoopTarget::Present => Ok(()),
@@ -6460,6 +6530,24 @@ impl SessionRuntime {
         &self,
         query: SessionQuery,
     ) -> Vec<meerkat_contracts::WireSessionSummary> {
+        match self.try_list_sessions_rich(query).await {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::error!(
+                    ?error,
+                    "failed to list sessions; returning legacy empty projection"
+                );
+                Vec::new()
+            }
+        }
+    }
+
+    /// Fallible session listing for public surfaces that must not publish
+    /// partial success when the canonical session service fails.
+    pub async fn try_list_sessions_rich(
+        &self,
+        query: SessionQuery,
+    ) -> Result<Vec<meerkat_contracts::WireSessionSummary>, SessionError> {
         let mut result = Vec::new();
 
         // Include pending sessions as synthetic entries.
@@ -6477,13 +6565,11 @@ impl SessionRuntime {
         }
 
         // Include materialized sessions from the service.
-        if let Ok(summaries) = self.service.list(query).await {
-            for summary in summaries {
-                result.push(summary.into());
-            }
+        for summary in self.service.list(query).await? {
+            result.push(summary.into());
         }
 
-        result
+        Ok(result)
     }
 
     /// Read a session as a canonical wire info object, checking pending and materialized.
@@ -6491,6 +6577,25 @@ impl SessionRuntime {
         &self,
         session_id: &SessionId,
     ) -> Option<meerkat_contracts::WireSessionInfo> {
+        match self.try_read_session_rich(session_id).await {
+            Ok(info) => info,
+            Err(error) => {
+                tracing::error!(
+                    %session_id,
+                    ?error,
+                    "failed to read session; returning legacy absence projection"
+                );
+                None
+            }
+        }
+    }
+
+    /// Fallible session read for public surfaces that need to preserve store
+    /// and control-plane failures instead of collapsing them to not-found.
+    pub async fn try_read_session_rich(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_contracts::WireSessionInfo>, SessionError> {
         // Check pending sessions first.
         if let Some(info) = self.staged_sessions.info(session_id).await {
             let mut wire = meerkat_contracts::WireSessionInfo {
@@ -6508,60 +6613,60 @@ impl SessionRuntime {
             };
             self.attach_resolved_capabilities_to_wire_info(&mut wire)
                 .await;
-            return Some(wire);
+            return Ok(Some(wire));
         }
 
         // Try list() first — non-blocking (uses watch receivers).
-        if let Ok(summaries) = self.service.list(Default::default()).await {
-            for summary in summaries {
-                if summary.session_id == *session_id {
-                    if !summary.is_active {
-                        // Idle session: safe to call read() without blocking,
-                        // which provides last_assistant_text.
-                        if let Ok(view) = self.service.read(session_id).await {
+        for summary in self.service.list(Default::default()).await? {
+            if summary.session_id == *session_id {
+                if !summary.is_active {
+                    // Idle session: safe to call read() without blocking,
+                    // which provides last_assistant_text.
+                    match self.service.read(session_id).await {
+                        Ok(view) => {
                             let mut info = view.state.into();
                             self.attach_resolved_capabilities_to_wire_info(&mut info)
                                 .await;
-                            return Some(info);
+                            return Ok(Some(info));
                         }
+                        Err(SessionError::NotFound { .. }) => return Ok(None),
+                        Err(error) => return Err(error),
                     }
-                    // Active session: return summary without last_assistant_text
-                    // to avoid blocking the caller during a running turn.
-                    let wire: meerkat_contracts::WireSessionSummary = summary.into();
-                    let llm_identity = self
-                        .service
-                        .live_session_llm_identity(session_id)
-                        .await
-                        .ok()?;
-                    let mut info = meerkat_contracts::WireSessionInfo {
-                        session_id: wire.session_id,
-                        session_ref: None,
-                        created_at: wire.created_at,
-                        updated_at: wire.updated_at,
-                        message_count: wire.message_count,
-                        is_active: wire.is_active,
-                        model: llm_identity.model,
-                        provider: llm_identity.provider.as_str().to_string(),
-                        last_assistant_text: None,
-                        resolved_capabilities: None,
-                        labels: wire.labels,
-                    };
-                    self.attach_resolved_capabilities_to_wire_info(&mut info)
-                        .await;
-                    return Some(info);
                 }
+                // Active session: return summary without last_assistant_text
+                // to avoid blocking the caller during a running turn.
+                let wire: meerkat_contracts::WireSessionSummary = summary.into();
+                let llm_identity = self.service.live_session_llm_identity(session_id).await?;
+                let mut info = meerkat_contracts::WireSessionInfo {
+                    session_id: wire.session_id,
+                    session_ref: None,
+                    created_at: wire.created_at,
+                    updated_at: wire.updated_at,
+                    message_count: wire.message_count,
+                    is_active: wire.is_active,
+                    model: llm_identity.model,
+                    provider: llm_identity.provider.as_str().to_string(),
+                    last_assistant_text: None,
+                    resolved_capabilities: None,
+                    labels: wire.labels,
+                };
+                self.attach_resolved_capabilities_to_wire_info(&mut info)
+                    .await;
+                return Ok(Some(info));
             }
         }
 
         // Fallback: try read() for archived/persisted sessions not in the live list.
-        if let Ok(view) = self.service.read(session_id).await {
-            let mut info = view.state.into();
-            self.attach_resolved_capabilities_to_wire_info(&mut info)
-                .await;
-            return Some(info);
+        match self.service.read(session_id).await {
+            Ok(view) => {
+                let mut info = view.state.into();
+                self.attach_resolved_capabilities_to_wire_info(&mut info)
+                    .await;
+                Ok(Some(info))
+            }
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
         }
-
-        None
     }
 
     /// Whether this runtime has a durable event replay projection installed.
@@ -6689,8 +6794,28 @@ impl SessionRuntime {
         session_id: &SessionId,
         query: SessionHistoryQuery,
     ) -> Option<meerkat_contracts::WireSessionHistory> {
+        match self.try_read_session_history_rich(session_id, query).await {
+            Ok(history) => history,
+            Err(error) => {
+                tracing::error!(
+                    %session_id,
+                    ?error,
+                    "failed to read session history; returning legacy absence projection"
+                );
+                None
+            }
+        }
+    }
+
+    /// Fallible history read for public surfaces that must preserve session
+    /// service failures instead of converting them to not-found.
+    pub async fn try_read_session_history_rich(
+        &self,
+        session_id: &SessionId,
+        query: SessionHistoryQuery,
+    ) -> Result<Option<meerkat_contracts::WireSessionHistory>, SessionError> {
         if self.staged_sessions.contains(session_id).await {
-            return Some(meerkat_contracts::WireSessionHistory {
+            return Ok(Some(meerkat_contracts::WireSessionHistory {
                 session_id: session_id.clone(),
                 session_ref: None,
                 message_count: 0,
@@ -6698,14 +6823,14 @@ impl SessionRuntime {
                 limit: query.limit,
                 has_more: false,
                 messages: Vec::new(),
-            });
+            }));
         }
 
-        self.service
-            .read_history(session_id, query)
-            .await
-            .ok()
-            .map(Into::into)
+        match self.service.read_history(session_id, query).await {
+            Ok(page) => Ok(Some(page.into())),
+            Err(SessionError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     fn transcript_edit_admission_error_to_rpc(err: TranscriptEditAdmissionError) -> RpcError {
@@ -7367,7 +7492,7 @@ fn decode_wire_content_blocks(
 // Error mapping
 // ---------------------------------------------------------------------------
 
-fn session_error_to_rpc(err: SessionError) -> RpcError {
+pub(crate) fn session_error_to_rpc(err: SessionError) -> RpcError {
     let code = match &err {
         SessionError::NotFound { .. } => error::SESSION_NOT_FOUND,
         SessionError::Busy { .. } => error::SESSION_BUSY,
@@ -7454,7 +7579,7 @@ fn completion_outcome_to_rpc_result(
             message: "request cancelled".to_string(),
             data: None,
         }),
-        CompletionOutcome::Abandoned(reason) => Err(RpcError {
+        CompletionOutcome::Abandoned { reason, .. } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("turn abandoned: {reason}"),
             data: None,
@@ -7488,7 +7613,7 @@ fn completion_outcome_to_rpc_result(
                 })),
             })
         }
-        CompletionOutcome::RuntimeTerminated(reason) => Err(RpcError {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => Err(RpcError {
             code: error::INTERNAL_ERROR,
             message: format!("runtime terminated: {reason}"),
             data: None,
@@ -11205,6 +11330,8 @@ mod tests {
     struct ToggleFailSaveStore {
         inner: meerkat::MemoryStore,
         fail_save: AtomicBool,
+        fail_load: AtomicBool,
+        fail_list: AtomicBool,
         fail_after_saves: AtomicUsize,
     }
 
@@ -11213,12 +11340,22 @@ mod tests {
             Self {
                 inner: meerkat::MemoryStore::new(),
                 fail_save: AtomicBool::new(false),
+                fail_load: AtomicBool::new(false),
+                fail_list: AtomicBool::new(false),
                 fail_after_saves: AtomicUsize::new(usize::MAX),
             }
         }
 
         fn set_fail_save(&self, fail: bool) {
             self.fail_save.store(fail, AtomicOrdering::Release);
+        }
+
+        fn set_fail_load(&self, fail: bool) {
+            self.fail_load.store(fail, AtomicOrdering::Release);
+        }
+
+        fn set_fail_list(&self, fail: bool) {
+            self.fail_list.store(fail, AtomicOrdering::Release);
         }
 
         fn fail_after_successful_saves(&self, saves: usize) {
@@ -11228,6 +11365,8 @@ mod tests {
 
         fn clear_failures(&self) {
             self.fail_save.store(false, AtomicOrdering::Release);
+            self.fail_load.store(false, AtomicOrdering::Release);
+            self.fail_list.store(false, AtomicOrdering::Release);
             self.fail_after_saves
                 .store(usize::MAX, AtomicOrdering::Release);
         }
@@ -11271,6 +11410,11 @@ mod tests {
             &self,
             id: &SessionId,
         ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            if self.fail_load.load(AtomicOrdering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced load failure".to_string(),
+                ));
+            }
             self.inner.load(id).await
         }
 
@@ -11278,12 +11422,55 @@ mod tests {
             &self,
             filter: meerkat_store::SessionFilter,
         ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            if self.fail_list.load(AtomicOrdering::Acquire) {
+                return Err(meerkat_store::SessionStoreError::Internal(
+                    "forced list failure".to_string(),
+                ));
+            }
             self.inner.list(filter).await
         }
 
         async fn delete(&self, id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
             self.inner.delete(id).await
         }
+    }
+
+    #[tokio::test]
+    async fn fallible_session_projections_surface_store_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(ToggleFailSaveStore::new());
+        let runtime = make_runtime_with_session_store(
+            temp_factory(&temp),
+            10,
+            Arc::clone(&store) as Arc<dyn meerkat::SessionStore>,
+        );
+
+        store.set_fail_list(true);
+        let list_error = runtime
+            .try_list_sessions_rich(Default::default())
+            .await
+            .expect_err("list store failure must not become partial success");
+        assert!(matches!(list_error, SessionError::Store(_)));
+
+        let read_error = runtime
+            .try_read_session_rich(&SessionId::new())
+            .await
+            .expect_err("read list failure must not become not-found");
+        assert!(matches!(read_error, SessionError::Store(_)));
+
+        store.clear_failures();
+        store.set_fail_load(true);
+        let history_error = runtime
+            .try_read_session_history_rich(
+                &SessionId::new(),
+                SessionHistoryQuery {
+                    offset: 0,
+                    limit: None,
+                },
+            )
+            .await
+            .expect_err("history store failure must not become not-found");
+        assert!(matches!(history_error, SessionError::Store(_)));
     }
 
     fn approval_request() -> meerkat_core::ApprovalRequest {
@@ -13723,9 +13910,10 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = meerkat_runtime::CompletionHandle::already_resolved(
-            meerkat_runtime::CompletionOutcome::Abandoned(
-                "executor never took pre-admission".to_string(),
-            ),
+            meerkat_runtime::CompletionOutcome::Abandoned {
+                reason: "executor never took pre-admission".to_string(),
+                kind: meerkat_runtime::completion::CompletionAbandonmentKind::Unknown,
+            },
         );
         runtime.spawn_runtime_pre_admission_cleanup(session_id, input_id, handle);
 
@@ -13770,16 +13958,24 @@ mod tests {
             .expect("insert pre-admission");
 
         let handle = meerkat_runtime::CompletionHandle::already_resolved(
-            meerkat_runtime::CompletionOutcome::Abandoned(
-                "apply failed: runtime boundary commit failed: injected failure".to_string(),
-            ),
+            meerkat_runtime::CompletionOutcome::Abandoned {
+                reason: "apply failed: runtime boundary commit failed: injected failure"
+                    .to_string(),
+                kind: meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed,
+            },
         );
         let outcome = runtime
             .spawn_runtime_pre_admission_cleanup_with_outcome(session_id.clone(), input_id, handle)
             .await
             .expect("cleanup task should report completion");
         assert!(
-            matches!(outcome, meerkat_runtime::CompletionOutcome::Abandoned(_)),
+            matches!(
+                outcome,
+                meerkat_runtime::CompletionOutcome::Abandoned {
+                    kind: meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed,
+                    ..
+                }
+            ),
             "test completion should be an apply failure: {outcome:?}"
         );
         assert!(
@@ -13905,9 +14101,10 @@ mod tests {
             .expect("insert second pre-admission");
 
         let stale_handle = meerkat_runtime::CompletionHandle::already_resolved(
-            meerkat_runtime::CompletionOutcome::Abandoned(
-                "stale cleanup for first input".to_string(),
-            ),
+            meerkat_runtime::CompletionOutcome::Abandoned {
+                reason: "stale cleanup for first input".to_string(),
+                kind: meerkat_runtime::completion::CompletionAbandonmentKind::Unknown,
+            },
         );
         runtime.spawn_runtime_pre_admission_cleanup(
             session_id.clone(),
@@ -20128,6 +20325,7 @@ mod tests {
         let session_id = SessionId::new();
         let run_result = meerkat_core::RunResult {
             text: "{\"gate\":\"green\"}".to_string(),
+            content: Vec::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
             turns: 1,

@@ -553,6 +553,7 @@ impl CoreCommsRuntime for MockCommsRuntime {
 fn mock_run_result(session_id: SessionId, text: String) -> RunResult {
     RunResult {
         text,
+        content: Vec::new(),
         session_id,
         usage: Usage::default(),
         turns: 1,
@@ -1341,6 +1342,7 @@ impl SessionService for MockSessionService {
                             AgentEvent::RunCompleted {
                                 session_id,
                                 result: completed_result,
+                                content: Vec::new(),
                                 structured_output: None,
                                 extraction_required: false,
                                 usage: Usage::default(),
@@ -4962,6 +4964,7 @@ impl SessionAgent for OverlayProbeSessionAgent {
             .send(AgentEvent::RunCompleted {
                 session_id,
                 result: result.text.clone(),
+                content: result.content.clone(),
                 structured_output: result.structured_output.clone(),
                 extraction_required: false,
                 usage: result.usage.clone(),
@@ -5633,7 +5636,14 @@ async fn test_mob_handle_is_clone() {
 async fn test_mob_shutdown() {
     let (handle, _service) = create_test_mob(sample_definition()).await;
     handle.shutdown().await.expect("shutdown");
-    assert_eq!(handle.status().await.unwrap(), MobState::Stopped);
+    let status_err = handle
+        .status()
+        .await
+        .expect_err("shutdown closes the actor, so status must surface actor loss");
+    assert!(
+        matches!(status_err, MobError::ActorTaskDropped),
+        "shutdown status should surface actor drop, got {status_err:?}"
+    );
 }
 
 #[tokio::test]
@@ -5669,8 +5679,7 @@ async fn test_lifecycle_state_machine_enforcement() {
     assert!(
         matches!(
             err,
-            crate::runtime::handle::MobDestroyError::Mob(MobError::Internal(ref message))
-                if message.contains("actor task dropped")
+            crate::runtime::handle::MobDestroyError::Mob(MobError::ActorTaskDropped)
         ),
         "destroy should be terminal once completed: {err:?}"
     );
@@ -5716,7 +5725,7 @@ async fn test_destroy_is_terminal_for_commands() {
         .await
         .expect_err("stop after destroy must fail");
     assert!(
-        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        matches!(err, MobError::ActorTaskDropped),
         "destroy should terminate the actor loop: {err:?}"
     );
 }
@@ -6307,7 +6316,8 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
     assert!(
         report.errors.iter().any(|error| {
             error.contains("destroy retire admission failed")
-                && error.contains("is not registered with this MeerkatMachine")
+                && error.contains("refused routed input `Retire`")
+                && error.contains("not registered with the consumer")
         }),
         "destroy should surface the failed retire admission: {report:?}"
     );
@@ -6364,7 +6374,8 @@ async fn test_destroy_retire_admission_failure_after_marker_retains_retry_anchor
     assert!(
         retry_report.errors.iter().any(|error| {
             error.contains("destroy retire admission failed")
-                && error.contains("is not registered with this MeerkatMachine")
+                && error.contains("refused routed input `Retire`")
+                && error.contains("not registered with the consumer")
         }),
         "retry should preserve the remaining partial destroy state: {retry_report:?}"
     );
@@ -18206,7 +18217,7 @@ async fn test_provision_member_uses_local_bindings_before_routed_runtime_bound()
             &self,
             variant: meerkat_machine_schema::identity::SignalVariantId,
             projected_fields: RecordingSignalFields,
-        ) -> Result<(), String> {
+        ) -> Result<(), meerkat_runtime::composition::SignalConsumerRefusal> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
@@ -21295,6 +21306,12 @@ fn test_supervisor_private_trust_realizes_generated_publish_obligation() {
             && body
                 .contains("cleanup failed while removing new supervisor trust after rejected ack"),
         "rejected supervisor_trust_publish ack must clean up any attempted private trust before returning"
+    );
+    assert!(
+        !source.contains(
+            "error_text.contains(\"cleanup failed while removing new supervisor trust\")"
+        ),
+        "supervisor activation rollback must use typed cleanup failure metadata, not rendered error text"
     );
 }
 
@@ -25814,7 +25831,7 @@ async fn test_reset_rejects_from_destroyed() {
         .await
         .expect_err("reset after destroy must fail");
     assert!(
-        matches!(err, MobError::Internal(ref message) if message.contains("actor task dropped")),
+        matches!(err, MobError::ActorTaskDropped),
         "reset after terminal destroy should fail because the actor is gone: {err:?}"
     );
 }
@@ -29791,7 +29808,11 @@ fn mob_runtime_parity_probe_for_input_variant(
 async fn mob_runtime_parity_snapshot_summary(
     handle: &MobHandle,
 ) -> Option<MobRuntimeParitySnapshotSummary> {
-    let phase = handle.status().await.unwrap();
+    let phase = match handle.status().await {
+        Ok(phase) => phase,
+        Err(MobError::ActorTaskDropped | MobError::ActorReplyDropped) => return None,
+        Err(error) => panic!("runtime parity snapshot status failed: {error:?}"),
+    };
     let active_members = handle.list_members().await;
     let all_members = handle.list_all_members().await;
     let orchestrator = handle.debug_orchestrator_snapshot().await.ok();
@@ -30331,8 +30352,12 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
             format!("bridge_delivery_rejected:{cause}")
         }
         MobError::SupervisorEscalation(_) => "supervisor_escalation".to_string(),
+        MobError::SupervisorPrivateTrustActivationFailed { cleanup_failed, .. } => {
+            format!("supervisor_private_trust_activation_failed:{cleanup_failed}")
+        }
         MobError::UnsupportedForMode { .. } => "unsupported_for_mode".to_string(),
         MobError::ResetBarrier => "reset_barrier".to_string(),
+        MobError::RosterProjectionFailed(_) => "roster_projection_failed".to_string(),
         MobError::StorageError(_) => "storage_error".to_string(),
         MobError::SessionError(_) => "session_error".to_string(),
         MobError::CommsError(_) => "comms_error".to_string(),
@@ -30340,6 +30365,11 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         MobError::StaleFenceToken { .. } => "stale_fence_token".to_string(),
         MobError::StaleEventCursor { .. } => "stale_event_cursor".to_string(),
         MobError::WorkNotFound(_) => "work_not_found".to_string(),
+        MobError::BridgeSessionMissingFromLiveAuthority(_) => {
+            "bridge_session_missing_from_live_mob_authority".to_string()
+        }
+        MobError::ActorTaskDropped => "actor_task_dropped".to_string(),
+        MobError::ActorReplyDropped => "actor_reply_dropped".to_string(),
         MobError::Internal(reason) => format!("internal:{reason}"),
     }
 }

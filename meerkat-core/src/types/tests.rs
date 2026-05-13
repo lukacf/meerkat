@@ -268,6 +268,24 @@ fn test_tool_result_serialization() {
     let json = serde_json::to_string(&error_result).unwrap();
     let parsed: ToolResult = serde_json::from_str(&json).unwrap();
     assert!(parsed.is_error);
+    assert!(parsed.error.is_none());
+
+    let typed_error_result = ToolResult::new(
+        "tc_abc125".to_string(),
+        "Permission denied".to_string(),
+        true,
+    )
+    .with_error(ToolResultError {
+        code: "access_denied".to_string(),
+        message: "Permission denied".to_string(),
+        data: Some(json!({"policy": "hidden"})),
+    });
+    let json = serde_json::to_value(&typed_error_result).unwrap();
+    assert_eq!(json["error"]["code"], "access_denied");
+    let parsed: ToolResult = serde_json::from_value(json).unwrap();
+    let error = parsed.error.expect("structured tool error");
+    assert_eq!(error.code, "access_denied");
+    assert_eq!(error.data, Some(json!({"policy": "hidden"})));
 }
 
 #[test]
@@ -339,6 +357,7 @@ fn test_usage_accumulation() {
 fn test_run_result_json_schema() {
     let result = RunResult {
         text: "Task completed".to_string(),
+        content: Vec::new(),
         session_id: SessionId::new(),
         usage: Usage {
             input_tokens: 1000,
@@ -681,6 +700,7 @@ fn test_output_schema_from_type() -> Result<(), Box<dyn std::error::Error>> {
 fn test_run_result_with_structured_output() {
     let result = RunResult {
         text: "Here's the structured data".to_string(),
+        content: Vec::new(),
         session_id: SessionId::new(),
         usage: Usage::default(),
         turns: 2,
@@ -706,6 +726,7 @@ fn test_run_result_with_structured_output() {
 fn test_run_result_without_structured_output_skips_field() {
     let result = RunResult {
         text: "Regular response".to_string(),
+        content: Vec::new(),
         session_id: SessionId::new(),
         usage: Usage::default(),
         turns: 1,

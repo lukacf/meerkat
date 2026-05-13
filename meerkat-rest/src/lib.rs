@@ -605,7 +605,10 @@ impl RestSessionRuntimeExecutor {
     }
 }
 
-async fn ensure_rest_session_runtime_executor(state: &AppState, session_id: &SessionId) {
+async fn ensure_rest_session_runtime_executor(
+    state: &AppState,
+    session_id: &SessionId,
+) -> Result<(), ApiError> {
     let executor = Box::new(RestSessionRuntimeExecutor::new(
         state.runtime_executor_context(),
         session_id.clone(),
@@ -613,7 +616,12 @@ async fn ensure_rest_session_runtime_executor(state: &AppState, session_id: &Ses
     state
         .runtime_adapter
         .ensure_session_with_executor(session_id.clone(), executor)
-        .await;
+        .await
+        .map_err(|error| {
+            ApiError::Internal(format!(
+                "failed to attach REST runtime executor for session {session_id}: {error}"
+            ))
+        })
 }
 
 async fn unregister_rest_runtime_if_new(
@@ -808,9 +816,10 @@ fn wrap_rest_runtime_completion_cleanup(
     handle.with_outcome_cleanup(move |outcome| async move {
         match cleanup_rest_runtime_after_completion_outcome(&state, &session_id, &outcome).await {
             Ok(()) => outcome,
-            Err(error) => meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
-                format!("REST runtime completion cleanup failed: {error}"),
-            ),
+            Err(error) => meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                reason: format!("REST runtime completion cleanup failed: {error}"),
+                kind: meerkat_runtime::completion::CompletionRuntimeTerminationKind::SurfaceCleanupFailed,
+            },
         }
     })
 }
@@ -819,9 +828,11 @@ fn completion_outcome_requires_rest_runtime_cleanup(
     outcome: &meerkat_runtime::completion::CompletionOutcome,
 ) -> bool {
     match outcome {
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
-        | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, .. }
-        | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { kind, .. } => {
+            *kind == meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed
+        }
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. } => false,
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, .. } => {
             reason.contains("runtime boundary commit failed")
                 || reason.contains("runtime loop commit failed")
         }
@@ -843,11 +854,11 @@ fn completion_outcome_is_rest_apply_failure(
     outcome: &meerkat_runtime::completion::CompletionOutcome,
 ) -> bool {
     match outcome {
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason)
-        | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, .. }
-        | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
-            reason.starts_with("apply failed:")
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { kind, .. } => {
+            *kind == meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed
         }
+        meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { .. } => true,
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. } => false,
         meerkat_runtime::completion::CompletionOutcome::CompletedWithFinalizationFailure {
             ..
         } => false,
@@ -2227,6 +2238,18 @@ fn rest_wire_error_with_details(
 
 // ---------------------------------------------------------------------------
 
+fn sse_serialization_terminal_event(error: impl std::fmt::Display) -> Event {
+    Event::default().event("terminal_error").data(
+        json!({
+            "error": {
+                "code": "serialize_error",
+                "message": error.to_string(),
+            }
+        })
+        .to_string(),
+    )
+}
+
 /// Health check endpoint
 async fn health_check() -> &'static str {
     "ok"
@@ -2267,16 +2290,27 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
+                let opened_data = match serde_json::to_string(&json!({
                         "mob_id": id,
                         "member": member,
-                    })).unwrap_or_default(),
-                ));
+                    })) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        yield Ok(sse_serialization_terminal_event(error));
+                        return;
+                    }
+                };
+                yield Ok(Event::default().event("stream_opened").data(opened_data));
 
                 while let Some(envelope) = futures::StreamExt::next(&mut event_stream).await {
                     let event_type = agent_event_type(&envelope.payload);
-                    let data = serde_json::to_string(&envelope).unwrap_or_default();
+                    let data = match serde_json::to_string(&envelope) {
+                        Ok(data) => data,
+                        Err(error) => {
+                            yield Ok(sse_serialization_terminal_event(error));
+                            break;
+                        }
+                    };
                     yield Ok(Event::default().event(event_type).data(data));
                 }
 
@@ -2291,15 +2325,26 @@ async fn mob_event_stream(
                 .map_err(|e| ApiError::NotFound(e.to_string()))?;
 
             Box::pin(async_stream::stream! {
-                yield Ok(Event::default().event("stream_opened").data(
-                    serde_json::to_string(&json!({
+                let opened_data = match serde_json::to_string(&json!({
                         "mob_id": id,
-                    })).unwrap_or_default(),
-                ));
+                    })) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        yield Ok(sse_serialization_terminal_event(error));
+                        return;
+                    }
+                };
+                yield Ok(Event::default().event("stream_opened").data(opened_data));
 
                 while let Some(attributed) = handle.event_rx.recv().await {
                     let event_type = agent_event_type(&attributed.envelope.payload);
-                    let data = serde_json::to_string(&attributed).unwrap_or_default();
+                    let data = match serde_json::to_string(&attributed) {
+                        Ok(data) => data,
+                        Err(error) => {
+                            yield Ok(sse_serialization_terminal_event(error));
+                            break;
+                        }
+                    };
                     yield Ok(Event::default().event(event_type).data(data));
                 }
 
@@ -2537,10 +2582,6 @@ pub struct CommsPeersRequest {
     pub session_id: String,
 }
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 /// POST /comms/send — dispatch a canonical comms command.
 async fn comms_send(
     State(state): State<AppState>,
@@ -2601,7 +2642,8 @@ fn normalize_rest_comms_send_error(
                 }),
             }
         }
-        meerkat_core::comms::SendError::Internal(details) if is_transport_internal(details) => {
+        meerkat_core::comms::SendError::Transport(details)
+        | meerkat_core::comms::SendError::Io(details) => {
             let peer = peer_name.unwrap_or("<unknown>");
             ApiError::InternalWithData {
                 message: format!(
@@ -2909,7 +2951,12 @@ async fn admit_runtime_input_via_webhook(
             let runtime_registration_lock = rest_runtime_registration_lock(state, session_id);
             let runtime_registration_guard = runtime_registration_lock.mutex().lock().await;
             let runtime_was_registered = state.runtime_adapter.contains_session(session_id).await;
-            ensure_rest_session_runtime_executor(state, session_id).await;
+            if let Err(error) = ensure_rest_session_runtime_executor(state, session_id).await {
+                if !runtime_was_registered {
+                    state.runtime_adapter.unregister_session(session_id).await;
+                }
+                return Err(error.into_response());
+            }
 
             let result = match state
                 .runtime_adapter
@@ -3028,6 +3075,13 @@ async fn admit_runtime_input_via_webhook(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "error": format!("unexpected runtime accept outcome: {outcome:?}"),
+            })),
+        )
+            .into_response()),
+        Err(meerkat_runtime::RuntimeDriverError::NotFound(_)) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": format!("Session not found: {session_id}"),
             })),
         )
             .into_response()),
@@ -3436,7 +3490,7 @@ fn completion_outcome_to_api_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(ApiError::RequestCancelled { details: None })
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             let message = format!("turn abandoned: {reason}");
             if session_created {
                 Err(session_created_with_turn_failure_api_error(
@@ -3486,7 +3540,7 @@ fn completion_outcome_to_api_result(
                 }),
             })
         }
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(ApiError::Internal(format!("runtime terminated: {reason}")))
         }
     }
@@ -3582,12 +3636,15 @@ async fn interrupt_noop_target(
             if session_metadata_marks_mob_member(&session) {
                 #[cfg(feature = "mob")]
                 {
-                    let owns_mob_session =
-                        state.mob_state.owns_live_bridge_session(session_id).await
-                            || state
-                                .mob_state
-                                .owns_persisted_bridge_session(session_id)
-                                .await;
+                    let owns_mob_session = state
+                        .mob_state
+                        .owns_live_bridge_session(session_id)
+                        .await
+                        .map_err(|err| ApiError::Internal(err.to_string()))?
+                        || state
+                            .mob_state
+                            .owns_persisted_bridge_session(session_id)
+                            .await;
                     return Ok(interrupt_noop_target_for_presence(owns_mob_session));
                 }
                 #[cfg(not(feature = "mob"))]
@@ -3605,7 +3662,11 @@ async fn interrupt_noop_target(
     }
 
     #[cfg(feature = "mob")]
-    if state.mob_state.owns_live_bridge_session(session_id).await
+    if state
+        .mob_state
+        .owns_live_bridge_session(session_id)
+        .await
+        .map_err(|err| ApiError::Internal(err.to_string()))?
         || state
             .mob_state
             .owns_persisted_bridge_session(session_id)
@@ -4257,7 +4318,12 @@ async fn create_session_inner(
         }
     };
 
-    ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
+    if let Err(error) = ensure_rest_session_runtime_executor(state, &create_result.session_id).await
+    {
+        drop(caller_event_tx);
+        drain_event_forwarder(&session_id, forward_task).await;
+        return RequestTerminal::RespondWithoutPublish(Err(error));
+    }
 
     // Update peer-ingress context so live sessions always get attached ingress
     // and idle keep_alive sessions retain a persistent host drain.
@@ -4696,6 +4762,7 @@ async fn interrupt_session(
         Err(meerkat_runtime::RuntimeDriverError::NotReady {
             state: meerkat_runtime::RuntimeState::Destroyed,
         })
+        | Err(meerkat_runtime::RuntimeDriverError::NotFound(_))
         | Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
             match interrupt_noop_target(&state, &session_id).await? {
                 InterruptNoopTarget::Present => Ok(Json(json!({
@@ -5211,7 +5278,13 @@ async fn continue_session_inner(
                 .update_peer_ingress_context(&session_id, keep_alive, comms_rt)
                 .await;
         }
-        ensure_rest_session_runtime_executor(state, &create_result.session_id).await;
+        if let Err(error) =
+            ensure_rest_session_runtime_executor(state, &create_result.session_id).await
+        {
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(error));
+        }
         let input =
             meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::from_content_input(
                 turn_prompt.clone(),
@@ -5277,9 +5350,10 @@ async fn continue_session_inner(
                 {
                     Ok(()) => outcome,
                     Err(error) => {
-                        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(format!(
-                            "REST runtime completion cleanup failed: {error}"
-                        ))
+                        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                            reason: format!("REST runtime completion cleanup failed: {error}"),
+                            kind: meerkat_runtime::completion::CompletionRuntimeTerminationKind::SurfaceCleanupFailed,
+                        }
                     }
                 }
             })
@@ -5552,7 +5626,16 @@ async fn continue_session_inner(
                 details: None,
             }));
         }
-        ensure_rest_session_runtime_executor(state, &session_id).await;
+        if let Err(error) = ensure_rest_session_runtime_executor(state, &session_id).await {
+            if let Some(registration) = pre_admission_registration.take() {
+                registration.disarm();
+            }
+            unregister_rest_runtime_if_new_idle_locked(state, &session_id, runtime_was_registered)
+                .await;
+            drop(caller_event_tx);
+            drain_event_forwarder(&session_id, forward_task).await;
+            return RequestTerminal::RespondWithoutPublish(Err(error));
+        }
         #[cfg(feature = "comms")]
         {
             adapter
@@ -5700,9 +5783,10 @@ async fn continue_session_inner(
                     {
                         Ok(()) => outcome,
                         Err(error) => {
-                            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(
-                                format!("REST runtime completion cleanup failed: {error}"),
-                            )
+                            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                                reason: format!("REST runtime completion cleanup failed: {error}"),
+                                kind: meerkat_runtime::completion::CompletionRuntimeTerminationKind::SurfaceCleanupFailed,
+                            }
                         }
                     }
                 }))
@@ -5808,12 +5892,19 @@ async fn session_events(
     // Create a stream that sends agent events as SSE events
     let stream = async_stream::stream! {
         // Emit a session_loaded event for compatibility
-        let event = Event::default()
-            .event("session_loaded")
-            .data(serde_json::to_string(&json!({
+        let loaded_data = match serde_json::to_string(&json!({
                 "session_id": session_id.to_string(),
                 "message_count": session.messages().len(),
-            })).unwrap_or_default());
+            })) {
+            Ok(data) => data,
+            Err(error) => {
+                yield Ok(sse_serialization_terminal_event(error));
+                return;
+            }
+        };
+        let event = Event::default()
+            .event("session_loaded")
+            .data(loaded_data);
         yield Ok(event);
 
         loop {
@@ -5824,15 +5915,22 @@ async fn session_events(
                     }
 
                     let event_type = agent_event_type(&payload.event.payload);
-                    let json = serde_json::to_value(&payload.event).unwrap_or_else(|_| {
-                        json!({
-                            "payload": {"type": "unknown"}
-                        })
-                    });
+                    let json = match serde_json::to_value(&payload.event) {
+                        Ok(json) => json,
+                        Err(error) => {
+                            yield Ok(sse_serialization_terminal_event(error));
+                            break;
+                        }
+                    };
 
-                    let event = Event::default()
-                        .event(event_type)
-                        .data(serde_json::to_string(&json).unwrap_or_default());
+                    let data = match serde_json::to_string(&json) {
+                        Ok(data) => data,
+                        Err(error) => {
+                            yield Ok(sse_serialization_terminal_event(error));
+                            break;
+                        }
+                    };
+                    let event = Event::default().event(event_type).data(data);
                     yield Ok(event);
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {
@@ -6281,10 +6379,21 @@ async fn archive_session_with_runtime_cleanup(
         let not_found = matches!(&result, Err(SessionError::NotFound { .. }));
         #[cfg(feature = "mob")]
         let retained_mob_cleanup = if not_found {
-            state
+            match state
                 .mob_state
                 .has_bridge_session_scoped_mobs(&session_id.to_string())
                 .await
+            {
+                Ok(retained) => retained,
+                Err(error) => {
+                    let _ = result_tx.send(Err(SessionError::Agent(
+                        meerkat_core::error::AgentError::InternalError(format!(
+                            "failed to restore mob cleanup state during REST archive for {session_id}: {error}"
+                        )),
+                    )));
+                    return;
+                }
+            }
         } else {
             false
         };
@@ -7368,7 +7477,9 @@ mod tests {
         )
         .await
         .expect("initial service turn should commit through machine receipt");
-        ensure_rest_session_runtime_executor(state, &created.session_id).await;
+        ensure_rest_session_runtime_executor(state, &created.session_id)
+            .await
+            .expect("runtime executor attachment should succeed");
         completed.session_id
     }
 
@@ -7420,7 +7531,9 @@ mod tests {
         )
         .await
         .expect("initial comms service turn should commit through machine receipt");
-        ensure_rest_session_runtime_executor(state, &created.session_id).await;
+        ensure_rest_session_runtime_executor(state, &created.session_id)
+            .await
+            .expect("runtime executor attachment should succeed");
         completed.session_id
     }
 
@@ -8716,6 +8829,34 @@ mod tests {
 
     #[cfg(feature = "comms")]
     #[test]
+    fn test_normalize_rest_comms_send_error_transport_is_peer_unreachable() {
+        let err = normalize_rest_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport("dial failed".to_string()),
+        );
+        match err {
+            ApiError::InternalWithData {
+                message,
+                code,
+                details,
+            } => {
+                assert!(message.starts_with("peer_unreachable:"));
+                assert_eq!(code, "peer_unreachable");
+                assert_eq!(
+                    details.get("reason").and_then(Value::as_str),
+                    Some("transport_error")
+                );
+                assert_eq!(
+                    details.get("details").and_then(Value::as_str),
+                    Some("dial failed")
+                );
+            }
+            other => panic!("expected structured transport error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "comms")]
+    #[test]
     fn test_normalize_rest_comms_send_error_fallback_is_structured() {
         let err = normalize_rest_comms_send_error(
             Some("peer-a"),
@@ -9876,7 +10017,9 @@ mod tests {
             "archived history should return the full transcript"
         );
 
-        ensure_rest_session_runtime_executor(&state, &created_session_id).await;
+        ensure_rest_session_runtime_executor(&state, &created_session_id)
+            .await
+            .expect("runtime executor attachment should succeed");
         assert!(
             state
                 .runtime_adapter
@@ -10437,7 +10580,9 @@ mod tests {
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        ensure_rest_session_runtime_executor(&state, &session_id).await;
+        ensure_rest_session_runtime_executor(&state, &session_id)
+            .await
+            .expect("runtime executor attachment should succeed");
         assert!(
             state.runtime_adapter.contains_session(&session_id).await,
             "test requires a pre-existing runtime registration"
@@ -10518,7 +10663,9 @@ mod tests {
             .await
             .expect("deferred session create should succeed");
         let session_id = created.session_id;
-        ensure_rest_session_runtime_executor(&state, &session_id).await;
+        ensure_rest_session_runtime_executor(&state, &session_id)
+            .await
+            .expect("runtime executor attachment should succeed");
         assert!(
             state.runtime_adapter.contains_session(&session_id).await,
             "test requires a pre-existing runtime registration"
@@ -10732,9 +10879,11 @@ mod tests {
         .expect("insert runtime pre-admission");
 
         let handle = meerkat_runtime::CompletionHandle::already_resolved(
-            meerkat_runtime::CompletionOutcome::Abandoned(
-                "apply failed: runtime boundary commit failed: injected failure".to_string(),
-            ),
+            meerkat_runtime::CompletionOutcome::Abandoned {
+                reason: "apply failed: runtime boundary commit failed: injected failure"
+                    .to_string(),
+                kind: meerkat_runtime::completion::CompletionAbandonmentKind::ApplyFailed,
+            },
         );
         spawn_rest_runtime_pre_admission_rekey_and_cleanup(
             state.clone(),
@@ -10939,6 +11088,7 @@ mod tests {
         let session_id = SessionId::new();
         let result = meerkat_core::RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
             turns: 1,
@@ -11076,6 +11226,7 @@ mod tests {
         let realm = meerkat_core::RealmId::parse("test-realm").expect("valid test realm id");
         let run_result = meerkat_core::RunResult {
             text: "{\"gate\":\"green\"}".to_string(),
+            content: Vec::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
             turns: 1,
@@ -11736,6 +11887,7 @@ mod tests {
             let response = run_result_to_response(
                 meerkat_core::types::RunResult {
                     text: "must not leak".to_string(),
+                    content: Vec::new(),
                     session_id: SessionId::new(),
                     usage: meerkat_core::types::Usage::default(),
                     turns: 1,

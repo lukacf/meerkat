@@ -223,6 +223,43 @@ pub struct SignalDispatchOutcome {
     pub applied_signal: SignalVariantId,
 }
 
+/// Typed reason a composition consumer refused a routed input.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConsumerRefusal {
+    /// The route reached the consumer, but consumer-side typed field
+    /// projection failed before a machine input could be applied.
+    #[error("projected input fields are invalid: {reason}")]
+    Projection { reason: String },
+    /// The routed input targeted a session the consumer no longer owns.
+    #[error("session `{session_id}` is not registered with the consumer")]
+    SessionNotRegistered { session_id: String },
+    /// The consumer machine has no transition for this input in the
+    /// current phase.
+    #[error("no matching machine transition from phase `{phase}` for `{trigger}`")]
+    NoMatchingTransition { phase: String, trigger: String },
+    /// The consumer machine owns the transition, but its guards rejected it.
+    #[error("machine guard rejected transition from phase `{phase}` for `{trigger}`")]
+    GuardRejected { phase: String, trigger: String },
+    /// The consumer applied the input but failed while dispatching the
+    /// resulting routed effects/signals.
+    #[error("committed effect dispatch failed: {reason}")]
+    EffectDispatchFailed { reason: String },
+    /// The consumer endpoint itself was unavailable for this delivery.
+    #[error("consumer unavailable: {reason}")]
+    ConsumerUnavailable { reason: String },
+}
+
+/// Typed reason a composition signal consumer refused a routed signal.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SignalConsumerRefusal {
+    /// Consumer-side typed signal projection failed.
+    #[error("projected signal fields are invalid: {reason}")]
+    Projection { reason: String },
+    /// The signal consumer endpoint was unavailable for this delivery.
+    #[error("signal consumer unavailable: {reason}")]
+    ConsumerUnavailable { reason: String },
+}
+
 /// Reasons the dispatcher refuses a routed effect.
 ///
 /// Unlike the deleted helper path, there is no "silently drop unknown
@@ -264,14 +301,14 @@ pub enum DispatchRefusal {
         instance: MachineInstanceId,
     },
     /// The consumer surface rejected the typed input (e.g. because the
-    /// consumer machine is no longer accepting inputs). The inner message
-    /// is the consumer-side rejection reason and is opaque to the
-    /// dispatcher — typed by the consumer's own error.
-    #[error("consumer {instance} refused input {variant}: {reason}")]
+    /// consumer machine is no longer accepting inputs). The refusal is
+    /// typed by the consumer's owner, so callers never need to parse an
+    /// opaque message to branch on machine-vs-projection-vs-endpoint truth.
+    #[error("consumer {instance} refused input {variant}: {refusal}")]
     ConsumerRefused {
         instance: MachineInstanceId,
         variant: InputVariantId,
-        reason: String,
+        refusal: ConsumerRefusal,
     },
 }
 
@@ -311,11 +348,11 @@ pub enum SignalDispatchRefusal {
         instance: MachineInstanceId,
     },
     /// The consumer surface rejected the typed signal.
-    #[error("consumer {instance} refused signal {variant}: {reason}")]
+    #[error("consumer {instance} refused signal {variant}: {refusal}")]
     ConsumerRefused {
         instance: MachineInstanceId,
         variant: SignalVariantId,
-        reason: String,
+        refusal: SignalConsumerRefusal,
     },
 }
 
@@ -341,7 +378,7 @@ pub trait ConsumerSurface: Send + Sync {
         &self,
         variant: InputVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String>;
+    ) -> Result<(), ConsumerRefusal>;
 }
 
 /// Delivery surface for one signal-consuming instance inside a composition.
@@ -355,7 +392,7 @@ pub trait SignalConsumerSurface: Send + Sync {
         &self,
         variant: SignalVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String>;
+    ) -> Result<(), SignalConsumerRefusal>;
 }
 
 /// Owned counterpart of [`FieldValue`] used when delivering a routed input
@@ -758,10 +795,10 @@ impl<E: ProducerEffect> CompositionDispatcher for CatalogCompositionDispatcher<E
         consumer
             .apply_routed_input(descriptor.input_variant.clone(), projected)
             .await
-            .map_err(|reason| DispatchRefusal::ConsumerRefused {
+            .map_err(|refusal| DispatchRefusal::ConsumerRefused {
                 instance: descriptor.instance_id.clone(),
                 variant: descriptor.input_variant.clone(),
-                reason,
+                refusal,
             })?;
 
         Ok(DispatchOutcome {
@@ -830,10 +867,10 @@ impl<S: ProducerSignal> CompositionSignalDispatcher for CatalogCompositionSignal
         consumer
             .receive_signal(descriptor.signal_variant.clone(), projected)
             .await
-            .map_err(|reason| SignalDispatchRefusal::ConsumerRefused {
+            .map_err(|refusal| SignalDispatchRefusal::ConsumerRefused {
                 instance: descriptor.instance_id.clone(),
                 variant: descriptor.signal_variant.clone(),
-                reason,
+                refusal,
             })?;
 
         Ok(SignalDispatchOutcome {
@@ -970,7 +1007,7 @@ mod tests {
             &self,
             variant: InputVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), ConsumerRefusal> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }
@@ -992,7 +1029,7 @@ mod tests {
             &self,
             variant: SignalVariantId,
             projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-        ) -> Result<(), String> {
+        ) -> Result<(), SignalConsumerRefusal> {
             self.log.lock().await.push((variant, projected_fields));
             Ok(())
         }

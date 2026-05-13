@@ -132,8 +132,11 @@ async fn archive_runtime_cleanup_dispatches_to_trait_hooks() {
             Ok(())
         }
 
-        async fn has_retained_cleanup(&self, _session_id: &SessionId) -> bool {
-            false
+        async fn has_retained_cleanup(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<bool, SessionError> {
+            Ok(false)
         }
     }
 

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::WireUsage;
+use super::{WireAssistantBlock, WireUsage};
 use meerkat_core::{ExtractionError, RunResult, SchemaWarning, SessionId, TurnTerminalCauseKind};
 
 /// Typed tool-error classification carried on the wire.
@@ -58,6 +58,8 @@ pub struct WireRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_ref: Option<String>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<WireAssistantBlock>,
     pub turns: u32,
     pub tool_calls: u32,
     pub usage: WireUsage,
@@ -79,6 +81,7 @@ impl From<RunResult> for WireRunResult {
             session_id: r.session_id,
             session_ref: None,
             text: r.text,
+            content: r.content.into_iter().map(Into::into).collect(),
             turns: r.turns,
             tool_calls: r.tool_calls,
             usage: r.usage.into(),
@@ -101,6 +104,10 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let run = RunResult {
             text: "ok".to_string(),
+            content: vec![meerkat_core::AssistantBlock::Text {
+                text: "ok".to_string(),
+                meta: None,
+            }],
             session_id: SessionId::new(),
             usage: Default::default(),
             turns: 1,
@@ -123,6 +130,10 @@ mod tests {
         };
 
         let wire: WireRunResult = run.into();
+        assert!(matches!(
+            wire.content.as_slice(),
+            [WireAssistantBlock::Text { text, .. }] if text == "ok"
+        ));
         let state = wire
             .skill_diagnostics
             .as_ref()

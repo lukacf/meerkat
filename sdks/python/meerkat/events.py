@@ -242,6 +242,27 @@ class ToolCallRequested(Event):
 
 
 @dataclass(frozen=True, slots=True)
+class ToolResultError:
+    """Structured, machine-readable error detail for failed tool results."""
+
+    code: str = ""
+    message: str = ""
+    data: Any | None = None
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "code":
+            return self.code
+        if key == "message":
+            return self.message
+        if key == "data":
+            return self.data
+        raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        return key in {"code", "message", "data"}
+
+
+@dataclass(frozen=True, slots=True)
 class ToolResultReceived(Event):
     """A tool result was fed back to the LLM."""
 
@@ -249,6 +270,7 @@ class ToolResultReceived(Event):
     name: str = ""
     content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
+    error: ToolResultError | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -280,6 +302,7 @@ class ToolExecutionCompleted(Event):
     result: str = ""
     content: list[ContentBlock] = field(default_factory=list)
     is_error: bool | None = None
+    error: ToolResultError | None = None
     duration_ms: int | None = None
 
 
@@ -756,6 +779,20 @@ def _parse_agent_error_report(raw: Any) -> AgentErrorReport | None:
     return AgentErrorReport(class_=error_class, message=message, reason=reason)
 
 
+def _parse_tool_result_error(raw: Any) -> ToolResultError | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("tool result error must be object")
+    code = raw.get("code")
+    message = raw.get("message")
+    if not isinstance(code, str):
+        raise ValueError("tool result error code must be string")
+    if not isinstance(message, str):
+        raise ValueError("tool result error message must be string")
+    return ToolResultError(code=code, message=message, data=raw.get("data"))
+
+
 def _parse_tool_config_change_status(raw: Any) -> ToolConfigChangeStatus | None:
     if not isinstance(raw, dict):
         return None
@@ -1144,6 +1181,8 @@ def parse_event(raw: dict[str, Any]) -> Event:
                 )
             elif f == "is_error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
                 kwargs["is_error"] = _parse_optional_bool(raw.get("is_error"))
+            elif f == "error" and cls in {ToolResultReceived, ToolExecutionCompleted}:
+                kwargs["error"] = _parse_tool_result_error(raw.get("error"))
             elif f == "duration_ms" and cls is ToolExecutionCompleted:
                 kwargs["duration_ms"] = _parse_optional_int(raw.get("duration_ms"))
             elif f == "error_report" and cls is RunFailed:

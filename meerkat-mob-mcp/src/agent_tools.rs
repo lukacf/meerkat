@@ -917,7 +917,11 @@ impl AgentMobToolSurface {
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
         let authority_context = self.authority_context_snapshot();
-        let mobs = self.state.mob_list().await;
+        let mobs = self
+            .state
+            .mob_list()
+            .await
+            .map_err(|e| Self::map_mob_error(call, e))?;
         let mob_list: Vec<serde_json::Value> = mobs
             .into_iter()
             .filter(|(id, _)| authority_context.can_manage_mob(id.as_str()))
@@ -1125,7 +1129,8 @@ impl meerkat_core::service::MobToolsFactory for AgentMobToolSurfaceFactory {
         let implicit_mob_id = self
             .state
             .find_implicit_mob_for_bridge_session(&session_id_str)
-            .await;
+            .await
+            .map_err(|err| -> Box<dyn std::error::Error + Send + Sync> { Box::new(err) })?;
 
         // Extract parent canonical comms identity for wiring helpers.
         let comms_peer_id = args.comms_runtime.as_ref().and_then(|r| r.peer_id());
@@ -2061,8 +2066,21 @@ where
         {
             Ok(true) => Ok(()),
             Ok(false) => {
-                let had_cleanup_anchor =
-                    mob_state.has_bridge_session_scoped_mobs(&session_key).await;
+                let had_cleanup_anchor = match mob_state
+                    .has_bridge_session_scoped_mobs(&session_key)
+                    .await
+                {
+                    Ok(retained) => retained,
+                    Err(error) => {
+                        return {
+                            let _ = result_tx.send(Err(SessionError::Agent(
+                                    meerkat_core::error::AgentError::InternalError(format!(
+                                        "failed to restore mob cleanup state during agent tool archive for {session_id}: {error}"
+                                    )),
+                                )));
+                        };
+                    }
+                };
                 match service
                     .archive_with_mob_lifecycle_authority(&session_id)
                     .await
@@ -2640,6 +2658,7 @@ mod tests {
             self.sessions.write().await.insert(sid.clone(), comms);
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: sid,
                 usage: Usage::default(),
                 turns: 1,
@@ -2662,6 +2681,7 @@ mod tests {
             }
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -3121,7 +3141,8 @@ mod tests {
         assert_eq!(
             state
                 .find_implicit_mob_for_bridge_session(&session_key)
-                .await,
+                .await
+                .expect("restore implicit mob lookup"),
             Some(stale_mob_id.clone()),
             "surface building must not own implicit-mob reconciliation"
         );
@@ -3331,6 +3352,7 @@ mod tests {
         let _mob_id = state
             .find_implicit_mob_for_bridge_session(&session_key)
             .await
+            .expect("restore implicit mob lookup")
             .expect("delegate should still create an implicit mob");
 
         // No session effect is returned when delegate errors — the effect

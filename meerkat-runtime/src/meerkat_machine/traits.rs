@@ -426,12 +426,13 @@ impl MeerkatMachine {
         err: RuntimeControlPlaneError,
     ) -> RuntimeDriverError {
         match err {
-            RuntimeControlPlaneError::NotFound(_) => RuntimeDriverError::NotReady {
-                state: RuntimeState::Destroyed,
-            },
+            RuntimeControlPlaneError::NotFound(runtime_id) => {
+                RuntimeDriverError::NotFound(runtime_id)
+            }
             RuntimeControlPlaneError::InvalidState { state } => {
                 RuntimeDriverError::NotReady { state }
             }
+            RuntimeControlPlaneError::DslRejected(error) => RuntimeDriverError::DslRejected(error),
             RuntimeControlPlaneError::StoreError(message)
             | RuntimeControlPlaneError::Internal(message) => RuntimeDriverError::Internal(message),
         }
@@ -538,6 +539,24 @@ impl MeerkatMachine {
             entry.completions.clone(),
             entry.wake_sender(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_plane_not_found_maps_to_driver_not_found() {
+        let runtime_id = LogicalRuntimeId::new("missing-runtime");
+        let mapped = MeerkatMachine::driver_error_from_control_plane_error(
+            RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+        );
+
+        assert!(
+            matches!(mapped, RuntimeDriverError::NotFound(ref id) if id == &runtime_id),
+            "not-found control-plane truth must not become destroyed/not-ready: {mapped:?}"
+        );
     }
 }
 

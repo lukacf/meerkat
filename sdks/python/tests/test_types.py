@@ -682,7 +682,18 @@ def test_parse_session_history():
             },
             {
                 "role": "tool_results",
-                "results": [{"tool_use_id": "tc_1", "content": "done", "is_error": False}],
+                "results": [
+                    {
+                        "tool_use_id": "tc_1",
+                        "content": "denied",
+                        "is_error": True,
+                        "error": {
+                            "code": "access_denied",
+                            "message": "tool access denied",
+                            "data": {"policy": "hidden"},
+                        },
+                    }
+                ],
             },
         ],
     }
@@ -692,6 +703,9 @@ def test_parse_session_history():
     assert history.has_more is True
     assert history.messages[1].tool_calls[0].name == "search"
     assert history.messages[2].results[0].tool_use_id == "tc_1"
+    assert history.messages[2].results[0].error is not None
+    assert history.messages[2].results[0].error.code == "access_denied"
+    assert history.messages[2].results[0].error["data"] == {"policy": "hidden"}
 
 
 def test_parse_session_history_preserves_assistant_image_blocks():
@@ -1588,6 +1602,35 @@ def test_parse_tool_execution_completed():
         {"type": "text", "text": "found it"},
         {"type": "image", "media_type": "image/png", "source": "inline", "data": "AAAA"},
     ]
+
+
+def test_parse_structured_tool_result_errors():
+    completed = parse_event({
+        "type": "tool_execution_completed",
+        "id": "t1",
+        "name": "search",
+        "result": "tool timed out",
+        "content": [{"type": "text", "text": "tool timed out"}],
+        "is_error": True,
+        "error": {"code": "timeout", "message": "tool timed out", "data": {"timeout_ms": 50}},
+        "duration_ms": 42,
+    })
+    received = parse_event({
+        "type": "tool_result_received",
+        "id": "t1",
+        "name": "search",
+        "content": [{"type": "text", "text": "tool timed out"}],
+        "is_error": True,
+        "error": {"code": "timeout", "message": "tool timed out"},
+    })
+
+    assert isinstance(completed, ToolExecutionCompleted)
+    assert completed.error is not None
+    assert completed.error.code == "timeout"
+    assert completed.error["data"] == {"timeout_ms": 50}
+    assert isinstance(received, ToolResultReceived)
+    assert received.error is not None
+    assert received.error.message == "tool timed out"
 
 
 def test_parse_tool_result_received_content_blocks():

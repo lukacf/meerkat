@@ -286,7 +286,8 @@ impl MeerkatMachine {
     pub async fn ops_lifecycle_registry(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>> {
+    ) -> Result<Option<Arc<crate::ops_lifecycle::RuntimeOpsLifecycleRegistry>>, RuntimeBindingsError>
+    {
         match self
             .execute_meerkat_machine_command(
                 None,
@@ -296,12 +297,15 @@ impl MeerkatMachine {
             )
             .await
         {
-            Ok(MeerkatMachineCommandResult::OpsLifecycleRegistry(registry)) => registry,
-            Ok(_) => {
-                tracing::error!("ops_lifecycle_registry: unexpected command result variant");
-                None
-            }
-            Err(_) => None,
+            Ok(MeerkatMachineCommandResult::OpsLifecycleRegistry(registry)) => Ok(registry),
+            Ok(other) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id.clone(),
+                format!("unexpected command result for ops lifecycle registry: {other:?}"),
+            )),
+            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id.clone(),
+                err.to_string(),
+            )),
         }
     }
 
@@ -328,10 +332,10 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
-            Ok(_) => {
-                tracing::error!("prepare_bindings: unexpected command result variant");
-                Err(RuntimeBindingsError::SessionNotFound(session_id))
-            }
+            Ok(other) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id,
+                format!("unexpected command result for prepare bindings: {other:?}"),
+            )),
             Err(err) => Err(RuntimeBindingsError::PrepareFailed(
                 session_id,
                 err.to_string(),
@@ -361,13 +365,14 @@ impl MeerkatMachine {
             .await
         {
             Ok(MeerkatMachineCommandResult::Bindings(bindings)) => Ok(bindings),
-            Ok(_) => {
-                tracing::error!(
-                    "prepare_local_session_bindings: unexpected command result variant"
-                );
-                Err(RuntimeBindingsError::SessionNotFound(session_id))
-            }
-            Err(_) => Err(RuntimeBindingsError::SessionNotFound(session_id)),
+            Ok(other) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id,
+                format!("unexpected command result for local session bindings: {other:?}"),
+            )),
+            Err(err) => Err(RuntimeBindingsError::PrepareFailed(
+                session_id,
+                err.to_string(),
+            )),
         }
     }
 }

@@ -304,7 +304,8 @@ async fn e2e_agent_tools_surface_present() {
     // Assert via authoritative state: delegate was called → implicit mob exists.
     let implicit = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find implicit mob for session");
     assert!(
         implicit.is_some(),
         "delegate should have created an implicit mob for session {session_id}"
@@ -346,7 +347,12 @@ async fn e2e_delegate_creates_implicit_mob() {
         .expect("implicit mob should exist after delegate");
 
     // Assert: mob is classified as implicit
-    assert!(mob_state.is_implicit_mob(&mob_id).await);
+    assert!(
+        mob_state
+            .is_implicit_mob(&mob_id)
+            .await
+            .expect("check implicit mob classification")
+    );
 
     // Assert: roster contains the helper
     let handle = mob_state.handle_for(&mob_id).await.expect("mob handle");
@@ -366,6 +372,7 @@ async fn e2e_delegate_creates_implicit_mob() {
         mob_state
             .find_implicit_mob_for_bridge_session(&session_id.to_string())
             .await
+            .expect("find implicit mob after archive")
             .is_none(),
         "implicit mob should be cleaned up after archive"
     );
@@ -427,7 +434,8 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     // Only one mob owned by this session
     let owned = mob_state
         .find_mobs_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find mobs for session");
     assert_eq!(
         owned.len(),
         1,
@@ -473,14 +481,18 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     // Assert: explicit mob exists and is NOT implicit
     let owned = mob_state
         .find_mobs_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find mobs for session");
     assert!(
         !owned.is_empty(),
         "session should own a mob after mob_create"
     );
     let mob_id = owned[0].clone();
     assert!(
-        !mob_state.is_implicit_mob(&mob_id).await,
+        !mob_state
+            .is_implicit_mob(&mob_id)
+            .await
+            .expect("check explicit mob classification"),
         "explicitly created mob should not be classified as implicit"
     );
 
@@ -608,7 +620,8 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
 
     let a_mobs = mob_state
         .find_mobs_for_bridge_session(&session_a.to_string())
-        .await;
+        .await
+        .expect("find session A mobs");
     assert_eq!(a_mobs.len(), 1);
     let a_mob_id = a_mobs[0].clone();
 
@@ -623,7 +636,8 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
     // B should own zero mobs
     let b_mobs = mob_state
         .find_mobs_for_bridge_session(&session_b.to_string())
-        .await;
+        .await
+        .expect("find session B mobs");
     assert!(b_mobs.is_empty(), "session B should not own any mobs");
 
     // A's mob should still exist
@@ -695,7 +709,8 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
     // Assert: 2 mobs owned by this session
     let owned = mob_state
         .find_mobs_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find owned mobs before archive");
     assert_eq!(
         owned.len(),
         2,
@@ -709,7 +724,8 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
     // Assert: 0 mobs owned
     let owned_after = mob_state
         .find_mobs_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find owned mobs after archive");
     assert_eq!(
         owned_after.len(),
         0,
@@ -763,7 +779,10 @@ async fn e2e_tool_error_contracts() {
 
     // Assert: implicit mob still exists
     assert!(
-        mob_state.is_implicit_mob(&implicit_mob_id).await,
+        mob_state
+            .is_implicit_mob(&implicit_mob_id)
+            .await
+            .expect("check implicit mob classification"),
         "implicit mob should survive destroy attempt"
     );
 
@@ -795,7 +814,8 @@ async fn e2e_tool_error_contracts() {
     // Assert: spoofed mob is owned by the CURRENT session, not the spoofed one
     let owned = mob_state
         .find_mobs_for_bridge_session(&session_id.to_string())
-        .await;
+        .await
+        .expect("find mobs for current session");
     // Should own 2: implicit + the "spoofed" one (which was re-tagged)
     assert!(
         owned.len() >= 2,
@@ -803,13 +823,17 @@ async fn e2e_tool_error_contracts() {
     );
     let spoofed_mobs = mob_state
         .find_mobs_for_bridge_session("spoofed-session-999")
-        .await;
+        .await
+        .expect("find mobs for invalid spoofed session");
     assert!(
         spoofed_mobs.is_empty(),
         "no mobs should be owned by the spoofed session"
     );
     assert!(
-        !mob_state.is_implicit_mob(&MobId::from("spoofed-mob")).await,
+        !mob_state
+            .is_implicit_mob(&MobId::from("spoofed-mob"))
+            .await
+            .expect("check spoofed mob classification"),
         "mob_create must not allow callers to mint faux implicit mobs"
     );
 }
@@ -893,6 +917,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
         mob_state
             .find_implicit_mob_for_bridge_session(&session_id.to_string())
             .await
+            .expect("find implicit mob after rebuild")
             .as_ref()
             == Some(&mob_id_a),
         "build_mob_tools must not destroy or replace the implicit mob during rebuild"
@@ -1006,6 +1031,7 @@ async fn e2e_delegate_bidirectional_comms() {
         if let Some(id) = mob_state
             .find_implicit_mob_for_bridge_session(&session_id.to_string())
             .await
+            .expect("find implicit mob while waiting")
         {
             break id;
         }

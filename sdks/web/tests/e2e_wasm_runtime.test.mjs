@@ -336,6 +336,7 @@ test("MeerkatRuntime opens and closes a public mob subscription through the ship
 
 test("MeerkatRuntime exposes runtime-scoped tool registration on the instance surface", async () => {
   const calls = [];
+  let registeredCallback;
   const wasm = {
     async default() {},
     runtime_version() {
@@ -346,6 +347,7 @@ test("MeerkatRuntime exposes runtime-scoped tool registration on the instance su
     },
     register_tool_callback(name, description, schemaJson, callback) {
       calls.push(["callback", name, description, JSON.parse(schemaJson), typeof callback]);
+      registeredCallback = callback;
     },
     register_js_tool(name, description, schemaJson) {
       calls.push(["fire_and_forget", name, description, JSON.parse(schemaJson)]);
@@ -399,6 +401,10 @@ test("MeerkatRuntime exposes runtime-scoped tool registration on the instance su
       },
       "function",
     ]);
+    assert.deepEqual(await registeredCallback('{"value":"browser"}'), {
+      content: '{"value":"browser"}',
+      is_error: false,
+    });
     assert.deepEqual(calls[1], [
       "fire_and_forget",
       "notify_browser",
@@ -499,6 +505,7 @@ test("MeerkatRuntime forwards canonical mob status/helper methods through the wa
     },
     async mob_lifecycle(mobId, action) {
       calls.push(["lifecycle", mobId, action]);
+      return JSON.stringify({ mob_id: mobId, action, ok: true });
     },
     async mob_events() {
       return JSON.stringify([]);

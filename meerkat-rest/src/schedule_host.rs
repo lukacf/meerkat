@@ -69,7 +69,12 @@ impl RestScheduleContext {
         self.runtime
             .runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(|error| {
+                ScheduleDomainError::Internal(format!(
+                    "failed to attach REST runtime executor for scheduled session {session_id}: {error}"
+                ))
+            })?;
         Ok(())
     }
 

@@ -1355,7 +1355,99 @@ pub enum TurnTerminalCauseKind {
     RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
+    CheckpointPersistenceFailure,
     FatalFailure,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnFailureClass {
+    Llm,
+    Store,
+    Tool,
+    Mcp,
+    SessionNotFound,
+    Budget,
+    MaxTokens,
+    ContentFiltered,
+    MaxTurns,
+    Cancelled,
+    InvalidState,
+    OperationNotFound,
+    DepthLimit,
+    ConcurrencyLimit,
+    Config,
+    Internal,
+    Build,
+    Auth,
+    CallbackPending,
+    StructuredOutput,
+    InvalidOutputSchema,
+    Hook,
+    #[default]
+    Terminal,
+    NoPendingBoundary,
+}
+
+impl From<meerkat_core::event::AgentErrorClass> for TurnFailureClass {
+    fn from(class: meerkat_core::event::AgentErrorClass) -> Self {
+        match class {
+            meerkat_core::event::AgentErrorClass::Llm => Self::Llm,
+            meerkat_core::event::AgentErrorClass::Store => Self::Store,
+            meerkat_core::event::AgentErrorClass::Tool => Self::Tool,
+            meerkat_core::event::AgentErrorClass::Mcp => Self::Mcp,
+            meerkat_core::event::AgentErrorClass::SessionNotFound => Self::SessionNotFound,
+            meerkat_core::event::AgentErrorClass::Budget => Self::Budget,
+            meerkat_core::event::AgentErrorClass::MaxTokens => Self::MaxTokens,
+            meerkat_core::event::AgentErrorClass::ContentFiltered => Self::ContentFiltered,
+            meerkat_core::event::AgentErrorClass::MaxTurns => Self::MaxTurns,
+            meerkat_core::event::AgentErrorClass::Cancelled => Self::Cancelled,
+            meerkat_core::event::AgentErrorClass::InvalidState => Self::InvalidState,
+            meerkat_core::event::AgentErrorClass::OperationNotFound => Self::OperationNotFound,
+            meerkat_core::event::AgentErrorClass::DepthLimit => Self::DepthLimit,
+            meerkat_core::event::AgentErrorClass::ConcurrencyLimit => Self::ConcurrencyLimit,
+            meerkat_core::event::AgentErrorClass::Config => Self::Config,
+            meerkat_core::event::AgentErrorClass::Internal => Self::Internal,
+            meerkat_core::event::AgentErrorClass::Build => Self::Build,
+            meerkat_core::event::AgentErrorClass::Auth => Self::Auth,
+            meerkat_core::event::AgentErrorClass::CallbackPending => Self::CallbackPending,
+            meerkat_core::event::AgentErrorClass::StructuredOutput => Self::StructuredOutput,
+            meerkat_core::event::AgentErrorClass::InvalidOutputSchema => Self::InvalidOutputSchema,
+            meerkat_core::event::AgentErrorClass::Hook => Self::Hook,
+            meerkat_core::event::AgentErrorClass::Terminal => Self::Terminal,
+            meerkat_core::event::AgentErrorClass::NoPendingBoundary => Self::NoPendingBoundary,
+        }
+    }
+}
+
+impl From<TurnFailureClass> for meerkat_core::event::AgentErrorClass {
+    fn from(class: TurnFailureClass) -> Self {
+        match class {
+            TurnFailureClass::Llm => Self::Llm,
+            TurnFailureClass::Store => Self::Store,
+            TurnFailureClass::Tool => Self::Tool,
+            TurnFailureClass::Mcp => Self::Mcp,
+            TurnFailureClass::SessionNotFound => Self::SessionNotFound,
+            TurnFailureClass::Budget => Self::Budget,
+            TurnFailureClass::MaxTokens => Self::MaxTokens,
+            TurnFailureClass::ContentFiltered => Self::ContentFiltered,
+            TurnFailureClass::MaxTurns => Self::MaxTurns,
+            TurnFailureClass::Cancelled => Self::Cancelled,
+            TurnFailureClass::InvalidState => Self::InvalidState,
+            TurnFailureClass::OperationNotFound => Self::OperationNotFound,
+            TurnFailureClass::DepthLimit => Self::DepthLimit,
+            TurnFailureClass::ConcurrencyLimit => Self::ConcurrencyLimit,
+            TurnFailureClass::Config => Self::Config,
+            TurnFailureClass::Internal => Self::Internal,
+            TurnFailureClass::Build => Self::Build,
+            TurnFailureClass::Auth => Self::Auth,
+            TurnFailureClass::CallbackPending => Self::CallbackPending,
+            TurnFailureClass::StructuredOutput => Self::StructuredOutput,
+            TurnFailureClass::InvalidOutputSchema => Self::InvalidOutputSchema,
+            TurnFailureClass::Hook => Self::Hook,
+            TurnFailureClass::Terminal => Self::Terminal,
+            TurnFailureClass::NoPendingBoundary => Self::NoPendingBoundary,
+        }
+    }
 }
 
 impl From<meerkat_core::turn_execution_authority::TurnTerminalCauseKind> for TurnTerminalCauseKind {
@@ -1394,6 +1486,9 @@ impl From<meerkat_core::turn_execution_authority::TurnTerminalCauseKind> for Tur
             meerkat_core::turn_execution_authority::TurnTerminalCauseKind::RuntimeApplyFailure => {
                 Self::RuntimeApplyFailure
             }
+            meerkat_core::turn_execution_authority::TurnTerminalCauseKind::CheckpointPersistenceFailure => {
+                Self::CheckpointPersistenceFailure
+            }
             meerkat_core::turn_execution_authority::TurnTerminalCauseKind::FatalFailure => {
                 Self::FatalFailure
             }
@@ -1417,6 +1512,9 @@ impl From<TurnTerminalCauseKind> for meerkat_core::turn_execution_authority::Tur
             TurnTerminalCauseKind::RetryExhausted => Self::RetryExhausted,
             TurnTerminalCauseKind::TurnLimitReached => Self::TurnLimitReached,
             TurnTerminalCauseKind::RuntimeApplyFailure => Self::RuntimeApplyFailure,
+            TurnTerminalCauseKind::CheckpointPersistenceFailure => {
+                Self::CheckpointPersistenceFailure
+            }
             TurnTerminalCauseKind::FatalFailure => Self::FatalFailure,
         }
     }

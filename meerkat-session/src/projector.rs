@@ -375,6 +375,7 @@ mod tests {
                 AgentEvent::RunCompleted {
                     session_id: sid.clone(),
                     result: "Hi there!".to_string(),
+                    content: Vec::new(),
                     structured_output: None,
                     extraction_required: false,
                     usage: Usage::default(),

@@ -9,6 +9,7 @@ use meerkat_comms::agent::DynCommsToolDispatcher;
 #[cfg(feature = "comms")]
 use meerkat_comms::{Router, TrustedPeers};
 use meerkat_core::AgentToolDispatcher;
+use meerkat_core::ops::DEFAULT_TOOL_DISPATCH_TIMEOUT;
 use meerkat_core::ops_lifecycle::OpsLifecycleRegistry;
 #[cfg(feature = "mcp")]
 use meerkat_mcp::McpRouter;
@@ -72,7 +73,7 @@ impl Default for ToolDispatcherConfig {
             source: ToolDispatcherSource::Empty,
             #[cfg(feature = "comms")]
             comms: None,
-            default_timeout: Duration::from_secs(30),
+            default_timeout: DEFAULT_TOOL_DISPATCH_TIMEOUT,
         }
     }
 }

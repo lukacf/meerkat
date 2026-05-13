@@ -102,7 +102,12 @@ impl McpScheduleContext {
         let callback_tools = ingress.current_callback_tools(session_id).await;
         ingress
             .configure_session(session_id, callback_tools, false)
-            .await;
+            .await
+            .map_err(|error| {
+                ScheduleDomainError::Internal(format!(
+                    "failed to attach MCP runtime executor for scheduled session {session_id}: {error}"
+                ))
+            })?;
         Ok(())
     }
 
@@ -261,7 +266,12 @@ impl McpScheduleContext {
                 .insert(session_id.to_string(), Arc::clone(&mcp_adapter));
             self.ingress_context()
                 .configure_session(&session_id, None, false)
-                .await;
+                .await
+                .map_err(|error| {
+                    ScheduleDomainError::Internal(format!(
+                        "failed to attach MCP runtime executor for scheduled session {session_id}: {error}"
+                    ))
+                })?;
             update_peer_ingress_context(self, &session_id).await;
         }
 

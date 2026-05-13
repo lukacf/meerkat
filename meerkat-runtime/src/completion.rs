@@ -19,6 +19,31 @@ use serde_json::Value;
 
 use crate::tokio::sync::oneshot;
 
+/// Typed class for an input abandoned before producing a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionAbandonmentKind {
+    RuntimeBatchPreparationFailed,
+    RuntimePrimitiveRejected,
+    RuntimeTurnStatePreparationFailed,
+    RuntimeFailureSnapshotFailed,
+    ApplyFailed,
+    Retired,
+    Unknown,
+}
+
+/// Typed class for runtime-side termination of pending completion waiters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionRuntimeTerminationKind {
+    CompletionChannelClosed,
+    RuntimeStopped,
+    RuntimeLoopExited,
+    RuntimeReset,
+    RuntimeDestroyed,
+    RuntimeSessionUnregistered,
+    SurfaceCleanupFailed,
+    Unknown,
+}
+
 /// Outcome delivered to a completion waiter.
 #[derive(Debug)]
 pub enum CompletionOutcome {
@@ -32,7 +57,10 @@ pub enum CompletionOutcome {
     /// The input reached the canonical cancellation terminal.
     Cancelled,
     /// The input was abandoned before completing.
-    Abandoned(String),
+    Abandoned {
+        reason: String,
+        kind: CompletionAbandonmentKind,
+    },
     /// The input was abandoned before completing, with typed failure metadata.
     AbandonedWithError {
         reason: String,
@@ -45,7 +73,10 @@ pub enum CompletionOutcome {
         error: TurnErrorMetadata,
     },
     /// The runtime was stopped or destroyed while the input was pending.
-    RuntimeTerminated(String),
+    RuntimeTerminated {
+        reason: String,
+        kind: CompletionRuntimeTerminationKind,
+    },
 }
 
 /// Snapshot of one input's registered completion waiters.
@@ -81,9 +112,10 @@ impl CompletionHandle {
         match self.rx.await {
             Ok(outcome) => outcome,
             // Sender dropped without sending — runtime shut down unexpectedly
-            Err(_) => CompletionOutcome::RuntimeTerminated(
-                "completion channel closed without result".into(),
-            ),
+            Err(_) => CompletionOutcome::RuntimeTerminated {
+                reason: "completion channel closed without result".into(),
+                kind: CompletionRuntimeTerminationKind::CompletionChannelClosed,
+            },
         }
     }
 
@@ -136,7 +168,31 @@ impl CompletionHandle {
 impl CompletionOutcome {
     pub fn abandoned_reason(&self) -> Option<&str> {
         match self {
-            Self::Abandoned(reason) | Self::AbandonedWithError { reason, .. } => Some(reason),
+            Self::Abandoned { reason, .. } | Self::AbandonedWithError { reason, .. } => {
+                Some(reason)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn runtime_termination_reason(&self) -> Option<&str> {
+        match self {
+            Self::RuntimeTerminated { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    pub fn abandonment_kind(&self) -> Option<CompletionAbandonmentKind> {
+        match self {
+            Self::Abandoned { kind, .. } => Some(*kind),
+            Self::AbandonedWithError { .. } => Some(CompletionAbandonmentKind::ApplyFailed),
+            _ => None,
+        }
+    }
+
+    pub fn runtime_termination_kind(&self) -> Option<CompletionRuntimeTerminationKind> {
+        match self {
+            Self::RuntimeTerminated { kind, .. } => Some(*kind),
             _ => None,
         }
     }
@@ -226,10 +282,18 @@ impl CompletionRegistry {
     }
 
     /// Resolve all waiters for an abandoned input.
-    pub(crate) fn resolve_abandoned(&mut self, input_id: &InputId, reason: String) {
+    pub(crate) fn resolve_abandoned(
+        &mut self,
+        input_id: &InputId,
+        reason: String,
+        kind: CompletionAbandonmentKind,
+    ) {
         if let Some(senders) = self.take_waiters(input_id) {
             for tx in senders {
-                let _ = tx.send(CompletionOutcome::Abandoned(reason.clone()));
+                let _ = tx.send(CompletionOutcome::Abandoned {
+                    reason: reason.clone(),
+                    kind,
+                });
             }
         }
     }
@@ -272,10 +336,17 @@ impl CompletionRegistry {
     /// Resolve all pending waiters with a termination error.
     ///
     /// Used when the runtime is stopped or destroyed.
-    pub(crate) fn resolve_all_terminated(&mut self, reason: &str) {
+    pub(crate) fn resolve_all_terminated(
+        &mut self,
+        reason: &str,
+        kind: CompletionRuntimeTerminationKind,
+    ) {
         for (_, senders) in self.waiters.drain() {
             for tx in senders {
-                let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
+                let _ = tx.send(CompletionOutcome::RuntimeTerminated {
+                    reason: reason.into(),
+                    kind,
+                });
             }
         }
     }
@@ -292,7 +363,10 @@ impl CompletionRegistry {
             }
 
             for tx in senders.drain(..) {
-                let _ = tx.send(CompletionOutcome::RuntimeTerminated(reason.into()));
+                let _ = tx.send(CompletionOutcome::RuntimeTerminated {
+                    reason: reason.into(),
+                    kind: CompletionRuntimeTerminationKind::Unknown,
+                });
             }
             false
         });
@@ -346,6 +420,7 @@ mod tests {
     fn make_run_result() -> RunResult {
         RunResult {
             text: "hello".into(),
+            content: Vec::new(),
             session_id: SessionId::new(),
             usage: Usage::default(),
             turns: 1,
@@ -382,10 +457,17 @@ mod tests {
         let input_id = InputId::new();
         let handle = registry.register(input_id.clone());
 
-        registry.resolve_abandoned(&input_id, "retired".into());
+        registry.resolve_abandoned(
+            &input_id,
+            "retired".into(),
+            CompletionAbandonmentKind::Retired,
+        );
 
         match handle.wait().await {
-            CompletionOutcome::Abandoned(reason) => assert_eq!(reason, "retired"),
+            CompletionOutcome::Abandoned { reason, kind } => {
+                assert_eq!(reason, "retired");
+                assert_eq!(kind, CompletionAbandonmentKind::Retired);
+            }
             other => panic!("Expected Abandoned, got {other:?}"),
         }
     }
@@ -396,16 +478,25 @@ mod tests {
         let h1 = registry.register(InputId::new());
         let h2 = registry.register(InputId::new());
 
-        registry.resolve_all_terminated("runtime stopped");
+        registry.resolve_all_terminated(
+            "runtime stopped",
+            CompletionRuntimeTerminationKind::RuntimeStopped,
+        );
 
         assert!(!registry.debug_has_waiters());
 
         match h1.wait().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
+            CompletionOutcome::RuntimeTerminated { reason, kind } => {
+                assert_eq!(reason, "runtime stopped");
+                assert_eq!(kind, CompletionRuntimeTerminationKind::RuntimeStopped);
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
         match h2.wait().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime stopped"),
+            CompletionOutcome::RuntimeTerminated { reason, kind } => {
+                assert_eq!(reason, "runtime stopped");
+                assert_eq!(kind, CompletionRuntimeTerminationKind::RuntimeStopped);
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
     }
@@ -414,7 +505,11 @@ mod tests {
     async fn resolve_nonexistent_is_a_noop() {
         let mut registry = CompletionRegistry::new();
         registry.resolve_completed(&InputId::new(), make_run_result());
-        registry.resolve_abandoned(&InputId::new(), "gone".into());
+        registry.resolve_abandoned(
+            &InputId::new(),
+            "gone".into(),
+            CompletionAbandonmentKind::Unknown,
+        );
         assert!(!registry.debug_has_waiters());
     }
 
@@ -428,7 +523,12 @@ mod tests {
         drop(registry);
 
         match handle.wait().await {
-            CompletionOutcome::RuntimeTerminated(_) => {}
+            CompletionOutcome::RuntimeTerminated { kind, .. } => {
+                assert_eq!(
+                    kind,
+                    CompletionRuntimeTerminationKind::CompletionChannelClosed
+                );
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
     }
@@ -539,11 +639,12 @@ mod tests {
 
         let observed = Arc::new(AtomicBool::new(false));
         let cleanup_observed = Arc::clone(&observed);
-        let handle = CompletionHandle::already_resolved(CompletionOutcome::Abandoned(
-            "apply failed: test".to_string(),
-        ))
+        let handle = CompletionHandle::already_resolved(CompletionOutcome::Abandoned {
+            reason: "apply failed: test".to_string(),
+            kind: CompletionAbandonmentKind::ApplyFailed,
+        })
         .with_outcome_cleanup(move |outcome| async move {
-            if matches!(&outcome, CompletionOutcome::Abandoned(reason) if reason == "apply failed: test")
+            if matches!(&outcome, CompletionOutcome::Abandoned { reason, kind: CompletionAbandonmentKind::ApplyFailed } if reason == "apply failed: test")
             {
                 cleanup_observed.store(true, Ordering::Release);
             }
@@ -551,8 +652,9 @@ mod tests {
         });
 
         match handle.wait().await {
-            CompletionOutcome::Abandoned(reason) => {
+            CompletionOutcome::Abandoned { reason, kind } => {
                 assert_eq!(reason, "apply failed: test");
+                assert_eq!(kind, CompletionAbandonmentKind::ApplyFailed);
             }
             other => panic!("Expected Abandoned, got {other:?}"),
         }
@@ -566,11 +668,17 @@ mod tests {
         let h1 = registry.register(input_id.clone());
         let h2 = registry.register(input_id);
 
-        registry.resolve_all_terminated("runtime reset");
+        registry.resolve_all_terminated(
+            "runtime reset",
+            CompletionRuntimeTerminationKind::RuntimeReset,
+        );
 
         for handle in [h1, h2] {
             match handle.wait().await {
-                CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime reset"),
+                CompletionOutcome::RuntimeTerminated { reason, kind } => {
+                    assert_eq!(reason, "runtime reset");
+                    assert_eq!(kind, CompletionRuntimeTerminationKind::RuntimeReset);
+                }
                 other => panic!("Expected RuntimeTerminated, got {other:?}"),
             }
         }
@@ -588,7 +696,10 @@ mod tests {
         assert_eq!(registry.debug_waiter_count(), 1);
 
         match drop_handle.wait().await {
-            CompletionOutcome::RuntimeTerminated(r) => assert_eq!(r, "runtime recycled"),
+            CompletionOutcome::RuntimeTerminated { reason, kind } => {
+                assert_eq!(reason, "runtime recycled");
+                assert_eq!(kind, CompletionRuntimeTerminationKind::Unknown);
+            }
             other => panic!("Expected RuntimeTerminated, got {other:?}"),
         }
 

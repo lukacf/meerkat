@@ -108,6 +108,16 @@ impl MeerkatMachine {
                 Arc::clone(&entry.dsl_authority),
             )
         };
+        if preparation == SessionBindingPreparation::LocalSessionResources {
+            let runtime_state = driver_handle.lock().await.runtime_state();
+            if matches!(runtime_state, RuntimeState::Destroyed) {
+                if inserted_by_call {
+                    self.unregister_session_inner_if_epoch(&session_id, &epoch_id)
+                        .await;
+                }
+                return Err(RuntimeDriverError::Destroyed);
+            }
+        }
         if preparation == SessionBindingPreparation::AuthoritativeRuntimeBinding {
             let runtime_id = {
                 let driver = driver_handle.lock().await;
@@ -833,7 +843,7 @@ impl MeerkatMachine {
                 // EnsureSessionWithExecutor transition BEFORE mutating the
                 // driver, attaches the executor, and spawns the runtime loop.
                 self.ensure_session_with_executor_inner(session_id, executor)
-                    .await;
+                    .await?;
                 Ok(MeerkatMachineCommandResult::Unit)
             }
             _ => unreachable!("non-ensure-session command routed to arc session handler"),

@@ -1574,7 +1574,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -8644,7 +8644,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillRef": {
@@ -9390,7 +9390,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillRef": {
@@ -10000,7 +10000,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -10396,7 +10396,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillRef": {

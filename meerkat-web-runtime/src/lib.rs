@@ -24,7 +24,7 @@
 //! - `mob_create(definition_json)` → mob_id
 //! - `mob_status(mob_id)` → JSON
 //! - `mob_list()` → JSON
-//! - `mob_lifecycle(mob_id, action)` — typed lifecycle action string carrier
+//! - `mob_lifecycle(mob_id, action)` → JSON lifecycle result
 //! - `mob_events(mob_id, after_cursor, limit)` → JSON
 //! - `mob_spawn(mob_id, specs_json)` → JSON
 //! - `mob_retire(mob_id, agent_identity)`
@@ -529,6 +529,79 @@ fn err_str(code: &str, msg: impl std::fmt::Display) -> JsValue {
     err_js(code, &msg.to_string())
 }
 
+fn agent_terminal_error_value(error: &meerkat_core::AgentError) -> serde_json::Value {
+    let report = meerkat_core::AgentErrorReport::from_agent_error(error);
+    let metadata = meerkat_core::TurnErrorMetadata::from_agent_error(error);
+    let outcome = meerkat_core::turn_execution_authority::terminal_outcome_for_agent_error(error);
+    serde_json::json!({
+        "code": "agent_error",
+        "message": report.message,
+        "terminal": {
+            "outcome": outcome,
+            "error": report,
+            "metadata": metadata,
+        },
+    })
+}
+
+fn err_agent(error: meerkat_core::AgentError) -> JsValue {
+    JsValue::from_str(&agent_terminal_error_value(&error).to_string())
+}
+
+fn direct_turn_terminal_outcome(
+    cause_kind: Option<meerkat_core::TurnTerminalCauseKind>,
+) -> meerkat_core::TurnTerminalOutcome {
+    match cause_kind {
+        Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted) => {
+            meerkat_core::TurnTerminalOutcome::BudgetExhausted
+        }
+        Some(meerkat_core::TurnTerminalCauseKind::TimeBudgetExceeded) => {
+            meerkat_core::TurnTerminalOutcome::TimeBudgetExceeded
+        }
+        Some(meerkat_core::TurnTerminalCauseKind::StructuredOutputValidationFailed) => {
+            meerkat_core::TurnTerminalOutcome::StructuredOutputValidationFailed
+        }
+        Some(
+            meerkat_core::TurnTerminalCauseKind::Unknown
+            | meerkat_core::TurnTerminalCauseKind::HookDenied
+            | meerkat_core::TurnTerminalCauseKind::HookFailure
+            | meerkat_core::TurnTerminalCauseKind::LlmFailure
+            | meerkat_core::TurnTerminalCauseKind::ToolFailure
+            | meerkat_core::TurnTerminalCauseKind::RetryExhausted
+            | meerkat_core::TurnTerminalCauseKind::TurnLimitReached
+            | meerkat_core::TurnTerminalCauseKind::RuntimeApplyFailure
+            | meerkat_core::TurnTerminalCauseKind::CheckpointPersistenceFailure
+            | meerkat_core::TurnTerminalCauseKind::FatalFailure,
+        )
+        | None => meerkat_core::TurnTerminalOutcome::Completed,
+    }
+}
+
+fn direct_turn_result_value(result: meerkat_core::types::RunResult) -> serde_json::Value {
+    let terminal_outcome = direct_turn_terminal_outcome(result.terminal_cause_kind);
+    let terminal = match result.terminal_cause_kind {
+        Some(cause_kind) => serde_json::json!({
+            "outcome": terminal_outcome,
+            "cause_kind": cause_kind,
+        }),
+        None => serde_json::json!({
+            "outcome": terminal_outcome,
+        }),
+    };
+    serde_json::json!({
+        "text": result.text,
+        "usage": {
+            "input_tokens": result.usage.input_tokens,
+            "output_tokens": result.usage.output_tokens,
+        },
+        "session_id": result.session_id.to_string(),
+        "terminal": terminal,
+        "status": terminal_outcome,
+        "turns": result.turns,
+        "tool_calls": result.tool_calls,
+    })
+}
+
 fn err_mob(e: meerkat_mob::MobError) -> JsValue {
     err_str("mob_error", e)
 }
@@ -578,7 +651,7 @@ fn err_session(e: meerkat_core::SessionError) -> JsValue {
             JsValue::from_str(&data.to_string())
         }
         meerkat_core::SessionError::Store(other) => err_str("internal_error", other),
-        meerkat_core::SessionError::Agent(other) => err_str("internal_error", other),
+        meerkat_core::SessionError::Agent(other) => err_agent(other),
     }
 }
 
@@ -737,7 +810,7 @@ struct JsToolEntry {
 ///
 /// Requires initialized runtime state.
 /// The `callback` receives a JSON string of tool arguments and must return
-/// a `Promise<string>` resolving to JSON `{"content": "...", "is_error": false}`.
+/// a `Promise` resolving to `{ content: "...", is_error: false }`.
 ///
 /// Example (JS):
 /// ```js
@@ -966,26 +1039,61 @@ impl meerkat_core::AgentToolDispatcher for JsToolDispatcher {
                     "JS promise rejected: {e:?}"
                 ))
             })?;
-        let result_str = result_val.as_string().unwrap_or_default();
-
-        // Parse JSON result: {"content": "...", "is_error": false}
-        #[derive(Deserialize)]
-        struct JsToolResult {
-            content: String,
-            #[serde(default)]
-            is_error: bool,
-        }
-        let parsed: JsToolResult = serde_json::from_str(&result_str).map_err(|e| {
-            meerkat_core::error::ToolError::execution_failed(format!(
-                "invalid tool result JSON: {e}"
-            ))
-        })?;
+        let parsed = parse_js_tool_callback_result(result_val)?;
 
         Ok(
             meerkat_core::ToolResult::new(call.id.to_string(), parsed.content, parsed.is_error)
                 .into(),
         )
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct JsToolCallbackResult {
+    content: String,
+    is_error: bool,
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_js_tool_callback_result(
+    result_val: JsValue,
+) -> Result<JsToolCallbackResult, meerkat_core::error::ToolError> {
+    if !result_val.is_object() {
+        return Err(meerkat_core::error::ToolError::execution_failed(
+            "JS tool callback must resolve to an object",
+        ));
+    }
+
+    let content = js_sys::Reflect::get(&result_val, &JsValue::from_str("content"))
+        .map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!(
+                "JS tool result content read failed: {e:?}"
+            ))
+        })?
+        .as_string()
+        .ok_or_else(|| {
+            meerkat_core::error::ToolError::execution_failed(
+                "JS tool result content must be a string",
+            )
+        })?;
+
+    let is_error_value = js_sys::Reflect::get(&result_val, &JsValue::from_str("is_error"))
+        .map_err(|e| {
+            meerkat_core::error::ToolError::execution_failed(format!(
+                "JS tool result is_error read failed: {e:?}"
+            ))
+        })?;
+    let is_error = if is_error_value.is_undefined() || is_error_value.is_null() {
+        false
+    } else {
+        is_error_value.as_bool().ok_or_else(|| {
+            meerkat_core::error::ToolError::execution_failed(
+                "JS tool result is_error must be a boolean",
+            )
+        })?
+    };
+
+    Ok(JsToolCallbackResult { content, is_error })
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1311,11 +1419,10 @@ pub async fn append_system_context(
 
 /// Run a turn through the runtime-backed session service.
 ///
-/// Returns JSON: `{ "text", "usage", "status", "session_id", "turns", "tool_calls" }`
+/// Returns JSON: `{ "text", "usage", "terminal", "session_id", "turns", "tool_calls" }`
 ///
-/// Convention: always resolves (Ok). Check `status` field for "completed" vs "failed".
-/// Only rejects (Err) for infrastructure errors (session not found, busy, etc).
-/// Agent-level errors (LLM failure, timeout) resolve with `status: "failed"` + `error` field.
+/// Agent-level errors reject with a typed terminal payload, matching
+/// infrastructure errors instead of resolving as a successful turn result.
 #[wasm_bindgen]
 pub async fn start_turn(session_id: &str, prompt: &str) -> Result<JsValue, JsValue> {
     let parsed_session_id = parse_runtime_session_id(session_id)?;
@@ -1347,30 +1454,10 @@ pub async fn start_turn(session_id: &str, prompt: &str) -> Result<JsValue, JsVal
 
     match run_result {
         Ok(result) => {
-            let result_json = serde_json::json!({
-                "text": result.text,
-                "usage": {
-                    "input_tokens": result.usage.input_tokens,
-                    "output_tokens": result.usage.output_tokens,
-                },
-                "session_id": result.session_id.to_string(),
-                "status": "completed",
-                "turns": result.turns,
-                "tool_calls": result.tool_calls,
-            });
+            let result_json = direct_turn_result_value(result);
             Ok(JsValue::from_str(&result_json.to_string()))
         }
-        Err(meerkat_core::SessionError::Agent(err)) => {
-            let error_msg = format!("{err}");
-            let result_json = serde_json::json!({
-                "text": "",
-                "usage": { "input_tokens": 0, "output_tokens": 0 },
-                "session_id": parsed_session_id.to_string(),
-                "status": "failed",
-                "error": error_msg,
-            });
-            Ok(JsValue::from_str(&result_json.to_string()))
-        }
+        Err(meerkat_core::SessionError::Agent(err)) => Err(err_agent(err)),
         Err(err) => Err(err_session(err)),
     }
 }
@@ -1473,6 +1560,9 @@ async fn destroy_session_with_services(
         mob_state
             .has_bridge_session_scoped_mobs(&session_id.to_string())
             .await
+            .map_err(|error| {
+                WebDestroySessionError::Mob(meerkat_mob_mcp::MobMcpDestroyError::Mob(error))
+            })?
     } else {
         false
     };
@@ -1560,7 +1650,10 @@ pub async fn mob_status(mob_id: &str) -> Result<JsValue, JsValue> {
 #[wasm_bindgen]
 pub async fn mob_list() -> Result<JsValue, JsValue> {
     let mob_state = with_mob_state(Ok)?;
-    let mobs = mob_state.mob_list().await;
+    let mobs = mob_state
+        .mob_list()
+        .await
+        .map_err(|e| err_str("mob_restore_failed", e))?;
     let rows: Vec<serde_json::Value> = mobs
         .into_iter()
         .map(|(id, state)| {
@@ -1580,7 +1673,7 @@ pub async fn mob_list() -> Result<JsValue, JsValue> {
 /// `action` is a compatibility string carrier that is immediately
 /// deserialized into the typed wire lifecycle action contract.
 #[wasm_bindgen]
-pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
+pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<JsValue, JsValue> {
     let action = parse_mob_lifecycle_action_arg(action).map_err(|err| {
         err_js(
             "invalid_action",
@@ -1589,14 +1682,20 @@ pub async fn mob_lifecycle(mob_id: &str, action: &str) -> Result<(), JsValue> {
     })?;
     let mob_state = with_mob_state(Ok)?;
     let id = MobId::from(mob_id);
-    // WASM lifecycle wrapper is `() on success`; the structured
-    // MobDestroyReport is available through public/RPC lifecycle result
-    // envelopes for consumers that need cleanup detail.
-    let _destroy_report = mob_state
+    let destroy_report = mob_state
         .mob_lifecycle_action(&id, action)
         .await
-        .map_err(err_mob_destroy)?;
-    Ok(())
+        .map_err(err_mob_destroy)?
+        .map(|report| serde_json::to_value(&report).map_err(|e| err_str("serialize_error", e)))
+        .transpose()?;
+    let result = meerkat_contracts::MobLifecycleResult {
+        mob_id: id.to_string(),
+        action,
+        ok: true,
+        destroy_report,
+    };
+    let json = serde_json::to_string(&result).map_err(|e| err_str("serialize_error", e))?;
+    Ok(JsValue::from_str(&json))
 }
 
 fn parse_mob_lifecycle_action_arg(
@@ -2496,10 +2595,11 @@ pub fn close_subscription(subscription_ref: &str) -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     use super::{
-        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, close_subscription,
-        destroy_session_with_services, member_subscription_ref, merge_runtime_system_context_state,
-        mob_destroy_error_value, mob_subscription_ref, parse_mob_lifecycle_action_arg,
-        parse_mobpack, poll_subscription, serialize_subscription_item,
+        EventSubscription, SUBSCRIPTIONS, SubscriptionInner, agent_terminal_error_value,
+        close_subscription, destroy_session_with_services, direct_turn_result_value,
+        member_subscription_ref, merge_runtime_system_context_state, mob_destroy_error_value,
+        mob_subscription_ref, parse_mob_lifecycle_action_arg, parse_mobpack, poll_subscription,
+        serialize_subscription_item,
     };
     #[cfg(target_arch = "wasm32")]
     use super::{
@@ -2743,6 +2843,48 @@ capabilities = [{capability_values}]
             .expect("create archive-owned mob with failing event clear");
         mob_state.mob_insert_handle(mob_id.clone(), handle).await;
         mob_id
+    }
+
+    #[test]
+    fn agent_terminal_error_value_preserves_non_failed_terminal_outcomes() {
+        let cancelled = agent_terminal_error_value(&meerkat_core::AgentError::Cancelled);
+        assert_eq!(cancelled["terminal"]["outcome"], "cancelled");
+
+        let budget = agent_terminal_error_value(&meerkat_core::AgentError::TokenBudgetExceeded {
+            used: 11,
+            limit: 10,
+        });
+        assert_eq!(budget["terminal"]["outcome"], "budget_exhausted");
+
+        let time = agent_terminal_error_value(&meerkat_core::AgentError::TimeBudgetExceeded {
+            elapsed_secs: 8,
+            limit_secs: 5,
+        });
+        assert_eq!(time["terminal"]["outcome"], "time_budget_exceeded");
+    }
+
+    #[test]
+    fn direct_turn_result_preserves_budget_terminal_truth() {
+        let result = meerkat_core::types::RunResult {
+            text: "partial answer".to_string(),
+            content: Vec::new(),
+            session_id: meerkat_core::SessionId::parse("00000000-0000-4000-8000-000000000007")
+                .expect("valid test session id"),
+            usage: meerkat_core::Usage::default(),
+            turns: 1,
+            tool_calls: 0,
+            terminal_cause_kind: Some(meerkat_core::TurnTerminalCauseKind::BudgetExhausted),
+            structured_output: None,
+            extraction_error: None,
+            schema_warnings: None,
+            skill_diagnostics: None,
+        };
+
+        let payload = direct_turn_result_value(result);
+
+        assert_eq!(payload["terminal"]["outcome"], "budget_exhausted");
+        assert_eq!(payload["terminal"]["cause_kind"], "budget_exhausted");
+        assert_eq!(payload["status"], "budget_exhausted");
     }
 
     #[test]

@@ -35,10 +35,17 @@ export interface WireToolCall {
   args: unknown;
 }
 
+export interface WireToolResultError {
+  code: string;
+  message: string;
+  data?: unknown;
+}
+
 export interface WireToolResult {
   tool_use_id: string;
   content: WireToolResultContent;
   is_error?: boolean;
+  error?: WireToolResultError | null;
 }
 
 export interface WireSessionMessage {
@@ -772,6 +779,7 @@ export interface MobReconcileReportWire {
 
 export interface MobReconcileFailureWire {
   agent_identity: string;
+  cause: MobSpawnManyFailureCause;
   error: string;
   stage: WireMobReconcileStage;
 }

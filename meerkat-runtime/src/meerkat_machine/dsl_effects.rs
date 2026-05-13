@@ -118,6 +118,35 @@ impl MeerkatMachine {
         Self::stage_dsl_transition_on_authority(&authority, input, context)
     }
 
+    pub(super) async fn stage_session_dsl_transition_typed(
+        &self,
+        session_id: &SessionId,
+        input: dsl::MeerkatMachineInput,
+        context: &'static str,
+    ) -> Result<StagedSessionDslInput, meerkat_core::handles::DslTransitionError> {
+        let authority = self
+            .session_dsl_authority(session_id)
+            .await
+            .map_err(|reason| {
+                meerkat_core::handles::DslTransitionError::no_matching(context, reason)
+            })?;
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input).map_err(|reason| {
+            meerkat_core::handles::DslTransitionError::no_matching(context, reason)
+        })?;
+
+        let mut authority = authority
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous_state = Box::new(authority.state.clone());
+        let effects = dsl::MeerkatMachineMutator::apply(&mut *authority, input)
+            .map(|transition| DslTransitionEffects::new(transition.effects))
+            .map_err(|err| dsl_authority::map_typed_error(err, context))?;
+        Ok(StagedSessionDslInput {
+            previous_state,
+            effects,
+        })
+    }
+
     pub(super) fn stage_dsl_transition_on_authority(
         authority: &crate::driver::ephemeral::SharedIngressDslAuthority,
         input: dsl::MeerkatMachineInput,

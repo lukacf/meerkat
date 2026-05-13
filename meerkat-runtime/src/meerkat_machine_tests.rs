@@ -849,7 +849,7 @@ impl crate::composition::SignalConsumerSurface for RecordingMeerkatSignalSurface
             meerkat_machine_schema::identity::FieldId,
             crate::composition::OwnedFieldValue,
         )>,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::composition::SignalConsumerRefusal> {
         self.log.lock().await.push((variant, projected_fields));
         Ok(())
     }
@@ -875,8 +875,12 @@ impl crate::composition::SignalConsumerSurface for RejectingMeerkatSignalSurface
             meerkat_machine_schema::identity::FieldId,
             crate::composition::OwnedFieldValue,
         )>,
-    ) -> Result<(), String> {
-        Err("injected signal commit failure".to_string())
+    ) -> Result<(), crate::composition::SignalConsumerRefusal> {
+        Err(
+            crate::composition::SignalConsumerRefusal::ConsumerUnavailable {
+                reason: "injected signal commit failure".to_string(),
+            },
+        )
     }
 }
 
@@ -1347,7 +1351,8 @@ async fn runtime_apply_failure_preserves_typed_cause_through_terminalization() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedFailingExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     adapter
         .accept_input(&session_id, make_prompt("typed apply failure"))
@@ -1426,7 +1431,8 @@ async fn machine_terminal_failure_preserves_typed_cause_through_runtime_loop() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedMachineFailureExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let (accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(&session_id, make_prompt("typed machine failure"))
@@ -1541,7 +1547,8 @@ async fn machine_terminal_failure_preserves_typed_outcome_through_runtime_loop()
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(TypedOutcomeFailureExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     adapter
         .accept_input(&session_id, make_prompt("typed outcome machine failure"))
@@ -1608,6 +1615,7 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
                 Some(b"session snapshot".to_vec()),
                 meerkat_core::RunResult {
                     text: "{\"gate\":\"green\"}".to_string(),
+                    content: Vec::new(),
                     session_id: self.session_id.clone(),
                     usage: Default::default(),
                     turns: 1,
@@ -1649,7 +1657,8 @@ async fn completion_preserves_structured_output_when_runtime_finalization_fails(
                 session_id: session_id.clone(),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let (accept_outcome, completion_handle) = adapter
         .accept_input_with_completion(
@@ -1734,7 +1743,8 @@ async fn hook_denial_terminalizes_with_typed_machine_apply_failure_cause() {
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(HookDeniedExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     adapter
         .accept_input(&session_id, make_prompt("typed hook denial"))
@@ -2425,7 +2435,8 @@ async fn until_changed_switch_turn_reconfigures_baseline_not_scoped_override() {
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "baseline".to_string(),
         provider: meerkat_core::Provider::OpenAI,
@@ -2679,7 +2690,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -2762,7 +2773,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
     );
 
     match stale_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "recycled input no longer pending");
         }
         other => panic!("expected recycled stale waiter termination, got {other:?}"),
@@ -2772,7 +2783,7 @@ async fn meerkat_machine_spine_snapshot_recycle_reconciles_stale_completion_wait
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -2876,7 +2887,7 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
         .await
         .expect("reset should terminate preserved waiter at test end");
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3034,7 +3045,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
     );
 
     match stale_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "recovered input no longer pending");
         }
         other => panic!("expected recovered stale waiter termination, got {other:?}"),
@@ -3044,7 +3055,7 @@ async fn meerkat_machine_spine_snapshot_recover_reconciles_stale_completion_wait
         .await
         .expect("reset should terminate preserved waiter at test end");
     match active_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -3110,7 +3121,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy(
     );
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -3366,6 +3377,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -3424,7 +3436,7 @@ async fn meerkat_machine_spine_snapshot_destroy_clears_steered_waiter_and_queue_
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => {
@@ -3559,7 +3571,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("destroy-with-loop");
     let input_id = input.id().clone();
@@ -3642,7 +3655,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_destroy_
     );
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -3721,7 +3734,8 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_requests_immedia
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered prompt",
@@ -3896,11 +3910,13 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_splits_completio
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -4153,11 +4169,13 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_preserves_comple
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -4421,11 +4439,13 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -4511,7 +4531,7 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_destroy_splits_c
         .expect("destroy should split attached steered completion and wait_all lifetimes");
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!(
@@ -4651,10 +4671,17 @@ async fn raw_fieldless_runtime_internal_routed_input_is_rejected_before_dsl_appl
             "raw fieldless runtime-internal input must not apply through routed input delivery",
         );
 
-    assert!(
-        err.contains("must use typed runtime-internal staging authority"),
-        "raw fieldless runtime-internal routed input must fail before DSL apply, got {err}"
-    );
+    match err {
+        crate::meerkat_machine::RoutedMeerkatInputError::InvalidRoutedInput { reason } => {
+            assert!(
+                reason.contains("must use typed runtime-internal staging authority"),
+                "raw fieldless runtime-internal routed input must fail before DSL apply, got {reason}"
+            );
+        }
+        other => panic!(
+            "raw fieldless runtime-internal routed input must fail before DSL apply, got {other:?}"
+        ),
+    }
 }
 
 #[tokio::test]
@@ -4825,7 +4852,8 @@ async fn hard_cancel_current_run_on_attached_runtime_uses_live_handle_during_app
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered live interrupt",
@@ -5053,7 +5081,8 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered deferred boundary cancel",
@@ -5221,7 +5250,8 @@ async fn cancel_after_boundary_full_effect_channel_fails_closed_after_live_wake(
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
         "attached steered saturated boundary cancel",
@@ -5374,7 +5404,8 @@ async fn apply_input_intermediate_peer_input_during_running_steered_turn() {
                 allow_first_finish: Arc::clone(&allow_first_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let first_input = Input::Prompt(crate::input::PromptInput::new(
         "attached running peer interrupt",
@@ -5634,7 +5665,8 @@ async fn service_peer_admission_uses_live_cancel_after_boundary() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let first_input = Input::Prompt(crate::input::PromptInput::new(
         "attached service ext running turn",
@@ -5791,11 +5823,13 @@ async fn meerkat_machine_spine_snapshot_attached_steered_prompt_defers_stop_unti
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -6118,7 +6152,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("reset-with-loop");
     let input_id = input.id().clone();
@@ -6192,7 +6227,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_reset_wi
     );
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -6253,7 +6288,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
     );
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -6319,7 +6354,8 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("stop-with-loop");
     let input_id = input.id().clone();
@@ -6366,7 +6402,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_stop_run
         .expect("stop should terminate queued completion waiters through the live control seam");
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -6452,7 +6488,7 @@ async fn meerkat_machine_spine_snapshot_clears_completion_waiters_after_retire_w
     );
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retired-without-runtime-loop termination, got {other:?}"),
@@ -6523,7 +6559,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_retir
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("retire-with-loop");
     let input_id = input.id().clone();
@@ -6678,7 +6715,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recov
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("recover-with-loop-completion");
     let input_id = input.id().clone();
@@ -6869,7 +6907,8 @@ async fn meerkat_machine_spine_snapshot_preserves_completion_waiters_after_recyc
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("recycle-with-loop-completion");
     let input_id = input.id().clone();
@@ -7027,6 +7066,7 @@ async fn meerkat_machine_spine_snapshot_tracks_runtime_ops_state() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -7091,6 +7131,7 @@ async fn meerkat_machine_spine_snapshot_tracks_wait_all_state() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -7160,6 +7201,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -7277,6 +7319,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let input = make_prompt("recover split lifetimes");
@@ -7421,7 +7464,7 @@ async fn meerkat_machine_spine_snapshot_recover_splits_completion_and_wait_all_l
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -7437,6 +7480,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
@@ -7585,7 +7629,7 @@ async fn meerkat_machine_spine_snapshot_recover_preserves_steered_input_and_wait
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -7601,6 +7645,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let input = Input::Prompt(crate::input::PromptInput::new(
@@ -7749,7 +7794,7 @@ async fn meerkat_machine_spine_snapshot_recycle_preserves_steered_input_and_wait
         .await
         .expect("reset should terminate the preserved steered completion waiter at test end");
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -7765,6 +7810,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -7874,6 +7920,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let input = make_prompt("recycle split lifetimes");
@@ -8010,7 +8057,7 @@ async fn meerkat_machine_spine_snapshot_recycle_splits_completion_and_wait_all_l
         .await
         .expect("reset should terminate the preserved completion waiter at test end");
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -8089,7 +8136,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -8103,6 +8151,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recover_with_ru
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -8369,7 +8418,8 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("recover-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -8384,6 +8434,7 @@ async fn meerkat_machine_spine_snapshot_recover_with_runtime_loop_splits_complet
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -8658,7 +8709,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -8672,6 +8724,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_recycle_with_ru
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -8909,7 +8962,8 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("recycle-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -8924,6 +8978,7 @@ async fn meerkat_machine_spine_snapshot_recycle_with_runtime_loop_splits_complet
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -9138,6 +9193,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -9264,6 +9320,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -9321,7 +9378,7 @@ async fn meerkat_machine_spine_snapshot_reset_clears_steered_waiter_and_queue_bu
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => {
@@ -9417,6 +9474,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -9472,7 +9530,7 @@ async fn meerkat_machine_spine_snapshot_reset_splits_completion_and_wait_all_lif
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => panic!("expected runtime reset termination, got {other:?}"),
@@ -9619,7 +9677,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(&session_id, make_progress_input("reset-wait-all-with-loop"))
@@ -9630,6 +9689,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_reset_with_runt
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -9836,7 +9896,8 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("reset-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -9851,6 +9912,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -9953,7 +10015,7 @@ async fn meerkat_machine_spine_snapshot_reset_with_runtime_loop_splits_completio
     );
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime reset");
         }
         other => {
@@ -10000,6 +10062,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -10129,6 +10192,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -10185,7 +10249,7 @@ async fn meerkat_machine_spine_snapshot_destroy_splits_completion_and_wait_all_l
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -10316,7 +10380,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(
@@ -10330,6 +10395,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_destroy_with_ru
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -10513,7 +10579,8 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
                 control_calls: Arc::clone(&control_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("destroy-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -10539,6 +10606,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -10595,7 +10663,7 @@ async fn meerkat_machine_spine_snapshot_destroy_with_runtime_loop_splits_complet
     assert_eq!(report.inputs_abandoned, 1);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -10678,6 +10746,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -10824,6 +10893,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -10881,7 +10951,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_clears_steered_wai
         .expect("stop should clear steered completion waiters while preserving wait_all");
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => {
@@ -10978,6 +11048,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -11033,7 +11104,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_splits_completion_
         .expect("stop should split completion and wait_all lifetimes");
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -11180,7 +11251,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let outcome = adapter
         .accept_input_without_wake(&session_id, make_progress_input("stop-wait-all-with-loop"))
@@ -11191,6 +11263,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_stop_runtime_ex
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -11373,7 +11446,8 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
                 stop_calls: Arc::clone(&stop_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("stop-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -11399,6 +11473,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -11454,7 +11529,7 @@ async fn meerkat_machine_spine_snapshot_stop_runtime_executor_with_runtime_loop_
         .expect("stop should split completion and wait_all lifetimes on attached runtimes");
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -11562,6 +11637,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire() {
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -11684,6 +11760,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -11741,7 +11818,7 @@ async fn meerkat_machine_spine_snapshot_retire_splits_completion_and_wait_all_li
     assert_eq!(report.inputs_pending_drain, 0);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retire termination, got {other:?}"),
@@ -11840,6 +11917,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for registered session");
 
     let operation_id = OperationId::new();
@@ -11899,7 +11977,7 @@ async fn meerkat_machine_spine_snapshot_retire_clears_steered_waiter_and_steer_q
     assert_eq!(report.inputs_pending_drain, 0);
 
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "retired without runtime loop");
         }
         other => panic!("expected retire termination for steered input, got {other:?}"),
@@ -12037,7 +12115,8 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("retire-wait-all-with-loop");
     let outcome = adapter
@@ -12049,6 +12128,7 @@ async fn meerkat_machine_spine_snapshot_preserves_wait_all_after_retire_with_run
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -12302,7 +12382,8 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("retire-with-loop-split-lifetimes");
     let input_id = input.id().clone();
@@ -12317,6 +12398,7 @@ async fn meerkat_machine_spine_snapshot_retire_with_runtime_loop_splits_completi
     let registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("ops registry lookup should not fail")
         .expect("ops registry should exist for attached session");
 
     let operation_id = OperationId::new();
@@ -12619,6 +12701,108 @@ async fn register_session_rejects_destroyed_session() {
 }
 
 #[tokio::test]
+async fn ensure_session_with_executor_surfaces_destroyed_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .ensure_session_with_executor(session_id.clone(), Box::new(RuntimeParityNoopExecutor))
+        .await
+        .expect_err("executor attach should reject a destroyed session");
+    assert!(
+        matches!(err, RuntimeDriverError::Destroyed),
+        "expected Destroyed, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn prepare_bindings_rejects_destroyed_session() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&*adapter, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::PrepareBindings {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("prepare_bindings should reject a destroyed session");
+    match err {
+        MeerkatMachineCommandError::Driver(RuntimeDriverError::ValidationFailed { reason }) => {
+            assert!(
+                reason.contains("PrepareBindings") && reason.contains("Destroyed"),
+                "expected destroyed PrepareBindings validation reason, got: {reason}"
+            );
+        }
+        other => panic!("expected PrepareBindings validation failure, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn prepare_bindings_rejects_durable_destroyed_session_without_registration() {
+    let store = Arc::new(crate::store::InMemoryRuntimeStore::new());
+    let machine = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let session_id = SessionId::new();
+
+    machine.register_session(session_id.clone()).await;
+    let runtime_id = runtime_id_for_session(&session_id);
+    crate::traits::RuntimeControlPlane::destroy(&machine, &runtime_id)
+        .await
+        .expect("destroy should succeed");
+    assert_eq!(
+        crate::store::RuntimeStore::load_runtime_state(store.as_ref(), &runtime_id)
+            .await
+            .expect("load persisted runtime state"),
+        Some(RuntimeState::Destroyed)
+    );
+
+    let recovered = MeerkatMachine::persistent(
+        store.clone() as Arc<dyn crate::store::RuntimeStore>,
+        memory_blob_store(),
+    );
+    let err = recovered
+        .execute_meerkat_machine_command(
+            None,
+            MeerkatMachineCommand::PrepareBindings {
+                session_id: session_id.clone(),
+            },
+        )
+        .await
+        .expect_err("prepare_bindings should reject durable destroyed state");
+    match err {
+        MeerkatMachineCommandError::Driver(RuntimeDriverError::ValidationFailed { reason }) => {
+            assert!(
+                reason.contains("PrepareBindings") && reason.contains("Destroyed"),
+                "expected destroyed PrepareBindings validation reason, got: {reason}"
+            );
+        }
+        other => panic!("expected PrepareBindings validation failure, got {other:?}"),
+    }
+    assert!(
+        !recovered.contains_session(&session_id).await,
+        "destroyed durable state must be rejected before registration bookkeeping is recreated"
+    );
+}
+
+#[tokio::test]
 async fn unregister_session_rejects_unknown_session() {
     let adapter = Arc::new(MeerkatMachine::ephemeral());
     let session_id = SessionId::new();
@@ -12816,15 +13000,20 @@ async fn ingest_rejects_retired_session() {
     let err = crate::traits::RuntimeControlPlane::ingest(&*adapter, &runtime_id, input)
         .await
         .expect_err("ingest should reject a retired session");
-    assert!(
-        matches!(
-            err,
-            RuntimeControlPlaneError::InvalidState {
-                state: RuntimeState::Retired
-            }
-        ),
-        "expected InvalidState(Retired), got {err:?}"
-    );
+    match err {
+        RuntimeControlPlaneError::DslRejected(error) => {
+            assert_eq!(error.context, "Ingest");
+            assert_eq!(
+                error.kind,
+                meerkat_core::handles::DslRejectionKind::GuardRejected
+            );
+            assert!(
+                error.reason.contains("Retired"),
+                "expected retired DSL reason, got {error:?}"
+            );
+        }
+        other => panic!("expected typed DSL Ingest rejection, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -12845,14 +13034,64 @@ async fn ingest_rejects_stopped_session() {
     let err = crate::traits::RuntimeControlPlane::ingest(&*adapter, &runtime_id, input)
         .await
         .expect_err("ingest should reject a stopped session");
+    match err {
+        RuntimeControlPlaneError::DslRejected(error) => {
+            assert_eq!(error.context, "Ingest");
+            assert_eq!(
+                error.kind,
+                meerkat_core::handles::DslRejectionKind::GuardRejected
+            );
+            assert!(
+                error.reason.contains("Stopped"),
+                "expected stopped DSL reason, got {error:?}"
+            );
+        }
+        other => panic!("expected typed DSL Ingest rejection, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn ingest_records_admission_with_real_input_id() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+
+    let runtime_id = runtime_id_for_session(&session_id);
+    let input = make_prompt("record real ingest id");
+    let input_id = input.id().clone();
+    let input_key = input_id.to_string();
+    let outcome = crate::traits::RuntimeControlPlane::ingest(&*adapter, &runtime_id, input)
+        .await
+        .expect("ingest should accept an idle session");
+    match outcome {
+        AcceptOutcome::Accepted {
+            input_id: accepted_id,
+            ..
+        } => assert_eq!(accepted_id, input_id),
+        other => panic!("expected accepted ingest outcome, got {other:?}"),
+    }
+
+    let (session_authority, driver_authority) = adapter
+        .debug_shared_ingress_authorities(&session_id)
+        .await
+        .expect("registered session should expose shared ingress authorities");
     assert!(
-        matches!(
-            err,
-            RuntimeControlPlaneError::InvalidState {
-                state: RuntimeState::Stopped
-            }
-        ),
-        "expected InvalidState(Stopped), got {err:?}"
+        Arc::ptr_eq(&session_authority, &driver_authority),
+        "ingest should mutate the shared DSL authority",
+    );
+
+    let authority = session_authority
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert!(
+        authority.state.input_admission_seq.contains_key(&input_key),
+        "ingest should record admission under the real input id"
+    );
+    assert_eq!(
+        authority.state.input_admission_seq.len(),
+        1,
+        "ingest should not create a synthetic admission entry"
     );
 }
 
@@ -15572,7 +15811,8 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -15700,7 +15940,8 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -15845,7 +16086,8 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let current_identity = Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
         model: "claude-sonnet-4-5".to_string(),
@@ -16056,7 +16298,8 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
         .expect("bindings should prepare");
     adapter
         .ensure_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let host = Arc::new(RollbackFailingHost {
         current_identity: Arc::new(std::sync::Mutex::new(meerkat_core::SessionLlmIdentity {
@@ -17947,7 +18190,8 @@ async fn modeled_meerkat_accept_with_completion_attached_steer_matches_runtime()
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
     wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
 
     let before = runtime_parity_snapshot_summary(&adapter, &session_id)
@@ -18093,7 +18337,7 @@ async fn modeled_meerkat_accept_with_completion_idle_queue_signal_matches_runtim
     .await
     .expect("idle queue test should destroy runtime cleanly");
     match completion_handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime destroyed");
         }
         other => panic!("expected runtime destroyed termination, got {other:?}"),
@@ -18119,7 +18363,8 @@ async fn wake_runtime_if_active_inputs_drains_existing_attached_queue() {
                 allow_finish: Arc::clone(&allow_finish),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
     wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
 
     let driver = {
@@ -18611,7 +18856,8 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                     session_id.clone(),
                     Box::new(RuntimeParityNoopExecutor),
                 )
-                .await;
+                .await
+                .expect("runtime executor attachment should succeed");
             wait_for_runtime_parity_phase(&adapter, &session_id, RuntimeState::Attached).await;
             RuntimeParityFixture {
                 adapter,
@@ -18638,7 +18884,8 @@ async fn build_runtime_parity_fixture(phase: RuntimeParityPhase) -> RuntimeParit
                         allow_finish: Arc::clone(&allow_finish),
                     }),
                 )
-                .await;
+                .await
+                .expect("runtime executor attachment should succeed");
             let (outcome, completion) = adapter
                 .accept_input_with_completion(
                     &session_id,
@@ -19053,6 +19300,7 @@ fn summarize_runtime_parity_command_result(result: &MeerkatMachineCommandResult)
 
 fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
     match error {
+        RuntimeDriverError::NotFound(runtime_id) => format!("not_found:{runtime_id}"),
         RuntimeDriverError::NotReady { state } => {
             format!("not_ready:{}", runtime_parity_state_label(*state))
         }
@@ -19063,6 +19311,7 @@ fn summarize_runtime_parity_driver_error(error: &RuntimeDriverError) -> String {
         RuntimeDriverError::RecoveryCorruption { reason } => {
             format!("recovery_corruption:{reason}")
         }
+        RuntimeDriverError::DslRejected(error) => format!("dsl_rejected:{error}"),
         RuntimeDriverError::Internal(reason) => format!("internal:{reason}"),
     }
 }
@@ -19072,6 +19321,9 @@ fn summarize_runtime_parity_control_error(error: &RuntimeControlPlaneError) -> S
         RuntimeControlPlaneError::NotFound(runtime_id) => format!("not_found:{runtime_id}"),
         RuntimeControlPlaneError::InvalidState { state } => {
             format!("invalid_state:{}", runtime_parity_state_label(*state))
+        }
+        RuntimeControlPlaneError::DslRejected(error) => {
+            format!("dsl_rejected:{}:{:?}", error.context, error.kind)
         }
         RuntimeControlPlaneError::StoreError(reason) => format!("store_error:{reason}"),
         RuntimeControlPlaneError::Internal(reason) => format!("internal:{reason}"),

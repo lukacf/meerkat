@@ -3295,6 +3295,144 @@ impl std::fmt::Display for TurnCancellationReason {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum TurnFailureClass {
+    #[default]
+    #[serde(rename = "Llm")]
+    Llm,
+    #[serde(rename = "Store")]
+    Store,
+    #[serde(rename = "Tool")]
+    Tool,
+    #[serde(rename = "Mcp")]
+    Mcp,
+    #[serde(rename = "SessionNotFound")]
+    SessionNotFound,
+    #[serde(rename = "Budget")]
+    Budget,
+    #[serde(rename = "MaxTokens")]
+    MaxTokens,
+    #[serde(rename = "ContentFiltered")]
+    ContentFiltered,
+    #[serde(rename = "MaxTurns")]
+    MaxTurns,
+    #[serde(rename = "Cancelled")]
+    Cancelled,
+    #[serde(rename = "InvalidState")]
+    InvalidState,
+    #[serde(rename = "OperationNotFound")]
+    OperationNotFound,
+    #[serde(rename = "DepthLimit")]
+    DepthLimit,
+    #[serde(rename = "ConcurrencyLimit")]
+    ConcurrencyLimit,
+    #[serde(rename = "Config")]
+    Config,
+    #[serde(rename = "Internal")]
+    Internal,
+    #[serde(rename = "Build")]
+    Build,
+    #[serde(rename = "Auth")]
+    Auth,
+    #[serde(rename = "CallbackPending")]
+    CallbackPending,
+    #[serde(rename = "StructuredOutput")]
+    StructuredOutput,
+    #[serde(rename = "InvalidOutputSchema")]
+    InvalidOutputSchema,
+    #[serde(rename = "Hook")]
+    Hook,
+    #[serde(rename = "Terminal")]
+    Terminal,
+    #[serde(rename = "NoPendingBoundary")]
+    NoPendingBoundary,
+}
+impl TurnFailureClass {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Llm => "Llm",
+            Self::Store => "Store",
+            Self::Tool => "Tool",
+            Self::Mcp => "Mcp",
+            Self::SessionNotFound => "SessionNotFound",
+            Self::Budget => "Budget",
+            Self::MaxTokens => "MaxTokens",
+            Self::ContentFiltered => "ContentFiltered",
+            Self::MaxTurns => "MaxTurns",
+            Self::Cancelled => "Cancelled",
+            Self::InvalidState => "InvalidState",
+            Self::OperationNotFound => "OperationNotFound",
+            Self::DepthLimit => "DepthLimit",
+            Self::ConcurrencyLimit => "ConcurrencyLimit",
+            Self::Config => "Config",
+            Self::Internal => "Internal",
+            Self::Build => "Build",
+            Self::Auth => "Auth",
+            Self::CallbackPending => "CallbackPending",
+            Self::StructuredOutput => "StructuredOutput",
+            Self::InvalidOutputSchema => "InvalidOutputSchema",
+            Self::Hook => "Hook",
+            Self::Terminal => "Terminal",
+            Self::NoPendingBoundary => "NoPendingBoundary",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for TurnFailureClass {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Llm" => Ok(Self::Llm),
+            "Store" => Ok(Self::Store),
+            "Tool" => Ok(Self::Tool),
+            "Mcp" => Ok(Self::Mcp),
+            "SessionNotFound" => Ok(Self::SessionNotFound),
+            "Budget" => Ok(Self::Budget),
+            "MaxTokens" => Ok(Self::MaxTokens),
+            "ContentFiltered" => Ok(Self::ContentFiltered),
+            "MaxTurns" => Ok(Self::MaxTurns),
+            "Cancelled" => Ok(Self::Cancelled),
+            "InvalidState" => Ok(Self::InvalidState),
+            "OperationNotFound" => Ok(Self::OperationNotFound),
+            "DepthLimit" => Ok(Self::DepthLimit),
+            "ConcurrencyLimit" => Ok(Self::ConcurrencyLimit),
+            "Config" => Ok(Self::Config),
+            "Internal" => Ok(Self::Internal),
+            "Build" => Ok(Self::Build),
+            "Auth" => Ok(Self::Auth),
+            "CallbackPending" => Ok(Self::CallbackPending),
+            "StructuredOutput" => Ok(Self::StructuredOutput),
+            "InvalidOutputSchema" => Ok(Self::InvalidOutputSchema),
+            "Hook" => Ok(Self::Hook),
+            "Terminal" => Ok(Self::Terminal),
+            "NoPendingBoundary" => Ok(Self::NoPendingBoundary),
+            other => Err(format!("invalid TurnFailureClass value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for TurnFailureClass {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for TurnFailureClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum TurnPhase {
     #[default]
     #[serde(rename = "Ready")]
@@ -3463,6 +3601,8 @@ pub enum TurnTerminalCauseKind {
     TurnLimitReached,
     #[serde(rename = "RuntimeApplyFailure")]
     RuntimeApplyFailure,
+    #[serde(rename = "CheckpointPersistenceFailure")]
+    CheckpointPersistenceFailure,
     #[serde(rename = "FatalFailure")]
     FatalFailure,
 }
@@ -3480,6 +3620,7 @@ impl TurnTerminalCauseKind {
             Self::RetryExhausted => "RetryExhausted",
             Self::TurnLimitReached => "TurnLimitReached",
             Self::RuntimeApplyFailure => "RuntimeApplyFailure",
+            Self::CheckpointPersistenceFailure => "CheckpointPersistenceFailure",
             Self::FatalFailure => "FatalFailure",
         }
     }
@@ -3499,6 +3640,7 @@ impl std::convert::TryFrom<&str> for TurnTerminalCauseKind {
             "RetryExhausted" => Ok(Self::RetryExhausted),
             "TurnLimitReached" => Ok(Self::TurnLimitReached),
             "RuntimeApplyFailure" => Ok(Self::RuntimeApplyFailure),
+            "CheckpointPersistenceFailure" => Ok(Self::CheckpointPersistenceFailure),
             "FatalFailure" => Ok(Self::FatalFailure),
             other => Err(format!("invalid TurnTerminalCauseKind value `{other}`")),
         }
@@ -3734,6 +3876,7 @@ pub struct State {
     pub cancel_after_boundary: bool,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    pub terminal_failure_class: Option<TurnFailureClass>,
     pub last_runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>,
     pub last_runtime_apply_failure_message: Option<String>,
     pub extraction_attempts: u64,
@@ -4173,6 +4316,7 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct FatalFailure {
         pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub failure_class: TurnFailureClass,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -4212,6 +4356,7 @@ pub mod inputs {
         pub runtime_apply_failure_message: Option<String>,
         pub terminal_outcome: TurnTerminalOutcome,
         pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub failure_class: TurnFailureClass,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5215,6 +5360,7 @@ pub mod effects {
     pub struct TurnRunFailed {
         pub run_id: RunId,
         pub terminal_cause_kind: TurnTerminalCauseKind,
+        pub failure_class: TurnFailureClass,
         pub error: String,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -6365,6 +6511,7 @@ pub fn initial_state() -> State {
         cancel_after_boundary: false,
         terminal_outcome: None,
         terminal_cause_kind: None,
+        terminal_failure_class: None,
         last_runtime_apply_failure_cause: None,
         last_runtime_apply_failure_message: None,
         extraction_attempts: 0,

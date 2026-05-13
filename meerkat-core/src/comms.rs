@@ -1088,6 +1088,10 @@ pub enum SendError {
     Unsupported(String),
     #[error("validation failed: {0}")]
     Validation(String),
+    #[error("transport error: {0}")]
+    Transport(String),
+    #[error("IO error: {0}")]
+    Io(String),
     #[error("internal: {0}")]
     Internal(String),
     /// Receiver admitted the envelope-transport but rejected it at ingress

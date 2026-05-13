@@ -28,7 +28,8 @@ use std::collections::BTreeMap;
 use meerkat_core::{
     AssistantBlock, BlobId, ContentBlock, ContentInput, ImageData, Message, ProviderMeta,
     SessionHistoryPage, SessionId, SessionInfo, SessionSummary, StopReason, SystemNoticeKind,
-    TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource, VideoData,
+    ToolResultError, TranscriptEditRunningBehavior, TranscriptReplacement, TranscriptSource,
+    VideoData,
 };
 use std::convert::TryFrom;
 
@@ -403,6 +404,26 @@ pub enum WireToolResultContent {
     Blocks(Vec<WireContentBlock>),
 }
 
+/// Wire-safe structured tool error detail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WireToolResultError {
+    pub code: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+impl From<ToolResultError> for WireToolResultError {
+    fn from(error: ToolResultError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+            data: error.data,
+        }
+    }
+}
+
 /// Transcript block inside a block-assistant message.
 ///
 /// Not `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through
@@ -769,6 +790,8 @@ pub struct WireToolResult {
     pub content: WireToolResultContent,
     #[serde(default)]
     pub is_error: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<WireToolResultError>,
 }
 
 /// Canonical transcript message for public wire surfaces.
@@ -889,6 +912,7 @@ impl From<Message> for WireSessionMessage {
                             tool_use_id: result.tool_use_id,
                             content,
                             is_error: result.is_error,
+                            error: result.error.map(Into::into),
                         }
                     })
                     .collect(),
@@ -1198,6 +1222,7 @@ mod tests {
                         tool_use_id: "tool-1".to_string(),
                         content: WireToolResultContent::Text("ok".to_string()),
                         is_error: false,
+                        error: None,
                     }],
                     created_at: "2026-04-27T00:00:04Z".to_string(),
                 },

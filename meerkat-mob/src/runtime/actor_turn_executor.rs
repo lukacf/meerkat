@@ -647,6 +647,7 @@ mod tests {
             .send(AgentEvent::RunCompleted {
                 session_id: meerkat_core::SessionId::new(),
                 result: "{\"answer\":42}".to_string(),
+                content: Vec::new(),
                 structured_output: Some(serde_json::json!({"answer": 42})),
                 extraction_required: false,
                 usage: meerkat_core::Usage::default(),
@@ -729,6 +730,7 @@ mod tests {
             .send(AgentEvent::RunCompleted {
                 session_id: session_id.clone(),
                 result: "main answer".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: true,
                 usage: meerkat_core::Usage::default(),
@@ -770,6 +772,7 @@ mod tests {
             .send(AgentEvent::RunCompleted {
                 session_id: session_id.clone(),
                 result: "main answer".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: true,
                 usage: meerkat_core::Usage::default(),

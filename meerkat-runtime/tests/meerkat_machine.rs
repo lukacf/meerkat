@@ -705,7 +705,8 @@ async fn async_stop_lifecycle_commit_failure_does_not_publish_stopped() {
                 cleanup_called: Arc::clone(&cleanup_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     adapter
         .stop_runtime_executor(&sid, "async stop lifecycle failure")
@@ -792,7 +793,8 @@ async fn async_stop_does_not_publish_stopped_while_lifecycle_commit_is_in_flight
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let baseline_commits = store.commit_machine_lifecycle_calls();
     let stop_adapter = Arc::clone(&adapter);
@@ -1173,7 +1175,8 @@ async fn recycle_keeps_waiters_for_preserved_pending_input() {
 
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let result = tokio::time::timeout(Duration::from_secs(1), handle.wait())
         .await
@@ -1274,7 +1277,8 @@ async fn recycle_attached_runtime_wakes_preserved_queued_work() {
                 apply_calls: Arc::clone(&apply_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_progress_input("recycle-attached"))
@@ -1333,7 +1337,7 @@ async fn unregister_session_terminates_pending_completion_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(ref reason)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { ref reason, .. }
             if reason == "runtime session unregistered"
         ),
         "unregister should explicitly terminate pending waiters, got {result:?}"
@@ -1403,7 +1407,8 @@ async fn accept_with_executor_triggers_loop() {
     });
     adapter
         .register_session_with_executor(sid.clone(), executor)
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // Accept input — should trigger the loop
     let input = make_prompt("hello from executor test");
@@ -1578,7 +1583,8 @@ async fn runtime_comms_terminal_response_wake_drains_requester_queue() {
                 terminal_context_keys: Arc::clone(&terminal_context_keys),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let requester_for_drain: Arc<dyn CoreCommsRuntime> = requester_comms.clone();
     assert!(
@@ -1755,7 +1761,8 @@ async fn failed_executor_does_not_strand_input_in_apc() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(FailingExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("hello failing");
     let input_id = input.id().clone();
@@ -1838,7 +1845,8 @@ async fn failed_executor_stops_retrying_after_stage_budget_exhausted() {
                 calls: Arc::clone(&calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("hello failing forever");
     let input_id = input.id().clone();
@@ -1957,7 +1965,8 @@ async fn failed_executor_continues_processing_backlog() {
                 first_apply_started: Arc::clone(&first_apply_started),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let first = make_prompt("first");
     let first_id = first.id().clone();
@@ -2069,7 +2078,8 @@ async fn ensure_session_with_executor_upgrades_registered_session() {
                 called: Arc::clone(&apply_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     wait_for_atomic_bool(
         &apply_called,
@@ -2168,7 +2178,8 @@ async fn ensure_session_with_executor_upgrades_racy_registration() {
                         called: apply_called,
                     }),
                 )
-                .await;
+                .await
+                .expect("runtime executor attachment should succeed");
         })
     };
 
@@ -2288,7 +2299,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(PanicOnStopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
     assert_eq!(
         adapter.runtime_state(&sid).await.unwrap(),
         RuntimeState::Attached
@@ -2323,7 +2335,8 @@ async fn ensure_session_with_executor_repairs_stale_attached_driver() {
                 called: Arc::clone(&apply_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("repair stale attachment");
     let input_id = input.id().clone();
@@ -2434,7 +2447,8 @@ async fn stop_runtime_executor_keeps_attachment_live_until_stop_completes() {
                 interrupt_calls: Arc::clone(&interrupt_calls),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let stop_adapter = Arc::clone(&adapter);
     let stop_sid = sid.clone();
@@ -2598,7 +2612,8 @@ async fn completed_boundary_commit_failure_unwinds_runtime_loop_state() {
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("loop boundary failure");
     let input_id = input.id().clone();
@@ -2670,7 +2685,8 @@ async fn completed_boundary_commit_failure_terminates_runtime_loop_completion_wa
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("loop boundary waiter failure"))
@@ -2762,7 +2778,8 @@ async fn completed_run_runtime_loop_skips_terminal_lifecycle_snapshot_writer() {
                 stop_called: Arc::clone(&stop_called),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let (outcome, handle) = adapter
         .accept_input_with_completion(&sid, make_prompt("loop skips terminal lifecycle snapshot"))
@@ -2870,6 +2887,7 @@ async fn dedup_terminal_input_returns_none_handle() {
         ) -> Result<CoreApplyOutput, CoreExecutorError> {
             let run_result = RunResult {
                 text: "done".into(),
+                content: Vec::new(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
                 turns: 1,
@@ -2912,7 +2930,8 @@ async fn dedup_terminal_input_returns_none_handle() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // Accept first input with idempotency key
     let key = IdempotencyKey::new("gate-a2");
@@ -2980,6 +2999,7 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
             tokio::time::sleep(Duration::from_millis(200)).await;
             let run_result = RunResult {
                 text: "slow done".into(),
+                content: Vec::new(),
                 session_id: SessionId::new(),
                 usage: Usage::default(),
                 turns: 1,
@@ -3022,7 +3042,8 @@ async fn dedup_inflight_input_returns_handle_that_resolves() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SlowExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // Accept first input with idempotency key
     let key = IdempotencyKey::new("gate-a3");
@@ -3161,7 +3182,8 @@ async fn completion_handle_resolves_without_result() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("context append");
     let (outcome, handle) = adapter
@@ -3217,7 +3239,8 @@ async fn completion_handle_resolves_cancelled_executor_separately() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(CancelledExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("cancelled");
     let input_id = input.id().clone();
@@ -3322,7 +3345,8 @@ async fn persistent_cancelled_executor_persists_cancelled_terminal_not_failed_re
     let runtime_id = LogicalRuntimeId::for_session(&sid);
     adapter
         .register_session_with_executor(sid.clone(), Box::new(CancelledExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("persistent cancelled");
     let input_id = input.id().clone();
@@ -3394,7 +3418,7 @@ async fn reset_runtime_resolves_pending_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. }
         ),
         "reset should resolve pending waiters as terminated, got {result:?}"
     );
@@ -3424,7 +3448,7 @@ async fn retire_without_loop_resolves_waiters() {
     assert!(
         matches!(
             result,
-            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(_)
+            meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { .. }
         ),
         "retire without loop should resolve pending waiters as terminated, got {result:?}"
     );
@@ -3629,7 +3653,8 @@ async fn attached_sessions_do_not_spawn_comms_drains_without_keep_alive() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let comms: Arc<dyn CommsRuntime> = Arc::new(IdleDrainRuntime::new());
     let spawned = adapter
@@ -3697,7 +3722,8 @@ async fn successful_execution_fires_boundary_applied() {
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(SuccessExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("hello success");
     let input_id = input.id().clone();
@@ -3792,7 +3818,8 @@ async fn executor_attached_session_is_executor_ready() {
 
     adapter
         .ensure_session_with_executor(sid.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     assert!(
         adapter.session_has_executor(&sid).await,

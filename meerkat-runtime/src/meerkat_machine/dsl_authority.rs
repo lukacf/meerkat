@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use super::dsl as mm_dsl;
 use crate::identifiers::LogicalRuntimeId;
 use crate::runtime_state::RuntimeState;
+use meerkat_core::handles::DslTransitionError;
 use meerkat_core::lifecycle::RunId;
 use meerkat_core::types::SessionId;
 
@@ -22,6 +23,21 @@ pub(crate) fn map_error(err: mm_dsl::MeerkatMachineTransitionError, context: &st
             format!(
                 "DSL authority ({context}): guard rejected transition from {phase} for {trigger}"
             )
+        }
+    }
+}
+
+pub(crate) fn map_typed_error(
+    err: mm_dsl::MeerkatMachineTransitionError,
+    context: &'static str,
+) -> DslTransitionError {
+    let reason = map_error(err.clone(), context);
+    match err {
+        mm_dsl::MeerkatMachineTransitionError::NoMatchingTransition { .. } => {
+            DslTransitionError::no_matching(context, reason)
+        }
+        mm_dsl::MeerkatMachineTransitionError::GuardRejected { .. } => {
+            DslTransitionError::guard_rejected(context, reason)
         }
     }
 }
@@ -165,6 +181,7 @@ pub(crate) fn project_state(
         cancel_after_boundary: false,
         terminal_outcome: None,
         terminal_cause_kind: None,
+        terminal_failure_class: None,
         last_runtime_apply_failure_cause: None,
         last_runtime_apply_failure_message: None,
         extraction_attempts: 0,

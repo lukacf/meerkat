@@ -62,7 +62,8 @@ impl McpProtocol {
     /// Call a tool, returning multimodal content blocks.
     ///
     /// Text and image content are captured as [`ContentBlock`] variants.
-    /// Other content types are silently dropped.
+    /// Unsupported content fails closed so callers do not observe lossy
+    /// success.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let arguments = args.as_object().cloned();
 
@@ -80,14 +81,19 @@ impl McpProtocol {
                 reason: e.to_string(),
             })?;
 
+        let blocks =
+            extract_content_blocks(result.content).map_err(|message| McpError::ProtocolError {
+                message: format!("Tool '{name}' returned unsupported content: {message}"),
+            })?;
+
         if result.is_error.unwrap_or(false) {
             return Err(McpError::ToolCallFailed {
                 tool: name.to_string(),
-                reason: "Tool returned error".to_string(),
+                reason: tool_error_reason(&blocks),
             });
         }
 
-        Ok(extract_content_blocks(result.content))
+        Ok(blocks)
     }
 
     /// Call a tool, returning only text content (errors on non-text content).
@@ -108,16 +114,25 @@ impl McpProtocol {
                 reason: e.to_string(),
             })?;
 
+        let text = extract_text_content_strict(result.content).map_err(|message| {
+            McpError::ProtocolError {
+                message: format!("Tool '{name}' returned unsupported content: {message}"),
+            }
+        })?;
+
         if result.is_error.unwrap_or(false) {
+            let reason = if text.trim().is_empty() {
+                "Tool returned error without text content".to_string()
+            } else {
+                text
+            };
             return Err(McpError::ToolCallFailed {
                 tool: name.to_string(),
-                reason: "Tool returned error".to_string(),
+                reason,
             });
         }
 
-        extract_text_content_strict(result.content).map_err(|message| McpError::ProtocolError {
-            message: format!("Tool '{name}' returned unsupported content: {message}"),
-        })
+        Ok(text)
     }
 
     pub async fn close(self) -> Result<(), McpError> {
@@ -135,18 +150,28 @@ impl McpProtocol {
 ///
 /// Shared extraction logic for the protocol layer (mirrors
 /// `connection::extract_content_blocks`).
-fn extract_content_blocks(contents: Vec<Content>) -> Vec<ContentBlock> {
-    contents
-        .into_iter()
-        .filter_map(|c| match c.raw {
-            RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
-            RawContent::Image(image) => Some(ContentBlock::Image {
+fn extract_content_blocks(contents: Vec<Content>) -> Result<Vec<ContentBlock>, String> {
+    let mut blocks = Vec::with_capacity(contents.len());
+    for (index, content) in contents.into_iter().enumerate() {
+        match content.raw {
+            RawContent::Text(text) => blocks.push(ContentBlock::Text { text: text.text }),
+            RawContent::Image(image) => blocks.push(ContentBlock::Image {
                 media_type: image.mime_type,
                 data: meerkat_core::ImageData::Inline { data: image.data },
             }),
-            _ => None,
-        })
-        .collect()
+            other => return Err(format!("item {index}: {other:?}")),
+        }
+    }
+    Ok(blocks)
+}
+
+fn tool_error_reason(blocks: &[ContentBlock]) -> String {
+    let text = meerkat_core::types::text_content(blocks);
+    if text.trim().is_empty() {
+        "Tool returned error without text content".to_string()
+    } else {
+        text
+    }
 }
 
 fn extract_text_content_strict(contents: Vec<Content>) -> Result<String, String> {
@@ -200,7 +225,7 @@ mod tests {
     #[test]
     fn protocol_extract_content_blocks_captures_image() {
         let contents = vec![Content::image("aW1hZ2VkYXRh", "image/png")];
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0],
@@ -217,7 +242,7 @@ mod tests {
             Content::text("Before image"),
             Content::image("cG5nZGF0YQ==", "image/jpeg"),
         ];
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], ContentBlock::Text { text } if text == "Before image"));
         assert!(
@@ -226,9 +251,27 @@ mod tests {
     }
 
     #[test]
+    fn protocol_extract_content_blocks_rejects_unsupported_content() {
+        let contents = vec![Content::embedded_text("file:///artifact.txt", "artifact")];
+        let err = extract_content_blocks(contents).unwrap_err();
+        assert!(
+            err.contains("item 0"),
+            "unsupported content error should identify the dropped item: {err}"
+        );
+    }
+
+    #[test]
+    fn protocol_tool_error_reason_uses_returned_text() {
+        let blocks = vec![ContentBlock::Text {
+            text: "machine-readable denial".to_string(),
+        }];
+        assert_eq!(tool_error_reason(&blocks), "machine-readable denial");
+    }
+
+    #[test]
     fn protocol_extract_content_blocks_text_only() {
         let contents = vec![Content::text("just text")];
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0],

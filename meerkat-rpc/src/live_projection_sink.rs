@@ -928,6 +928,7 @@ mod tests {
                 tool_use_id: view.id.to_string(),
                 is_error: false,
                 content: ContentBlock::text_vec("ok".to_string()),
+                error: None,
             }))
         }
     }

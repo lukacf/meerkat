@@ -42,6 +42,7 @@ fn classify_cause(cause_kind: Option<TurnTerminalCauseKind>) -> TerminalCauseCla
             | TurnTerminalCauseKind::ToolFailure
             | TurnTerminalCauseKind::TurnLimitReached
             | TurnTerminalCauseKind::RuntimeApplyFailure
+            | TurnTerminalCauseKind::CheckpointPersistenceFailure
             | TurnTerminalCauseKind::FatalFailure,
         ) => TerminalCauseClass::OtherFailure,
     }

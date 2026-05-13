@@ -26,6 +26,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `cancel_after_boundary`: `Bool`
 - `terminal_outcome`: `Option<TurnTerminalOutcome>`
 - `terminal_cause_kind`: `Option<TurnTerminalCauseKind>`
+- `terminal_failure_class`: `Option<TurnFailureClass>`
 - `last_runtime_apply_failure_cause`: `Option<RuntimeApplyFailureCause>`
 - `last_runtime_apply_failure_message`: `Option<String>`
 - `extraction_attempts`: `u64`
@@ -209,7 +210,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ExtractionValidationFailed`(error: String)
 - `ExtractionFailed`(error: String)
 - `RecoverableFailure`(failure_kind: LlmRetryFailureKind, retry_attempt: u64, max_retries: u64, selected_delay_ms: u64, error: String)
-- `FatalFailure`(terminal_cause_kind: TurnTerminalCauseKind, error: String)
+- `FatalFailure`(terminal_cause_kind: TurnTerminalCauseKind, failure_class: TurnFailureClass, error: String)
 - `RetryRequested`(retry_attempt: u64)
 - `CancelNow`
 - `RequestCancelAfterBoundary`
@@ -221,7 +222,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ForceCancelNoRun`
 - `RunCompleted`(run_id: RunId)
 - `ServiceTurnCommitted`(run_id: RunId)
-- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
+- `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, failure_class: TurnFailureClass, error: String)
 - `RunCancelled`(run_id: RunId)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
@@ -333,7 +334,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `TurnRunStarted`(run_id: RunId)
 - `TurnBoundaryApplied`(run_id: RunId, boundary_sequence: u64)
 - `TurnRunCompleted`(run_id: RunId, outcome: TurnTerminalOutcome)
-- `TurnRunFailed`(run_id: RunId, terminal_cause_kind: TurnTerminalCauseKind, error: String)
+- `TurnRunFailed`(run_id: RunId, terminal_cause_kind: TurnTerminalCauseKind, failure_class: TurnFailureClass, error: String)
 - `TurnRunCancelled`(run_id: RunId, reason: TurnCancellationReason)
 - `TurnCheckCompaction`
 - `RequestCancellationAtBoundary`
@@ -2506,7 +2507,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `FatalFailure`
 - From: `Running`
-- On: `FatalFailure`(terminal_cause_kind, error)
+- On: `FatalFailure`(terminal_cause_kind, failure_class, error)
 - Guards:
   - `turn_not_terminal`
   - `terminal_cause_known`
@@ -2619,7 +2620,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 
 ### `RunFailed`
 - From: `Running`
-- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, error)
+- On: `RunFailed`(run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, failure_class, error)
 - Guards:
   - `run_matches_binding`
   - `terminal_cause_known`

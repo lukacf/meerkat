@@ -1440,6 +1440,9 @@ pub enum WireMobReconcileStage {
     Retire,
 }
 
+/// Typed mob error cause for one failed `mob/reconcile` member row.
+pub type MobReconcileFailureCause = MobSpawnManyFailureCause;
+
 /// Request payload for `mob/reconcile`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1458,7 +1461,9 @@ pub struct MobReconcileParams {
 pub struct MobReconcileFailureWire {
     pub agent_identity: String,
     pub stage: WireMobReconcileStage,
-    /// Stringified mob error.
+    /// Stable machine-readable mob failure cause.
+    pub cause: MobReconcileFailureCause,
+    /// Operator-facing diagnostic message.
     pub error: String,
 }
 
@@ -2189,22 +2194,35 @@ mod tests {
         let failure = MobReconcileFailureWire {
             agent_identity: "worker-1".into(),
             stage: WireMobReconcileStage::Spawn,
+            cause: MobReconcileFailureCause::ProfileNotFound,
             error: "spawn failed".into(),
         };
 
         let json = serde_json::to_value(&failure).expect("serialize failure");
         assert_eq!(json["stage"], "spawn");
+        assert_eq!(json["cause"], "profile_not_found");
 
         let round_trip: MobReconcileFailureWire =
             serde_json::from_value(json).expect("deserialize failure");
         assert_eq!(round_trip.stage, WireMobReconcileStage::Spawn);
+        assert_eq!(round_trip.cause, MobReconcileFailureCause::ProfileNotFound);
 
         let err = serde_json::from_value::<MobReconcileFailureWire>(serde_json::json!({
             "agent_identity": "worker-1",
             "stage": "restart",
+            "cause": "profile_not_found",
             "error": "bad stage"
         }))
         .expect_err("unknown reconcile stage must be rejected");
+        assert!(err.to_string().contains("unknown variant"));
+
+        let err = serde_json::from_value::<MobReconcileFailureWire>(serde_json::json!({
+            "agent_identity": "worker-1",
+            "stage": "spawn",
+            "cause": "text_only_failure",
+            "error": "bad cause"
+        }))
+        .expect_err("unknown reconcile cause must be rejected");
         assert!(err.to_string().contains("unknown variant"));
     }
 

@@ -690,12 +690,17 @@ impl MobActor {
                 if let Err(rollback_error) = rollback {
                     reason.push_str(&format!("; rollback failed: {rollback_error}"));
                 }
+                let mut cleanup_failed = false;
                 if let Some(Err(cleanup_error)) = cleanup {
+                    cleanup_failed = true;
                     reason.push_str(&format!(
                         "; cleanup failed while removing new supervisor trust: {cleanup_error}"
                     ));
                 }
-                return Err(MobError::WiringError(reason));
+                return Err(MobError::SupervisorPrivateTrustActivationFailed {
+                    reason,
+                    cleanup_failed,
+                });
             }
 
             if let Err(error) = adapter
@@ -730,12 +735,17 @@ impl MobActor {
                 if let Err(rollback_error) = rollback {
                     reason.push_str(&format!("; rollback failed: {rollback_error}"));
                 }
+                let mut cleanup_failed = false;
                 if let Some(Err(cleanup_error)) = cleanup {
+                    cleanup_failed = true;
                     reason.push_str(&format!(
                         "; cleanup failed while removing new supervisor trust after rejected ack: {cleanup_error}"
                     ));
                 }
-                return Err(MobError::WiringError(reason));
+                return Err(MobError::SupervisorPrivateTrustActivationFailed {
+                    reason,
+                    cleanup_failed,
+                });
             }
 
             if let meerkat_runtime::meerkat_machine::SupervisorBinding::Bound {
@@ -768,12 +778,17 @@ impl MobActor {
                     if let Err(rollback_error) = rollback {
                         reason.push_str(&format!("; rollback failed: {rollback_error}"));
                     }
+                    let mut cleanup_failed = false;
                     if let Err(cleanup_error) = cleanup {
+                        cleanup_failed = true;
                         reason.push_str(&format!(
                             "; cleanup failed while removing new supervisor trust: {cleanup_error}"
                         ));
                     }
-                    return Err(MobError::WiringError(reason));
+                    return Err(MobError::SupervisorPrivateTrustActivationFailed {
+                        reason,
+                        cleanup_failed,
+                    });
                 }
             }
 
@@ -945,6 +960,19 @@ impl MobActor {
         MobError::from(rejection)
     }
 
+    fn bridge_trust_rollback_error(
+        context: &'static str,
+        error: MobError,
+        rollback: Result<(), MobError>,
+    ) -> MobError {
+        match rollback {
+            Ok(()) => error,
+            Err(rollback_error) => MobError::WiringError(format!(
+                "{context}: {error}; bridge trust rollback failed: {rollback_error}"
+            )),
+        }
+    }
+
     fn bridge_rejection_error_with_reason(
         rejection: &super::bridge_protocol::BridgeRejectionReply,
         reason: String,
@@ -1019,16 +1047,33 @@ impl MobActor {
         let payload = self.bridge_supervisor_payload().await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, &command, std::time::Duration::from_secs(30))
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                return Err(Self::bridge_trust_rollback_error(
+                    "authorize supervisor send failed",
+                    error,
+                    rollback,
+                ));
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             if let Some(cause) = rejection.typed_cause()
                 && super::bridge_fallback::should_fall_back_to_bind(cause)
                 && let Some(binding) = binding
             {
+                self.supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await?;
                 let bind = self
                     .bind_peer_only_member_for_binding(peer, binding)
                     .await?;
@@ -1058,14 +1103,33 @@ impl MobActor {
                     "ensure_supervisor_authorized rebound peer",
                 );
             }
-            return Err(Self::bridge_rejection_error(rejection));
+            let error = Self::bridge_rejection_error(rejection);
+            let rollback = self
+                .supervisor_bridge
+                .rollback_recipient_trust(trust_install)
+                .await;
+            return Err(Self::bridge_trust_rollback_error(
+                "authorize supervisor rejected",
+                error,
+                rollback,
+            ));
         }
-        let _ack: super::bridge_protocol::BridgeAck =
-            serde_json::from_value(value).map_err(|error| {
-                MobError::Internal(format!(
-                    "failed to decode authorize supervisor response: {error}"
-                ))
-            })?;
+        let _ack: super::bridge_protocol::BridgeAck = match serde_json::from_value(value) {
+            Ok(ack) => ack,
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                return Err(Self::bridge_trust_rollback_error(
+                    "authorize supervisor response decode failed",
+                    MobError::Internal(format!(
+                        "failed to decode authorize supervisor response: {error}"
+                    )),
+                    rollback,
+                ));
+            }
+        };
         Ok(peer.clone())
     }
 
@@ -1159,17 +1223,53 @@ impl MobActor {
         command: &super::bridge_protocol::BridgeCommand,
         timeout: std::time::Duration,
     ) -> Result<R, MobError> {
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                return Err(Self::bridge_trust_rollback_error(
+                    "bridge command send failed",
+                    error,
+                    rollback,
+                ));
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+            let error = Self::bridge_rejection_error(rejection);
+            let rollback = self
+                .supervisor_bridge
+                .rollback_recipient_trust(trust_install)
+                .await;
+            return Err(Self::bridge_trust_rollback_error(
+                "bridge command rejected",
+                error,
+                rollback,
+            ));
         }
-        serde_json::from_value(value).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
+        match serde_json::from_value(value) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                Err(Self::bridge_trust_rollback_error(
+                    "bridge command response decode failed",
+                    MobError::Internal(format!(
+                        "failed to decode bridge command response: {error}"
+                    )),
+                    rollback,
+                ))
+            }
+        }
     }
 
     fn bridge_ack_from_value(
@@ -2866,12 +2966,18 @@ impl MobActor {
                             error: "cancelled".to_string(),
                         }
                     }
-                    meerkat_runtime::completion::CompletionOutcome::Abandoned(error)
+                    meerkat_runtime::completion::CompletionOutcome::Abandoned {
+                        reason: error,
+                        ..
+                    }
                     | meerkat_runtime::completion::CompletionOutcome::AbandonedWithError {
                         reason: error,
                         ..
                     }
-                    | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(error) => {
+                    | meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated {
+                        reason: error,
+                        ..
+                    } => {
                         mob_dsl::MobMachineInput::KickoffResolveFailed {
                             member_id: agent_identity.to_string(),
                             error,
@@ -9095,7 +9201,7 @@ impl MobActor {
                 }
                 let mut effective_peer = peer.clone();
                 let mut effective_binding = binding.clone();
-                self.supervisor_bridge.trust_recipient(&peer).await?;
+                let initial_trust_install = self.supervisor_bridge.trust_recipient(&peer).await?;
                 let authorize_result = self
                     .supervisor_bridge
                     .send_bridge_command(&peer, &next_command, std::time::Duration::from_secs(5))
@@ -9108,6 +9214,9 @@ impl MobActor {
                             if let Some(cause) = rejection.typed_cause()
                                 && super::bridge_fallback::should_fall_back_to_bind(cause)
                             {
+                                self.supervisor_bridge
+                                    .rollback_recipient_trust(initial_trust_install)
+                                    .await?;
                                 let bind = self
                                     .bind_peer_only_member_for_binding_with_payload(
                                         &peer,
@@ -9155,7 +9264,8 @@ impl MobActor {
                                             )));
                                         }
                                         effective_binding = rebound_binding;
-                                        self.supervisor_bridge
+                                        let fallback_trust_install = self
+                                            .supervisor_bridge
                                             .trust_recipient(&effective_peer)
                                             .await?;
                                         let retry = self
@@ -9174,27 +9284,62 @@ impl MobActor {
                                                         &value,
                                                     )
                                                 {
-                                                    Some(Self::bridge_rejection_error_with_reason(
-                                                        &retry_rejection,
-                                                        format!(
-                                                            "{}; bind fallback restored current supervisor but authorize retry failed: {}",
-                                                            rejection.reason(),
-                                                            retry_rejection.reason()
-                                                        ),
+                                                    let error =
+                                                        Self::bridge_rejection_error_with_reason(
+                                                            &retry_rejection,
+                                                            format!(
+                                                                "{}; bind fallback restored current supervisor but authorize retry failed: {}",
+                                                                rejection.reason(),
+                                                                retry_rejection.reason()
+                                                            ),
+                                                        );
+                                                    let rollback = self
+                                                        .supervisor_bridge
+                                                        .rollback_recipient_trust(
+                                                            fallback_trust_install,
+                                                        )
+                                                        .await;
+                                                    Some(Self::bridge_trust_rollback_error(
+                                                        "rotate supervisor authorize retry rejected",
+                                                        error,
+                                                        rollback,
                                                     ))
                                                 } else if let Err(error) = serde_json::from_value::<
                                                     super::bridge_protocol::BridgeAck,
                                                 >(
                                                     value
                                                 ) {
-                                                    Some(MobError::Internal(format!(
+                                                    let error = MobError::Internal(format!(
                                                         "failed to decode rotate supervisor response after bind fallback: {error}"
-                                                    )))
+                                                    ));
+                                                    let rollback = self
+                                                        .supervisor_bridge
+                                                        .rollback_recipient_trust(
+                                                            fallback_trust_install,
+                                                        )
+                                                        .await;
+                                                    Some(Self::bridge_trust_rollback_error(
+                                                        "rotate supervisor authorize retry response decode failed",
+                                                        error,
+                                                        rollback,
+                                                    ))
                                                 } else {
                                                     None
                                                 }
                                             }
-                                            Err(error) => Some(error),
+                                            Err(error) => {
+                                                let rollback = self
+                                                    .supervisor_bridge
+                                                    .rollback_recipient_trust(
+                                                        fallback_trust_install,
+                                                    )
+                                                    .await;
+                                                Some(Self::bridge_trust_rollback_error(
+                                                    "rotate supervisor authorize retry send failed",
+                                                    error,
+                                                    rollback,
+                                                ))
+                                            }
                                         }
                                     }
                                     Err(bind_error) => {
@@ -9208,19 +9353,47 @@ impl MobActor {
                                     }
                                 }
                             } else {
-                                Some(Self::bridge_rejection_error(rejection))
+                                let error = Self::bridge_rejection_error(rejection);
+                                let rollback = self
+                                    .supervisor_bridge
+                                    .rollback_recipient_trust(initial_trust_install)
+                                    .await;
+                                Some(Self::bridge_trust_rollback_error(
+                                    "rotate supervisor authorize rejected",
+                                    error,
+                                    rollback,
+                                ))
                             }
                         } else if let Err(error) =
                             serde_json::from_value::<super::bridge_protocol::BridgeAck>(value)
                         {
-                            Some(MobError::Internal(format!(
+                            let error = MobError::Internal(format!(
                                 "failed to decode rotate supervisor response: {error}"
-                            )))
+                            ));
+                            let rollback = self
+                                .supervisor_bridge
+                                .rollback_recipient_trust(initial_trust_install)
+                                .await;
+                            Some(Self::bridge_trust_rollback_error(
+                                "rotate supervisor authorize response decode failed",
+                                error,
+                                rollback,
+                            ))
                         } else {
                             None
                         }
                     }
-                    Err(error) => Some(error),
+                    Err(error) => {
+                        let rollback = self
+                            .supervisor_bridge
+                            .rollback_recipient_trust(initial_trust_install)
+                            .await;
+                        Some(Self::bridge_trust_rollback_error(
+                            "rotate supervisor authorize send failed",
+                            error,
+                            rollback,
+                        ))
+                    }
                 };
                 if let Some(error) = authorize_error {
                     let accepted_peer_count = accepted_peer_ids.len();
@@ -9868,8 +10041,13 @@ impl MobActor {
                 }
             }
         }
-        let error_text = error.to_string();
-        if error_text.contains("cleanup failed while removing new supervisor trust") {
+        if matches!(
+            &error,
+            MobError::SupervisorPrivateTrustActivationFailed {
+                cleanup_failed: true,
+                ..
+            }
+        ) {
             rollback_errors.push("supervisor private trust cleanup failed".to_string());
         }
         SupervisorAuthorityActivationError {

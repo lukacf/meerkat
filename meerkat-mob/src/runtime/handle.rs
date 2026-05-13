@@ -1261,10 +1261,8 @@ impl MobHandle {
         self.command_tx
             .send(build(reply_tx))
             .await
-            .map_err(|_| MobError::Internal("actor task dropped".into()))?;
-        reply_rx
-            .await
-            .map_err(|_| MobError::Internal("actor reply dropped".into()))
+            .map_err(|_| MobError::ActorTaskDropped)?;
+        reply_rx.await.map_err(|_| MobError::ActorReplyDropped)
     }
 
     async fn execute_machine_command(
@@ -1667,7 +1665,11 @@ impl MobHandle {
             // terminal-phase watch, which the actor updates after every
             // DSL phase transition so its last observed value is the
             // authoritative terminal phase.
-            Err(MobError::Internal(_)) => Ok(*self.phase_watch_rx.borrow()),
+            Err(MobError::ActorTaskDropped)
+                if *self.phase_watch_rx.borrow() == MobState::Destroyed =>
+            {
+                Ok(MobState::Destroyed)
+            }
             Err(other) => Err(other),
         }
     }

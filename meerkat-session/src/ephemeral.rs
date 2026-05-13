@@ -2321,6 +2321,7 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
         if defer_initial_turn {
             return Ok(RunResult {
                 text: String::new(),
+                content: Vec::new(),
                 session_id,
                 turns: 0,
                 tool_calls: 0,
@@ -2927,6 +2928,7 @@ fn apply_runtime_system_context_and_publish<A: SessionAgent>(
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: Usage::default(),
@@ -2970,6 +2972,7 @@ fn publish_runtime_system_context_events<A: SessionAgent>(
             AgentEvent::RunCompleted {
                 session_id,
                 result: String::new(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: Usage::default(),
@@ -4014,6 +4017,7 @@ mod runtime_turn_metadata_tests {
                 );
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -4537,6 +4541,7 @@ mod admission_window_tests {
             };
             Ok(RunResult {
                 text: text.to_string(),
+                content: Vec::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -5067,6 +5072,7 @@ mod inline_video_admission_tests {
         ) -> Result<RunResult, AgentError> {
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 1,

@@ -7,6 +7,7 @@ import type {
   MobDefinition,
   JsonSchema,
   ToolCallback,
+  ToolCallbackResult,
   MobStatus,
 } from './types.js';
 import type { MobListResult as WireMobListResult } from './generated/mob.js';
@@ -93,7 +94,7 @@ export interface WasmModule {
     name: string,
     description: string,
     schemaJson: string,
-    callback: (args: string) => Promise<string>,
+    callback: (args: string) => Promise<ToolCallbackResult>,
   ) => void;
   register_js_tool: (
     name: string,
@@ -113,7 +114,7 @@ export interface WasmModule {
   mob_create: (definitionJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
   mob_list: () => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_spawn: (mobId: string, specsJson: string) => Promise<string>;
   mob_retire: (mobId: string, agentIdentity: string) => Promise<void>;
@@ -263,7 +264,7 @@ export class MeerkatRuntime {
       name,
       description,
       JSON.stringify(schema),
-      async (args: string) => JSON.stringify(await callback(args)),
+      async (args: string) => callback(args),
     );
   }
 
@@ -315,7 +316,7 @@ export class MeerkatRuntime {
       name,
       description,
       JSON.stringify(schema),
-      async (args: string) => JSON.stringify(await callback(args)),
+      async (args: string) => callback(args),
     );
   }
 

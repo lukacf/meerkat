@@ -16,10 +16,10 @@ use meerkat_core::event::BackgroundJobTerminalStatus;
 use meerkat_core::{
     AgentErrorClass, AgentEvent, AssistantImageEvent, AssistantImageId, BlobId, BlobRef,
     BudgetType, ContentBlock, ContentInput, HookId, HookPoint, HookReasonCode, LlmRetryEvent,
-    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, MediaType,
+    LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetrySchedule, MediaType, Message,
     ProviderImageMetadata, RevisedPromptDisposition, RunResult, SessionId,
     SkillResolutionFailureReason, StopReason, ToolCallArguments, ToolConfigChangeOperation,
-    ToolConfigChangeStatus, ToolConfigChangedPayload, Usage,
+    ToolConfigChangeStatus, ToolConfigChangedPayload, ToolResult, ToolResultError, Usage,
 };
 
 fn tool_args(value: serde_json::Value) -> ToolCallArguments {
@@ -59,6 +59,7 @@ fn wire_run_result_required_fields() {
         session_id: SessionId::new(),
         session_ref: None,
         text: "hello".to_string(),
+        content: Vec::new(),
         turns: 3,
         tool_calls: 2,
         usage: WireUsage::default(),
@@ -87,6 +88,7 @@ fn wire_run_result_optional_omitted() {
         session_id: SessionId::new(),
         session_ref: None,
         text: "ok".to_string(),
+        content: Vec::new(),
         turns: 1,
         tool_calls: 0,
         usage: WireUsage::default(),
@@ -126,6 +128,7 @@ fn wire_run_result_roundtrip() {
         session_id: SessionId::new(),
         session_ref: Some("ref-1".to_string()),
         text: "result text".to_string(),
+        content: Vec::new(),
         turns: 5,
         tool_calls: 3,
         usage: WireUsage {
@@ -286,6 +289,7 @@ fn wire_session_history_roundtrip() {
                     tool_use_id: "tool-1".to_string(),
                     content: meerkat_contracts::WireToolResultContent::Text("ok".to_string()),
                     is_error: false,
+                    error: None,
                 }],
                 created_at: "2026-04-27T00:00:03Z".to_string(),
             },
@@ -304,6 +308,34 @@ fn wire_session_history_roundtrip() {
     assert_eq!(
         serde_json::to_value(&wire.messages).unwrap(),
         serde_json::to_value(&roundtrip.messages).unwrap()
+    );
+}
+
+#[test]
+fn wire_tool_result_preserves_structured_error() {
+    let message = Message::ToolResults {
+        results: vec![
+            ToolResult::new("tool-err".to_string(), "denied".to_string(), true).with_error(
+                ToolResultError {
+                    code: "access_denied".to_string(),
+                    message: "denied".to_string(),
+                    data: Some(serde_json::json!({"policy": "hidden"})),
+                },
+            ),
+        ],
+        created_at: chrono::Utc::now(),
+    };
+
+    let wire = WireSessionMessage::from(message);
+    let WireSessionMessage::ToolResults { results, .. } = wire else {
+        panic!("expected tool results");
+    };
+    let error = results[0].error.as_ref().expect("structured tool error");
+    assert_eq!(error.code, "access_denied");
+    assert_eq!(error.data, Some(serde_json::json!({"policy": "hidden"})));
+    assert_eq!(
+        results[0].content,
+        meerkat_contracts::WireToolResultContent::Text("denied".to_string())
     );
 }
 
@@ -387,6 +419,7 @@ fn agent_event_all_variants_roundtrip() {
         AgentEvent::RunCompleted {
             session_id: session_id.clone(),
             result: "done".to_string(),
+            content: Vec::new(),
             structured_output: Some(serde_json::json!({"ok": true})),
             extraction_required: false,
             usage: Usage {
@@ -448,6 +481,7 @@ fn agent_event_all_variants_roundtrip() {
             name: "read_file".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
+            error: None,
         },
         AgentEvent::TurnCompleted {
             stop_reason: StopReason::EndTurn,
@@ -463,6 +497,7 @@ fn agent_event_all_variants_roundtrip() {
             result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
+            error: None,
             duration_ms: 100,
         },
         AgentEvent::ToolExecutionTimedOut {
@@ -610,6 +645,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
         AgentEvent::RunCompleted {
             session_id: SessionId::new(),
             result: "done".to_string(),
+            content: Vec::new(),
             structured_output: None,
             extraction_required: false,
             usage: Usage::default(),
@@ -666,6 +702,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             name: "search".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
+            error: None,
         },
         AgentEvent::TurnCompleted {
             stop_reason: StopReason::EndTurn,
@@ -681,6 +718,7 @@ fn documented_event_catalog_covers_core_agent_event_discriminators() {
             result: "ok".to_string(),
             content: ContentBlock::text_vec("ok".to_string()),
             is_error: false,
+            error: None,
             duration_ms: 1,
         },
         AgentEvent::ToolExecutionTimedOut {
@@ -786,6 +824,7 @@ fn wire_run_result_from_run_result_conversion() {
     let session_id = SessionId::new();
     let run = RunResult {
         text: "result".to_string(),
+        content: Vec::new(),
         session_id: session_id.clone(),
         usage: Usage {
             input_tokens: 200,

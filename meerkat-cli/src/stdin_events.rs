@@ -95,8 +95,11 @@ pub fn spawn_stdin_reader(
                     );
                     return;
                 }
-                Err(meerkat_runtime::RuntimeDriverError::Destroyed) => {
-                    tracing::debug!("Stdin reader: runtime destroyed, exiting");
+                Err(
+                    meerkat_runtime::RuntimeDriverError::NotFound(_)
+                    | meerkat_runtime::RuntimeDriverError::Destroyed,
+                ) => {
+                    tracing::debug!("Stdin reader: runtime unavailable, exiting");
                     return;
                 }
                 Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {

@@ -28,6 +28,7 @@ use std::sync::Arc;
 
 use crate::LoopState;
 use crate::comms::InputSource;
+use crate::event::AgentErrorClass;
 use crate::interaction::{
     PeerIngressAdmission, PeerIngressEnvelopeFacts, PeerIngressPlainEventFacts,
 };
@@ -584,6 +585,9 @@ pub struct TurnStateSnapshot {
     /// Typed terminal cause recorded by the DSL. `None` means no failure cause
     /// has been selected for the current turn.
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    /// Typed failure class recorded with the terminal cause. `None` means no
+    /// failure class has been selected for the current turn.
+    pub terminal_failure_class: Option<AgentErrorClass>,
     pub extraction_attempts: u64,
     pub max_extraction_retries: u64,
     pub llm_retry_attempt: u32,

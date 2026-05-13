@@ -209,6 +209,7 @@ pub struct StructuredProviderExtension {
 /// rather than being silently dropped (persistence-migration.md §3.1,
 /// adversarial review flaw 5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "provider", rename_all = "snake_case")]
 pub enum ProviderTag {
     Anthropic(AnthropicProviderTag),
@@ -321,6 +322,7 @@ impl OpaqueProviderBody {
 
 /// Typed shape of Anthropic's extended-thinking knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AnthropicThinkingConfig {
     /// Opus 4.6 adaptive thinking — provider picks the budget.
@@ -333,6 +335,7 @@ pub enum AnthropicThinkingConfig {
 /// Typed shape of Anthropic's response-effort knob (Opus 4.6+).
 /// `XHigh` is the Opus 4.7 extended-high effort level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicEffort {
     Low,
@@ -356,6 +359,7 @@ impl AnthropicEffort {
 
 /// Typed shape of Anthropic's data-residency knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnthropicInferenceGeo {
     Us,
@@ -369,6 +373,7 @@ pub enum AnthropicInferenceGeo {
 
 /// Typed shape of Anthropic's context-window opt-in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AnthropicContextWindow {
     /// 1M-token beta context window (2025-08-07 beta header).
@@ -377,6 +382,7 @@ pub enum AnthropicContextWindow {
 
 /// Typed shape of Anthropic's automatic-compaction knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnthropicCompactionConfig {
     /// `"auto"` — provider picks trigger and instructions.
@@ -388,6 +394,7 @@ pub enum AnthropicCompactionConfig {
 
 /// Per-turn Anthropic-specific knobs carried in `ProviderTag::Anthropic`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct AnthropicProviderTag {
     /// Extended-thinking configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +435,7 @@ pub struct AnthropicProviderTag {
 
 /// Per-turn OpenAI-specific knobs carried in `ProviderTag::OpenAi`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct OpenAiProviderTag {
     /// Reasoning-effort level for o-series and GPT-5 models.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -470,6 +478,7 @@ pub struct OpenAiProviderTag {
 
 /// Gemini 3 reasoning levels accepted by the API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum GeminiThinkingLevel {
     Minimal,
@@ -491,6 +500,7 @@ impl GeminiThinkingLevel {
 
 /// Typed shape of Gemini's thinking knob.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GeminiThinkingConfig {
     /// Whether reasoning output is included in the response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -505,6 +515,7 @@ pub struct GeminiThinkingConfig {
 
 /// Per-turn Gemini-specific knobs carried in `ProviderTag::Gemini`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct GeminiProviderTag {
     /// Thinking configuration (Gemini 3+ models).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -862,6 +873,7 @@ impl std::error::Error for LegacyProviderParamsError {}
 
 /// Typed projection of OpenAI's reasoning-effort knob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     None,
@@ -887,6 +899,7 @@ impl ReasoningEffort {
 
 /// Typed mode for generalized reasoning emission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningMode {
     /// Reasoning output is emitted inline to the caller.
@@ -905,6 +918,7 @@ pub enum ReasoningMode {
 /// that is fundamentally per-binding (not per-turn) lives on the auth /
 /// backend profile and never traverses this seam.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProviderParamsOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,

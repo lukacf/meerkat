@@ -69,7 +69,7 @@ pub mod external_auth;
 
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use wasm_bindgen::prelude::*;
 
@@ -2629,8 +2629,6 @@ mod tests {
     #[cfg(not(target_arch = "wasm32"))]
     use meerkat_mob::{MobId, SpawnMemberSpec};
     use serde_json::json;
-    use std::collections::BTreeMap;
-    #[cfg(not(target_arch = "wasm32"))]
     use std::collections::BTreeMap;
     #[cfg(not(target_arch = "wasm32"))]
     use std::sync::Arc;

@@ -621,14 +621,16 @@ mod tests {
 
     #[test]
     fn hook_execution_plan_rejects_background_pre_guardrails() {
-        let mut config = HooksConfig::default();
-        config.entries = vec![HookEntryConfig {
-            id: HookId::new("guardrail"),
-            point: HookPoint::PreToolExecution,
-            mode: HookExecutionMode::Background,
-            capability: HookCapability::Guardrail,
-            ..HookEntryConfig::default()
-        }];
+        let config = HooksConfig {
+            entries: vec![HookEntryConfig {
+                id: HookId::new("guardrail"),
+                point: HookPoint::PreToolExecution,
+                mode: HookExecutionMode::Background,
+                capability: HookCapability::Guardrail,
+                ..HookEntryConfig::default()
+            }],
+            ..HooksConfig::default()
+        };
 
         let err = config
             .execution_plan(HookPoint::PreToolExecution, None)

@@ -512,7 +512,10 @@ mod tests {
             },
         );
 
-        let registry = ModelRegistry::from_config(&config).expect("registry");
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
         assert_eq!(
             registry.default_model(Provider::SelfHosted),
             None,
@@ -520,7 +523,10 @@ mod tests {
         );
 
         config.self_hosted.default_model = Some("gemma-4-31b".to_string());
-        let registry = ModelRegistry::from_config(&config).expect("registry");
+        let registry = match ModelRegistry::from_config(&config) {
+            Ok(registry) => registry,
+            Err(err) => panic!("registry construction failed: {err}"),
+        };
         assert_eq!(
             registry.default_model(Provider::SelfHosted),
             Some("gemma-4-31b")
@@ -532,8 +538,10 @@ mod tests {
         let mut config = config_with_self_hosted();
         config.self_hosted.default_model = Some("missing".to_string());
 
-        let err = ModelRegistry::from_config(&config)
-            .expect_err("missing default model alias should fail registry build");
+        let err = match ModelRegistry::from_config(&config) {
+            Ok(_) => panic!("missing default model alias should fail registry build"),
+            Err(err) => err,
+        };
         assert!(
             err.to_string()
                 .contains("self_hosted.default_model references unknown model alias 'missing'"),

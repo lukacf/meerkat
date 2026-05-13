@@ -83,36 +83,38 @@ impl MobpackArchive {
         let mut selected = BTreeMap::new();
         for (profile_name, profile) in &self.manifest.profiles {
             for skill_path in &profile.skills {
+                let profile_name = profile_name.as_str();
+                let skill_path = skill_path.as_str();
                 let normalized = normalize_for_archive(skill_path).map_err(|err| {
                     PackValidationError::InvalidSkillPath {
-                        skill_name: profile_name.clone(),
-                        path: skill_path.clone(),
+                        skill_name: profile_name.to_string(),
+                        path: skill_path.to_string(),
                         reason: err.to_string(),
                     }
                 })?;
-                if normalized != *skill_path {
+                if normalized != skill_path {
                     return Err(PackValidationError::InvalidSkillPath {
-                        skill_name: profile_name.clone(),
-                        path: skill_path.clone(),
+                        skill_name: profile_name.to_string(),
+                        path: skill_path.to_string(),
                         reason: format!("must use canonical archive path `{normalized}`"),
                     });
                 }
                 if !normalized.starts_with("skills/") {
                     return Err(PackValidationError::InvalidSkillPath {
-                        skill_name: profile_name.clone(),
-                        path: skill_path.clone(),
+                        skill_name: profile_name.to_string(),
+                        path: skill_path.to_string(),
                         reason: "must be under skills/".to_string(),
                     });
                 }
                 let bytes = self.skills.get(&normalized).ok_or_else(|| {
                     PackValidationError::MissingSkillFile {
-                        skill_name: profile_name.clone(),
+                        skill_name: profile_name.to_string(),
                         path: normalized.clone(),
                     }
                 })?;
                 let text = std::str::from_utf8(bytes).map_err(|err| {
                     PackValidationError::InvalidSkillUtf8 {
-                        skill_name: profile_name.clone(),
+                        skill_name: profile_name.to_string(),
                         path: normalized.clone(),
                         reason: err.to_string(),
                     }

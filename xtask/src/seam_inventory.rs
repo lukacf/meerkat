@@ -1376,13 +1376,18 @@ mod tests {
         let known = known_classifications();
         let mob = canonical_machine_schemas()
             .into_iter()
-            .find(|machine| machine.machine.as_str() == "MobMachine")
-            .expect("MobMachine schema");
-        let rule = mob
-            .effect_dispositions
-            .iter()
-            .find(|rule| rule.effect_variant.as_str() == "RequestSessionIngressDetachForMobDestroy")
-            .expect("destroy ingress handoff disposition");
+            .find(|machine| machine.machine.as_str() == "MobMachine");
+        assert!(mob.is_some(), "MobMachine schema");
+        let Some(mob) = mob else {
+            return;
+        };
+        let rule = mob.effect_dispositions.iter().find(|rule| {
+            rule.effect_variant.as_str() == "RequestSessionIngressDetachForMobDestroy"
+        });
+        assert!(rule.is_some(), "destroy ingress handoff disposition");
+        let Some(rule) = rule else {
+            return;
+        };
 
         let (classification, notes, explicitly_classified) =
             classify_effect(mob.machine.as_str(), rule, &known);
@@ -1404,8 +1409,14 @@ mod tests {
         let rows = collect_handoff_obligation_coverages(&all_compositions);
         let destroy_row = rows
             .iter()
-            .find(|row| row.protocol == "mob_destroying_session_ingress")
-            .expect("destroy ingress handoff coverage row");
+            .find(|row| row.protocol == "mob_destroying_session_ingress");
+        assert!(
+            destroy_row.is_some(),
+            "destroy ingress handoff coverage row"
+        );
+        let Some(destroy_row) = destroy_row else {
+            return;
+        };
 
         assert!(destroy_row.invariant_covered);
         assert_eq!(destroy_row.closure_policy, "AckRequired");

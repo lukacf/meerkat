@@ -13793,6 +13793,7 @@ default_model = "gemma"
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
+            content: Vec::new(),
             session_id: SessionId::new(),
             usage: Usage::default(),
             turns: 1,
@@ -13821,6 +13822,7 @@ default_model = "gemma"
         let scope = test_scope(temp.path().join("state"), "html-realm");
         let result = RunResult {
             text: "<!doctype html><html><body>artifact</body></html>".to_string(),
+            content: Vec::new(),
             session_id: SessionId::new(),
             usage: Usage::default(),
             turns: 1,

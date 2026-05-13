@@ -2429,9 +2429,9 @@ mod tests {
         let received = AgentEvent::ToolResultReceived {
             id: tool_result.tool_use_id.clone(),
             name: "structured_tool".to_string(),
-            content: tool_result.content.clone(),
+            content: tool_result.content,
             is_error: tool_result.is_error,
-            error: tool_result.error.clone(),
+            error: tool_result.error,
         };
 
         let completed_json = serde_json::to_value(&completed).expect("serialize completed event");

@@ -260,11 +260,10 @@ fn routed_consumer_inputs_from_compositions(
     }
     inputs.sort();
     inputs.dedup();
-    if inputs.is_empty() {
-        panic!(
-            "routed effect {producer}::{effect_variant} declares consumer {consumer}, but no canonical composition Route resolves the consumer input"
-        );
-    }
+    assert!(
+        !inputs.is_empty(),
+        "routed effect {producer}::{effect_variant} declares consumer {consumer}, but no canonical composition Route resolves the consumer input"
+    );
     inputs
 }
 

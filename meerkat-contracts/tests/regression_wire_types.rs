@@ -312,7 +312,7 @@ fn wire_session_history_roundtrip() {
 }
 
 #[test]
-fn wire_tool_result_preserves_structured_error() {
+fn wire_tool_result_preserves_structured_error() -> Result<(), String> {
     let message = Message::ToolResults {
         results: vec![
             ToolResult::new("tool-err".to_string(), "denied".to_string(), true).with_error(
@@ -327,16 +327,24 @@ fn wire_tool_result_preserves_structured_error() {
     };
 
     let wire = WireSessionMessage::from(message);
+    assert!(
+        matches!(wire, WireSessionMessage::ToolResults { .. }),
+        "expected tool results"
+    );
     let WireSessionMessage::ToolResults { results, .. } = wire else {
-        panic!("expected tool results");
+        return Ok(());
     };
-    let error = results[0].error.as_ref().expect("structured tool error");
+    let error = results[0]
+        .error
+        .as_ref()
+        .ok_or_else(|| "structured tool error".to_string())?;
     assert_eq!(error.code, "access_denied");
     assert_eq!(error.data, Some(serde_json::json!({"policy": "hidden"})));
     assert_eq!(
         results[0].content,
         meerkat_contracts::WireToolResultContent::Text("denied".to_string())
     );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

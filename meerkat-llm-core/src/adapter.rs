@@ -523,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_preserves_catalog_policy_flags_when_turn_params_override() {
+    fn adapter_preserves_catalog_policy_flags_when_turn_params_override() -> Result<(), String> {
         use meerkat_core::lifecycle::run_primitive::{
             OpenAiProviderTag, ProviderTag, ReasoningEffort,
         };
@@ -539,13 +539,14 @@ mod tests {
         });
 
         let merged = LlmClientAdapter::merge_base_provider_policy(Some(explicit), Some(base))
-            .expect("merged provider tag");
+            .ok_or_else(|| "merged provider tag".to_string())?;
         let ProviderTag::OpenAi(tag) = merged else {
-            panic!("expected OpenAI tag");
+            return Err("expected OpenAI tag".to_string());
         };
 
         assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(tag.supports_temperature_override, Some(false));
         assert_eq!(tag.supports_reasoning_override, Some(true));
+        Ok(())
     }
 }

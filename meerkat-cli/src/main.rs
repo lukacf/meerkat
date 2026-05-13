@@ -36,7 +36,7 @@ use meerkat_core::CommsRuntimeMode;
 use meerkat_core::config::CliOverrides;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionQuery, SessionService,
-    SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
+    SessionServiceCommsExt, SessionSummary, StartTurnRequest, TurnToolOverlay,
 };
 use meerkat_core::{
     AgentEvent, AuthBindingRef, AuthStatusPhase, BlobId, EventEnvelope, RealmConfig, RealmLocator,
@@ -7393,7 +7393,7 @@ fn resolve_scoped_session_id(input: &str, scope: &RuntimeScope) -> anyhow::Resul
     })
 }
 
-/// Resolve a session identifier that may be a full UUID, a short prefix,
+/// Resolve a session identifier that may be a full UUID, a short handle,
 /// or a relative alias (`last`, `~N`).
 async fn resolve_flexible_session_id(
     input: &str,
@@ -7456,13 +7456,13 @@ async fn resolve_flexible_session_id(
         Err(e) => e,
     };
 
-    // Only fall through to prefix matching for inputs that look like a bare
-    // prefix (no colon = not a realm-scoped locator).
+    // Only fall through to short-handle matching for bare inputs (no colon =
+    // not a realm-scoped locator).
     if input.contains(':') {
         return Err(locator_err);
     }
 
-    // Try short prefix match against all sessions (no limit).
+    // Try short handle match against all sessions (no limit).
     #[cfg(feature = "session-store")]
     {
         let (service, _runtime_adapter) =
@@ -7476,16 +7476,14 @@ async fn resolve_flexible_session_id(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to list sessions: {e}"))?;
 
-        let matches: Vec<_> = sessions
-            .iter()
-            .filter(|s| s.session_id.to_string().starts_with(input))
-            .collect();
+        let matches = find_session_matches_in_summaries(input, &sessions);
 
         match matches.len() {
             0 => Err(anyhow::anyhow!("No session matching '{input}'")),
             1 => Ok(matches[0].session_id.clone()),
-            n => Err(anyhow::anyhow!(
-                "Ambiguous prefix '{input}': matches {n} sessions. Use a longer prefix."
+            _ => Err(anyhow::anyhow!(
+                "{}",
+                format_ambiguous_session_match_error(input, &matches, scope)
             )),
         }
     }
@@ -7496,10 +7494,51 @@ async fn resolve_flexible_session_id(
     }
 }
 
-/// Format a short 8-character session ID prefix for display.
+fn find_session_matches_in_summaries<'a>(
+    input: &str,
+    sessions: &'a [SessionSummary],
+) -> Vec<&'a SessionSummary> {
+    sessions
+        .iter()
+        .filter(|s| {
+            let id = s.session_id.to_string();
+            id.starts_with(input) || id.ends_with(input)
+        })
+        .collect()
+}
+
+fn format_ambiguous_session_match_error(
+    input: &str,
+    matches: &[&SessionSummary],
+    scope: &RuntimeScope,
+) -> String {
+    let mut message = format!(
+        "Ambiguous session handle '{input}': matches {} sessions. Use `last`, `~N`, a full session id, or a session ref.",
+        matches.len()
+    );
+    let shown = matches.len().min(5);
+    for summary in matches.iter().take(shown) {
+        message.push_str(&format!(
+            "\n  - {} (handle {})",
+            format_session_ref(&scope.locator.realm, &summary.session_id),
+            short_session_id(&summary.session_id)
+        ));
+    }
+    if matches.len() > shown {
+        message.push_str(&format!("\n  ... and {} more", matches.len() - shown));
+    }
+    message
+}
+
+/// Format a short 8-character session handle for display.
+///
+/// Session IDs are UUID v7, so their leading characters are time-derived and
+/// collide for sessions created near each other. The tail carries more entropy
+/// and is therefore a better copy/paste handle for `run --resume`.
 fn short_session_id(sid: &SessionId) -> String {
     let s = sid.to_string();
-    s[..8.min(s.len())].to_string()
+    let len = s.len();
+    s[len.saturating_sub(8)..].to_string()
 }
 
 fn build_flow_tool_overlay(
@@ -18368,6 +18407,91 @@ supports_reasoning = true
         let err = resolve_scoped_session_id(&format!("other-realm:{sid}"), &scope)
             .expect_err("mismatched realm should fail");
         assert!(err.to_string().contains("active realm is 'team-alpha'"));
+    }
+
+    #[test]
+    fn test_short_session_id_uses_uuid_tail() {
+        let sid =
+            SessionId::parse("019e2136-0000-7000-8000-00000000abcd").expect("valid uuid literal");
+
+        assert_eq!(short_session_id(&sid), "0000abcd");
+    }
+
+    #[test]
+    fn test_session_match_accepts_tail_handle_without_losing_legacy_prefix() {
+        let first =
+            SessionId::parse("019e2136-0000-7000-8000-00000000aaaa").expect("valid uuid literal");
+        let second =
+            SessionId::parse("019e2136-0000-7000-8000-00000000bbbb").expect("valid uuid literal");
+        let sessions = vec![
+            SessionSummary {
+                session_id: first,
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            },
+            SessionSummary {
+                session_id: second.clone(),
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            },
+        ];
+
+        let legacy_prefix_matches = find_session_matches_in_summaries("019e2136", &sessions);
+        assert_eq!(
+            legacy_prefix_matches.len(),
+            2,
+            "UUIDv7 leading handles should be treated as ambiguous"
+        );
+
+        let tail_matches = find_session_matches_in_summaries("0000bbbb", &sessions);
+        assert_eq!(tail_matches.len(), 1);
+        assert_eq!(tail_matches[0].session_id, second);
+    }
+
+    #[test]
+    fn test_ambiguous_session_match_error_lists_copyable_refs() {
+        let first =
+            SessionId::parse("019e2136-0000-7000-8000-00000000aaaa").expect("valid uuid literal");
+        let second =
+            SessionId::parse("019e2136-0000-7000-8000-00000000bbbb").expect("valid uuid literal");
+        let sessions = vec![
+            SessionSummary {
+                session_id: first,
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            },
+            SessionSummary {
+                session_id: second,
+                created_at: std::time::SystemTime::now(),
+                updated_at: std::time::SystemTime::now(),
+                message_count: 0,
+                total_tokens: 0,
+                is_active: false,
+                labels: Default::default(),
+            },
+        ];
+        let matches = find_session_matches_in_summaries("019e2136", &sessions);
+        let scope = test_scope(PathBuf::from("/tmp/realms"), "team-alpha");
+
+        let message = format_ambiguous_session_match_error("019e2136", &matches, &scope);
+
+        assert!(message.contains("Ambiguous session handle '019e2136'"));
+        assert!(message.contains("team-alpha:019e2136-0000-7000-8000-00000000aaaa"));
+        assert!(message.contains("team-alpha:019e2136-0000-7000-8000-00000000bbbb"));
+        assert!(message.contains("handle 0000aaaa"));
+        assert!(message.contains("handle 0000bbbb"));
     }
 
     #[tokio::test]

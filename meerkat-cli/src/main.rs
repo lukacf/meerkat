@@ -4209,6 +4209,7 @@ struct CliOAuthLoginTarget {
     auth_profile: meerkat_core::AuthProfile,
 }
 
+#[cfg(all(feature = "anthropic", feature = "openai", feature = "gemini"))]
 fn resolve_configured_cli_interactive_oauth_target(
     provider: LoginProvider,
     config: &Config,

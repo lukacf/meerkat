@@ -39,7 +39,13 @@ wait "${build_pid}"
 rm -rf "${out_dir}"
 mkdir -p "${out_dir}"
 
-packfile="$(npm pack --ignore-scripts | tail -n 1)"
+pack_output="$(npm pack --ignore-scripts)"
+printf '%s\n' "${pack_output}"
+packfile="$(printf '%s\n' "${pack_output}" | awk 'NF { line = $0 } END { print line }')"
+if [[ -z "${packfile}" ]]; then
+  echo "npm pack did not report an output tarball" >&2
+  exit 1
+fi
 tarball="${out_dir}/${packfile}"
 mv "${packfile}" "${tarball}"
 

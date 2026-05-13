@@ -623,7 +623,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' &&
+              github.event.inputs.publish_web_sdk_only == 'true' &&
+              github.ref ||
+              (github.event_name == 'workflow_dispatch' &&
+               github.event.inputs.release_tag != '' &&
+               github.event.inputs.release_tag ||
+               github.ref)
+            }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -1019,7 +1028,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+          ref: >-
+            ${{
+              github.event_name == 'workflow_dispatch' &&
+              github.event.inputs.publish_web_sdk_only == 'true' &&
+              github.ref ||
+              (github.event_name == 'workflow_dispatch' &&
+               github.event.inputs.release_tag != '' &&
+               github.event.inputs.release_tag ||
+               github.ref)
+            }}
 
       - name: Setup Node
         uses: actions/setup-node@v6

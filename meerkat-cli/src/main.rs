@@ -1549,8 +1549,9 @@ enum Commands {
     /// `login` runs the interactive OAuth flow by default, or writes an
     /// inline api_key when `--non-interactive --secret <S>` is passed.
     /// Env-var auth (`RKAT_*` provider keys, ANTHROPIC_API_KEY,
-    /// OPENAI_API_KEY, GEMINI_API_KEY / GOOGLE_API_KEY) continues to work
-    /// as a fallback for callers that haven't migrated.
+    /// OPENAI_API_KEY, AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT,
+    /// GEMINI_API_KEY / GOOGLE_API_KEY) continues to work as a fallback for
+    /// callers that haven't migrated.
     Auth {
         #[command(subcommand)]
         command: AuthCommands,
@@ -1614,9 +1615,9 @@ enum AuthCommands {
         #[arg(long)]
         backend: Option<String>,
 
-        /// Auth method (e.g. `api_key`, `managed_chatgpt_oauth`,
-        /// `claude_ai_oauth`, `google_oauth`). Defaults to the primary
-        /// interactive flow for the provider.
+        /// Auth method (e.g. `api_key`, `azure_api_key`,
+        /// `managed_chatgpt_oauth`, `claude_ai_oauth`, `google_oauth`).
+        /// Defaults to the primary interactive flow for the provider.
         #[arg(long)]
         method: Option<String>,
 
@@ -4707,9 +4708,9 @@ async fn noninteractive_login(
     }
 
     let method = method_hint.unwrap_or("api_key");
-    if method != "api_key" && method != "static_bearer" {
+    if method != "api_key" && method != "azure_api_key" && method != "static_bearer" {
         anyhow::bail!(
-            "--non-interactive login supports only --method api_key|static_bearer; \
+            "--non-interactive login supports only --method api_key|azure_api_key|static_bearer; \
              OAuth-backed methods (managed_chatgpt_oauth, claude_ai_oauth, google_oauth, \
              oauth_to_api_key) require the interactive browser flow"
         );
@@ -5515,12 +5516,11 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
         println!("warn\tconfig\tmissing config at {}", config_path.display());
     }
 
-    let provider_keys: [(&str, &[&str]); 3] = [
+    let provider_keys: [(&str, &[&str]); 2] = [
         (
             "anthropic",
             &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
         ),
-        ("openai", &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]),
         (
             "gemini",
             &[
@@ -5531,13 +5531,26 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             ],
         ),
     ];
+    let openai_env_present = ["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"]
+        .iter()
+        .any(|env_key| env_var_present(env_key));
+    let azure_openai_env_present = ["RKAT_AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"]
+        .iter()
+        .any(|env_key| env_var_present(env_key))
+        && ["RKAT_AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_ENDPOINT"]
+            .iter()
+            .any(|env_key| env_var_present(env_key));
+    if openai_env_present {
+        println!("ok\tprovider\topenai via OPENAI_API_KEY");
+    } else if azure_openai_env_present {
+        println!("ok\tprovider\topenai via AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT");
+    } else {
+        println!(
+            "warn\tprovider\topenai missing RKAT_OPENAI_API_KEY/OPENAI_API_KEY or AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT"
+        );
+    }
     for (provider, env_keys) in provider_keys {
-        if let Some(env_key) = env_keys.iter().find(|env_key| {
-            std::env::var(env_key)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .is_some()
-        }) {
+        if let Some(env_key) = env_keys.iter().find(|env_key| env_var_present(env_key)) {
             println!("ok\tprovider\t{provider} via {env_key}");
         } else {
             println!("warn\tprovider\t{provider} missing {}", env_keys.join("/"));
@@ -5667,6 +5680,13 @@ async fn handle_doctor(scope: &RuntimeScope) -> anyhow::Result<()> {
             "doctor found issues; review the warnings above"
         ))
     }
+}
+
+fn env_var_present(env_key: &str) -> bool {
+    std::env::var(env_key)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .is_some()
 }
 
 async fn handle_realm_command(command: RealmCommands, scope: &RuntimeScope) -> anyhow::Result<()> {

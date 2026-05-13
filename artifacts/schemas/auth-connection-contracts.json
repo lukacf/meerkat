@@ -1,6 +1,7 @@
 {
   "auth_methods": [
     "api_key",
+    "azure_api_key",
     "static_bearer",
     "managed_chatgpt_oauth",
     "external_chatgpt_tokens",
@@ -30,6 +31,7 @@
   "backend_kinds": [
     "openai_api",
     "chatgpt_backend",
+    "azure_openai",
     "anthropic_api",
     "bedrock",
     "vertex",
@@ -81,6 +83,7 @@
     ],
     "openai": [
       "api_key",
+      "azure_api_key",
       "static_bearer",
       "managed_chatgpt_oauth",
       "external_chatgpt_tokens",
@@ -106,7 +109,8 @@
     ],
     "openai": [
       "openai_api",
-      "chatgpt_backend"
+      "chatgpt_backend",
+      "azure_openai"
     ],
     "self_hosted": [
       "self_hosted",

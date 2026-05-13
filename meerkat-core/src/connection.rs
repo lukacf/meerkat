@@ -21,6 +21,24 @@ use crate::provider_matrix::{
     AnthropicBackendKind, GoogleBackendKind, OpenAiBackendKind, SelfHostedBackendKind,
 };
 
+const AZURE_OPENAI_API_KEY_ENV: &str = "AZURE_OPENAI_API_KEY";
+const AZURE_OPENAI_ENDPOINT_ENV: &str = "AZURE_OPENAI_ENDPOINT";
+const AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT_ENV: &str =
+    "AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT";
+const AZURE_OPENAI_IMAGE_DEPLOYMENT_ENV: &str = "AZURE_OPENAI_IMAGE_DEPLOYMENT";
+const AZURE_OPENAI_IMAGE_GENERATION_API_VERSION_ENV: &str =
+    "AZURE_OPENAI_IMAGE_GENERATION_API_VERSION";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EnvDefaultSpec {
+    backend_kind: &'static str,
+    auth_method: &'static str,
+    env_var: &'static str,
+    fallback: Vec<String>,
+    base_url: Option<String>,
+    options: serde_json::Value,
+}
+
 // ---------------------------------------------------------------------
 // Runtime shapes (what providers/surfaces consume at runtime)
 // ---------------------------------------------------------------------
@@ -741,78 +759,77 @@ impl RealmConnectionSet {
     /// sourcing credentials from a well-known env var. Used by surface
     /// factories when no explicit realm config exists but the user has
     /// set `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` in
-    /// the environment — the synthesized realm is consumed by the same
-    /// `ProviderRuntimeRegistry` path as explicit realms, so env-var auth
-    /// and realm-config auth share one resolution pipeline.
+    /// the environment. OpenAI also supports an Azure env envelope:
+    /// `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_ENDPOINT` synthesizes the
+    /// `azure_openai` backend instead of public OpenAI when no public OpenAI
+    /// key is present. The synthesized realm is consumed by the same
+    /// `ProviderRuntimeRegistry` path as explicit realms, so env-var auth and
+    /// realm-config auth share one resolution pipeline.
     ///
     /// Returns a realm with id `"env_default"` containing one binding
     /// `"default"` pointing at:
     /// - BackendProfile `"default"` with the provider's default
     ///   backend_kind and base_url=None (provider client uses its default).
-    /// - AuthProfile `"default"` with `source = Env { env: <ENV_VAR> }`,
-    ///   `auth_method = "api_key"`.
+    /// - AuthProfile `"default"` with `source = Env { env: <ENV_VAR> }` and
+    ///   the provider-specific env auth method.
     ///
     /// The ENV_VAR name is per-provider:
     /// - Anthropic: `ANTHROPIC_API_KEY`
     /// - OpenAI:   `OPENAI_API_KEY`
+    /// - Azure OpenAI: `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_ENDPOINT`
     /// - Google:   `GEMINI_API_KEY`
     ///
     /// Callers should also honor `RKAT_*`-prefixed overrides via
     /// `ResolverEnvironment::with_process_env()`; that lookup is applied
     /// inside the registry's resolve path when it reads the env source.
     pub fn synthesize_env_default(provider: Provider) -> Self {
-        Self::synthesize_default(provider, None)
+        Self::synthesize_env_default_from_lookup(provider, |key| std::env::var(key).ok())
+    }
+
+    /// Testable variant of [`Self::synthesize_env_default`] that lets callers
+    /// inject the env lookup used to select the OpenAI public-vs-Azure default.
+    pub fn synthesize_env_default_from_lookup<F>(provider: Provider, env_lookup: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let spec = env_default_spec(provider, env_lookup);
+        Self::synthesize_default_from_spec(provider, None, spec)
     }
 
     /// Synthesize a default realm with an inline secret instead of an env
     /// lookup. Used when callers have already read the api key from a
     /// config file (legacy credential-map path).
     pub fn synthesize_inline_default(provider: Provider, secret: String) -> Self {
-        Self::synthesize_default(provider, Some(secret))
+        Self::synthesize_default_from_spec(
+            provider,
+            Some(secret),
+            env_default_spec(provider, |_| None),
+        )
     }
 
-    fn synthesize_default(provider: Provider, inline_secret: Option<String>) -> Self {
-        let (backend_kind, env_var, fallback) = match provider {
-            Provider::Anthropic => (
-                AnthropicBackendKind::AnthropicApi.as_str(),
-                "ANTHROPIC_API_KEY",
-                vec![],
-            ),
-            Provider::OpenAI => (
-                OpenAiBackendKind::OpenAiApi.as_str(),
-                "OPENAI_API_KEY",
-                vec![],
-            ),
-            Provider::Gemini => (
-                GoogleBackendKind::GoogleGenAi.as_str(),
-                "GEMINI_API_KEY",
-                vec!["GOOGLE_API_KEY".to_string()],
-            ),
-            Provider::SelfHosted => (
-                SelfHostedBackendKind::SelfHosted.as_str(),
-                "RKAT_SELF_HOSTED_API_KEY",
-                vec![],
-            ),
-            Provider::Other => ("other_api", "RKAT_OTHER_API_KEY", vec![]),
-        };
+    fn synthesize_default_from_spec(
+        provider: Provider,
+        inline_secret: Option<String>,
+        spec: EnvDefaultSpec,
+    ) -> Self {
         let backend = BackendProfile {
             id: "default".to_string(),
             provider,
-            backend_kind: backend_kind.to_string(),
-            base_url: None,
-            options: serde_json::Value::Null,
+            backend_kind: spec.backend_kind.to_string(),
+            base_url: spec.base_url,
+            options: spec.options,
         };
         let source = match inline_secret {
             Some(secret) => CredentialSourceSpec::InlineSecret { secret },
             None => CredentialSourceSpec::Env {
-                env: env_var.to_string(),
-                fallback,
+                env: spec.env_var.to_string(),
+                fallback: spec.fallback,
             },
         };
         let auth = AuthProfile {
             id: "default".to_string(),
             provider,
-            auth_method: "api_key".to_string(),
+            auth_method: spec.auth_method.to_string(),
             source,
             constraints: AuthConstraints::default(),
             metadata_defaults: AuthMetadataDefaults::default(),
@@ -1015,6 +1032,123 @@ impl RealmConfigSection {
     }
 }
 
+fn env_default_spec<F>(provider: Provider, env_lookup: F) -> EnvDefaultSpec
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match provider {
+        Provider::Anthropic => EnvDefaultSpec {
+            backend_kind: AnthropicBackendKind::AnthropicApi.as_str(),
+            auth_method: "api_key",
+            env_var: "ANTHROPIC_API_KEY",
+            fallback: vec![],
+            base_url: None,
+            options: serde_json::Value::Null,
+        },
+        Provider::OpenAI => openai_env_default_spec(env_lookup),
+        Provider::Gemini => EnvDefaultSpec {
+            backend_kind: GoogleBackendKind::GoogleGenAi.as_str(),
+            auth_method: "api_key",
+            env_var: "GEMINI_API_KEY",
+            fallback: vec!["GOOGLE_API_KEY".to_string()],
+            base_url: None,
+            options: serde_json::Value::Null,
+        },
+        Provider::SelfHosted => EnvDefaultSpec {
+            backend_kind: SelfHostedBackendKind::SelfHosted.as_str(),
+            auth_method: "api_key",
+            env_var: "RKAT_SELF_HOSTED_API_KEY",
+            fallback: vec![],
+            base_url: None,
+            options: serde_json::Value::Null,
+        },
+        Provider::Other => EnvDefaultSpec {
+            backend_kind: "other_api",
+            auth_method: "api_key",
+            env_var: "RKAT_OTHER_API_KEY",
+            fallback: vec![],
+            base_url: None,
+            options: serde_json::Value::Null,
+        },
+    }
+}
+
+fn openai_env_default_spec<F>(env_lookup: F) -> EnvDefaultSpec
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let public_openai_key = env_value_with_rkat(&env_lookup, "OPENAI_API_KEY");
+    let azure_key = env_value_with_rkat(&env_lookup, AZURE_OPENAI_API_KEY_ENV);
+    let azure_endpoint = env_value_with_rkat(&env_lookup, AZURE_OPENAI_ENDPOINT_ENV);
+    let azure_explicit = direct_env_value(&env_lookup, &format!("RKAT_{AZURE_OPENAI_API_KEY_ENV}"))
+        .is_some()
+        || direct_env_value(&env_lookup, &format!("RKAT_{AZURE_OPENAI_ENDPOINT_ENV}")).is_some();
+    if azure_key.is_some()
+        && let Some(endpoint) = azure_endpoint
+        && (azure_explicit || public_openai_key.is_none())
+    {
+        let mut options = serde_json::Map::new();
+        if let Some(deployment) =
+            env_value_with_rkat(&env_lookup, AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT_ENV)
+                .or_else(|| env_value_with_rkat(&env_lookup, AZURE_OPENAI_IMAGE_DEPLOYMENT_ENV))
+        {
+            options.insert(
+                "image_generation_deployment".to_string(),
+                serde_json::Value::String(deployment),
+            );
+        }
+        if let Some(api_version) =
+            env_value_with_rkat(&env_lookup, AZURE_OPENAI_IMAGE_GENERATION_API_VERSION_ENV)
+        {
+            options.insert(
+                "image_generation_api_version".to_string(),
+                serde_json::Value::String(api_version),
+            );
+        }
+        return EnvDefaultSpec {
+            backend_kind: OpenAiBackendKind::AzureOpenAi.as_str(),
+            auth_method: "azure_api_key",
+            env_var: AZURE_OPENAI_API_KEY_ENV,
+            fallback: vec![],
+            base_url: Some(endpoint),
+            options: if options.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(options)
+            },
+        };
+    }
+    EnvDefaultSpec {
+        backend_kind: OpenAiBackendKind::OpenAiApi.as_str(),
+        auth_method: "api_key",
+        env_var: "OPENAI_API_KEY",
+        fallback: vec![],
+        base_url: None,
+        options: serde_json::Value::Null,
+    }
+}
+
+fn env_value_with_rkat<F>(env_lookup: &F, candidate: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let rkat_override = if candidate.starts_with("RKAT_") {
+        None
+    } else {
+        direct_env_value(env_lookup, &format!("RKAT_{candidate}"))
+    };
+    rkat_override.or_else(|| direct_env_value(env_lookup, candidate))
+}
+
+fn direct_env_value<F>(env_lookup: &F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    env_lookup(key)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Serialized backend profile (pre-normalization).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -1088,6 +1222,16 @@ backend_profile = "openai_default"
 auth_profile = "openai_oauth"
 "#,
         )
+    }
+
+    fn lookup_from_pairs(
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> impl Fn(&str) -> Option<String> {
+        move |key| {
+            pairs
+                .iter()
+                .find_map(|(candidate, value)| (*candidate == key).then(|| (*value).to_string()))
+        }
     }
 
     #[test]
@@ -1193,6 +1337,101 @@ auth_profile = "default_profile"
             err.to_string().contains("nonexistent") || err.to_string().contains("unknown variant"),
             "serde error should mention unknown variant: {err}",
         );
+    }
+
+    #[test]
+    fn env_default_openai_uses_public_openai_without_azure_envelope() {
+        let realm = RealmConnectionSet::synthesize_env_default_from_lookup(
+            Provider::OpenAI,
+            lookup_from_pairs(&[]),
+        );
+        let backend = realm.backends.get("default").unwrap();
+        let auth = realm.auth_profiles.get("default").unwrap();
+
+        assert_eq!(backend.backend_kind, "openai_api");
+        assert_eq!(backend.base_url, None);
+        assert_eq!(auth.auth_method, "api_key");
+        assert_eq!(
+            auth.source,
+            CredentialSourceSpec::Env {
+                env: "OPENAI_API_KEY".to_string(),
+                fallback: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn env_default_openai_uses_azure_when_key_and_endpoint_are_present() {
+        let realm = RealmConnectionSet::synthesize_env_default_from_lookup(
+            Provider::OpenAI,
+            lookup_from_pairs(&[
+                ("AZURE_OPENAI_API_KEY", "azure-key"),
+                ("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com/"),
+                ("AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT", "gpt-image-2"),
+                ("AZURE_OPENAI_IMAGE_GENERATION_API_VERSION", "preview"),
+            ]),
+        );
+        let backend = realm.backends.get("default").unwrap();
+        let auth = realm.auth_profiles.get("default").unwrap();
+
+        assert_eq!(backend.backend_kind, "azure_openai");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://example.openai.azure.com/")
+        );
+        assert_eq!(
+            backend.options["image_generation_deployment"],
+            "gpt-image-2"
+        );
+        assert_eq!(backend.options["image_generation_api_version"], "preview");
+        assert_eq!(auth.auth_method, "azure_api_key");
+        assert_eq!(
+            auth.source,
+            CredentialSourceSpec::Env {
+                env: "AZURE_OPENAI_API_KEY".to_string(),
+                fallback: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn env_default_openai_keeps_public_key_when_plain_azure_and_public_keys_are_both_set() {
+        let realm = RealmConnectionSet::synthesize_env_default_from_lookup(
+            Provider::OpenAI,
+            lookup_from_pairs(&[
+                ("OPENAI_API_KEY", "public-key"),
+                ("AZURE_OPENAI_API_KEY", "azure-key"),
+                ("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com"),
+            ]),
+        );
+        let backend = realm.backends.get("default").unwrap();
+
+        assert_eq!(backend.backend_kind, "openai_api");
+        assert_eq!(backend.base_url, None);
+    }
+
+    #[test]
+    fn env_default_openai_rkat_azure_envelope_overrides_public_openai_key() {
+        let realm = RealmConnectionSet::synthesize_env_default_from_lookup(
+            Provider::OpenAI,
+            lookup_from_pairs(&[
+                ("OPENAI_API_KEY", "public-key"),
+                ("RKAT_AZURE_OPENAI_API_KEY", "azure-key"),
+                (
+                    "RKAT_AZURE_OPENAI_ENDPOINT",
+                    "https://example.openai.azure.com",
+                ),
+            ]),
+        );
+        let backend = realm.backends.get("default").unwrap();
+        let auth = realm.auth_profiles.get("default").unwrap();
+
+        assert_eq!(backend.backend_kind, "azure_openai");
+        assert_eq!(
+            backend.base_url.as_deref(),
+            Some("https://example.openai.azure.com")
+        );
+        assert_eq!(auth.auth_method, "azure_api_key");
     }
 
     #[test]

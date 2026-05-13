@@ -36,7 +36,9 @@ pub use meerkat_core::auth::token_store::{
 
 pub fn persisted_auth_mode_for_auth_method(auth_method: &str) -> Option<PersistedAuthMode> {
     match auth_method {
-        "api_key" | "api_key_express" | "foundry_api_key" => Some(PersistedAuthMode::ApiKey),
+        "api_key" | "api_key_express" | "foundry_api_key" | "azure_api_key" => {
+            Some(PersistedAuthMode::ApiKey)
+        }
         "static_bearer" | "bearer_api_key" | "bedrock_bearer" => {
             Some(PersistedAuthMode::StaticBearer)
         }
@@ -120,6 +122,14 @@ impl TokenStoreBackend {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn azure_openai_api_key_uses_api_key_token_store_mode() {
+        assert_eq!(
+            persisted_auth_mode_for_auth_method("azure_api_key"),
+            Some(PersistedAuthMode::ApiKey)
+        );
+    }
 
     #[test]
     fn persisted_tokens_round_trip_serde() {

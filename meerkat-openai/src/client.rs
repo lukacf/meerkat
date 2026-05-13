@@ -45,7 +45,7 @@ pub struct OpenAiClient {
     api_key: Option<String>,
     base_url: String,
     responses_path: String,
-    chatgpt_backend_wire: bool,
+    backend_wire: OpenAiBackendWire,
     http: reqwest::Client,
     /// Extra headers emitted on every request (e.g. `ChatGPT-Account-ID`,
     /// `X-OpenAI-Fedramp`). Populated by provider runtimes when the
@@ -57,6 +57,28 @@ pub struct OpenAiClient {
     /// invocation. Used for ExternalAuthorizer flows that produce a
     /// DynamicAuthorizer envelope (host-managed OAuth refresh, etc.).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AzureOpenAiWireConfig {
+    pub image_generation_deployment: Option<String>,
+    pub image_generation_api_version: String,
+}
+
+impl Default for AzureOpenAiWireConfig {
+    fn default() -> Self {
+        Self {
+            image_generation_deployment: None,
+            image_generation_api_version: "preview".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenAiBackendWire {
+    PublicOpenAi,
+    ChatGptBackend,
+    AzureOpenAi(AzureOpenAiWireConfig),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -359,7 +381,7 @@ impl OpenAiClient {
             api_key,
             base_url,
             responses_path: "v1/responses".to_string(),
-            chatgpt_backend_wire: false,
+            backend_wire: OpenAiBackendWire::PublicOpenAi,
             http,
             extra_headers: Vec::new(),
             authorizer: None,
@@ -386,8 +408,13 @@ impl OpenAiClient {
 
     pub fn with_chatgpt_backend_wire(self) -> Self {
         let mut client = self.with_responses_path("responses");
-        client.chatgpt_backend_wire = true;
+        client.backend_wire = OpenAiBackendWire::ChatGptBackend;
         client
+    }
+
+    pub fn with_azure_openai_wire(mut self, config: AzureOpenAiWireConfig) -> Self {
+        self.backend_wire = OpenAiBackendWire::AzureOpenAi(config);
+        self
     }
 
     /// Attach a dynamic authorizer. When set, overrides the
@@ -404,6 +431,55 @@ impl OpenAiClient {
 
     pub fn extra_headers(&self) -> &[(String, String)] {
         &self.extra_headers
+    }
+
+    fn is_chatgpt_backend_wire(&self) -> bool {
+        matches!(self.backend_wire, OpenAiBackendWire::ChatGptBackend)
+    }
+
+    fn azure_openai_wire_config(&self) -> Option<&AzureOpenAiWireConfig> {
+        match &self.backend_wire {
+            OpenAiBackendWire::AzureOpenAi(config) => Some(config),
+            OpenAiBackendWire::PublicOpenAi | OpenAiBackendWire::ChatGptBackend => None,
+        }
+    }
+
+    async fn apply_request_headers(
+        &self,
+        mut request_builder: reqwest::RequestBuilder,
+        endpoint: &str,
+        request_extra_headers: &[(String, String)],
+    ) -> Result<reqwest::RequestBuilder, LlmError> {
+        if let Some(authorizer) = &self.authorizer {
+            let mut extra: Vec<(String, String)> = Vec::new();
+            let mut auth_req = meerkat_core::HttpAuthorizationRequest {
+                method: "POST",
+                url: endpoint,
+                headers: &mut extra,
+            };
+            authorizer.authorize(&mut auth_req).await.map_err(|e| {
+                LlmError::AuthenticationFailed {
+                    message: format!("openai authorizer failed: {e}"),
+                }
+            })?;
+            for (name, value) in extra {
+                request_builder = request_builder.header(name, value);
+            }
+        } else if let Some(api_key) = &self.api_key {
+            if self.azure_openai_wire_config().is_some() {
+                request_builder = request_builder.header("api-key", api_key);
+            } else {
+                request_builder =
+                    request_builder.header("Authorization", format!("Bearer {api_key}"));
+            }
+        }
+        for (name, value) in &self.extra_headers {
+            request_builder = request_builder.header(name, value);
+        }
+        for (name, value) in request_extra_headers {
+            request_builder = request_builder.header(name, value);
+        }
+        Ok(request_builder)
     }
 
     fn responses_endpoint(&self) -> String {
@@ -425,7 +501,7 @@ impl OpenAiClient {
 
     /// Build request body for OpenAI Responses API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
-        let (input, instructions) = if self.chatgpt_backend_wire {
+        let (input, instructions) = if self.is_chatgpt_backend_wire() {
             Self::convert_to_responses_input_with_system_mode(
                 &request.messages,
                 SystemMessageMode::ExtractToInstructions,
@@ -453,7 +529,7 @@ impl OpenAiClient {
             });
         }
 
-        if self.chatgpt_backend_wire {
+        if self.is_chatgpt_backend_wire() {
             body["instructions"] = Value::String(
                 instructions.unwrap_or_else(|| "You are a helpful assistant.".to_string()),
             );
@@ -893,31 +969,23 @@ impl OpenAiClient {
         endpoint: &str,
         body: &Value,
     ) -> Result<reqwest::Response, LlmError> {
+        self.post_json_to_openai_with_headers(endpoint, body, &[])
+            .await
+    }
+
+    async fn post_json_to_openai_with_headers(
+        &self,
+        endpoint: &str,
+        body: &Value,
+        request_extra_headers: &[(String, String)],
+    ) -> Result<reqwest::Response, LlmError> {
         let mut request_builder = self
             .http
             .post(endpoint)
             .header("Content-Type", "application/json");
-        if let Some(authorizer) = &self.authorizer {
-            let mut extra: Vec<(String, String)> = Vec::new();
-            let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-                method: "POST",
-                url: endpoint,
-                headers: &mut extra,
-            };
-            authorizer.authorize(&mut auth_req).await.map_err(|e| {
-                LlmError::AuthenticationFailed {
-                    message: format!("openai authorizer failed: {e}"),
-                }
-            })?;
-            for (name, value) in extra {
-                request_builder = request_builder.header(name, value);
-            }
-        } else if let Some(api_key) = &self.api_key {
-            request_builder = request_builder.header("Authorization", format!("Bearer {api_key}"));
-        }
-        for (name, value) in &self.extra_headers {
-            request_builder = request_builder.header(name, value);
-        }
+        request_builder = self
+            .apply_request_headers(request_builder, endpoint, request_extra_headers)
+            .await?;
         request_builder.json(body).send().await.map_err(|e| {
             if e.is_timeout() {
                 LlmError::NetworkTimeout { duration_ms: 30000 }
@@ -952,10 +1020,12 @@ impl OpenAiClient {
             "type".to_string(),
             serde_json::Value::String(plan.tool_name),
         );
-        tool.insert(
-            "model".to_string(),
-            serde_json::Value::String(plan.model.to_string()),
-        );
+        if self.azure_openai_wire_config().is_none() {
+            tool.insert(
+                "model".to_string(),
+                serde_json::Value::String(plan.model.to_string()),
+            );
+        }
         Self::apply_image_output_options(&mut tool, &plan.output);
         Self::apply_openai_image_provider_params(&mut tool, &plan.provider_params, true);
         let mut tools = Vec::new();
@@ -963,7 +1033,7 @@ impl OpenAiClient {
             tools.push(web_search_tool);
         }
         tools.push(serde_json::Value::Object(tool));
-        let stream = self.chatgpt_backend_wire;
+        let stream = self.is_chatgpt_backend_wire();
         let body = serde_json::json!({
             "model": request.model,
             "input": input,
@@ -977,8 +1047,32 @@ impl OpenAiClient {
         if let Some(effort) = plan.provider_params.reasoning_effort {
             body["reasoning"] = serde_json::json!({ "effort": effort.as_legacy_str() });
         }
+        let mut extra_headers = Vec::new();
+        if let Some(config) = self.azure_openai_wire_config() {
+            let deployment = config
+                .image_generation_deployment
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| LlmError::InvalidConfig {
+                    message: "azure_openai image generation requires backend option `image_generation_deployment`".to_string(),
+                })?;
+            extra_headers.push((
+                "x-ms-oai-image-generation-deployment".to_string(),
+                deployment.to_string(),
+            ));
+            let api_version = config.image_generation_api_version.trim();
+            if api_version.is_empty() {
+                return Err(LlmError::InvalidConfig {
+                    message: "azure_openai image generation requires a non-empty `image_generation_api_version`".to_string(),
+                });
+            }
+            extra_headers.push(("api_version".to_string(), api_version.to_string()));
+        }
         let endpoint = self.responses_endpoint();
-        let response = self.post_json_to_openai(&endpoint, &body).await?;
+        let response = self
+            .post_json_to_openai_with_headers(&endpoint, &body, &extra_headers)
+            .await?;
         if stream {
             let status_code = response.status().as_u16();
             if (200..=299).contains(&status_code) {
@@ -1419,29 +1513,7 @@ impl LlmClient for OpenAiClient {
                 .http
                 .post(&endpoint)
                 .header("Content-Type", "application/json");
-            // Auth path: authorizer overrides Bearer<api_key>.
-            if let Some(authorizer) = &self.authorizer {
-                let mut extra: Vec<(String, String)> = Vec::new();
-                let mut auth_req = meerkat_core::HttpAuthorizationRequest {
-                    method: "POST",
-                    url: &endpoint,
-                    headers: &mut extra,
-                };
-                authorizer.authorize(&mut auth_req).await.map_err(|e| {
-                    LlmError::AuthenticationFailed {
-                        message: format!("openai authorizer failed: {e}"),
-                    }
-                })?;
-                for (name, value) in extra {
-                    request_builder = request_builder.header(name, value);
-                }
-            } else if let Some(api_key) = &self.api_key {
-                request_builder =
-                    request_builder.header("Authorization", format!("Bearer {api_key}"));
-            }
-            for (name, value) in &self.extra_headers {
-                request_builder = request_builder.header(name, value);
-            }
+            request_builder = self.apply_request_headers(request_builder, &endpoint, &[]).await?;
             let response = request_builder
                 .json(&body)
                 .send()
@@ -2112,7 +2184,9 @@ fn parse_tool_call_arguments(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use axum::{Json, Router, extract::State, response::IntoResponse, routing::post};
+    use axum::{
+        Json, Router, extract::State, http::HeaderMap, response::IntoResponse, routing::post,
+    };
     use meerkat_core::{
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, MediaType, ProviderImageMetadata,
         RevisedPromptDisposition, ToolResult, UserMessage, VideoData,
@@ -2446,16 +2520,44 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct HeaderStreamStubState {
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+        seen_headers: Arc<Mutex<Vec<HeaderMap>>>,
+    }
+
+    async fn responses_sse_with_body_and_headers(
+        State(state): State<HeaderStreamStubState>,
+        headers: HeaderMap,
+        Json(body): Json<Value>,
+    ) -> impl IntoResponse {
+        state.seen.lock().expect("seen mutex").push(body);
+        state
+            .seen_headers
+            .lock()
+            .expect("seen headers mutex")
+            .push(headers);
+        ([("content-type", "text/event-stream")], state.payload)
+    }
+
+    #[derive(Clone)]
     struct ImageStubState {
         response: Value,
         seen: Arc<Mutex<Vec<Value>>>,
+        seen_headers: Arc<Mutex<Vec<HeaderMap>>>,
     }
 
     async fn openai_image_stub(
         State(state): State<ImageStubState>,
+        headers: HeaderMap,
         Json(body): Json<Value>,
     ) -> impl IntoResponse {
         state.seen.lock().expect("seen mutex").push(body);
+        state
+            .seen_headers
+            .lock()
+            .expect("seen headers mutex")
+            .push(headers);
         Json(state.response)
     }
 
@@ -2490,15 +2592,54 @@ mod tests {
         (format!("http://{addr}"), handle)
     }
 
+    async fn spawn_azure_responses_stub_server(
+        payload: String,
+        seen: Arc<Mutex<Vec<Value>>>,
+        seen_headers: Arc<Mutex<Vec<HeaderMap>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route(
+                "/openai/v1/responses",
+                post(responses_sse_with_body_and_headers),
+            )
+            .with_state(HeaderStreamStubState {
+                payload,
+                seen,
+                seen_headers,
+            });
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve test server");
+        });
+        (format!("http://{addr}"), handle)
+    }
+
     async fn spawn_openai_image_stub(
         response: Value,
         seen: Arc<Mutex<Vec<Value>>>,
     ) -> (String, tokio::task::JoinHandle<()>) {
+        let seen_headers = Arc::new(Mutex::new(Vec::new()));
+        spawn_openai_image_stub_with_headers(response, seen, seen_headers).await
+    }
+
+    async fn spawn_openai_image_stub_with_headers(
+        response: Value,
+        seen: Arc<Mutex<Vec<Value>>>,
+        seen_headers: Arc<Mutex<Vec<HeaderMap>>>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new()
             .route("/v1/responses", post(openai_image_stub))
+            .route("/openai/v1/responses", post(openai_image_stub))
             .route("/responses", post(openai_image_stub))
             .route("/v1/images/generations", post(openai_image_stub))
-            .with_state(ImageStubState { response, seen });
+            .with_state(ImageStubState {
+                response,
+                seen,
+                seen_headers,
+            });
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind test server");
@@ -2728,6 +2869,97 @@ mod tests {
         assert!(body.get("stream").and_then(Value::as_bool) == Some(false));
 
         handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_openai_hosted_image_uses_deployment_header_and_omits_tool_model()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_headers = Arc::new(Mutex::new(Vec::new()));
+        let response = serde_json::json!({
+            "id": "resp_img_azure",
+            "output": [{
+                "type": "image_generation_call",
+                "id": "ig_azure",
+                "result": "data:image/png;base64,aGVsbG8="
+            }]
+        });
+        let (base_url, handle) =
+            spawn_openai_image_stub_with_headers(response, seen.clone(), seen_headers.clone())
+                .await;
+        let client =
+            OpenAiClient::new_with_base_url("azure-key".to_string(), format!("{base_url}/openai"))
+                .with_azure_openai_wire(AzureOpenAiWireConfig {
+                    image_generation_deployment: Some("gpt-image-2".to_string()),
+                    image_generation_api_version: "preview".to_string(),
+                });
+        let mut request = image_executor_request_json(hosted_openai_plan_json());
+        request.model = "gpt-5.5".to_string();
+
+        let output = client.execute_image_generation(request).await?;
+
+        assert!(matches!(
+            output.terminal,
+            ImageOperationTerminalClass::Generated
+        ));
+        let headers = seen_headers.lock().expect("seen headers mutex");
+        let headers = headers.first().expect("captured Azure image headers");
+        assert_eq!(
+            headers.get("api-key").and_then(|v| v.to_str().ok()),
+            Some("azure-key")
+        );
+        assert!(headers.get("authorization").is_none());
+        assert_eq!(
+            headers
+                .get("x-ms-oai-image-generation-deployment")
+                .and_then(|v| v.to_str().ok()),
+            Some("gpt-image-2")
+        );
+        assert_eq!(
+            headers.get("api_version").and_then(|v| v.to_str().ok()),
+            Some("preview")
+        );
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured Azure image request");
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["tools"][0]["type"], "image_generation");
+        assert!(
+            !body["tools"][0]
+                .as_object()
+                .expect("tool object")
+                .contains_key("model"),
+            "Azure Responses image generation selects the image deployment via header"
+        );
+        assert_eq!(body["stream"], false);
+        assert_eq!(body["store"], false);
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_openai_hosted_image_requires_image_generation_deployment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = OpenAiClient::new_with_base_url(
+            "azure-key".to_string(),
+            "http://127.0.0.1:1/openai".to_string(),
+        )
+        .with_azure_openai_wire(AzureOpenAiWireConfig::default());
+
+        let err = match client
+            .execute_image_generation(image_executor_request_json(hosted_openai_plan_json()))
+            .await
+        {
+            Ok(_) => panic!("missing Azure image deployment should fail before HTTP"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            LlmError::InvalidConfig { message }
+                if message.contains("image_generation_deployment")
+        ));
         Ok(())
     }
 
@@ -3057,6 +3289,56 @@ mod tests {
                 .all(|item| item.get("role").and_then(Value::as_str) != Some("system")),
             "ChatGPT Codex backend rejects system messages in input; they must be lifted to instructions"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_openai_wire_uses_api_key_header_and_openai_responses_path()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let payload = [
+            r#"data: {"type":"response.output_text.delta","delta":"Hello from Azure"}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":3}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_headers = Arc::new(Mutex::new(Vec::new()));
+        let (base_url, server) =
+            spawn_azure_responses_stub_server(payload, seen.clone(), seen_headers.clone()).await;
+        let client =
+            OpenAiClient::new_with_base_url("azure-key".to_string(), format!("{base_url}/openai"))
+                .with_azure_openai_wire(AzureOpenAiWireConfig::default());
+        let request = LlmRequest::new(
+            "gpt-5.5",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let mut stream = client.stream(&request);
+        let mut deltas = Vec::new();
+        while let Some(event) = stream.next().await {
+            match event? {
+                LlmEvent::TextDelta { delta, .. } => deltas.push(delta),
+                LlmEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        server.abort();
+
+        assert_eq!(deltas, vec!["Hello from Azure"]);
+        let headers = seen_headers.lock().expect("seen headers mutex");
+        let headers = headers.first().expect("captured Azure headers");
+        assert_eq!(
+            headers.get("api-key").and_then(|v| v.to_str().ok()),
+            Some("azure-key")
+        );
+        assert!(headers.get("authorization").is_none());
+        let bodies = seen.lock().expect("seen mutex");
+        let body = bodies.first().expect("captured Azure request body");
+        assert_eq!(body["model"], "gpt-5.5");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["store"], false);
+        assert!(body.get("max_output_tokens").is_some());
         Ok(())
     }
 

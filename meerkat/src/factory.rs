@@ -92,6 +92,16 @@ use crate::compose_tools_with_comms;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{create_default_hook_engine, resolve_layered_hooks_config};
 
+#[cfg(feature = "openai")]
+fn is_azure_openai_connection(connection: &meerkat_providers::ResolvedConnection) -> bool {
+    matches!(
+        connection.backend,
+        meerkat_providers::NormalizedBackendKind::OpenAi(
+            meerkat_core::provider_matrix::OpenAiBackendKind::AzureOpenAi
+        )
+    )
+}
+
 /// Ephemeral in-process store used when no storage backend feature is enabled.
 #[cfg(not(feature = "memory-store"))]
 #[derive(Default)]
@@ -1677,6 +1687,12 @@ impl AgentFactory {
             .resolve(&realm, &auth_binding, &env)
             .await
             .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+        if is_azure_openai_connection(&connection) {
+            return Err(BuildAgentError::ConnectionResolution(
+                "azure_openai does not support the OpenAI realtime sideband in Meerkat v1"
+                    .to_string(),
+            ));
+        }
         let secret = connection.resolved_secret().ok_or_else(|| {
             BuildAgentError::ConnectionResolution(
                 "OpenAI realtime sideband requires resolved inline credential material".to_string(),
@@ -3427,6 +3443,14 @@ impl AgentFactory {
                         }
                         #[cfg(feature = "openai-realtime")]
                         if realtime_route {
+                            if is_azure_openai_connection(&connection) {
+                                return Err(BuildAgentError::ConnectionResolution(format!(
+                                    "model '{}' advertises ModelCapabilities.realtime=true, \
+                                     but azure_openai does not support the OpenAI realtime \
+                                     text adapter in Meerkat v1",
+                                    build_config.model
+                                )));
+                            }
                             let secret = connection.resolved_secret().ok_or_else(|| {
                                 BuildAgentError::ConnectionResolution(
                                     "openai realtime text adapter requires an inline API key (\

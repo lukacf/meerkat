@@ -4,8 +4,9 @@ description: "Realm-scoped credential resolution: from the env-var happy path to
 icon: "key"
 ---
 
-Meerkat's auth story has two layers. The **fast path** is an env var
-(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — set it and
+Meerkat's auth story has two layers. The **fast path** is env vars
+(`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, or
+`AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_ENDPOINT`) — set them and
 `rkat run` works. The **powerful path** is realm-scoped bindings:
 declare a realm in your config, register credentials via `rkat auth
 login` or the REST/RPC surfaces, and pass `--auth-binding
@@ -43,11 +44,17 @@ That's it. If the env var is set, Meerkat synthesizes a default realm
 env vars (e.g., `RKAT_ANTHROPIC_API_KEY`) take precedence over the
 provider-native names.
 
-| Provider  | Primary env var       | Fallback         |
-|-----------|-----------------------|------------------|
-| Anthropic | `ANTHROPIC_API_KEY`   | —                |
-| OpenAI    | `OPENAI_API_KEY`      | —                |
-| Gemini    | `GEMINI_API_KEY`      | `GOOGLE_API_KEY` |
+| Provider | Primary env var | Fallback |
+|----------|-----------------|----------|
+| Anthropic | `ANTHROPIC_API_KEY` | — |
+| OpenAI | `OPENAI_API_KEY` | — |
+| OpenAI on Azure | `AZURE_OPENAI_API_KEY` plus `AZURE_OPENAI_ENDPOINT` | Optional `AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT`, `AZURE_OPENAI_IMAGE_GENERATION_API_VERSION` |
+| Gemini | `GEMINI_API_KEY` | `GOOGLE_API_KEY` |
+
+If both public OpenAI and unprefixed Azure OpenAI env vars are present, the
+public OpenAI env default wins. Use `RKAT_AZURE_OPENAI_API_KEY` plus
+`RKAT_AZURE_OPENAI_ENDPOINT`, or an explicit realm binding, to make Azure
+OpenAI the env default in that case.
 
 ## The powerful path: realms + bindings
 
@@ -92,6 +99,27 @@ backend_profile = "openai_primary"
 auth_profile    = "openai_apikey"
 ```
 
+Azure OpenAI uses the same provider id (`openai`) with an Azure-specific
+backend/auth pair:
+
+```toml
+[realm.prod.backend.azure_openai]
+provider = "openai"
+backend_kind = "azure_openai"
+base_url = "https://my-resource.cognitiveservices.azure.com"
+options = { image_generation_deployment = "gpt-image-2", image_generation_api_version = "preview" }
+
+[realm.prod.auth.azure_openai_key]
+provider = "openai"
+auth_method = "azure_api_key"
+source = { kind = "managed_store" }
+
+[realm.prod.binding.azure_openai]
+backend_profile = "azure_openai"
+auth_profile    = "azure_openai_key"
+default_model   = "gpt-5.5" # Azure deployment name
+```
+
 ### Log in
 
 ```bash
@@ -131,7 +159,7 @@ rkat run --auth-binding prod:openai   "hello"
     rkat auth refresh --realm prod <profile_id>   # force-refresh OAuth tokens
     ```
 
-    `rkat auth refresh` is a no-op for `api_key` / `static_bearer`
+    `rkat auth refresh` is a no-op for `api_key` / `azure_api_key` / `static_bearer`
     auth methods (nothing to refresh). For OAuth-backed methods it
     exchanges the persisted refresh token for a fresh access token and
     writes the new bundle back to the TokenStore.
@@ -180,6 +208,7 @@ auth_method)` pairs. The table below summarizes what's wired today.
 | Anthropic | `vertex`            | `vertex_google_auth`    | GoogleAuth / Vertex AI |
 | Anthropic | `foundry`           | `foundry_api_key`, `foundry_azure_ad` | Azure AI Foundry |
 | OpenAI    | `openai_api`        | `api_key`, `static_bearer`, `external_authorizer` | Direct to api.openai.com or host-resolved auth |
+| OpenAI    | `azure_openai`      | `azure_api_key`       | Azure OpenAI Responses API; `base_url` required; session model is the Azure deployment name |
 | OpenAI    | `chatgpt_backend`   | `managed_chatgpt_oauth` | ChatGPT Plus/Pro OAuth |
 | OpenAI    | `chatgpt_backend`   | `external_chatgpt_tokens` | Host-supplied tokens |
 | Google    | `google_genai`      | `api_key`, `bearer_api_key`, `external_authorizer` | Direct to Google GenAI or host-resolved auth |

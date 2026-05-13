@@ -11,7 +11,7 @@ This is not a standalone `image/generate` RPC. Use it by running a session with 
 ## Requirements
 
 - A runtime-backed session surface with builtins enabled. The CLI default `--tools safe` enables builtins; `--tools none` hides `generate_image`.
-- At least one configured image provider. OpenAI uses `RKAT_OPENAI_API_KEY` or `OPENAI_API_KEY`; Gemini uses `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY`.
+- At least one configured image provider. OpenAI uses `RKAT_OPENAI_API_KEY` or `OPENAI_API_KEY`; Azure OpenAI uses `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_IMAGE_GENERATION_DEPLOYMENT`; Gemini uses `RKAT_GEMINI_API_KEY`, `GEMINI_API_KEY`, or `GOOGLE_API_KEY`.
 - A blob store. CLI, REST, RPC, MCP, and persistent SDK-backed sessions wire this automatically through the runtime-backed surface.
 - `count` must be `1`. Multiple image output is rejected today with `unsupported_count`; run multiple operations if you need several variants.
 
@@ -178,6 +178,7 @@ Meerkat fields and OpenAI lowering:
 Model behavior:
 
 - `gpt-image-2` uses the hosted Responses image tool internally, but callers still pass Meerkat's `generate_image` request shape.
+- On the `azure_openai` backend, hosted image generation requires backend option `image_generation_deployment` (for example `gpt-image-2`). The session model remains the Azure text deployment name, and Meerkat selects the image deployment with Azure's Responses image-generation header.
 - `gpt-image-2` accepts flexible `WIDTHxHEIGHT` sizes when they satisfy OpenAI's constraints: both edges are multiples of 16 px, max edge is 3840 px, aspect ratio is at most 3:1, and total pixels are between 655,360 and 8,294,400. Common values include `1024x1024`, `1536x1024`, `1024x1536`, `2048x2048`, `2048x1152`, `3840x2160`, and `2160x3840`.
 - Do not copy raw Responses API JSON into `provider_params`. Use Meerkat's universal `size`, `quality`, `format`, and `intent` fields, and reserve `provider_params` for the advanced OpenAI overrides above.
 - For fresh/current image-only requests, prefer passing `provider_params.web_search` to `generate_image` over doing a separate search turn first.

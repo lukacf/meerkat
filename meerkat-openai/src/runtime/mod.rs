@@ -37,6 +37,8 @@ use meerkat_llm_core::provider_runtime::registry::ResolverEnvironment;
 use meerkat_llm_core::provider_runtime::runtime::ProviderRuntime;
 use meerkat_llm_core::{ImageGenerationExecutor, LlmClient};
 
+use crate::client::AzureOpenAiWireConfig;
+
 pub use meerkat_core::provider_matrix::openai::{OpenAiAuthMethod, OpenAiBackendKind};
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "oauth"))]
@@ -85,6 +87,45 @@ fn chatgpt_backend_base_url(configured: Option<&str>) -> String {
         OpenAiBackendKind::ChatGptBackend.default_base_url().into()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn azure_openai_base_url(configured: Option<&str>) -> Result<String, ProviderClientError> {
+    let Some(raw) = configured.map(str::trim).filter(|url| !url.is_empty()) else {
+        return Err(ProviderClientError::InvalidBaseUrl(
+            "azure_openai requires backend base_url".to_string(),
+        ));
+    };
+    let trimmed = raw.trim_end_matches('/');
+    if trimmed.ends_with("/openai") {
+        Ok(trimmed.to_string())
+    } else {
+        Ok(format!("{trimmed}/openai"))
+    }
+}
+
+fn backend_option_string(connection: &ResolvedConnection, key: &str) -> Option<String> {
+    connection
+        .backend_profile
+        .options
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn azure_openai_wire_config(connection: &ResolvedConnection) -> AzureOpenAiWireConfig {
+    AzureOpenAiWireConfig {
+        image_generation_deployment: backend_option_string(
+            connection,
+            "image_generation_deployment",
+        ),
+        image_generation_api_version: backend_option_string(
+            connection,
+            "image_generation_api_version",
+        )
+        .unwrap_or_else(|| "preview".to_string()),
     }
 }
 
@@ -153,7 +194,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
 
         let source_label = format!("openai:{}", binding.auth_profile().id);
         let lease: Arc<dyn AuthLease> = match auth_method {
-            OpenAiAuthMethod::ApiKey | OpenAiAuthMethod::StaticBearer => {
+            OpenAiAuthMethod::ApiKey
+            | OpenAiAuthMethod::AzureApiKey
+            | OpenAiAuthMethod::StaticBearer => {
                 let secret =
                     resolve_simple_secret(&binding.auth_profile().source, env, binding).await?;
                 let metadata = finalize_auth_metadata(binding, AuthMetadata::default())?;
@@ -356,6 +399,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 OpenAiBackendKind::ChatGptBackend => {
                     chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
                 }
+                OpenAiBackendKind::AzureOpenAi => {
+                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
+                }
                 OpenAiBackendKind::OpenAiApi => connection
                     .backend_profile
                     .base_url
@@ -367,6 +413,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .with_authorizer(authorizer);
             if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
                 client = client.with_chatgpt_backend_wire();
+            } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
+                client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
             }
             return Ok(Arc::new(client));
         }
@@ -403,6 +451,13 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .with_chatgpt_backend_wire();
                 Ok(Arc::new(client))
             }
+            OpenAiBackendKind::AzureOpenAi => {
+                let base_url =
+                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?;
+                let client = crate::OpenAiClient::new_with_base_url(secret, base_url)
+                    .with_azure_openai_wire(azure_openai_wire_config(&connection));
+                Ok(Arc::new(client))
+            }
         }
     }
 
@@ -423,6 +478,9 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 OpenAiBackendKind::ChatGptBackend => {
                     chatgpt_backend_base_url(connection.backend_profile.base_url.as_deref())
                 }
+                OpenAiBackendKind::AzureOpenAi => {
+                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?
+                }
                 OpenAiBackendKind::OpenAiApi => connection
                     .backend_profile
                     .base_url
@@ -434,6 +492,8 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                     .with_authorizer(authorizer);
             if matches!(backend_kind, OpenAiBackendKind::ChatGptBackend) {
                 client = client.with_chatgpt_backend_wire();
+            } else if matches!(backend_kind, OpenAiBackendKind::AzureOpenAi) {
+                client = client.with_azure_openai_wire(azure_openai_wire_config(&connection));
             }
             return Ok(Some(Arc::new(client)));
         }
@@ -458,6 +518,12 @@ impl ProviderRuntime for OpenAiProviderRuntime {
                 crate::OpenAiClient::new_with_base_url(secret, base_url)
                     .with_extra_headers(chatgpt_backend_extra_headers(&connection))
                     .with_chatgpt_backend_wire()
+            }
+            OpenAiBackendKind::AzureOpenAi => {
+                let base_url =
+                    azure_openai_base_url(connection.backend_profile.base_url.as_deref())?;
+                crate::OpenAiClient::new_with_base_url(secret, base_url)
+                    .with_azure_openai_wire(azure_openai_wire_config(&connection))
             }
         };
         Ok(Some(Arc::new(client)))
@@ -496,6 +562,14 @@ mod tests {
         assert!(ProviderRuntimeCatalog::supports(
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
             NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ManagedChatGptOauth),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::AzureApiKey),
+        ));
+        assert!(!ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ApiKey),
         ));
     }
 
@@ -656,6 +730,22 @@ mod tests {
     }
 
     #[test]
+    fn typed_catalog_validate_accepts_azure_openai_combination() {
+        let vb = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding(),
+            &backend("azure_openai"),
+            &auth("azure_api_key"),
+            &BindingPolicy::default(),
+        )
+        .expect("allowed Azure OpenAI combination");
+        assert_eq!(vb.provider(), Provider::OpenAI);
+        assert_eq!(
+            vb.backend(),
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi)
+        );
+    }
+
+    #[test]
     fn typed_catalog_validate_rejects_unknown_backend_kind() {
         let err = ProviderRuntimeCatalog::validate_binding(
             &auth_binding(),
@@ -681,6 +771,26 @@ mod tests {
             err,
             ProviderBindingError::UnsupportedCombination { .. }
         ));
+    }
+
+    #[test]
+    fn azure_openai_base_url_normalizes_resource_endpoint() {
+        assert_eq!(
+            azure_openai_base_url(Some("https://example.openai.azure.com/")).unwrap(),
+            "https://example.openai.azure.com/openai"
+        );
+        assert_eq!(
+            azure_openai_base_url(Some("https://example.openai.azure.com/openai")).unwrap(),
+            "https://example.openai.azure.com/openai"
+        );
+    }
+
+    #[test]
+    fn azure_openai_base_url_rejects_missing_value() {
+        let err = azure_openai_base_url(None).unwrap_err();
+        assert!(matches!(err, ProviderClientError::InvalidBaseUrl(_)));
+        let err = azure_openai_base_url(Some("   ")).unwrap_err();
+        assert!(matches!(err, ProviderClientError::InvalidBaseUrl(_)));
     }
 
     #[test]

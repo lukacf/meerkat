@@ -13,6 +13,7 @@ export type WireAuthProvider = typeof WIRE_AUTH_PROVIDERS[number];
 export const WIRE_BACKEND_KINDS = [
   "openai_api",
   "chatgpt_backend",
+  "azure_openai",
   "anthropic_api",
   "bedrock",
   "vertex",
@@ -28,6 +29,7 @@ export type WireBackendKind = typeof WIRE_BACKEND_KINDS[number];
 
 export const WIRE_AUTH_METHODS = [
   "api_key",
+  "azure_api_key",
   "static_bearer",
   "managed_chatgpt_oauth",
   "external_chatgpt_tokens",
@@ -59,6 +61,7 @@ export const WIRE_PROVIDER_BACKEND_KINDS = {
   openai: [
     "openai_api",
     "chatgpt_backend",
+    "azure_openai",
   ],
   gemini: [
     "google_genai",
@@ -86,6 +89,7 @@ export const WIRE_PROVIDER_AUTH_METHODS = {
   ],
   openai: [
     "api_key",
+    "azure_api_key",
     "static_bearer",
     "managed_chatgpt_oauth",
     "external_chatgpt_tokens",

@@ -14,6 +14,7 @@ pub const FEDRAMP_HEADER: &str = "X-OpenAI-Fedramp";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpenAiAuthMethod {
     ApiKey,
+    AzureApiKey,
     StaticBearer,
     ManagedChatGptOauth,
     ExternalChatGptTokens,
@@ -23,6 +24,7 @@ pub enum OpenAiAuthMethod {
 impl OpenAiAuthMethod {
     pub const ALL: &'static [Self] = &[
         Self::ApiKey,
+        Self::AzureApiKey,
         Self::StaticBearer,
         Self::ManagedChatGptOauth,
         Self::ExternalChatGptTokens,
@@ -32,6 +34,7 @@ impl OpenAiAuthMethod {
     pub fn parse(raw: &str) -> Option<Self> {
         match raw {
             "api_key" => Some(Self::ApiKey),
+            "azure_api_key" => Some(Self::AzureApiKey),
             "static_bearer" => Some(Self::StaticBearer),
             "managed_chatgpt_oauth" => Some(Self::ManagedChatGptOauth),
             "external_chatgpt_tokens" => Some(Self::ExternalChatGptTokens),
@@ -43,6 +46,7 @@ impl OpenAiAuthMethod {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ApiKey => "api_key",
+            Self::AzureApiKey => "azure_api_key",
             Self::StaticBearer => "static_bearer",
             Self::ManagedChatGptOauth => "managed_chatgpt_oauth",
             Self::ExternalChatGptTokens => "external_chatgpt_tokens",

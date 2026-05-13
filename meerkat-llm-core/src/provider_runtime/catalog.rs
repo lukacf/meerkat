@@ -207,6 +207,9 @@ impl ProviderRuntimeCatalog {
                         | OpenAiAuthMethod::ExternalAuthorizer,
                 ),
             ) | (
+                NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
+                NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::AzureApiKey),
+            ) | (
                 NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
                 NormalizedAuthMethod::OpenAi(
                     OpenAiAuthMethod::ManagedChatGptOauth | OpenAiAuthMethod::ExternalChatGptTokens,
@@ -332,6 +335,25 @@ mod tests {
     }
 
     #[test]
+    fn validate_accepts_azure_openai_api_key_combination() {
+        let binding = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding(),
+            &backend(Provider::OpenAI, "azure_openai"),
+            &auth(Provider::OpenAI, "azure_api_key"),
+            &BindingPolicy::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            binding.backend(),
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi)
+        );
+        assert_eq!(
+            binding.auth(),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::AzureApiKey)
+        );
+    }
+
+    #[test]
     fn validate_rejects_unknown_backend_kind() {
         let err = ProviderRuntimeCatalog::validate_binding(
             &auth_binding(),
@@ -371,6 +393,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_azure_openai_with_public_openai_api_key() {
+        let err = ProviderRuntimeCatalog::validate_binding(
+            &auth_binding(),
+            &backend(Provider::OpenAI, "azure_openai"),
+            &auth(Provider::OpenAI, "api_key"),
+            &BindingPolicy::default(),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ProviderBindingError::UnsupportedCombination { .. }
+        ));
+    }
+
+    #[test]
     fn validate_rejects_profile_provider_mismatch() {
         let err = ProviderRuntimeCatalog::validate_binding(
             &auth_binding(),
@@ -387,6 +424,10 @@ mod tests {
         assert!(ProviderRuntimeCatalog::supports(
             NormalizedBackendKind::OpenAi(OpenAiBackendKind::ChatGptBackend),
             NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::ManagedChatGptOauth),
+        ));
+        assert!(ProviderRuntimeCatalog::supports(
+            NormalizedBackendKind::OpenAi(OpenAiBackendKind::AzureOpenAi),
+            NormalizedAuthMethod::OpenAi(OpenAiAuthMethod::AzureApiKey),
         ));
         assert!(ProviderRuntimeCatalog::supports(
             NormalizedBackendKind::Anthropic(AnthropicBackendKind::Bedrock),

@@ -7,16 +7,18 @@ printf '%s\n' \
   meerkat-machine-dsl-core \
   meerkat-agent-build-authority \
   meerkat-core \
+  meerkat-capabilities \
   meerkat-machine-dsl \
   meerkat-models \
   meerkat-machine-schema \
   meerkat-machine-kernels \
+  meerkat-skills \
   meerkat-schedule \
+  meerkat-workgraph \
   meerkat-contracts \
   meerkat-store \
   meerkat-llm-core \
   meerkat-live \
-  meerkat-skills \
   meerkat-auth-core \
   meerkat-memory \
   meerkat-mcp \

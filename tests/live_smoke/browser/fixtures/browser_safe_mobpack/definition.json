@@ -1,3 +1,15 @@
 {
-  "id": "browser-smoke-pack"
+  "id": "browser-smoke-pack",
+  "profiles": {
+    "browser": {
+      "model": "claude-sonnet-4-5",
+      "skills": [],
+      "tools": {
+        "comms": true
+      },
+      "peer_description": "Browser-safe smoke session profile",
+      "external_addressable": true
+    }
+  },
+  "skills": {}
 }

@@ -2639,7 +2639,11 @@ describe("Mob decoder strictness", () => {
 
   it("rejects missing member status instead of fabricating unknown", async () => {
     const client = new MeerkatClient();
-    client.request = async () => ({ tokens_used: 0, is_final: false });
+    client.request = async () => ({
+      member_ref: "mob-1:lead",
+      tokens_used: 0,
+      is_final: false,
+    });
 
     await assert.rejects(
       () => client.mobMemberStatus("mob-1", "lead"),

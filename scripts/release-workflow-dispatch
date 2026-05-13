@@ -9,8 +9,9 @@ Dispatches the release workflow through the same public/default vs owner-only
 BuildBuddy backend split used by CI.
 
 Backend note: release_backend=buildbuddy covers release validation and binary
-asset builds. Registry package publish jobs, including @rkat/web, run on
-GitHub-hosted runners today; use the narrow recovery modes for retries.
+asset builds. @rkat/web is built once as a release artifact before npm
+publishing. Credentialed registry publish jobs still run on GitHub-hosted
+runners; use the narrow recovery modes for retries.
 
 Environment equivalents:
   VERSION or RELEASE_TAG     Release tag, for example v0.6.1.
@@ -192,7 +193,7 @@ else
 fi
 case "${mode}" in
   full|packages|web-sdk)
-    printf 'release workflow registry publishing: GitHub-hosted runners (use web-sdk/packages recovery for retries)\n'
+    printf 'release workflow registry publishing: prebuilt Web SDK artifact + GitHub-hosted credentialed publish (use web-sdk/packages recovery for retries)\n'
     ;;
 esac
 

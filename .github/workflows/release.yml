@@ -604,6 +604,74 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build_web_sdk_package:
+    name: Build Web SDK package
+    needs: [require_ci_green, release_validate_gate]
+    if: >-
+      always() &&
+      needs.require_ci_green.result == 'success' &&
+      (needs.release_validate_gate.result == 'success' ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_web_sdk_only == 'true' &&
+        needs.release_validate_gate.result == 'skipped')) &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_packages == 'true'))
+    runs-on: ${{ fromJSON(vars.MEERKAT_CI_RUNNER || '"ubuntu-latest"') }}
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Python + Node tooling
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install wasm-pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="0.13.1"
+          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
+          curl --fail --location --retry 5 --retry-delay 2 \
+            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
+            --output "/tmp/${archive}"
+          tar -xzf "/tmp/${archive}" -C /tmp
+          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
+          wasm-pack --version
+
+      - name: Add wasm32 target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build and pack Web SDK
+        env:
+          VERSION: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag || github.ref_name }}
+          CARGO_BUILD_JOBS: "1"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
+        run: scripts/release-build-web-sdk-package.sh "${GITHUB_WORKSPACE}/web-sdk-package"
+
+      - name: Upload Web SDK package
+        uses: actions/upload-artifact@v4
+        with:
+          name: rkat-web-package
+          path: web-sdk-package/rkat-web-*.tgz
+          if-no-files-found: error
+
   build_binaries_gate:
     name: Release binary build gate
     if: >-
@@ -835,7 +903,7 @@ jobs:
   #
   # Use registry_dry_run=true to validate without uploading.
   publish_registries:
-    name: Publish crates + SDK packages
+    name: Publish crates + Python/TypeScript SDK packages
     if: >-
       always() &&
       needs.require_ci_green.result == 'success' &&
@@ -935,127 +1003,39 @@ jobs:
             npm publish --access public
           fi
 
-      - name: Install wasm-pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="0.13.1"
-          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
-          tar -xzf "/tmp/${archive}" -C /tmp
-          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
-          wasm-pack --version
-
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
-
-      - name: Publish Web SDK
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          CARGO_BUILD_JOBS: "1"
-          CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-        working-directory: sdks/web
-        run: |
-          set -euo pipefail
-          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
-          PACKAGE_VERSION="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
-          if [[ "$DRY_RUN" != "true" ]] && npm view "$PACKAGE_VERSION" version >/dev/null 2>&1; then
-            echo "$PACKAGE_VERSION already published, skipping"
-            exit 0
-          fi
-          npm install --ignore-scripts
-          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
-          npm run build &
-          build_pid=$!
-          while kill -0 "$build_pid" 2>/dev/null; do
-            echo "Web SDK build still running..."
-            sleep 60
-          done
-          wait "$build_pid"
-          if [[ "$DRY_RUN" == "true" ]]; then
-            npm publish --access public --dry-run --ignore-scripts
-          else
-            npm publish --access public --ignore-scripts
-          fi
-
-  publish_web_sdk_recovery:
-    name: Publish Web SDK recovery
+  publish_web_sdk:
+    name: Publish Web SDK package
     if: >-
       always() &&
       needs.require_ci_green.result == 'success' &&
-      github.event_name == 'workflow_dispatch' &&
-      github.event.inputs.publish_release_packages == 'true' &&
-      github.event.inputs.publish_web_sdk_only == 'true'
-    needs: [require_ci_green]
+      needs.build_web_sdk_package.result == 'success' &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' &&
+        github.event.inputs.publish_release_packages == 'true'))
+    needs: [require_ci_green, build_web_sdk_package]
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_tag != '' && github.event.inputs.release_tag || github.ref }}
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Python + Node tooling
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.14"
       - name: Setup Node
         uses: actions/setup-node@v6
         with:
           node-version: "22"
 
-
-      - name: Install wasm-pack
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="0.13.1"
-          archive="wasm-pack-v${version}-x86_64-unknown-linux-musl.tar.gz"
-          curl --fail --location --retry 5 --retry-delay 2 \
-            "https://github.com/wasm-bindgen/wasm-pack/releases/download/v${version}/${archive}" \
-            --output "/tmp/${archive}"
-          tar -xzf "/tmp/${archive}" -C /tmp
-          install -m 0755 "/tmp/wasm-pack-v${version}-x86_64-unknown-linux-musl/wasm-pack" "$HOME/.cargo/bin/wasm-pack"
-          wasm-pack --version
-
-      - name: Add wasm32 target
-        run: rustup target add wasm32-unknown-unknown
+      - name: Download Web SDK package
+        uses: actions/download-artifact@v4
+        with:
+          name: rkat-web-package
+          path: web-sdk-package
 
       - name: Publish Web SDK
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          CARGO_BUILD_JOBS: "1"
-          CARGO_INCREMENTAL: "0"
-          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
-        working-directory: sdks/web
+          MEERKAT_REGISTRY_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}
         run: |
           set -euo pipefail
-          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && github.event.inputs.registry_dry_run == 'true' }}"
-          PACKAGE_VERSION="$(node -p "const p = require('./package.json'); p.name + '@' + p.version")"
-          if [[ "$DRY_RUN" != "true" ]] && npm view "$PACKAGE_VERSION" version >/dev/null 2>&1; then
-            echo "$PACKAGE_VERSION already published, skipping"
-            exit 0
-          fi
-          npm install --ignore-scripts
-          npm config set //registry.npmjs.org/:_authToken ${NODE_AUTH_TOKEN}
-          npm run build &
-          build_pid=$!
-          while kill -0 "$build_pid" 2>/dev/null; do
-            echo "Web SDK build still running..."
-            sleep 60
-          done
-          wait "$build_pid"
-          if [[ "$DRY_RUN" == "true" ]]; then
-            npm publish --access public --dry-run --ignore-scripts
-          else
-            npm publish --access public --ignore-scripts
-          fi
+          scripts/release-publish-web-sdk-package.sh web-sdk-package/rkat-web-*.tgz

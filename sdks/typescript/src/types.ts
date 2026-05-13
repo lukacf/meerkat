@@ -29,9 +29,9 @@ import type {
   WireToolAccessPolicy,
   WireToolFilter,
 } from "./generated/types.js";
-import type { TurnTerminalCauseKind, Usage } from "./events.js";
+import type { ToolResultError, TurnTerminalCauseKind, Usage } from "./events.js";
 
-export type { TurnTerminalCauseKind, Usage } from "./events.js";
+export type { ToolResultError, TurnTerminalCauseKind, Usage } from "./events.js";
 
 declare const peerIdBrand: unique symbol;
 declare const peerCorrelationIdBrand: unique symbol;
@@ -202,6 +202,7 @@ export interface SessionToolResult {
   readonly toolUseId: string;
   readonly content: ContentInput;
   readonly isError: boolean;
+  readonly error?: ToolResultError | null;
 }
 
 /**

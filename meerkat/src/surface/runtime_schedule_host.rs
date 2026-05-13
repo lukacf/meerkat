@@ -140,7 +140,12 @@ impl RuntimeBackedScheduleSessionHost {
                     session_id.clone(),
                 ),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                ScheduleDomainError::Internal(format!(
+                    "failed to attach runtime executor for scheduled session {session_id}: {error}"
+                ))
+            })?;
         self.update_peer_ingress_context(session_id).await;
         Ok(())
     }

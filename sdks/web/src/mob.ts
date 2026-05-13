@@ -9,6 +9,7 @@ import type {
   MobPeerTarget,
   MobStatus,
   MobLifecycleAction,
+  MobLifecycleResult,
   FlowStatus,
   AttributedEventItem,
   MemberEventItem,
@@ -61,7 +62,7 @@ interface MobWasmBindings {
   mob_spawn_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_fork_helper: (mobId: string, requestJson: string) => Promise<string>;
   mob_status: (mobId: string) => Promise<string>;
-  mob_lifecycle: (mobId: string, action: string) => Promise<void>;
+  mob_lifecycle: (mobId: string, action: string) => Promise<string>;
   mob_events: (mobId: string, afterCursor: number, limit: number) => Promise<string>;
   mob_run_flow: (mobId: string, flowId: string, params: string) => Promise<string>;
   mob_flow_status: (mobId: string, runId: string) => Promise<string>;
@@ -296,6 +297,24 @@ function parseWireHandlingMode(raw: unknown, message: string): HandlingMode {
   throw new Error(message);
 }
 
+const MOB_LIFECYCLE_ACTIONS: readonly MobLifecycleAction[] = [
+  'stop',
+  'resume',
+  'complete',
+  'reset',
+  'destroy',
+];
+
+function parseMobLifecycleAction(raw: unknown, message: string): MobLifecycleAction {
+  if (
+    typeof raw === 'string' &&
+    MOB_LIFECYCLE_ACTIONS.includes(raw as MobLifecycleAction)
+  ) {
+    return raw as MobLifecycleAction;
+  }
+  throw new Error(message);
+}
+
 export function parseMobStatusResult(
   raw: unknown,
   context = 'Invalid mob/status response',
@@ -318,6 +337,19 @@ export function parseMobStatusResult(
     mob_id: mobId,
     status,
     state: status,
+  };
+}
+
+export function parseMobLifecycleResult(
+  raw: unknown,
+  context = 'Invalid mob/lifecycle response',
+): MobLifecycleResult {
+  const record = requireRecord(raw, `${context}: malformed envelope`);
+  return {
+    mob_id: requireStringField(record, 'mob_id', `${context}: missing mob_id`),
+    action: parseMobLifecycleAction(record.action, `${context}: invalid action`),
+    ok: requireBooleanField(record, 'ok', `${context}: missing ok`),
+    destroy_report: record.destroy_report,
   };
 }
 
@@ -1055,8 +1087,11 @@ export class Mob {
   }
 
   /** Perform a lifecycle action (stop, resume, complete, destroy). */
-  async lifecycle(action: MobLifecycleAction): Promise<void> {
-    await this.bindings.mob_lifecycle(this.mobId, action);
+  async lifecycle(action: MobLifecycleAction): Promise<MobLifecycleResult> {
+    const json = await this.bindings.mob_lifecycle(this.mobId, action);
+    return parseMobLifecycleResult(
+      parseJsonPayload(json, 'Invalid mob/lifecycle response'),
+    );
   }
 
   /** Get mob events after a cursor. */

@@ -53,11 +53,20 @@ class WireToolCall:
 
 
 @dataclass
+class WireToolResultError:
+    """Structured tool error truth for transcript tool results."""
+    code: str = ''
+    message: str = ''
+    data: Optional[Any] = None
+
+
+@dataclass
 class WireToolResult:
     """Tool result transcript item."""
     tool_use_id: str = ''
     content: Optional[WireToolResultContent] = None
     is_error: Optional[bool] = None
+    error: Optional[WireToolResultError] = None
 
 
 @dataclass
@@ -1056,6 +1065,7 @@ class MobReconcileReportWire:
 class MobReconcileFailureWire:
     """Per-identity failure in a `mob/reconcile` pass."""
     agent_identity: str
+    cause: MobSpawnManyFailureCause
     error: str
     stage: WireMobReconcileStage
 

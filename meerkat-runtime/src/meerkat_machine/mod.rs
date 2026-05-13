@@ -340,6 +340,29 @@ pub(crate) use comms_drain::{CommsDrainSlot, abort_slot};
 pub(crate) use dsl_effects::{DslTransitionEffects, apply_dsl_transition_on_authority};
 pub(crate) use visibility::MachineToolVisibilityOwner;
 
+/// Typed error for a routed composition input applied to MeerkatMachine.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RoutedMeerkatInputError {
+    /// A raw runtime-internal fieldless DSL input attempted to cross the
+    /// composition seam.
+    #[error("invalid routed input: {reason}")]
+    InvalidRoutedInput { reason: String },
+    /// The consumer machine no longer owns the target session.
+    #[error("session `{session_id}` is not registered with this MeerkatMachine")]
+    SessionNotRegistered { session_id: SessionId },
+    /// The MeerkatMachine DSL refused the routed input with typed transition
+    /// truth.
+    #[error("machine transition refused: {source}")]
+    TransitionRefused {
+        #[source]
+        source: dsl::MeerkatMachineTransitionError,
+    },
+    /// Applying the input succeeded, but dispatching its resulting routed
+    /// signal/effect failed and the DSL state was rolled back.
+    #[error("routed MeerkatMachine input committed effect dispatch failed: {reason}")]
+    EffectDispatchFailed { reason: String },
+}
+
 struct StagedSessionDslInput {
     previous_state: Box<dsl::MeerkatMachineState>,
     effects: DslTransitionEffects,
@@ -712,7 +735,9 @@ impl MeerkatMachine {
 
         for effect in effects {
             if let Some(signal) = composition::lift_routed_signal(effect) {
-                composition::dispatch_routed_signal(&dispatcher, signal).await?;
+                composition::dispatch_routed_signal(&dispatcher, signal)
+                    .await
+                    .map_err(|error| error.to_string())?;
             }
         }
         Ok(())
@@ -1086,21 +1111,21 @@ impl MeerkatMachine {
     /// [`crate::meerkat_machine::composition::MeerkatConsumerSurface::apply_routed_input`];
     /// it has already projected producer fields into the typed
     /// [`dsl::MeerkatMachineInput`] shape. This method performs the
-    /// session lookup + DSL-lock-scoped apply. A typed transition error
-    /// from the kernel is surfaced as a `String` so the dispatcher can
-    /// map it onto `DispatchRefusal::ConsumerRefused`.
+    /// session lookup + DSL-lock-scoped apply. Typed transition errors
+    /// from the kernel remain typed so the composition dispatcher can
+    /// preserve machine-owned refusal truth.
     pub async fn apply_routed_meerkat_input(
         &self,
         session_id: &SessionId,
         input: dsl::MeerkatMachineInput,
-    ) -> Result<(), String> {
-        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)?;
+    ) -> Result<(), RoutedMeerkatInputError> {
+        Self::reject_raw_fieldless_runtime_internal_dsl_input(&input)
+            .map_err(|reason| RoutedMeerkatInputError::InvalidRoutedInput { reason })?;
         let sessions = self.sessions.read().await;
         let entry = sessions.get(session_id).ok_or_else(|| {
-            format!(
-                "session `{session_id}` is not registered with this MeerkatMachine; \
-                 cannot deliver routed input"
-            )
+            RoutedMeerkatInputError::SessionNotRegistered {
+                session_id: session_id.clone(),
+            }
         })?;
         let authority = Arc::clone(&entry.dsl_authority);
         drop(sessions);
@@ -1112,15 +1137,13 @@ impl MeerkatMachine {
             let previous_state = Box::new(guard.state.clone());
             let effects = dsl::MeerkatMachineMutator::apply(&mut *guard, input)
                 .map(|transition| transition.effects)
-                .map_err(|err| format!("{err}"))?;
+                .map_err(|source| RoutedMeerkatInputError::TransitionRefused { source })?;
             (previous_state, effects)
         };
         if let Err(error) = self.dispatch_routed_signals_from_effects(&effects).await {
             self.restore_session_dsl_state(session_id, previous_state)
                 .await;
-            return Err(format!(
-                "routed MeerkatMachine input committed effect dispatch failed: {error}"
-            ));
+            return Err(RoutedMeerkatInputError::EffectDispatchFailed { reason: error });
         }
         Ok(())
     }

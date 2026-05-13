@@ -106,7 +106,7 @@ pub use blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
 pub use budget::{
     Budget, BudgetDimension, BudgetExceeded, BudgetLimits, BudgetObservation, BudgetPool,
 };
-pub use checkpoint::SessionCheckpointer;
+pub use checkpoint::{SessionCheckpointError, SessionCheckpointErrorKind, SessionCheckpointer};
 pub use comms::{
     CommsCommand, EventStream, InputSource, InputStreamMode, PeerDirectoryEntry,
     PeerDirectorySource, PeerName, PeerReachability, PeerReachabilityReason, PeerRoute,
@@ -304,9 +304,10 @@ pub use types::{
     RunResult, SUPPORTED_VIDEO_MEDIA_TYPES, SecurityMode, SessionId, StopReason, SystemMessage,
     SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage,
     SystemNoticePeer, ToolCall, ToolCallIter, ToolCallView, ToolDef, ToolIdentity, ToolName,
-    ToolNameSet, ToolProvenance, ToolResult, ToolSourceId, ToolSourceKind, TranscriptSource, Usage,
-    UserMessage, VideoData, assistant_blocks_have_visible_or_actionable_output, has_images,
-    has_non_text_content, has_video, is_supported_video_media_type, validate_inline_video_blocks,
+    ToolNameSet, ToolProvenance, ToolResult, ToolResultError, ToolSourceId, ToolSourceKind,
+    TranscriptSource, Usage, UserMessage, VideoData,
+    assistant_blocks_have_visible_or_actionable_output, has_images, has_non_text_content,
+    has_video, is_supported_video_media_type, validate_inline_video_blocks,
 };
 pub use web_search::*;
 

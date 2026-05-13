@@ -177,8 +177,8 @@ PeerId = NewType("PeerId", str)
 PeerCorrelationId = NewType("PeerCorrelationId", str)
 """Canonical request/response correlation identity for peer interactions."""
 
-# Re-export Usage from events so there's a single canonical definition.
-from .events import Event, Usage as Usage  # noqa: F401
+# Re-export event-owned types so there is a single canonical definition.
+from .events import Event, ToolResultError as ToolResultError, Usage as Usage  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +682,7 @@ class SessionToolResult:
     tool_use_id: str = ""
     content: ContentInput = ""
     is_error: bool = False
+    error: ToolResultError | None = None
 
 
 @dataclass(frozen=True, slots=True)

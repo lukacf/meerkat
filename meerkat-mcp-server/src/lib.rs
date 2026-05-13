@@ -1236,6 +1236,52 @@ pub struct MeerkatMobEventStreamReadInput {
     pub no_timeout: bool,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum McpEventStreamReadStatus {
+    Timeout,
+    Event,
+    Closed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+pub struct McpEventStreamReadResult {
+    pub stream_id: String,
+    pub status: McpEventStreamReadStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<Value>,
+}
+
+fn event_stream_read_payload(result: McpEventStreamReadResult) -> Result<Value, String> {
+    serde_json::to_value(result)
+        .map(wrap_tool_payload)
+        .map_err(|err| format!("Failed to serialize stream read result: {err}"))
+}
+
+fn event_stream_timeout_payload(stream_id: String) -> Result<Value, String> {
+    event_stream_read_payload(McpEventStreamReadResult {
+        stream_id,
+        status: McpEventStreamReadStatus::Timeout,
+        event: None,
+    })
+}
+
+fn event_stream_closed_payload(stream_id: String) -> Result<Value, String> {
+    event_stream_read_payload(McpEventStreamReadResult {
+        stream_id,
+        status: McpEventStreamReadStatus::Closed,
+        event: None,
+    })
+}
+
+fn event_stream_event_payload(stream_id: String, event: Value) -> Result<Value, String> {
+    event_stream_read_payload(McpEventStreamReadResult {
+        stream_id,
+        status: McpEventStreamReadStatus::Event,
+        event: Some(event),
+    })
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct MeerkatMobEventStreamCloseInput {
     pub stream_id: String,
@@ -2198,6 +2244,9 @@ async fn handle_meerkat_interrupt(
             }
             | meerkat_runtime::RuntimeDriverError::Destroyed,
         ) => {}
+        Err(meerkat_runtime::RuntimeDriverError::NotFound(_)) => {
+            return Err(format!("Session not found: {session_id}"));
+        }
         Err(meerkat_runtime::RuntimeDriverError::NotReady { state }) => {
             return Err(format!(
                 "Failed to interrupt session: runtime is not interruptible while {state}"
@@ -2379,10 +2428,21 @@ async fn archive_session_with_runtime_cleanup(
         }
 
         #[cfg(feature = "mob")]
-        let had_cleanup_anchor = cleanup
+        let had_cleanup_anchor = match cleanup
             .mob_state
             .has_bridge_session_scoped_mobs(&session_id.to_string())
-            .await;
+            .await
+        {
+            Ok(had_cleanup_anchor) => had_cleanup_anchor,
+            Err(error) => {
+                let _ = result_tx.send(Err(SessionError::Agent(
+                    meerkat_core::error::AgentError::InternalError(format!(
+                        "failed to restore mob cleanup state during MCP archive for {session_id}: {error}"
+                    )),
+                )));
+                return;
+            }
+        };
         let result = archive_with_mcp_machine_authority(
             service.as_ref(),
             runtime_adapter.as_ref(),
@@ -2602,10 +2662,7 @@ async fn handle_meerkat_event_stream_read(
                 {
                     Ok(item) => item,
                     Err(_) => {
-                        return Ok(wrap_tool_payload(json!({
-                            "stream_id": input.stream_id,
-                            "status": "timeout"
-                        })));
+                        return event_stream_timeout_payload(input.stream_id);
                     }
                 }
             }
@@ -2616,11 +2673,7 @@ async fn handle_meerkat_event_stream_read(
         Some(envelope) => {
             let envelope_json = serde_json::to_value(&envelope)
                 .map_err(|e| format!("Failed to serialize stream event: {e}"))?;
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "event",
-                "event": envelope_json
-            })))
+            event_stream_event_payload(input.stream_id, envelope_json)
         }
         None => {
             state
@@ -2628,10 +2681,7 @@ async fn handle_meerkat_event_stream_read(
                 .lock()
                 .await
                 .remove(&input.stream_id);
-            Ok(wrap_tool_payload(json!({
-                "stream_id": input.stream_id,
-                "status": "closed"
-            })))
+            event_stream_closed_payload(input.stream_id)
         }
     }
 }
@@ -2744,10 +2794,7 @@ async fn handle_meerkat_mob_event_stream_read(
                         {
                             Ok(item) => item,
                             Err(_) => {
-                                return Ok(wrap_tool_payload(json!({
-                                    "stream_id": input.stream_id,
-                                    "status": "timeout"
-                                })));
+                                return event_stream_timeout_payload(input.stream_id);
                             }
                         }
                     }
@@ -2757,11 +2804,7 @@ async fn handle_meerkat_mob_event_stream_read(
                 Some(envelope) => {
                     let event_json = serde_json::to_value(&envelope)
                         .map_err(|e| format!("Failed to serialize event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    })))
+                    event_stream_event_payload(input.stream_id, event_json)
                 }
                 None => {
                     state
@@ -2769,10 +2812,7 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    })))
+                    event_stream_closed_payload(input.stream_id)
                 }
             }
         }
@@ -2790,10 +2830,7 @@ async fn handle_meerkat_mob_event_stream_read(
                         {
                             Ok(item) => item,
                             Err(_) => {
-                                return Ok(wrap_tool_payload(json!({
-                                    "stream_id": input.stream_id,
-                                    "status": "timeout"
-                                })));
+                                return event_stream_timeout_payload(input.stream_id);
                             }
                         }
                     }
@@ -2803,11 +2840,7 @@ async fn handle_meerkat_mob_event_stream_read(
                 Some(attributed) => {
                     let event_json = serde_json::to_value(&attributed)
                         .map_err(|e| format!("Failed to serialize attributed event: {e}"))?;
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "event",
-                        "event": event_json
-                    })))
+                    event_stream_event_payload(input.stream_id, event_json)
                 }
                 None => {
                     state
@@ -2815,10 +2848,7 @@ async fn handle_meerkat_mob_event_stream_read(
                         .lock()
                         .await
                         .remove(&input.stream_id);
-                    Ok(wrap_tool_payload(json!({
-                        "stream_id": input.stream_id,
-                        "status": "closed"
-                    })))
+                    event_stream_closed_payload(input.stream_id)
                 }
             }
         }
@@ -2945,23 +2975,20 @@ fn normalize_mcp_comms_send_error(
                 "reason": "offline_or_no_ack",
             })),
         ),
-        meerkat_core::comms::SendError::Internal(details)
-            if peer_name.is_some() && is_transport_internal(details) =>
-        {
-            ToolCallError::new(
-                -32603,
-                format!(
-                    "peer_unreachable: peer '{}' is unreachable: transport_error ({details})",
-                    peer_name.unwrap_or("<unknown>")
-                ),
-                Some(json!({
-                    "code": "peer_unreachable",
-                    "peer": peer_name.unwrap_or("<unknown>"),
-                    "reason": "transport_error",
-                    "details": details,
-                })),
-            )
-        }
+        meerkat_core::comms::SendError::Transport(details)
+        | meerkat_core::comms::SendError::Io(details) => ToolCallError::new(
+            -32603,
+            format!(
+                "peer_unreachable: peer '{}' is unreachable: transport_error ({details})",
+                peer_name.unwrap_or("<unknown>")
+            ),
+            Some(json!({
+                "code": "peer_unreachable",
+                "peer": peer_name.unwrap_or("<unknown>"),
+                "reason": "transport_error",
+                "details": details,
+            })),
+        ),
         other => ToolCallError::new(
             -32603,
             other.to_string(),
@@ -2971,11 +2998,6 @@ fn normalize_mcp_comms_send_error(
             })),
         ),
     }
-}
-
-#[cfg(feature = "comms")]
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
 }
 
 fn help_provider_to_mcp_provider(
@@ -3329,7 +3351,12 @@ async fn handle_meerkat_run(
         state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         ingress
             .configure_session(&session_id, callback_tools, false)
-            .await;
+            .await
+            .map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to attach MCP runtime executor for session {session_id}: {error}"
+                ))
+            })?;
     }
 
     // Manage comms drain lifecycle for the new session.
@@ -4017,11 +4044,20 @@ async fn handle_meerkat_resume(
             state.upsert_mcp_adapter(&session_id, mcp_adapter).await;
         }
         if input.tools.is_empty() {
-            ingress.ensure_session(&session_id).await;
+            ingress.ensure_session(&session_id).await.map_err(|error| {
+                ToolCallError::internal(format!(
+                    "failed to attach MCP runtime executor for session {session_id}: {error}"
+                ))
+            })?;
         } else {
             ingress
                 .configure_session(&session_id, callback_tools, false)
-                .await;
+                .await
+                .map_err(|error| {
+                    ToolCallError::internal(format!(
+                        "failed to attach MCP runtime executor for session {session_id}: {error}"
+                    ))
+                })?;
         }
     }
 
@@ -4998,6 +5034,7 @@ mod tests {
         let session_id = meerkat::SessionId::new();
         let result = meerkat_core::types::RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: session_id.clone(),
             usage: Default::default(),
             turns: 1,
@@ -5297,6 +5334,30 @@ mod tests {
     }
 
     #[cfg(feature = "comms")]
+    #[test]
+    fn test_normalize_mcp_comms_send_error_transport_is_peer_unreachable() {
+        let err = normalize_mcp_comms_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport("dial failed".to_string()),
+        );
+        assert_eq!(err.code, -32603);
+        assert!(err.message.starts_with("peer_unreachable:"));
+        let data = err.data.expect("structured error data");
+        assert_eq!(
+            data.get("code").and_then(Value::as_str),
+            Some("peer_unreachable")
+        );
+        assert_eq!(
+            data.get("reason").and_then(Value::as_str),
+            Some("transport_error")
+        );
+        assert_eq!(
+            data.get("details").and_then(Value::as_str),
+            Some("dial failed")
+        );
+    }
+
+    #[cfg(feature = "comms")]
     #[tokio::test]
     async fn test_handle_meerkat_run_keep_alive_requires_comms_name() {
         let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
@@ -5591,7 +5652,8 @@ mod tests {
         state
             .runtime_ingress_context()
             .ensure_session(&parsed)
-            .await;
+            .await
+            .expect("MCP runtime session should be ensured");
         assert!(
             state.runtime_adapter.contains_session(&parsed).await,
             "test requires a pre-existing runtime registration"
@@ -6143,7 +6205,8 @@ mod tests {
         state
             .runtime_ingress_context()
             .ensure_session(&session_id)
-            .await;
+            .await
+            .expect("MCP runtime session should be ensured");
         state
             .upsert_mcp_adapter(
                 &session_id,
@@ -7027,6 +7090,11 @@ mod tests {
         .expect("read should complete with timeout");
         let read_payload = unwrap_payload(read);
         assert_eq!(read_payload["status"], "timeout");
+        let typed: McpEventStreamReadResult =
+            serde_json::from_value(read_payload).expect("typed stream read timeout payload");
+        assert_eq!(typed.stream_id, stream_id);
+        assert_eq!(typed.status, McpEventStreamReadStatus::Timeout);
+        assert!(typed.event.is_none());
 
         let closed = Box::pin(handle_tools_call(
             &state,
@@ -7109,6 +7177,11 @@ mod tests {
         .expect("read should succeed");
         let read_payload = unwrap_payload(read);
         assert_eq!(read_payload["status"], "closed");
+        let typed: McpEventStreamReadResult =
+            serde_json::from_value(read_payload).expect("typed stream read closed payload");
+        assert_eq!(typed.stream_id, stream_id);
+        assert_eq!(typed.status, McpEventStreamReadStatus::Closed);
+        assert!(typed.event.is_none());
 
         let close = Box::pin(handle_tools_call(
             &state,

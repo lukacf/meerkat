@@ -316,7 +316,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(anyhow::anyhow!("request cancelled"))
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(anyhow::anyhow!("turn abandoned: {reason}"))
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
@@ -342,7 +342,7 @@ fn completion_outcome_to_cli_runtime_turn_result(
                     .unwrap_or("turn finalization failed")
             ))
         }
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(anyhow::anyhow!("runtime terminated: {reason}"))
         }
     }
@@ -6861,7 +6861,10 @@ impl RunMobToolsContext {
     async fn persist(&mut self, scope: &RuntimeScope) -> anyhow::Result<()> {
         let _lock = acquire_mob_registry_lock(scope).await?;
         let mut registry = load_mob_registry(scope).await?;
-        let active = self.state.mob_list().await;
+        let active =
+            self.state.mob_list().await.map_err(|error| {
+                anyhow::anyhow!("failed to restore mob registry state: {error}")
+            })?;
         let active_ids: std::collections::BTreeSet<String> =
             active.iter().map(|(id, _)| id.to_string()).collect();
 
@@ -7583,7 +7586,12 @@ async fn run_agent(
             });
             runtime_adapter
                 .register_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to attach CLI runtime executor for session {session_id}: {error}"
+                    )
+                })?;
 
             #[cfg(feature = "comms")]
             if stdin_events && keep_alive {
@@ -8181,7 +8189,12 @@ async fn resume_session_with_llm_override(
             });
             resume_adapter
                 .register_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to attach CLI runtime executor for session {session_id}: {error}"
+                    )
+                })?;
 
             #[cfg(feature = "comms")]
             if stdin_events && keep_alive {
@@ -8649,7 +8662,12 @@ impl CliScheduleSessionHost {
                 session_id.clone(),
                 Box::new(self.executor(session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "failed to attach runtime executor for scheduled session {session_id}: {error}"
+                ))
+            })?;
         self.update_peer_ingress_context(session_id).await;
         Ok(())
     }
@@ -8795,7 +8813,13 @@ impl SurfaceScheduleSessionHost for CliScheduleSessionHost {
                 result.session_id.clone(),
                 Box::new(self.executor(result.session_id.clone())),
             )
-            .await;
+            .await
+            .map_err(|error| {
+                meerkat::ScheduleDomainError::Internal(format!(
+                    "failed to attach runtime executor for materialized session {}: {error}",
+                    result.session_id
+                ))
+            })?;
         self.update_peer_ingress_context(&result.session_id).await;
         Ok(result.session_id)
     }
@@ -9512,7 +9536,8 @@ async fn interrupt_session(id: &str, scope: &RuntimeScope) -> anyhow::Result<()>
                 Ok(())
             }
             Err(
-                meerkat_runtime::RuntimeDriverError::NotReady {
+                meerkat_runtime::RuntimeDriverError::NotFound(_)
+                | meerkat_runtime::RuntimeDriverError::NotReady {
                     state: meerkat_runtime::RuntimeState::Destroyed,
                 }
                 | meerkat_runtime::RuntimeDriverError::Destroyed,
@@ -12804,7 +12829,8 @@ default_model = "gemma"
         });
         runtime_adapter
             .register_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor attachment should succeed");
 
         Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
@@ -12869,7 +12895,8 @@ default_model = "gemma"
         });
         runtime_adapter
             .register_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .expect("runtime executor attachment should succeed");
 
         let err = Box::pin(tokio::time::timeout(
             Duration::from_secs(2),
@@ -13190,6 +13217,7 @@ default_model = "gemma"
                 .insert(sid.clone(), Arc::new(TestCommsRuntime::new(&name)));
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: sid,
                 usage: Usage::default(),
                 turns: 1,
@@ -13212,6 +13240,7 @@ default_model = "gemma"
             }
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -13375,6 +13404,7 @@ default_model = "gemma"
         ) -> Result<RunResult, SessionError> {
             Ok(RunResult {
                 text: String::new(),
+                content: Vec::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 0,
@@ -13416,6 +13446,7 @@ default_model = "gemma"
             }
             Ok(RunResult {
                 text: "streamed".to_string(),
+                content: Vec::new(),
                 session_id: self.session_id.clone(),
                 usage: Usage::default(),
                 turns: 1,
@@ -17860,6 +17891,7 @@ supports_reasoning = true
     fn test_json_output_payload_includes_skill_diagnostics_field() {
         let result = RunResult {
             text: "ok".to_string(),
+            content: Vec::new(),
             session_id: SessionId::new(),
             usage: Usage::default(),
             turns: 1,

@@ -35,7 +35,7 @@ from urllib.error import URLError
 import urllib.request
 
 from .errors import CapabilityUnavailableError, MeerkatError
-from .events import Usage, parse_event
+from .events import ToolResultError, Usage, parse_event
 from .generated.types import CONTRACT_VERSION
 from .generated.types import (
     LiveRefreshResult,
@@ -3380,10 +3380,21 @@ class MeerkatClient:
                     tool_use_id=result.get("tool_use_id", ""),
                     content=MeerkatClient._parse_content_input(result.get("content", "")),
                     is_error=bool(result.get("is_error", False)),
+                    error=MeerkatClient._parse_tool_result_error(result.get("error")),
                 )
                 for result in data.get("results", [])
             ],
         )
+
+    @staticmethod
+    def _parse_tool_result_error(value: Any) -> ToolResultError | None:
+        if not isinstance(value, dict):
+            return None
+        code = value.get("code")
+        message = value.get("message")
+        if not isinstance(code, str) or not isinstance(message, str):
+            return None
+        return ToolResultError(code=code, message=message, data=value.get("data"))
 
     @staticmethod
     def _parse_content_input(value: Any) -> ContentInput:

@@ -24,8 +24,8 @@ use crate::turn_execution_authority::{
     TurnTerminalOutcome,
 };
 use crate::types::{
-    BlockAssistantMessage, Message, RunResult, SystemNoticeKind, SystemNoticeMessage, ToolCallView,
-    ToolDef, ToolNameSet, UserMessage,
+    AssistantBlock, BlockAssistantMessage, Message, RunResult, SystemNoticeKind,
+    SystemNoticeMessage, ToolCallView, ToolDef, ToolNameSet, UserMessage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -234,13 +234,10 @@ where
 }
 
 fn tool_call_args_projection_error(tool_name: &str, error: ToolCallArgumentsError) -> AgentError {
-    AgentError::ToolError(
-        ToolError::invalid_arguments(
-            tool_name,
-            format!("tool call arguments projection failed: {error}"),
-        )
-        .to_string(),
-    )
+    AgentError::ToolError(ToolError::invalid_arguments(
+        tool_name,
+        format!("tool call arguments projection failed: {error}"),
+    ))
 }
 
 impl<C, T, S> Agent<C, T, S>
@@ -921,6 +918,7 @@ where
         let extraction_error = failure.extraction_error;
         let result = RunResult {
             text: extraction_error.last_output.clone(),
+            content: self.session.last_assistant_blocks(),
             session_id: self.session.id().clone(),
             usage: self.session.total_usage(),
             turns: turn_count + 1,
@@ -1513,41 +1511,11 @@ where
                         tool_result: None,
                     };
                     // Pre-LLM hooks may observe or deny the turn.
-                    let pre_llm_report = if in_extraction {
-                        match self
-                            .execute_hooks(pre_llm_invocation, event_tx.as_ref())
-                            .await
-                        {
-                            Ok(report) => report,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        self.execute_turn_hooks(pre_llm_invocation, &run_id, turn_count, &event_tx)
-                            .await?
-                    };
+                    let pre_llm_report = self
+                        .execute_turn_hooks(pre_llm_invocation, &run_id, turn_count, &event_tx)
+                        .await?;
 
                     if let Some(error) = pre_llm_report.denial_error(HookPoint::PreLlmRequest) {
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
@@ -1663,6 +1631,7 @@ where
                     let (blocks, stop_reason, usage) = result.into_parts();
                     let assistant_msg = BlockAssistantMessage::new(blocks, stop_reason);
                     let assistant_text = assistant_msg.to_string();
+                    let assistant_blocks = assistant_msg.blocks.clone();
 
                     if !assistant_msg.has_visible_or_actionable_output() {
                         let error = AgentError::llm_empty_response(self.client.provider());
@@ -1704,41 +1673,11 @@ where
                         tool_call: None,
                         tool_result: None,
                     };
-                    let post_llm_report = if in_extraction {
-                        match self
-                            .execute_hooks(post_llm_invocation, event_tx.as_ref())
-                            .await
-                        {
-                            Ok(report) => report,
-                            Err(error) => {
-                                return self
-                                    .complete_extraction_failed(
-                                        &run_id,
-                                        turn_count,
-                                        tool_call_count,
-                                        error.to_string(),
-                                        &event_tx,
-                                    )
-                                    .await;
-                            }
-                        }
-                    } else {
-                        self.execute_turn_hooks(post_llm_invocation, &run_id, turn_count, &event_tx)
-                            .await?
-                    };
+                    let post_llm_report = self
+                        .execute_turn_hooks(post_llm_invocation, &run_id, turn_count, &event_tx)
+                        .await?;
 
                     if let Some(error) = post_llm_report.denial_error(HookPoint::PostLlmResponse) {
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
                         self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
                             .await?;
                         return Err(error);
@@ -1889,7 +1828,7 @@ where
                                 &visible_tool_names,
                                 tc.name.as_str(),
                             ) {
-                                let error = AgentError::ToolError(error.to_string());
+                                let error = AgentError::ToolError(error);
                                 self.terminalize_fatal_error(
                                     &run_id, turn_count, &event_tx, &error,
                                 )
@@ -2003,6 +1942,12 @@ where
                                 return Err(error);
                             }
 
+                            if tool_result.has_video() {
+                                return Err(AgentError::ConfigError(
+                                    "video blocks are not supported in tool results".to_string(),
+                                ));
+                            }
+
                             // Emit execution complete
                             emit_event!(AgentEvent::ToolExecutionCompleted {
                                 id: tc.id.clone(),
@@ -2010,6 +1955,7 @@ where
                                 result: tool_result.text_content(),
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
+                                error: tool_result.error.clone(),
                                 duration_ms,
                             });
 
@@ -2019,13 +1965,8 @@ where
                                 name: tc.name.clone(),
                                 content: tool_result.content.clone(),
                                 is_error: tool_result.is_error,
+                                error: tool_result.error.clone(),
                             });
-
-                            if tool_result.has_video() {
-                                return Err(AgentError::ConfigError(
-                                    "video blocks are not supported in tool results".to_string(),
-                                ));
-                            }
 
                             tool_results.push(tool_result);
                             accumulated_session_effects.extend(tool_session_effects);
@@ -2217,6 +2158,10 @@ where
                                 let extraction_error = failure.extraction_error;
                                 let result = RunResult {
                                     text: extraction_error.last_output.clone(),
+                                    content: vec![AssistantBlock::Text {
+                                        text: extraction_error.last_output.clone(),
+                                        meta: None,
+                                    }],
                                     session_id: self.session.id().clone(),
                                     usage: self.session.total_usage(),
                                     turns: turn_count + 1,
@@ -2241,8 +2186,13 @@ where
                         }
 
                         let success = self.extraction_authority.finish_success()?;
+                        let primary_output = success.text;
                         let result = RunResult {
-                            text: success.text,
+                            text: primary_output.clone(),
+                            content: vec![AssistantBlock::Text {
+                                text: primary_output,
+                                meta: None,
+                            }],
                             session_id: self.session.id().clone(),
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
@@ -2308,6 +2258,7 @@ where
 
                             let mut result = RunResult {
                                 text: final_text.clone(),
+                                content: assistant_blocks.clone(),
                                 session_id: self.session.id().clone(),
                                 usage: self.session.total_usage(),
                                 turns: turn_count + 1,
@@ -2370,6 +2321,7 @@ where
 
                         let mut result = RunResult {
                             text: final_text,
+                            content: assistant_blocks,
                             session_id: self.session.id().clone(),
                             usage: self.session.total_usage(),
                             turns: turn_count + 1,
@@ -2497,6 +2449,7 @@ where
         match classify_terminal(&outcome, cause_kind) {
             SurfaceResultClass::Success => Ok(RunResult {
                 text: self.session.last_assistant_text().unwrap_or_default(),
+                content: self.session.last_assistant_blocks(),
                 session_id: self.session.id().clone(),
                 usage: self.session.total_usage(),
                 turns,
@@ -2582,6 +2535,9 @@ mod tests {
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
+    use crate::checkpoint::{
+        SessionCheckpointError, SessionCheckpointErrorKind, SessionCheckpointer,
+    };
     use crate::compact::{CompactionContext, CompactionResult, Compactor};
     use crate::error::{AgentError, ToolError};
     use crate::event::AgentErrorClass;
@@ -2640,6 +2596,23 @@ mod tests {
 
     struct StaticLlmClient;
 
+    struct FailingCheckpointer;
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl SessionCheckpointer for FailingCheckpointer {
+        async fn checkpoint(
+            &self,
+            session: &crate::session::Session,
+        ) -> Result<(), SessionCheckpointError> {
+            Err(SessionCheckpointError::new(
+                session.id().clone(),
+                SessionCheckpointErrorKind::StoreSave,
+                "store offline",
+            ))
+        }
+    }
+
     #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
     #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
     impl AgentLlmClient for StaticLlmClient {
@@ -2697,12 +2670,21 @@ mod tests {
 
     struct RecordingSkillEngine {
         seen_keys: Mutex<Vec<SkillKey>>,
+        fail_resolve: bool,
     }
 
     impl RecordingSkillEngine {
         fn new() -> Self {
             Self {
                 seen_keys: Mutex::new(Vec::new()),
+                fail_resolve: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                seen_keys: Mutex::new(Vec::new()),
+                fail_resolve: true,
             }
         }
 
@@ -2736,6 +2718,15 @@ mod tests {
                 let mut seen = self.seen_keys.lock().unwrap();
                 seen.extend_from_slice(&keys);
                 drop(seen);
+
+                if self.fail_resolve {
+                    return Err(crate::skills::SkillError::NotFound {
+                        key: keys
+                            .first()
+                            .cloned()
+                            .unwrap_or_else(|| fixture_skill_key("missing")),
+                    });
+                }
 
                 Ok(vec![ResolvedSkill {
                     key: keys
@@ -3912,6 +3903,71 @@ mod tests {
             .await
     }
 
+    #[tokio::test]
+    async fn checkpoint_failure_terminalizes_run_before_success_event() {
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_checkpointer(Arc::new(FailingCheckpointer))
+            .build_standalone(
+                Arc::new(StaticLlmClient),
+                Arc::new(NoTools),
+                Arc::new(NoopStore),
+            )
+            .await;
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("checkpoint failure should fail the public run");
+        match err {
+            AgentError::SessionCheckpointFailed(error) => {
+                assert_eq!(error.kind, SessionCheckpointErrorKind::StoreSave);
+                assert_eq!(error.message, "store offline");
+            }
+            other => panic!("expected checkpoint failure, got {other:?}"),
+        }
+
+        let mut saw_run_failed = false;
+        let mut saw_run_completed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::RunFailed {
+                    error_class,
+                    terminal_cause_kind,
+                    error_report,
+                    ..
+                } => {
+                    saw_run_failed = true;
+                    assert_eq!(error_class, AgentErrorClass::Store);
+                    assert_eq!(
+                        terminal_cause_kind,
+                        Some(
+                            crate::turn_execution_authority::TurnTerminalCauseKind::CheckpointPersistenceFailure
+                        )
+                    );
+                    let report = error_report.expect("run failure should carry typed report");
+                    assert!(matches!(
+                        report.reason,
+                        Some(crate::event::AgentErrorReason::SessionCheckpointFailure {
+                            kind: SessionCheckpointErrorKind::StoreSave,
+                            ..
+                        })
+                    ));
+                }
+                crate::event::AgentEvent::RunCompleted { .. } => {
+                    saw_run_completed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_run_failed, "checkpoint failure should emit run_failed");
+        assert!(
+            !saw_run_completed,
+            "checkpoint failure must not emit a success event"
+        );
+    }
+
     fn start_test_conversation_turn(handle: &dyn crate::TurnStateHandle) {
         handle
             .start_conversation_run(
@@ -4650,6 +4706,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_skill_key_failure_emits_typed_event_and_preserves_retry() {
+        let client = Arc::new(RecordingLlmClient::new());
+        let skill_engine = Arc::new(RecordingSkillEngine::failing());
+        let skill_runtime = Arc::new(crate::skills::SkillRuntime::new(skill_engine));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .with_skill_engine(skill_runtime)
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let skill_key = SkillKey {
+            source_uuid: SourceUuid::parse("dc256086-0d2f-4f61-a307-320d4148107f")
+                .expect("valid source uuid"),
+            skill_name: SkillName::parse("missing-skill").expect("valid skill name"),
+        };
+        agent.pending_skill_references = Some(vec![skill_key.clone()]);
+        agent.config.max_turns = Some(1);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(16);
+        let result = agent
+            .run_with_events("plain user prompt".to_string().into(), tx)
+            .await
+            .expect("skill resolution failure should not fail the main run");
+        assert_eq!(result.turns, 1);
+
+        assert_eq!(
+            agent.pending_skill_references,
+            Some(vec![skill_key.clone()]),
+            "failed per-turn skill activation should remain retryable"
+        );
+
+        let mut saw_typed_failure = false;
+        while let Ok(event) = rx.try_recv() {
+            if let crate::event::AgentEvent::SkillResolutionFailed {
+                skill_key: Some(key),
+                reason,
+                ..
+            } = event
+            {
+                assert_eq!(key, skill_key);
+                assert!(
+                    matches!(
+                        reason,
+                        crate::event::SkillResolutionFailureReason::NotFound { key }
+                            if key == skill_key
+                    ),
+                    "expected typed not-found skill failure reason"
+                );
+                saw_typed_failure = true;
+            }
+        }
+
+        assert!(saw_typed_failure, "missing skill failure event");
+    }
+
+    #[tokio::test]
     async fn llm_execution_hydrates_blob_refs_before_provider_call() {
         let blob_id = BlobId::new("sha256:test-image");
         let blob_store = Arc::new(RecordingBlobStore::new(vec![BlobPayload {
@@ -4713,9 +4824,10 @@ mod tests {
             .run("prompt".to_string().into())
             .await
             .expect_err("hidden LLM tool denial should terminalize the run");
-        assert!(
-            matches!(err, AgentError::ToolError(message) if message.contains("not allowed by policy"))
-        );
+        assert!(matches!(
+            err,
+            AgentError::ToolError(ToolError::AccessDenied { .. })
+        ));
 
         // Provider sees only visible tools (filtered by ToolScope)
         let seen = client.seen_tools();
@@ -4870,8 +4982,17 @@ mod tests {
             outcome
                 .result
                 .text_content()
-                .contains("\"error\":\"timeout\""),
+                .contains("Tool 'spoof_timeout' timed out after 5ms"),
             "tool-authored payload should keep its transcript text"
+        );
+        assert_eq!(
+            outcome
+                .result
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("timeout"),
+            "typed tool error should carry the semantic timeout code"
         );
         assert!(
             !outcome.is_runtime_tool_timeout(),
@@ -4917,14 +5038,21 @@ mod tests {
 
         assert_eq!(outcome.result.tool_use_id, "tool-call-hidden");
         assert!(outcome.result.is_error);
-        let payload: serde_json::Value =
-            serde_json::from_str(&outcome.result.text_content()).expect("error payload JSON");
+        assert_eq!(
+            outcome
+                .result
+                .error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("access_denied"),
+            "hidden tool terminalization should preserve a typed access-denied error"
+        );
         assert!(
-            payload
-                .get("error")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|code| code == "access_denied"),
-            "expected access_denied payload, got {payload:?}"
+            outcome
+                .result
+                .text_content()
+                .contains("Tool 'secret' is not allowed by policy"),
+            "hidden tool transcript text should remain diagnostic"
         );
         assert!(
             tools.dispatched().is_empty(),
@@ -5026,9 +5154,10 @@ mod tests {
             .await
             .expect_err("hidden LLM tool denial should fail the run");
 
-        assert!(
-            matches!(err, AgentError::ToolError(message) if message.contains("not allowed by policy"))
-        );
+        assert!(matches!(
+            err,
+            AgentError::ToolError(ToolError::AccessDenied { .. })
+        ));
         let seen = client.seen_tools();
         assert_eq!(
             seen.len(),
@@ -5221,6 +5350,49 @@ mod tests {
                     }],
                 });
             Ok(outcome)
+        }
+    }
+
+    struct VideoToolResultDispatcher {
+        tools: Arc<[Arc<ToolDef>]>,
+    }
+
+    impl VideoToolResultDispatcher {
+        fn new() -> Self {
+            Self {
+                tools: vec![Arc::new(ToolDef {
+                    name: "image_effect".into(),
+                    description: "returns an unsupported video tool result".into(),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    provenance: None,
+                })]
+                .into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl AgentToolDispatcher for VideoToolResultDispatcher {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            Arc::clone(&self.tools)
+        }
+
+        async fn dispatch(
+            &self,
+            call: ToolCallView<'_>,
+        ) -> Result<crate::ops::ToolDispatchOutcome, ToolError> {
+            Ok(ToolResult::with_blocks(
+                call.id.to_string(),
+                vec![crate::types::ContentBlock::Video {
+                    media_type: "video/mp4".to_string(),
+                    duration_ms: 1,
+                    data: crate::types::VideoData::Inline {
+                        data: "AAAA".to_string(),
+                    },
+                }],
+                false,
+            )
+            .into())
         }
     }
 
@@ -5499,6 +5671,53 @@ mod tests {
             image_event_index
         };
         assert!(image_event_index > 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_video_tool_result_fails_before_success_like_tool_events() {
+        let client = Arc::new(ImageEffectClient {
+            call_count: Mutex::new(0),
+        });
+        let tools = Arc::new(VideoToolResultDispatcher::new());
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .build_standalone(client, tools, Arc::new(NoopStore))
+            .await;
+        agent.config.max_turns = Some(2);
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let err = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("unsupported video tool result must fail");
+        assert!(
+            err.to_string()
+                .contains("video blocks are not supported in tool results"),
+            "unexpected error: {err}"
+        );
+
+        let mut saw_tool_success_event = false;
+        let mut saw_run_failed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                crate::event::AgentEvent::ToolExecutionCompleted { .. }
+                | crate::event::AgentEvent::ToolResultReceived { .. } => {
+                    saw_tool_success_event = true;
+                }
+                crate::event::AgentEvent::RunFailed { .. } => {
+                    saw_run_failed = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            saw_run_failed,
+            "unsupported video tool result should terminalize the run"
+        );
+        assert!(
+            !saw_tool_success_event,
+            "unsupported video tool result must not emit completed/result events first"
+        );
     }
 
     #[tokio::test]
@@ -5993,6 +6212,10 @@ mod tests {
         assert_eq!(
             snapshot.terminal_cause_kind,
             Some(crate::TurnTerminalCauseKind::LlmFailure)
+        );
+        assert_eq!(
+            snapshot.terminal_failure_class,
+            Some(crate::event::AgentErrorClass::Llm)
         );
     }
 
@@ -7326,6 +7549,90 @@ mod tests {
         assert!(
             !saw_run_failed,
             "extraction denial must not re-fail the run"
+        );
+    }
+
+    #[tokio::test]
+    async fn extraction_pre_llm_denial_terminalizes_with_typed_hook_cause() {
+        use crate::hooks::{
+            HookDecision, HookEngine, HookEngineError, HookExecutionReport, HookInvocation,
+            HookPoint, HookReasonCode,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DenySecondPreLlm {
+            calls: AtomicUsize,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for DenySecondPreLlm {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point != HookPoint::PreLlmRequest {
+                    return Ok(HookExecutionReport::empty());
+                }
+                let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if call == 1 {
+                    return Ok(HookExecutionReport::empty());
+                }
+
+                Ok(HookExecutionReport {
+                    decision: Some(HookDecision::Deny {
+                        hook_id: crate::hooks::HookId::new("deny-extraction-pre-llm"),
+                        reason_code: HookReasonCode::PolicyViolation,
+                        message: "deny extraction pre llm".to_string(),
+                        payload: None,
+                    }),
+                    ..HookExecutionReport::empty()
+                })
+            }
+        }
+
+        let schema = crate::types::OutputSchema::new(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"]
+        }))
+        .unwrap();
+
+        let client = Arc::new(ScriptedExtractionClient::new(vec![
+            text_response("main answer"),
+            text_response(r#"{"answer": "42"}"#),
+        ]));
+        let mut agent = with_test_turn_state_handle(AgentBuilder::new())
+            .output_schema(schema)
+            .with_hook_engine(Arc::new(DenySecondPreLlm {
+                calls: AtomicUsize::new(0),
+            }))
+            .build_standalone(client, Arc::new(NoTools), Arc::new(NoopStore))
+            .await;
+
+        let err = agent
+            .run("prompt".to_string().into())
+            .await
+            .expect_err("extraction PreLlmRequest denial should fail the run");
+        assert!(matches!(
+            err,
+            AgentError::HookDenied {
+                point: HookPoint::PreLlmRequest,
+                ..
+            }
+        ));
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(
+            snapshot.terminal_cause_kind,
+            Some(crate::TurnTerminalCauseKind::HookDenied),
+            "extraction PreLlmRequest denial should keep typed hook terminal cause"
         );
     }
 

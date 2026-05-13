@@ -554,7 +554,8 @@ async fn terminal_transition_surfaces_store_write_failure_after_persistence_requ
     let session_id = SessionId::new();
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
     let bindings = adapter
         .prepare_bindings(session_id.clone())
         .await
@@ -642,7 +643,8 @@ async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
     // Go straight to register_session_with_executor — no prior register_session.
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // The session should be registered with valid bindings.
     let bindings = adapter
@@ -660,6 +662,7 @@ async fn cold_ensure_session_with_executor_uses_shared_recovery_path() {
     let direct = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("registry lookup should not fail")
         .expect("registry should exist");
     assert!(
         direct.snapshot(&op_id).is_some(),
@@ -850,7 +853,8 @@ async fn cold_ensure_session_with_executor_recovers_persisted_epoch() {
     ));
     adapter
         .register_session_with_executor(session_id.clone(), Box::new(NoopExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     // Verify epoch recovered
     let bindings = adapter.prepare_bindings(session_id.clone()).await.unwrap();

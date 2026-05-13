@@ -206,10 +206,11 @@ fn abandon_completion_waiters(
     registry: &mut crate::completion::CompletionRegistry,
     input_ids: &[InputId],
     reason: impl Into<String>,
+    kind: crate::completion::CompletionAbandonmentKind,
 ) {
     let reason = reason.into();
     for input_id in input_ids {
-        registry.resolve_abandoned(input_id, reason.clone());
+        registry.resolve_abandoned(input_id, reason.clone(), kind);
     }
 }
 
@@ -645,7 +646,10 @@ pub(crate) fn spawn_runtime_loop_with_completions(
         // Loop exiting — resolve any pending completion waiters as terminated.
         if let Some(ref completions) = completions {
             let mut reg = completions.lock().await;
-            reg.resolve_all_terminated("runtime loop exited");
+            reg.resolve_all_terminated(
+                "runtime loop exited",
+                crate::completion::CompletionRuntimeTerminationKind::RuntimeLoopExited,
+            );
         }
     })
 }
@@ -829,6 +833,7 @@ async fn process_queue(
                             &mut completions,
                             &input_ids,
                             format!("runtime batch preparation failed: {err}"),
+                            crate::completion::CompletionAbandonmentKind::RuntimeBatchPreparationFailed,
                         );
                     }
                     return false;
@@ -863,6 +868,7 @@ async fn process_queue(
                                     &mut completions,
                                     &input_ids,
                                     format!("runtime primitive rejection snapshot failed: {err}"),
+                                    crate::completion::CompletionAbandonmentKind::RuntimeFailureSnapshotFailed,
                                 );
                             }
                             return should_stop;
@@ -873,6 +879,7 @@ async fn process_queue(
                                 &mut completions,
                                 &input_ids,
                                 format!("runtime primitive rejected: {conflict}"),
+                                crate::completion::CompletionAbandonmentKind::RuntimePrimitiveRejected,
                             );
                         }
                         return false;
@@ -903,6 +910,7 @@ async fn process_queue(
                                 &mut completions,
                                 &input_ids,
                                 format!("runtime turn-state preparation snapshot failed: {err}"),
+                                crate::completion::CompletionAbandonmentKind::RuntimeFailureSnapshotFailed,
                             );
                         }
                         return should_stop;
@@ -913,6 +921,7 @@ async fn process_queue(
                             &mut completions,
                             &input_ids,
                             format!("runtime turn-state preparation failed: {error}"),
+                            crate::completion::CompletionAbandonmentKind::RuntimeTurnStatePreparationFailed,
                         );
                     }
                     return false;
@@ -1029,6 +1038,7 @@ async fn process_queue(
                                     &mut completions,
                                     &input_ids,
                                     format!("runtime failure snapshot failed: {err}"),
+                                    crate::completion::CompletionAbandonmentKind::RuntimeFailureSnapshotFailed,
                                 );
                             }
                             return should_stop;
@@ -1054,6 +1064,7 @@ async fn process_queue(
                                         &mut completions,
                                         &input_ids,
                                         reason,
+                                        crate::completion::CompletionAbandonmentKind::ApplyFailed,
                                     );
                                 }
                             }
@@ -2492,6 +2503,7 @@ mod tests {
         let handle = registry.register(input_id.clone());
         let run_result = meerkat_core::types::RunResult {
             text: "terminal authority".to_string(),
+            content: Vec::new(),
             session_id: SessionId::new(),
             usage: meerkat_core::types::Usage::default(),
             turns: 1,
@@ -2527,11 +2539,13 @@ mod tests {
             &mut registry,
             std::slice::from_ref(&input_id),
             "runtime loop failed before executor apply",
+            crate::completion::CompletionAbandonmentKind::Unknown,
         );
 
         match handle.wait().await {
-            crate::completion::CompletionOutcome::Abandoned(reason) => {
+            crate::completion::CompletionOutcome::Abandoned { reason, kind } => {
                 assert_eq!(reason, "runtime loop failed before executor apply");
+                assert_eq!(kind, crate::completion::CompletionAbandonmentKind::Unknown);
             }
             other => panic!("Expected Abandoned, got {other:?}"),
         }

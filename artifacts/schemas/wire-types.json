@@ -310,6 +310,26 @@
           },
           {
             "properties": {
+              "kind": {
+                "$ref": "#/$defs/SessionCheckpointErrorKind"
+              },
+              "reason_type": {
+                "const": "session_checkpoint_failure",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/SessionId"
+              }
+            },
+            "required": [
+              "reason_type",
+              "session_id",
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
               "args": true,
               "reason_type": {
                 "const": "callback_pending",
@@ -323,6 +343,23 @@
               "reason_type",
               "tool_name",
               "args"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "data": true,
+              "reason_type": {
+                "const": "tool_error",
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason_type",
+              "code"
             ],
             "type": "object"
           },
@@ -400,6 +437,11 @@
           {
             "description": "Agent run completed successfully",
             "properties": {
+              "content": {
+                "description": "Ordered assistant blocks from the completed run.\n\n`result` remains as the compatibility text projection.",
+                "items": true,
+                "type": "array"
+              },
               "extraction_required": {
                 "default": false,
                 "description": "Whether a separate extraction terminal event is expected after this\ncompleted main run.",
@@ -811,6 +853,16 @@
                 },
                 "type": "array"
               },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolResultError"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "id": {
                 "type": "string"
               },
@@ -889,6 +941,16 @@
                 "format": "uint64",
                 "minimum": 0,
                 "type": "integer"
+              },
+              "error": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/ToolResultError"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               },
               "id": {
                 "type": "string"
@@ -1875,7 +1937,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -2011,6 +2073,16 @@
         ],
         "type": "object"
       },
+      "SessionCheckpointErrorKind": {
+        "description": "Machine-owned classifier for a failed session checkpoint.",
+        "enum": [
+          "blob_externalization",
+          "deferred_turn_externalization",
+          "deferred_turn_serialization",
+          "store_save"
+        ],
+        "type": "string"
+      },
       "SessionId": {
         "description": "Unique identifier for a session (UUID v7 for time-ordering)",
         "type": "string"
@@ -2032,7 +2104,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillResolutionFailureReason": {
@@ -2492,6 +2564,27 @@
         ],
         "type": "object"
       },
+      "ToolResultError": {
+        "description": "Structured, machine-readable error detail for a failed tool result.",
+        "properties": {
+          "code": {
+            "description": "Stable semantic error code, such as `timeout` or `access_denied`.",
+            "type": "string"
+          },
+          "data": {
+            "description": "Optional protocol/tool-specific structured detail."
+          },
+          "message": {
+            "description": "Human-readable diagnostic message.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
+      },
       "TurnTerminalCauseKind": {
         "description": "Closed machine-owned classifier for why a turn reached a terminal failure.",
         "enum": [
@@ -2506,6 +2599,7 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"
@@ -8440,6 +8534,29 @@
   },
   "HelpResponse": {
     "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
       "ExtractionError": {
         "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
         "properties": {
@@ -8465,14 +8582,180 @@
         ],
         "type": "object"
       },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
         ],
         "type": "string"
       },
@@ -8517,7 +8800,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillQuarantineDiagnostic": {
@@ -8534,8 +8817,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "identity_hint": {
+            "type": "string"
+          },
           "key": {
-            "$ref": "#/$defs/SkillKey"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -8550,7 +8843,7 @@
           }
         },
         "required": [
-          "key",
+          "identity_hint",
           "location",
           "error_code",
           "error_class",
@@ -8645,9 +8938,411 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "WireAssistantBlock": {
+        "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
+        "oneOf": [
+          {
+            "properties": {
+              "block_type": {
+                "const": "text",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Spoken-transcript output (provider audio output → text). Distinct\nfrom `Text` so callers can render or filter by lane provenance.",
+            "properties": {
+              "block_type": {
+                "const": "transcript",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/$defs/WireTranscriptSource"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text",
+                  "source"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "reasoning",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "tool_use",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "args": {
+                    "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "server_tool_content",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "content": true,
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "image",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "blob_ref": {
+                    "$ref": "#/$defs/BlobRef"
+                  },
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_id": {
+                    "$ref": "#/$defs/AssistantImageId"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "$ref": "#/$defs/ProviderImageMetadata"
+                  },
+                  "revised_prompt": {
+                    "$ref": "#/$defs/RevisedPromptDisposition"
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_id",
+                  "blob_ref",
+                  "media_type",
+                  "width",
+                  "height",
+                  "revised_prompt",
+                  "meta"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTranscriptSource": {
+        "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireUsage": {
         "description": "Canonical token usage for wire protocol.",
@@ -8695,6 +9390,12 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical run result for wire protocol.",
     "properties": {
+      "content": {
+        "items": {
+          "$ref": "#/$defs/WireAssistantBlock"
+        },
+        "type": "array"
+      },
       "extraction_error": {
         "anyOf": [
           {
@@ -12778,6 +13479,10 @@
   },
   "MobMemberStatusResult": {
     "$defs": {
+      "WireMemberRef": {
+        "description": "Server-resolved opaque handle for a mob member.\n\nEncodes `{mob_id, agent_identity}` as a single base64url-encoded token\nthat callers treat as opaque. The server resolves the current\n`AgentRuntimeId` and fence token against the live mob roster on every\ndispatch — clients never reason about `generation` or `fence_token`\ndirectly.\n\nUse [`WireMemberRef::encode`] to produce a token and\n[`WireMemberRef::decode`] inside an RPC handler to recover the\n`(mob_id, agent_identity)` pair before resolving against the runtime.",
+        "type": "string"
+      },
       "WireMobMemberStatus": {
         "description": "Execution status mirroring `meerkat_mob::runtime::MobMemberStatus`.",
         "enum": [
@@ -12851,6 +13556,9 @@
         "type": "boolean"
       },
       "kickoff": true,
+      "member_ref": {
+        "$ref": "#/$defs/WireMemberRef"
+      },
       "output_preview": {
         "type": [
           "string",
@@ -12879,6 +13587,7 @@
     },
     "required": [
       "status",
+      "member_ref",
       "tokens_used",
       "is_final"
     ],
@@ -13192,8 +13901,12 @@
           "agent_identity": {
             "type": "string"
           },
+          "cause": {
+            "$ref": "#/$defs/MobSpawnManyFailureCause",
+            "description": "Stable machine-readable mob failure cause."
+          },
           "error": {
-            "description": "Stringified mob error.",
+            "description": "Operator-facing diagnostic message.",
             "type": "string"
           },
           "stage": {
@@ -13203,6 +13916,7 @@
         "required": [
           "agent_identity",
           "stage",
+          "cause",
           "error"
         ],
         "type": "object"
@@ -13242,6 +13956,46 @@
           }
         },
         "type": "object"
+      },
+      "MobSpawnManyFailureCause": {
+        "description": "Typed failure cause for one failed `mob/spawn_many` member row.",
+        "enum": [
+          "profile_not_found",
+          "member_not_found",
+          "member_already_exists",
+          "not_externally_addressable",
+          "invalid_transition",
+          "wiring_error",
+          "bridge_command_rejected",
+          "member_restore_failed",
+          "kickoff_wait_timed_out",
+          "ready_wait_timed_out",
+          "definition_error",
+          "flow_not_found",
+          "flow_failed",
+          "run_not_found",
+          "run_canceled",
+          "flow_turn_timed_out",
+          "frame_depth_limit_exceeded",
+          "frame_atomic_persistence_unavailable",
+          "spec_revision_conflict",
+          "schema_validation",
+          "insufficient_targets",
+          "topology_violation",
+          "bridge_delivery_rejected",
+          "supervisor_escalation",
+          "unsupported_for_mode",
+          "reset_barrier",
+          "storage_error",
+          "session_error",
+          "comms_error",
+          "callback_pending",
+          "stale_fence_token",
+          "stale_event_cursor",
+          "work_not_found",
+          "internal"
+        ],
+        "type": "string"
       },
       "MobSpawnReceiptWire": {
         "description": "Identity-native payload for `EnsureMemberOutcome::Spawned`.",
@@ -15508,7 +16262,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -16026,7 +16780,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillRef": {
@@ -17037,7 +17791,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -17507,7 +18261,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillRef": {
@@ -18001,7 +18755,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillSourceProvenance": {
@@ -18126,7 +18880,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillSourceProvenance": {
@@ -18289,7 +19043,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillSourceProvenance": {
@@ -26467,6 +27221,29 @@
   },
   "WireRunResult": {
     "$defs": {
+      "AssistantImageId": {
+        "type": "string"
+      },
+      "BlobId": {
+        "description": "Canonical realm-local blob identifier.\n\nThe identifier is content-addressed, but storage and GC semantics remain\nrealm-scoped.",
+        "type": "string"
+      },
+      "BlobRef": {
+        "description": "Durable image reference owned by transcript/runtime state.",
+        "properties": {
+          "blob_id": {
+            "$ref": "#/$defs/BlobId"
+          },
+          "media_type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "blob_id",
+          "media_type"
+        ],
+        "type": "object"
+      },
       "ExtractionError": {
         "description": "Structured-output extraction failure details for a run whose main agentic\nturn completed successfully.",
         "properties": {
@@ -26492,14 +27269,180 @@
         ],
         "type": "object"
       },
+      "GeminiImageMetadata": {
+        "properties": {
+          "continuity_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "OpenAiImageMetadata": {
+        "properties": {
+          "image_generation_call_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "response_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_model": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_model"
+        ],
+        "type": "object"
+      },
+      "PromptText": {
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      },
       "Provider": {
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
+        ],
+        "type": "string"
+      },
+      "ProviderImageMetadata": {
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "not_emitted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/OpenAiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/$defs/GeminiImageMetadata",
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptDisposition": {
+        "oneOf": [
+          {
+            "properties": {
+              "disposition": {
+                "const": "not_requested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unsupported_by_backend",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "unchanged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "disposition"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "disposition": {
+                "const": "revised",
+                "type": "string"
+              },
+              "source": {
+                "$ref": "#/$defs/RevisedPromptSource"
+              },
+              "text": {
+                "$ref": "#/$defs/PromptText"
+              }
+            },
+            "required": [
+              "disposition",
+              "text",
+              "source"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "RevisedPromptSource": {
+        "enum": [
+          "provider",
+          "meerkat_projection"
         ],
         "type": "string"
       },
@@ -26544,7 +27487,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillQuarantineDiagnostic": {
@@ -26561,8 +27504,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "identity_hint": {
+            "type": "string"
+          },
           "key": {
-            "$ref": "#/$defs/SkillKey"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/SkillKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -26577,7 +27530,7 @@
           }
         },
         "required": [
-          "key",
+          "identity_hint",
           "location",
           "error_code",
           "error_class",
@@ -26672,9 +27625,411 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"
+      },
+      "WireAssistantBlock": {
+        "description": "Transcript block inside a block-assistant message.\n\nNot `PartialEq`: `ToolUse.args` is `Box<RawValue>` for pass-through\nfidelity (core invariant — opaque from provider to dispatcher), and\n`RawValue` does not derive equality. Equivalence checks should\nround-trip through serialization and compare the serialized bytes.",
+        "oneOf": [
+          {
+            "properties": {
+              "block_type": {
+                "const": "text",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Spoken-transcript output (provider audio output → text). Distinct\nfrom `Text` so callers can render or filter by lane provenance.",
+            "properties": {
+              "block_type": {
+                "const": "transcript",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "source": {
+                    "$ref": "#/$defs/WireTranscriptSource"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text",
+                  "source"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "reasoning",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "text": {
+                    "default": "",
+                    "type": "string"
+                  }
+                },
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "tool_use",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "args": {
+                    "description": "Wire-projected tool-call args. Carries the opaque JSON payload\nas `Box<RawValue>` to mirror the core `AssistantBlock::ToolUse`\ninvariant (\"tool-call args pass through un-parsed from provider\nto dispatcher\") — see `CLAUDE.md` Rust design principles §3.\nAllow-listed by dogma-blind-spots §7."
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "args"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "server_tool_content",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "content": true,
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "meta": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/WireProviderMeta"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "content"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "image",
+                "type": "string"
+              },
+              "data": {
+                "properties": {
+                  "blob_ref": {
+                    "$ref": "#/$defs/BlobRef"
+                  },
+                  "height": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "image_id": {
+                    "$ref": "#/$defs/AssistantImageId"
+                  },
+                  "media_type": {
+                    "type": "string"
+                  },
+                  "meta": {
+                    "$ref": "#/$defs/ProviderImageMetadata"
+                  },
+                  "revised_prompt": {
+                    "$ref": "#/$defs/RevisedPromptDisposition"
+                  },
+                  "width": {
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "image_id",
+                  "blob_ref",
+                  "media_type",
+                  "width",
+                  "height",
+                  "revised_prompt",
+                  "meta"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "block_type",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "block_type": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "block_type"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireProviderMeta": {
+        "description": "Provider continuity metadata for transcript blocks.",
+        "oneOf": [
+          {
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "signature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "signature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_redacted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "content": {
+                "type": "string"
+              },
+              "provider": {
+                "const": "anthropic_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "gemini",
+                "type": "string"
+              },
+              "thoughtSignature": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "thoughtSignature"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "encrypted_content": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "id": {
+                "type": "string"
+              },
+              "phase": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider",
+              "id"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "provider": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "provider"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WireTranscriptSource": {
+        "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
+        "oneOf": [
+          {
+            "properties": {
+              "kind": {
+                "const": "spoken",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "R7-4 (P3 dogma): explicit fail-loud variant for unknown core\nvariants. The core [`TranscriptSource`] enum is `#[non_exhaustive]`;\nwhen a future variant lands without an explicit arm in the wire\n`From` impl, the conversion surfaces as `Unknown { debug }` rather\nthan silently coercing into `Spoken` — a \"plausible lie\" that would\nmark a non-spoken provenance as user-voice on the wire. SDK\nconsumers route on the `kind: \"unknown\"` discriminator and treat\nit as unrecognized — never as `Spoken`.\n\n**When a new core variant is added, add an explicit arm in the\nforward `From` impl above this variant — `Unknown` is the floor,\nnot the destination.**",
+            "properties": {
+              "debug": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "unknown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "debug"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "WireUsage": {
         "description": "Canonical token usage for wire protocol.",
@@ -26722,6 +28077,12 @@
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "description": "Canonical run result for wire protocol.",
     "properties": {
+      "content": {
+        "items": {
+          "$ref": "#/$defs/WireAssistantBlock"
+        },
+        "type": "array"
+      },
       "extraction_error": {
         "anyOf": [
           {
@@ -28589,6 +29950,16 @@
           "content": {
             "$ref": "#/$defs/WireToolResultContent"
           },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireToolResultError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_error": {
             "default": false,
             "type": "boolean"
@@ -28616,6 +29987,23 @@
           }
         ],
         "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      },
+      "WireToolResultError": {
+        "description": "Wire-safe structured tool error detail.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "data": true,
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
       },
       "WireTranscriptSource": {
         "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
@@ -30235,6 +31623,16 @@
           "content": {
             "$ref": "#/$defs/WireToolResultContent"
           },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WireToolResultError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_error": {
             "default": false,
             "type": "boolean"
@@ -30262,6 +31660,23 @@
           }
         ],
         "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      },
+      "WireToolResultError": {
+        "description": "Wire-safe structured tool error detail.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "data": true,
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
       },
       "WireTranscriptSource": {
         "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",
@@ -32152,6 +33567,23 @@
           }
         ],
         "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      },
+      "WireToolResultError": {
+        "description": "Wire-safe structured tool error detail.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "data": true,
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -32159,6 +33591,16 @@
     "properties": {
       "content": {
         "$ref": "#/$defs/WireToolResultContent"
+      },
+      "error": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WireToolResultError"
+          },
+          {
+            "type": "null"
+          }
+        ]
       },
       "is_error": {
         "default": false,

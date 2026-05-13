@@ -777,6 +777,14 @@ pub enum BuildAgentError {
     #[error("Connection resolution failed: {0}")]
     ConnectionResolution(String),
 
+    /// Provider-runtime connection/auth resolution failed with a typed cause.
+    #[error("Provider connection resolution failed: {0}")]
+    ProviderConnection(#[from] meerkat_llm_core::provider_runtime::ProviderAuthError),
+
+    /// Provider-runtime client construction failed with a typed cause.
+    #[error("Provider client creation failed: {0}")]
+    ProviderClient(#[from] meerkat_llm_core::provider_runtime::ProviderClientError),
+
     /// LLM client creation failed.
     #[error("LLM client creation failed: {0}")]
     LlmClient(#[from] FactoryError),
@@ -1797,7 +1805,7 @@ impl AgentFactory {
             .provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?;
+            .map_err(BuildAgentError::ProviderConnection)?;
         let secret = connection.resolved_secret().ok_or_else(|| {
             BuildAgentError::ConnectionResolution(
                 "OpenAI realtime sideband requires resolved inline credential material".to_string(),
@@ -2591,7 +2599,7 @@ impl AgentFactory {
         let connection = provider_registry
             .resolve(&realm, &auth_binding, &env)
             .await
-            .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+            .map_err(FactoryError::ProviderConnection)?;
         if let (Some(handle), Some(lease_auth_binding)) =
             (auth_lease_handle, lease_auth_binding.as_ref())
         {
@@ -2599,7 +2607,7 @@ impl AgentFactory {
         }
         provider_registry
             .build_client(connection)
-            .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))
+            .map_err(FactoryError::ProviderClient)
     }
 
     pub fn request_policy_for_llm_identity(
@@ -2811,7 +2819,7 @@ impl AgentFactory {
             let connection = provider_registry
                 .resolve(&realm, &auth_binding, &env)
                 .await
-                .map_err(|e| FactoryError::ClientCreationFailed(e.to_string()))?;
+                .map_err(FactoryError::ProviderConnection)?;
 
             if let Some(handle) = auth_lease_handle {
                 Self::publish_auth_lease(&handle, &auth_binding, &connection)?;
@@ -3350,7 +3358,9 @@ impl AgentFactory {
                         }
                         let explicit_auth_binding = build_config.auth_binding.is_some();
                         let provider_registry = Arc::clone(&self.provider_registry);
-                        let mut first_resolution_error: Option<String> = None;
+                        let mut first_resolution_error: Option<
+                            meerkat_llm_core::provider_runtime::ProviderAuthError,
+                        > = None;
                         let mut resolved = None;
                         let candidates = Self::resolve_realm_binding_candidates_for_provider(
                             config,
@@ -3409,7 +3419,9 @@ impl AgentFactory {
                                     break;
                                 }
                                 Err(err) => {
-                                    first_resolution_error.get_or_insert_with(|| err.to_string());
+                                    if first_resolution_error.is_none() {
+                                        first_resolution_error = Some(err);
+                                    }
                                     if explicit_auth_binding {
                                         break;
                                     }
@@ -3417,16 +3429,18 @@ impl AgentFactory {
                             }
                         }
                         let (connection, resolved_auth_binding, lease_auth_binding, resolved_model) =
-                            resolved.ok_or_else(|| {
-                                BuildAgentError::ConnectionResolution(
-                                    first_resolution_error.unwrap_or_else(|| {
-                                        format!(
-                                            "no auth binding candidates resolved for provider '{}'",
-                                            provider.as_str()
-                                        )
-                                    }),
-                                )
-                            })?;
+                            match resolved {
+                                Some(resolved) => resolved,
+                                None => {
+                                    if let Some(err) = first_resolution_error {
+                                        return Err(BuildAgentError::ProviderConnection(err));
+                                    }
+                                    return Err(BuildAgentError::ConnectionResolution(format!(
+                                        "no auth binding candidates resolved for provider '{}'",
+                                        provider.as_str()
+                                    )));
+                                }
+                            };
                         build_config.model = resolved_model;
 
                         // Publish immediately after resolve. Provider resolution can refresh and
@@ -3448,9 +3462,7 @@ impl AgentFactory {
                         {
                             auto_image_generation_executor = provider_registry
                                 .build_image_generation_executor(connection.clone())
-                                .map_err(|e| {
-                                    BuildAgentError::ConnectionResolution(e.to_string())
-                                })?;
+                                .map_err(BuildAgentError::ProviderClient)?;
                         }
 
                         if lease_auth_binding.is_some() {
@@ -3491,13 +3503,13 @@ impl AgentFactory {
                         } else {
                             provider_registry
                                 .build_client(connection)
-                                .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                                .map_err(BuildAgentError::ProviderClient)?
                         }
                         #[cfg(not(feature = "openai-realtime"))]
                         {
                             provider_registry
                                 .build_client(connection)
-                                .map_err(|e| BuildAgentError::ConnectionResolution(e.to_string()))?
+                                .map_err(BuildAgentError::ProviderClient)?
                         }
                     }
                 }
@@ -7507,6 +7519,61 @@ mod tests {
             0,
             "invalid selected binding must not dispatch or fall back to the default realm"
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn provider_runtime_auth_failure_reaches_build_agent_typed() {
+        use meerkat_llm_core::provider_runtime::{
+            ProviderAuthError, ProviderClientError, ProviderRuntime, ProviderRuntimeRegistry,
+            ResolvedConnection, ResolverEnvironment, ValidatedBinding,
+        };
+
+        struct FailingOpenAiRuntime;
+
+        #[async_trait::async_trait]
+        impl ProviderRuntime for FailingOpenAiRuntime {
+            fn provider_id(&self) -> Provider {
+                Provider::OpenAI
+            }
+
+            async fn resolve_binding(
+                &self,
+                _binding: &ValidatedBinding,
+                _env: &ResolverEnvironment,
+            ) -> Result<ResolvedConnection, ProviderAuthError> {
+                Err(ProviderAuthError::Auth(
+                    meerkat_core::AuthError::MissingSecret,
+                ))
+            }
+
+            fn build_client(
+                &self,
+                _connection: ResolvedConnection,
+            ) -> Result<Arc<dyn LlmClient>, ProviderClientError> {
+                unreachable!("auth failure should stop before client construction")
+            }
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut factory = AgentFactory::new(temp.path().join("sessions")).builtins(false);
+        factory.provider_registry =
+            Arc::new(ProviderRuntimeRegistry::empty().with_runtime(Arc::new(FailingOpenAiRuntime)));
+
+        let mut build = AgentBuildConfig::new("gpt-5.4");
+        build.provider = Some(Provider::OpenAI);
+        build.override_builtins = ToolCategoryOverride::Disable;
+
+        let err = match factory.build_agent(build, &Config::default()).await {
+            Ok(_) => panic!("provider auth failure should surface from build_agent"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            BuildAgentError::ProviderConnection(ProviderAuthError::Auth(
+                meerkat_core::AuthError::MissingSecret
+            ))
+        ));
     }
 
     #[test]

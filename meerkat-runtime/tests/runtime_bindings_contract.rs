@@ -6,7 +6,8 @@ use meerkat_core::ops_lifecycle::{
     OperationKind, OperationResult, OperationSpec, OpsLifecycleRegistry,
 };
 use meerkat_core::types::SessionId;
-use meerkat_runtime::MeerkatMachine;
+use meerkat_runtime::identifiers::LogicalRuntimeId;
+use meerkat_runtime::{MeerkatMachine, RuntimeBindingsError, RuntimeControlPlane};
 use std::sync::Arc;
 
 fn test_op_spec(name: &str) -> OperationSpec {
@@ -51,6 +52,32 @@ async fn local_session_bindings_still_carry_unforgeable_machine_authority() {
     assert!(
         meerkat_runtime::session_runtime_bindings_have_machine_authority(&bindings),
         "local-only session resources must still be MeerkatMachine-minted so AgentFactory can accept them without publishing runtime readiness"
+    );
+}
+
+#[tokio::test]
+async fn local_session_bindings_destroyed_session_reports_prepare_failure() {
+    let adapter = Arc::new(MeerkatMachine::ephemeral());
+    let session_id = SessionId::new();
+
+    adapter.register_session(session_id.clone()).await;
+    adapter
+        .destroy(&LogicalRuntimeId::for_session(&session_id))
+        .await
+        .expect("destroy should succeed");
+
+    let err = adapter
+        .prepare_local_session_bindings(session_id.clone())
+        .await
+        .expect_err("destroyed local binding preparation should fail");
+
+    assert!(
+        matches!(
+            err,
+            RuntimeBindingsError::PrepareFailed(ref id, ref message)
+                if id == &session_id && message.contains("Runtime destroyed")
+        ),
+        "local binding failure must preserve the command failure, got {err:?}"
     );
 }
 
@@ -136,6 +163,7 @@ async fn prepare_bindings_idempotent_with_prior_registration() {
     let direct_registry = adapter
         .ops_lifecycle_registry(&session_id)
         .await
+        .expect("session registry lookup should not fail")
         .expect("session should be registered");
 
     assert!(
@@ -190,7 +218,11 @@ async fn bindings_registry_shares_completion_feed_with_adapter() {
     assert_eq!(batch.entries[0].operation_id, op_id);
 
     // Feed obtained via the adapter's ops_lifecycle_registry should also see it
-    let adapter_registry = adapter.ops_lifecycle_registry(&session_id).await.unwrap();
+    let adapter_registry = adapter
+        .ops_lifecycle_registry(&session_id)
+        .await
+        .unwrap()
+        .unwrap();
     let adapter_feed = adapter_registry.completion_feed_handle();
     let adapter_batch = adapter_feed.list_since(0);
     assert_eq!(

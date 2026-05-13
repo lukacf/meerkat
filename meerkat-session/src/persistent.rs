@@ -281,48 +281,66 @@ struct StoreCheckpointer {
 
 #[async_trait]
 impl meerkat_core::checkpoint::SessionCheckpointer for StoreCheckpointer {
-    async fn checkpoint(&self, session: &Session) {
+    async fn checkpoint(
+        &self,
+        session: &Session,
+    ) -> Result<(), meerkat_core::SessionCheckpointError> {
+        use meerkat_core::SessionCheckpointErrorKind;
+
         if !self.enabled {
-            return;
+            return Ok(());
         }
         let guard = self.gate.cancelled.lock().await;
         if *guard {
-            return;
+            return Ok(());
         }
         let current_len = session.messages().len();
         let prev_len = self
             .last_saved_len
             .load(std::sync::atomic::Ordering::Acquire);
         if current_len == prev_len {
-            return;
+            return Ok(());
         }
         let mut persisted = session.clone();
         if let Err(e) = persisted
             .externalize_media(self.blob_store.as_ref(), 0)
             .await
         {
-            tracing::warn!("Host-mode checkpoint blob externalization failed: {e}");
-            return;
+            return Err(meerkat_core::SessionCheckpointError::new(
+                session.id().clone(),
+                SessionCheckpointErrorKind::BlobExternalization,
+                e.to_string(),
+            ));
         }
         if let Some(mut state) = persisted.deferred_turn_state() {
             if let Err(e) =
                 externalize_deferred_turn_state(self.blob_store.as_ref(), &mut state).await
             {
-                tracing::warn!("Host-mode checkpoint deferred-turn externalization failed: {e}");
-                return;
+                return Err(meerkat_core::SessionCheckpointError::new(
+                    session.id().clone(),
+                    SessionCheckpointErrorKind::DeferredTurnExternalization,
+                    e.to_string(),
+                ));
             }
             if let Err(err) = persisted.set_deferred_turn_state(state) {
-                tracing::warn!("Host-mode checkpoint deferred-turn serialization failed: {err}");
-                return;
+                return Err(meerkat_core::SessionCheckpointError::new(
+                    session.id().clone(),
+                    SessionCheckpointErrorKind::DeferredTurnSerialization,
+                    err.to_string(),
+                ));
             }
         }
         if let Err(e) = self.store.save(&persisted).await {
-            tracing::warn!("Host-mode checkpoint failed: {e}");
+            Err(meerkat_core::SessionCheckpointError::new(
+                session.id().clone(),
+                SessionCheckpointErrorKind::StoreSave,
+                e.to_string(),
+            ))
         } else {
             self.last_saved_len
                 .store(current_len, std::sync::atomic::Ordering::Release);
+            Ok(())
         }
-        drop(guard);
     }
 }
 
@@ -4148,6 +4166,7 @@ mod tests {
                 ));
                 RunResult {
                     text: "ok".to_string(),
+                    content: Vec::new(),
                     session_id,
                     usage: meerkat_core::types::Usage::default(),
                     turns: 1,
@@ -4418,6 +4437,7 @@ mod tests {
                 .send(AgentEvent::RunCompleted {
                     session_id,
                     result: result.text.clone(),
+                    content: result.content.clone(),
                     structured_output: result.structured_output.clone(),
                     extraction_required: false,
                     usage: result.usage.clone(),
@@ -5158,6 +5178,7 @@ mod tests {
             }));
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id: session.id().clone(),
                 usage: meerkat_core::types::Usage::default(),
                 turns: 1,
@@ -5378,6 +5399,7 @@ mod tests {
             ));
             Ok(RunResult {
                 text: "ok".to_string(),
+                content: Vec::new(),
                 session_id,
                 usage: meerkat_core::types::Usage::default(),
                 turns: 1,
@@ -5770,7 +5792,7 @@ mod tests {
         ));
 
         // Checkpoint should persist the session
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
 
         let loaded = store.load(session.id()).await.unwrap();
         assert!(
@@ -5780,6 +5802,41 @@ mod tests {
         let loaded = loaded.unwrap();
         assert_eq!(loaded.id(), session.id());
         assert_eq!(loaded.messages().len(), session.messages().len());
+    }
+
+    #[tokio::test]
+    async fn test_store_checkpointer_surfaces_store_save_failure() {
+        use meerkat_core::checkpoint::SessionCheckpointer;
+
+        let store = Arc::new(FailSaveStore::new());
+        store.set_fail_save(true);
+        let store: Arc<dyn SessionStore> = store;
+        let gate = Arc::new(super::CheckpointerGate {
+            cancelled: tokio::sync::Mutex::new(false),
+        });
+        let checkpointer = super::StoreCheckpointer {
+            store,
+            blob_store: memory_blob_store(),
+            gate,
+            last_saved_len: std::sync::atomic::AtomicUsize::new(0),
+            enabled: true,
+        };
+
+        let mut session = Session::new();
+        session.push(meerkat_core::types::Message::User(
+            meerkat_core::types::UserMessage::text("hello".to_string()),
+        ));
+
+        let err = checkpointer
+            .checkpoint(&session)
+            .await
+            .expect_err("store save failure should surface as checkpoint error");
+        assert_eq!(
+            err.kind,
+            meerkat_core::SessionCheckpointErrorKind::StoreSave
+        );
+        assert_eq!(&err.session_id, session.id());
+        assert!(err.message.contains("forced save failure"));
     }
 
     #[tokio::test]
@@ -5804,7 +5861,7 @@ mod tests {
         ));
 
         // First checkpoint should persist (message count changed)
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
         assert!(store.load(session.id()).await.unwrap().is_some());
 
         // Simulate archive: acquire gate, set cancelled, delete
@@ -5818,7 +5875,7 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("world".to_string()),
         ));
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
         assert!(
             store.load(session.id()).await.unwrap().is_none(),
             "cancelled checkpointer should not write session back"
@@ -5845,14 +5902,14 @@ mod tests {
         ));
 
         // First checkpoint saves (message count changed from 0 -> 1)
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
         assert!(store.load(session.id()).await.unwrap().is_some());
 
         // Delete from store to detect whether the next checkpoint writes
         store.delete(session.id()).await.unwrap();
 
         // Second checkpoint with same session is skipped (count still 1)
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
         assert!(
             store.load(session.id()).await.unwrap().is_none(),
             "unchanged session should not be re-saved"
@@ -5862,7 +5919,7 @@ mod tests {
         session.push(meerkat_core::types::Message::User(
             meerkat_core::types::UserMessage::text("world".to_string()),
         ));
-        checkpointer.checkpoint(&session).await;
+        checkpointer.checkpoint(&session).await.unwrap();
         assert!(
             store.load(session.id()).await.unwrap().is_some(),
             "changed session should be saved"
@@ -7080,7 +7137,7 @@ mod tests {
                 "checkpoint should not bypass runtime boundary".to_string(),
             ),
         ));
-        checkpointer.checkpoint(&mutated).await;
+        checkpointer.checkpoint(&mutated).await.unwrap();
 
         let raw_after = store
             .load(&result.session_id)

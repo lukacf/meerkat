@@ -24,6 +24,14 @@ pub enum FactoryError {
     /// are absent, preserving downstream text-based error parsing.
     #[error("Failed to create client: {0}")]
     ClientCreationFailed(String),
+
+    /// Provider-runtime connection/auth resolution failed with a typed cause.
+    #[error("Provider connection resolution failed: {0}")]
+    ProviderConnection(#[from] crate::provider_runtime::ProviderAuthError),
+
+    /// Provider-runtime client construction failed with a typed cause.
+    #[error("Provider client creation failed: {0}")]
+    ProviderClient(#[from] crate::provider_runtime::ProviderClientError),
 }
 
 #[cfg(test)]
@@ -44,5 +52,16 @@ mod tests {
 
         let err = FactoryError::ClientCreationFailed("timeout".into());
         assert_eq!(err.to_string(), "Failed to create client: timeout");
+
+        let err =
+            FactoryError::ProviderConnection(crate::provider_runtime::ProviderAuthError::Auth(
+                meerkat_core::AuthError::MissingSecret,
+            ));
+        assert!(matches!(err, FactoryError::ProviderConnection(_)));
+
+        let err = FactoryError::ProviderClient(
+            crate::provider_runtime::ProviderClientError::NoCredentialMaterial,
+        );
+        assert!(matches!(err, FactoryError::ProviderClient(_)));
     }
 }

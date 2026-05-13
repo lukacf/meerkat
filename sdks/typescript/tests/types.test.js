@@ -470,6 +470,37 @@ describe("Typed Events", () => {
     }
   });
 
+  it("should parse structured tool result errors", () => {
+    const completed = parseEvent({
+      type: "tool_execution_completed",
+      id: "t1",
+      name: "search",
+      result: "tool timed out",
+      content: [{ type: "text", text: "tool timed out" }],
+      is_error: true,
+      error: { code: "timeout", message: "tool timed out", data: { timeout_ms: 50 } },
+      duration_ms: 42,
+    });
+    const received = parseEvent({
+      type: "tool_result_received",
+      id: "t1",
+      name: "search",
+      content: [{ type: "text", text: "tool timed out" }],
+      is_error: true,
+      error: { code: "timeout", message: "tool timed out" },
+    });
+
+    assert.equal(completed.type, "tool_execution_completed");
+    if (completed.type === "tool_execution_completed") {
+      assert.equal(completed.error?.code, "timeout");
+      assert.deepEqual(completed.error?.data, { timeout_ms: 50 });
+    }
+    assert.equal(received.type, "tool_result_received");
+    if (received.type === "tool_result_received") {
+      assert.equal(received.error?.message, "tool timed out");
+    }
+  });
+
   it("should parse tool_result_received content blocks", () => {
     const event = parseEvent({
       type: "tool_result_received",
@@ -805,6 +836,21 @@ describe("Typed Events", () => {
           ],
           stop_reason: "end_turn",
         },
+        {
+          role: "tool_results",
+          results: [
+            {
+              tool_use_id: "tc_1",
+              content: "denied",
+              is_error: true,
+              error: {
+                code: "access_denied",
+                message: "tool access denied",
+                data: { policy: "hidden" },
+              },
+            },
+          ],
+        },
       ],
     });
 
@@ -814,6 +860,8 @@ describe("Typed Events", () => {
     assert.equal(history.hasMore, true);
     assert.equal(history.messages[1].toolCalls[0].name, "search");
     assert.equal(history.messages[2].blocks[0].name, "lookup");
+    assert.equal(history.messages[3].results[0].error?.code, "access_denied");
+    assert.deepEqual(history.messages[3].results[0].error?.data, { policy: "hidden" });
   });
 
   it("should preserve assistant image blocks from session history", () => {

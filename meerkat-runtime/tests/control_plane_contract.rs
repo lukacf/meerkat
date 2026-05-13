@@ -58,6 +58,7 @@ fn make_progress_input(label: &str) -> Input {
 fn make_run_result(text: &str) -> RunResult {
     RunResult {
         text: text.into(),
+        content: Vec::new(),
         session_id: SessionId::new(),
         usage: Usage::default(),
         turns: 1,
@@ -162,7 +163,8 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
                 )))),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("reset");
     let input_id = input.id().clone();
@@ -180,7 +182,7 @@ async fn control_plane_contract_reset_terminates_waited_progress_work_without_ru
 
     let result = handle.unwrap().wait().await;
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "reset should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -231,7 +233,8 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
                 )))),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("stop");
     let input_id = input.id().clone();
@@ -252,7 +255,7 @@ async fn control_plane_contract_stop_runtime_executor_preempts_queued_progress_w
 
     let result = handle.unwrap().wait().await;
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "stop-runtime-executor should terminate queued waiters, got {result:?}"
     );
     assert_eq!(
@@ -310,7 +313,7 @@ async fn control_plane_contract_stop_runtime_executor_persists_stopped_state_wit
         .unwrap();
 
     match handle.wait().await {
-        CompletionOutcome::RuntimeTerminated(reason) => {
+        CompletionOutcome::RuntimeTerminated { reason, .. } => {
             assert_eq!(reason, "runtime stopped");
         }
         other => panic!("expected runtime stopped termination, got {other:?}"),
@@ -354,7 +357,8 @@ async fn control_plane_contract_retire_drains_waited_progress_work_to_completion
                 terminal: None,
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_progress_input("retire");
     let input_id = input.id().clone();
@@ -428,7 +432,7 @@ async fn control_plane_contract_retire_without_runtime_loop_abandons_waited_work
 
     let result = handle.unwrap().wait().await;
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "retire without a runtime loop should terminate the waiter, got {result:?}"
     );
     assert_eq!(

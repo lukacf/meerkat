@@ -465,6 +465,7 @@ pub async fn handle_public_tools_call(
             let mobs = state
                 .mob_list()
                 .await
+                .map_err(|err| McpToolError::invalid_params(err.to_string()))?
                 .into_iter()
                 .map(|(mob_id, status)| json!({"mob_id": mob_id, "status": status.to_string()}))
                 .collect::<Vec<_>>();

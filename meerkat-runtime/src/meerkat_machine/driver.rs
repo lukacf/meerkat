@@ -1007,6 +1007,7 @@ fn machine_apply_turn_run_failed(
                 .map(|failure| failure.message().to_owned()),
             terminal_outcome: terminal_outcome.into(),
             terminal_cause_kind: terminal_cause_kind.into(),
+            failure_class: terminal_cause_kind.agent_error_class().into(),
             error: terminal_error.to_owned(),
         },
     )

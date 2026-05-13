@@ -43,6 +43,7 @@ fn make_prompt(text: &str) -> Input {
 fn make_run_result(text: &str) -> RunResult {
     RunResult {
         text: text.into(),
+        content: Vec::new(),
         session_id: SessionId::new(),
         usage: Usage::default(),
         turns: 1,
@@ -133,7 +134,8 @@ async fn runtime_ingress_control_red_ok_accepts_prompt_and_resolves_completion_h
     let sid = SessionId::new();
     adapter
         .register_session_with_executor(sid.clone(), Box::new(ResultExecutor))
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let input = make_prompt("phase 1 runtime ingress");
     let input_id = input.id().clone();
@@ -192,7 +194,7 @@ async fn runtime_ingress_control_red_ok_reset_preempts_queued_input_once() {
         .wait()
         .await;
     assert!(
-        matches!(result, CompletionOutcome::RuntimeTerminated(_)),
+        matches!(result, CompletionOutcome::RuntimeTerminated { .. }),
         "queued ingress should resolve as terminated when control-plane reset wins"
     );
 
@@ -279,7 +281,8 @@ async fn runtime_ingress_control_batches_same_boundary_contributors_in_runtime_o
                 seen_contributors: Arc::clone(&seen),
             }),
         )
-        .await;
+        .await
+        .expect("runtime executor attachment should succeed");
 
     let first = make_prompt("batched one");
     let first_id = first.id().clone();

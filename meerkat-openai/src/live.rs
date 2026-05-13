@@ -10,8 +10,8 @@ use meerkat_contracts::{
     RealtimeInputKind, RealtimeOutputKind, RealtimeTurningMode,
 };
 use meerkat_core::{
-    Message, PendingSystemContextAppend, RealtimeTranscriptEvent, RealtimeTranscriptRole, ToolDef,
-    ToolResult,
+    Message, PendingSystemContextAppend, RealtimeTranscriptEvent, RealtimeTranscriptRole,
+    ToolCallArguments, ToolDef, ToolResult,
 };
 use meerkat_core::{StopReason, types::Usage};
 use meerkat_llm_core::LlmError;
@@ -1755,7 +1755,10 @@ impl OpenAiRealtimeSession {
             .or_default()
     }
 
-    fn capture_mcp_call_item(&mut self, item: &Item) -> Option<RealtimeSessionEvent> {
+    fn capture_mcp_call_item(
+        &mut self,
+        item: &Item,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let Item::McpCall {
             id: Some(item_id),
             call_id,
@@ -1764,7 +1767,7 @@ impl OpenAiRealtimeSession {
             ..
         } = item
         else {
-            return None;
+            return Ok(None);
         };
 
         let pending = self.pending_mcp_call_mut(item_id);
@@ -1788,7 +1791,7 @@ impl OpenAiRealtimeSession {
         &mut self,
         item_id: &str,
         arguments: String,
-    ) -> Option<RealtimeSessionEvent> {
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         if self.pending_text_suppressions.is_empty() {
             self.pending_text_suppressions.push_back(arguments.clone());
         }
@@ -1797,7 +1800,10 @@ impl OpenAiRealtimeSession {
         self.try_emit_mcp_tool_call(item_id)
     }
 
-    fn try_emit_mcp_tool_call(&mut self, item_id: &str) -> Option<RealtimeSessionEvent> {
+    fn try_emit_mcp_tool_call(
+        &mut self,
+        item_id: &str,
+    ) -> Result<Option<RealtimeSessionEvent>, LlmError> {
         let ready = self.pending_mcp_calls.get(item_id).and_then(|pending| {
             Some((
                 pending.call_id.clone()?,
@@ -1805,17 +1811,21 @@ impl OpenAiRealtimeSession {
                 pending.final_arguments.clone()?,
             ))
         });
-        let (call_id, tool_name, arguments) = ready?;
+        let Some((call_id, tool_name, arguments)) = ready else {
+            return Ok(None);
+        };
 
-        let pending = self.pending_mcp_calls.remove(item_id)?;
+        let Some(pending) = self.pending_mcp_calls.remove(item_id) else {
+            return Ok(None);
+        };
         let arguments = pending.final_arguments.unwrap_or(arguments);
+        let arguments = parse_realtime_tool_arguments(&tool_name, &arguments)?;
         self.response_tool_call_observed = true;
-        Some(RealtimeSessionEvent::ToolCallRequested {
+        Ok(Some(RealtimeSessionEvent::ToolCallRequested {
             call_id,
             tool_name,
-            arguments: serde_json::from_str(&arguments)
-                .unwrap_or(serde_json::Value::String(arguments)),
-        })
+            arguments,
+        }))
     }
 
     fn should_suppress_mcp_echoed_text(&mut self, delta: &str) -> bool {
@@ -2152,7 +2162,7 @@ impl OpenAiRealtimeSession {
                         Some(response_id),
                     )));
                 }
-                self.capture_mcp_call_item(&item)
+                self.capture_mcp_call_item(&item)?
             }
             ServerEvent::ResponseMcpCallArgumentsDelta {
                 response_id,
@@ -2173,7 +2183,7 @@ impl OpenAiRealtimeSession {
             } => {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
-                self.note_mcp_argument_done(&item_id, arguments)
+                self.note_mcp_argument_done(&item_id, arguments)?
             }
             ServerEvent::ResponseOutputTextDelta {
                 event_id,
@@ -2329,11 +2339,11 @@ impl OpenAiRealtimeSession {
                 self.note_provider_response_progressed();
                 self.note_response_for_item(&response_id, &item_id);
                 self.response_tool_call_observed = true;
+                let arguments = parse_realtime_tool_arguments(&name, &arguments)?;
                 Some(RealtimeSessionEvent::ToolCallRequested {
                     call_id,
                     tool_name: name,
-                    arguments: serde_json::from_str(&arguments)
-                        .unwrap_or(serde_json::Value::String(arguments)),
+                    arguments,
                 })
             }
             ServerEvent::ConversationItemTruncated {
@@ -2525,6 +2535,21 @@ impl OpenAiRealtimeSession {
         self.turn_staging.clear_after_commit();
         Ok(())
     }
+}
+
+fn parse_realtime_tool_arguments(
+    tool_name: &str,
+    arguments: &str,
+) -> Result<serde_json::Value, LlmError> {
+    let parsed = serde_json::from_str::<serde_json::Value>(arguments).map_err(|error| {
+        LlmError::InvalidRequest {
+            message: format!("invalid realtime tool-call arguments for `{tool_name}`: {error}"),
+        }
+    })?;
+    ToolCallArguments::from_value(parsed.clone()).map_err(|error| LlmError::InvalidRequest {
+        message: format!("invalid realtime tool-call arguments for `{tool_name}`: {error}"),
+    })?;
+    Ok(parsed)
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
@@ -3067,9 +3092,7 @@ fn map_openai_live_error(error: OpenAiLiveError) -> LlmError {
         OpenAiLiveError::Serialization(error) => LlmError::StreamParseError {
             message: error.to_string(),
         },
-        OpenAiLiveError::WebSocket(error) => LlmError::NetworkTimeout {
-            duration_ms: u64::from(error.to_string().contains("timed out")) * 30_000,
-        },
+        OpenAiLiveError::WebSocket(error) => map_openai_websocket_error(&error),
         OpenAiLiveError::Http(error) => LlmError::ServerError {
             status: error.status().map_or(500, |status| status.as_u16()),
             message: error.to_string(),
@@ -3078,6 +3101,26 @@ fn map_openai_live_error(error: OpenAiLiveError) -> LlmError {
             message: other.to_string(),
         },
     }
+}
+
+fn map_openai_websocket_error(error: &(dyn std::error::Error + 'static)) -> LlmError {
+    match websocket_timeout_duration_ms(error) {
+        Some(duration_ms) => LlmError::NetworkTimeout { duration_ms },
+        None => LlmError::ConnectionReset,
+    }
+}
+
+fn websocket_timeout_duration_ms(error: &(dyn std::error::Error + 'static)) -> Option<u64> {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if let Some(io_error) = error.downcast_ref::<std::io::Error>()
+            && io_error.kind() == std::io::ErrorKind::TimedOut
+        {
+            return Some(30_000);
+        }
+        current = error.source();
+    }
+    None
 }
 
 fn map_openai_live_server_error(error: OpenAiServerError) -> LlmError {
@@ -4048,6 +4091,7 @@ async fn execute_openai_live_command(
                 tool_use_id: result.call_id,
                 content: result.content,
                 is_error: result.is_error,
+                error: None,
             };
             session.submit_tool_result(tool_result).await?;
             Ok(())
@@ -4851,6 +4895,15 @@ mod tests {
     }
 
     #[test]
+    fn websocket_timeout_mapping_uses_typed_io_kind() {
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "provider stalled");
+        assert_eq!(websocket_timeout_duration_ms(&timeout), Some(30_000));
+
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset");
+        assert_eq!(websocket_timeout_duration_ms(&reset), None);
+    }
+
+    #[test]
     fn realtime_reconstruction_replays_authoritative_runtime_context_and_recent_dialogue() {
         let seed_messages = [
             Message::System(meerkat_core::SystemMessage::new(
@@ -4882,6 +4935,7 @@ mod tests {
                         "{\"token\":\"birch seventeen\"}".to_string(),
                     ),
                     is_error: false,
+                    error: None,
                 }],
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
@@ -4991,6 +5045,7 @@ mod tests {
                             .to_string(),
                     ),
                     is_error: false,
+                    error: None,
                 }],
                 created_at: meerkat_core::types::message_timestamp_now(),
             },
@@ -6875,6 +6930,33 @@ mod tests {
                     && arguments == serde_json::json!({"query":"checksum token for alpha beta gamma"})
         ));
         assert_eq!(session.next_event().await.expect("eof"), None);
+    }
+
+    #[tokio::test]
+    async fn provider_neutral_session_rejects_invalid_tool_call_arguments() {
+        let mut session = OpenAiRealtimeSession::new(
+            Box::new(FakeOpenAiLiveSession {
+                seen: Arc::new(Mutex::new(Vec::new())),
+                next_events: Arc::new(Mutex::new(VecDeque::from(vec![Ok(Some(
+                    ServerEvent::ResponseFunctionCallArgumentsDone {
+                        event_id: "evt_bad_args".to_string(),
+                        response_id: "resp_bad_args".to_string(),
+                        item_id: "item_bad_args".to_string(),
+                        output_index: 0,
+                        call_id: "call_bad_args".to_string(),
+                        name: "lookup".into(),
+                        arguments: "not-json".to_string(),
+                    },
+                ))]))),
+            }),
+            RealtimeTurningMode::ProviderManaged,
+        );
+
+        let err = session
+            .next_event()
+            .await
+            .expect_err("invalid provider tool args must fail closed");
+        assert!(matches!(err, LlmError::InvalidRequest { .. }));
     }
 
     #[tokio::test]

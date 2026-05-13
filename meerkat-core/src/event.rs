@@ -2,6 +2,7 @@
 //!
 //! These events form the streaming API for consumers.
 
+use crate::checkpoint::SessionCheckpointErrorKind;
 use crate::error::{
     AgentError, LlmFailureReason, LlmProviderErrorKind, LlmProviderErrorRetryability,
 };
@@ -12,7 +13,7 @@ use crate::retry::{LlmRetryFailure, LlmRetryFailureKind, LlmRetryPlan, LlmRetryS
 use crate::skills::{CapabilityId, SkillError, SkillKey};
 use crate::time_compat::SystemTime;
 use crate::turn_execution_authority::{TurnTerminalCauseKind, TurnTerminalOutcome};
-use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, Usage};
+use crate::types::{ContentBlock, ContentInput, SessionId, StopReason, ToolResultError, Usage};
 use serde::de::{self, DeserializeOwned};
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -489,9 +490,18 @@ pub enum AgentErrorReason {
         binding_key: String,
         message: String,
     },
+    SessionCheckpointFailure {
+        session_id: SessionId,
+        kind: SessionCheckpointErrorKind,
+    },
     CallbackPending {
         tool_name: String,
         args: Value,
+    },
+    ToolError {
+        code: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<Value>,
     },
     TurnTerminalCause {
         outcome: TurnTerminalOutcome,
@@ -574,9 +584,17 @@ impl AgentErrorReason {
                 binding_key: binding_key.clone(),
                 message: message.clone(),
             }),
+            AgentError::SessionCheckpointFailed(error) => Some(Self::SessionCheckpointFailure {
+                session_id: error.session_id.clone(),
+                kind: error.kind,
+            }),
             AgentError::CallbackPending { tool_name, args } => Some(Self::CallbackPending {
                 tool_name: tool_name.clone(),
                 args: args.clone(),
+            }),
+            AgentError::ToolError(error) => Some(Self::ToolError {
+                code: error.error_code().to_string(),
+                data: error.structured_data(),
             }),
             AgentError::TerminalFailure {
                 outcome,
@@ -597,7 +615,7 @@ impl From<&AgentError> for AgentErrorClass {
     fn from(error: &AgentError) -> Self {
         match error {
             AgentError::Llm { .. } => Self::Llm,
-            AgentError::StoreError(_) => Self::Store,
+            AgentError::StoreError(_) | AgentError::SessionCheckpointFailed(_) => Self::Store,
             AgentError::ToolError(_) => Self::Tool,
             AgentError::McpError(_) => Self::Mcp,
             AgentError::SessionNotFound(_) => Self::SessionNotFound,
@@ -1617,6 +1635,12 @@ pub enum AgentEvent {
     RunCompleted {
         session_id: SessionId,
         result: String,
+        /// Ordered assistant blocks from the completed run.
+        ///
+        /// `result` remains as the compatibility text projection.
+        #[cfg_attr(feature = "schema", schemars(with = "Vec<serde_json::Value>"))]
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        content: Vec<crate::types::AssistantBlock>,
         /// Structured output from the completed run, when schema extraction
         /// produced a typed value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1727,6 +1751,8 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ContentBlock>,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ToolResultError>,
     },
 
     /// Turn completed
@@ -1749,6 +1775,8 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         content: Vec<ContentBlock>,
         is_error: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ToolResultError>,
         duration_ms: u64,
     },
 
@@ -2254,6 +2282,7 @@ mod tests {
             result: "plain output".to_string(),
             content: content.clone(),
             is_error: false,
+            error: None,
             duration_ms: 12,
         };
         let received = AgentEvent::ToolResultReceived {
@@ -2261,6 +2290,7 @@ mod tests {
             name: "text_tool".to_string(),
             content,
             is_error: false,
+            error: None,
         };
 
         let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
@@ -2289,6 +2319,7 @@ mod tests {
             result: "[image: image/png]".to_string(),
             content: content.clone(),
             is_error: false,
+            error: None,
             duration_ms: 12,
         };
         let received = AgentEvent::ToolResultReceived {
@@ -2296,6 +2327,7 @@ mod tests {
             name: "view_image".to_string(),
             content,
             is_error: false,
+            error: None,
         };
 
         let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
@@ -2330,6 +2362,7 @@ mod tests {
             result: "before\n[image: image/png]\nafter".to_string(),
             content: content.clone(),
             is_error: false,
+            error: None,
             duration_ms: 12,
         };
         let received = AgentEvent::ToolResultReceived {
@@ -2337,6 +2370,7 @@ mod tests {
             name: "mixed_tool".to_string(),
             content: content.clone(),
             is_error: false,
+            error: None,
         };
 
         let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
@@ -2371,6 +2405,50 @@ mod tests {
         assert_eq!(received_json["content"][0]["text"], "before");
         assert_eq!(received_json["content"][1]["media_type"], "image/png");
         assert_eq!(received_json["content"][2]["text"], "after");
+    }
+
+    #[test]
+    fn tool_result_events_carry_structured_error_truth() {
+        let tool_outcome = crate::ops::terminal_tool_outcome_for_error(
+            "tc_error",
+            crate::ToolError::execution_failed_with_data(
+                "tool returned a structured failure",
+                serde_json::json!({"retryable": false}),
+            ),
+        );
+        let tool_result = tool_outcome.result;
+        let completed = AgentEvent::ToolExecutionCompleted {
+            id: tool_result.tool_use_id.clone(),
+            name: "structured_tool".to_string(),
+            result: tool_result.text_content(),
+            content: tool_result.content.clone(),
+            is_error: tool_result.is_error,
+            error: tool_result.error.clone(),
+            duration_ms: 50,
+        };
+        let received = AgentEvent::ToolResultReceived {
+            id: tool_result.tool_use_id.clone(),
+            name: "structured_tool".to_string(),
+            content: tool_result.content.clone(),
+            is_error: tool_result.is_error,
+            error: tool_result.error.clone(),
+        };
+
+        let completed_json = serde_json::to_value(&completed).expect("serialize completed event");
+        assert_eq!(
+            completed_json["result"],
+            "Tool execution failed: tool returned a structured failure"
+        );
+        assert_eq!(completed_json["error"]["code"], "execution_failed");
+        assert_eq!(completed_json["error"]["data"]["retryable"], false);
+
+        let received_json = serde_json::to_value(&received).expect("serialize received event");
+        assert_eq!(received_json["error"]["code"], "execution_failed");
+        assert_eq!(
+            received_json["error"]["message"],
+            "Tool execution failed: tool returned a structured failure"
+        );
+        assert_eq!(received_json["error"]["data"]["retryable"], false);
     }
 
     #[test]
@@ -2588,6 +2666,7 @@ mod tests {
                 name: "read_file".to_string(),
                 content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
+                error: None,
             },
             AgentEvent::BudgetWarning {
                 budget_type: BudgetType::Tokens,
@@ -2601,6 +2680,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: Usage {
@@ -3149,6 +3229,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: SessionId::new(),
                 result: "Done".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: Usage::default(),
@@ -3223,6 +3304,7 @@ mod tests {
                 name: "search".to_string(),
                 content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
+                error: None,
             },
             AgentEvent::TurnCompleted {
                 stop_reason: StopReason::EndTurn,
@@ -3238,6 +3320,7 @@ mod tests {
                 result: "ok".to_string(),
                 content: ContentBlock::text_vec("ok".to_string()),
                 is_error: false,
+                error: None,
                 duration_ms: 1,
             },
             AgentEvent::ToolExecutionTimedOut {

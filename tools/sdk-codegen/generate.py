@@ -759,11 +759,18 @@ def generate_python_types(schemas: dict, output_dir: Path, *, has_comms: bool = 
     types_content += "    name: str = ''\n"
     types_content += "    args: Optional[Any] = None\n\n\n"
 
+    types_content += "@dataclass\nclass WireToolResultError:\n"
+    types_content += '    """Structured tool error truth for transcript tool results."""\n'
+    types_content += "    code: str = ''\n"
+    types_content += "    message: str = ''\n"
+    types_content += "    data: Optional[Any] = None\n\n\n"
+
     types_content += "@dataclass\nclass WireToolResult:\n"
     types_content += '    """Tool result transcript item."""\n'
     types_content += "    tool_use_id: str = ''\n"
     types_content += "    content: Optional[WireToolResultContent] = None\n"
-    types_content += "    is_error: Optional[bool] = None\n\n\n"
+    types_content += "    is_error: Optional[bool] = None\n"
+    types_content += "    error: Optional[WireToolResultError] = None\n\n\n"
 
     types_content += "@dataclass\nclass WireSessionMessage:\n"
     types_content += '    """Canonical transcript message."""\n'
@@ -1283,10 +1290,17 @@ def generate_typescript_types(schemas: dict, output_dir: Path, *, has_comms: boo
     types_content += "  args: unknown;\n"
     types_content += "}\n\n"
 
+    types_content += "export interface WireToolResultError {\n"
+    types_content += "  code: string;\n"
+    types_content += "  message: string;\n"
+    types_content += "  data?: unknown;\n"
+    types_content += "}\n\n"
+
     types_content += "export interface WireToolResult {\n"
     types_content += "  tool_use_id: string;\n"
     types_content += "  content: WireToolResultContent;\n"
     types_content += "  is_error?: boolean;\n"
+    types_content += "  error?: WireToolResultError | null;\n"
     types_content += "}\n\n"
 
     types_content += "export interface WireSessionMessage {\n"

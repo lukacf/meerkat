@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { Mob } from '../dist/mob.js';
@@ -6,7 +7,9 @@ import { MeerkatRuntime } from '../dist/runtime.js';
 import { Session } from '../dist/session.js';
 import { isKnownEvent } from '../dist/types.js';
 
-const CURRENT_WASM_VERSION = '0.6.5';
+const { version: CURRENT_WASM_VERSION } = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+);
 
 function makeSubscriptionRuntime(overrides = {}) {
   return {
@@ -494,12 +497,50 @@ test('Session direct turn rejects missing response text instead of fabricating e
 test('Session direct turn accepts either canonical response text field', async () => {
   const session = makeDirectSession(
     () => JSON.stringify([]),
-    async () => JSON.stringify({ response: 'hello', usage: {}, tool_calls: 0 }),
+    async () =>
+      JSON.stringify({
+        response: 'hello',
+        usage: {},
+        tool_calls: 0,
+        terminal: { outcome: 'completed' },
+      }),
   );
 
   const result = await session.turn('hello');
   assert.equal(result.text, 'hello');
   assert.equal(result.response, 'hello');
+  assert.equal(result.terminal.outcome, 'completed');
+  assert.equal(result.status, 'completed');
+});
+
+test('Session direct turn mirrors typed budget terminal outcome', async () => {
+  const session = makeDirectSession(
+    () => JSON.stringify([]),
+    async () =>
+      JSON.stringify({
+        text: 'partial answer',
+        usage: {},
+        tool_calls: 0,
+        terminal: {
+          outcome: 'budget_exhausted',
+          cause_kind: 'budget_exhausted',
+        },
+      }),
+  );
+
+  const result = await session.turn('hello');
+  assert.equal(result.terminal.outcome, 'budget_exhausted');
+  assert.equal(result.terminal.cause_kind, 'budget_exhausted');
+  assert.equal(result.status, 'budget_exhausted');
+});
+
+test('Session direct turn rejects missing typed terminal result', async () => {
+  const session = makeDirectSession(
+    () => JSON.stringify([]),
+    async () => JSON.stringify({ response: 'hello', usage: {}, tool_calls: 0 }),
+  );
+
+  await assert.rejects(() => session.turn('hello'), /missing typed terminal result/);
 });
 
 test('Session destroy does not cache lifecycle state in the browser session object', async () => {
@@ -831,6 +872,8 @@ test('Mob memberStatus does not default malformed resolved capabilities', async 
     async mob_member_status() {
       return JSON.stringify({
         status: 'active',
+        member_ref: 'ref-worker-1',
+        tokens_used: 0,
         is_final: false,
         resolved_capabilities: {
           vision: 'true',

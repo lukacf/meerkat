@@ -30,8 +30,10 @@ import type {
   MobDefinition,
   SpawnSpec,
   AgentEvent,
+  TurnResult,
   ToolCallback,
   MobLifecycleAction,
+  MobLifecycleResult,
   MemberDeliveryReceipt,
   MobMemberSnapshot,
   MobHelperResult,
@@ -340,7 +342,7 @@ function handleEvent(event: AgentEvent): string {
     case 'tool_call_requested':
       return `${event.name}:${event.id}`;
     case 'tool_result_received':
-      return `${event.name}:${event.is_error}`;
+      return `${event.name}:${event.is_error}:${event.error?.code ?? 'ok'}`;
     case 'turn_started':
       return `turn ${event.turn_number}`;
     case 'turn_completed':
@@ -353,10 +355,18 @@ function handleEvent(event: AgentEvent): string {
       return `${event.session_id}:${event.attempts}:${event.reason}`;
     case 'run_failed':
       return event.error;
+    case 'extraction_succeeded':
+      return String(event.structured_output);
+    case 'extraction_failed':
+      return event.reason;
+    case 'server_tool_content':
+      return event.name;
+    case 'assistant_image_appended':
+      return event.image.image_id;
     case 'tool_execution_started':
       return `exec:${event.name}`;
     case 'tool_execution_completed':
-      return `done:${event.name}:${event.duration_ms}ms`;
+      return `done:${event.name}:${event.duration_ms}ms:${event.error?.code ?? 'ok'}`;
     case 'tool_execution_timed_out':
       return `timeout:${event.name}:${event.timeout_ms}`;
     case 'compaction_started':
@@ -438,11 +448,21 @@ const myTool: ToolCallback = async (args: string) => {
   return { content: parsed.input.toUpperCase(), is_error: false };
 };
 
+const typedTurnResult: TurnResult = {
+  text: 'done',
+  response: 'done',
+  usage: { input_tokens: 1, output_tokens: 1 },
+  tool_calls: 0,
+  terminal: { outcome: 'completed' },
+  status: 'completed',
+};
+
 // ─── MobLifecycleAction ─────────────────────────────────────────
 
 const actions: MobLifecycleAction[] = ['stop', 'resume', 'complete', 'reset', 'destroy'];
 
 declare const mob: Mob;
+const lifecycleResult: Promise<MobLifecycleResult> = mob.lifecycle('destroy');
 const memberSendResult: Promise<MemberDeliveryReceipt> = mob.member('worker-1').send('hello');
 const memberStatusResult: Promise<MobMemberSnapshot> = mob.memberStatus('worker-1');
 const helperResult: Promise<MobHelperResult> = mob.spawnHelper('Summarize the latest findings.', {
@@ -512,6 +532,7 @@ void typedSkillsResolved;
 void legacyStringSkillsResolved;
 void myTool;
 void actions;
+void lifecycleResult;
 void memberSendResult;
 void memberStatusResult;
 void helperResult;

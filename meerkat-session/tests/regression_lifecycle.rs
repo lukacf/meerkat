@@ -112,6 +112,7 @@ impl SessionAgent for MockAgent {
             .send(AgentEvent::RunCompleted {
                 session_id: self.session_id.clone(),
                 result: "Hello from mock".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: usage.clone(),
@@ -121,6 +122,7 @@ impl SessionAgent for MockAgent {
 
         Ok(RunResult {
             text: "Hello from mock".to_string(),
+            content: Vec::new(),
             session_id: self.session_id.clone(),
             usage,
             turns: 1,
@@ -211,6 +213,7 @@ impl SessionAgent for SnapshotAgent {
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(RunResult {
             text: "snapshot".to_string(),
+            content: Vec::new(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
             turns: 0,
@@ -428,6 +431,7 @@ impl SessionAgent for RecordingTurnAgent {
     ) -> Result<RunResult, meerkat_core::error::AgentError> {
         Ok(RunResult {
             text: "recorded".to_string(),
+            content: Vec::new(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
             turns: 1,
@@ -458,6 +462,7 @@ impl SessionAgent for RecordingTurnAgent {
             });
         Ok(RunResult {
             text: "recorded".to_string(),
+            content: Vec::new(),
             session_id: self.session_id.clone(),
             usage: Usage::default(),
             turns: 1,
@@ -1259,6 +1264,7 @@ async fn execution_snapshot_returns_live_agent_execution_state() {
             meerkat_core::turn_execution_authority::TurnTerminalOutcome::Cancelled,
         ),
         terminal_cause_kind: None,
+        terminal_failure_class: None,
         extraction_attempts: 1,
         max_extraction_retries: 3,
         applied_cursor: 17,
@@ -1316,6 +1322,7 @@ async fn tool_scope_snapshot_returns_live_agent_tool_scope_state() {
         cancel_after_boundary: false,
         terminal_outcome: Some(meerkat_core::turn_execution_authority::TurnTerminalOutcome::None),
         terminal_cause_kind: None,
+        terminal_failure_class: None,
         extraction_attempts: 0,
         max_extraction_retries: 2,
         applied_cursor: 0,
@@ -1379,6 +1386,7 @@ async fn external_tool_surface_snapshot_returns_live_agent_tool_surface_state() 
         cancel_after_boundary: false,
         terminal_outcome: Some(meerkat_core::turn_execution_authority::TurnTerminalOutcome::None),
         terminal_cause_kind: None,
+        terminal_failure_class: None,
         extraction_attempts: 0,
         max_extraction_retries: 0,
         applied_cursor: 0,

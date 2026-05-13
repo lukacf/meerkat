@@ -39,7 +39,7 @@ use meerkat_machine_schema::identity::{
 use meerkat_runtime::composition::{
     CatalogCompositionSignalDispatcher, CompositionBinding, CompositionDispatcher, DispatchOutcome,
     DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
-    RouteTable, SignalConsumerSurface,
+    RouteTable, SignalConsumerRefusal, SignalConsumerSurface,
 };
 use meerkat_runtime::generated::meerkat_mob_seam as seam_facts;
 use meerkat_runtime::meerkat_machine::dsl as meerkat_dsl;
@@ -376,11 +376,14 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
         &self,
         variant: SignalVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
-        let signal = build_mob_signal(&variant, &projected_fields)?;
+    ) -> Result<(), SignalConsumerRefusal> {
+        let signal = build_mob_signal(&variant, &projected_fields)
+            .map_err(|reason| SignalConsumerRefusal::Projection { reason })?;
         self.command_tx
             .try_send(super::state::MobCommand::ProjectMachineSignal { signal })
-            .map_err(|error| format!("mob actor refused signal enqueue: {error}"))
+            .map_err(|error| SignalConsumerRefusal::ConsumerUnavailable {
+                reason: format!("mob actor refused signal enqueue: {error}"),
+            })
     }
 }
 
@@ -455,9 +458,9 @@ fn dispatch_refusal_to_mob_error(refusal: DispatchRefusal) -> MobError {
         DispatchRefusal::ConsumerRefused {
             instance,
             variant,
-            reason,
+            refusal,
         } => MobError::Internal(format!(
-            "consumer `{instance}` refused routed input `{variant}`: {reason}"
+            "consumer `{instance}` refused routed input `{variant}`: {refusal}"
         )),
     }
 }

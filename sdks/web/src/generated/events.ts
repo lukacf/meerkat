@@ -54,9 +54,17 @@ export type AgentErrorReason = {
   message: string;
   reason_type: "auth_reauth_required";
 } | {
+  kind: SessionCheckpointErrorKind;
+  reason_type: "session_checkpoint_failure";
+  session_id: SessionId;
+} | {
   args: unknown;
   reason_type: "callback_pending";
   tool_name: string;
+} | {
+  code: string;
+  data?: unknown;
+  reason_type: "tool_error";
 } | {
   cause_kind: TurnTerminalCauseKind;
   outcome: TurnTerminalOutcome;
@@ -197,6 +205,8 @@ export interface SchemaWarning {
   provider: Provider;
 }
 
+export type SessionCheckpointErrorKind = "blob_externalization" | "deferred_turn_externalization" | "deferred_turn_serialization" | "store_save";
+
 export type SessionId = string;
 
 export interface SkillKey {
@@ -294,7 +304,13 @@ export type ToolConfigChangedPayload = {
   target: string;
 };
 
-export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "fatal_failure";
+export interface ToolResultError {
+  code: string;
+  data?: unknown;
+  message: string;
+}
+
+export type TurnTerminalCauseKind = "unknown" | "hook_denied" | "hook_failure" | "llm_failure" | "tool_failure" | "structured_output_validation_failed" | "budget_exhausted" | "time_budget_exceeded" | "retry_exhausted" | "turn_limit_reached" | "runtime_apply_failure" | "checkpoint_persistence_failure" | "fatal_failure";
 
 export type TurnTerminalOutcome = "none" | "completed" | "failed" | "cancelled" | "budget_exhausted" | "time_budget_exceeded" | "structured_output_validation_failed";
 
@@ -312,6 +328,7 @@ export interface RunStartedEvent {
 }
 
 export interface RunCompletedEvent {
+  content?: unknown[];
   extraction_required?: boolean;
   result: string;
   session_id: SessionId;
@@ -420,6 +437,7 @@ export interface ToolCallRequestedEvent {
 
 export interface ToolResultReceivedEvent {
   content?: ContentBlock[];
+  error?: ToolResultError | null;
   id: string;
   is_error: boolean;
   name: string;
@@ -441,6 +459,7 @@ export interface ToolExecutionStartedEvent {
 export interface ToolExecutionCompletedEvent {
   content?: ContentBlock[];
   duration_ms: number;
+  error?: ToolResultError | null;
   id: string;
   is_error: boolean;
   name: string;

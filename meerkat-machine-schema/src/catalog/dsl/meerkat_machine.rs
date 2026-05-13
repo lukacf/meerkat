@@ -656,7 +656,41 @@ pub enum TurnTerminalCauseKind {
     RetryExhausted,
     TurnLimitReached,
     RuntimeApplyFailure,
+    CheckpointPersistenceFailure,
     FatalFailure,
+}
+
+/// Typed turn failure class. Closed mirror of
+/// [`meerkat_core::event::AgentErrorClass`] carried by fatal/runtime failure
+/// inputs so structured failure detail is not reduced to display text at the
+/// runtime turn-state boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum TurnFailureClass {
+    Llm,
+    Store,
+    Tool,
+    Mcp,
+    SessionNotFound,
+    Budget,
+    MaxTokens,
+    ContentFiltered,
+    MaxTurns,
+    Cancelled,
+    InvalidState,
+    OperationNotFound,
+    DepthLimit,
+    ConcurrencyLimit,
+    Config,
+    Internal,
+    Build,
+    Auth,
+    CallbackPending,
+    StructuredOutput,
+    InvalidOutputSchema,
+    Hook,
+    #[default]
+    Terminal,
+    NoPendingBoundary,
 }
 
 /// Typed classifier for failures surfaced by the runtime apply loop when a
@@ -1183,6 +1217,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             cancel_after_boundary: bool,
             terminal_outcome: Option<Enum<TurnTerminalOutcome>>,
             terminal_cause_kind: Option<Enum<TurnTerminalCauseKind>>,
+            terminal_failure_class: Option<Enum<TurnFailureClass>>,
             last_runtime_apply_failure_cause: Option<Enum<RuntimeApplyFailureCause>>,
             last_runtime_apply_failure_message: Option<String>,
             extraction_attempts: u64,
@@ -1449,6 +1484,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             cancel_after_boundary = false,
             terminal_outcome = None,
             terminal_cause_kind = None,
+            terminal_failure_class = None,
             last_runtime_apply_failure_cause = None,
             last_runtime_apply_failure_message = None,
             extraction_attempts = 0,
@@ -1712,7 +1748,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 selected_delay_ms: u64,
                 error: String,
             },
-            FatalFailure { terminal_cause_kind: Enum<TurnTerminalCauseKind>, error: String },
+            FatalFailure {
+                terminal_cause_kind: Enum<TurnTerminalCauseKind>,
+                failure_class: Enum<TurnFailureClass>,
+                error: String
+            },
             RetryRequested { retry_attempt: u64 },
             CancelNow,
             RequestCancelAfterBoundary,
@@ -1730,6 +1770,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_apply_failure_message: Option<String>,
                 terminal_outcome: Enum<TurnTerminalOutcome>,
                 terminal_cause_kind: Enum<TurnTerminalCauseKind>,
+                failure_class: Enum<TurnFailureClass>,
                 error: String,
             },
             RunCancelled { run_id: RunId },
@@ -2011,6 +2052,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             TurnRunFailed {
                 run_id: RunId,
                 terminal_cause_kind: Enum<TurnTerminalCauseKind>,
+                failure_class: Enum<TurnFailureClass>,
                 error: String
             },
             TurnRunCancelled { run_id: RunId, reason: Enum<TurnCancellationReason> },
@@ -5172,7 +5214,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
@@ -5217,7 +5260,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
@@ -5261,7 +5305,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = max_extraction_retries;
@@ -5300,7 +5345,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5338,7 +5384,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5375,7 +5422,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5414,7 +5462,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5452,7 +5501,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5489,7 +5539,8 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = None;
                 self.terminal_cause_kind = None;
-                self.last_runtime_apply_failure_cause = None;
+                self.terminal_failure_class = None;
+                                self.last_runtime_apply_failure_cause = None;
                 self.last_runtime_apply_failure_message = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
@@ -5705,6 +5756,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
+            self.terminal_failure_class = None;
             }
             to Running
             emit TurnRunCompleted {
@@ -5726,6 +5778,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Completed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Completed);
                 self.terminal_cause_kind = None;
+            self.terminal_failure_class = None;
             }
             to Running
             emit TurnRunCompleted {
@@ -5761,7 +5814,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition FatalFailure {
-            on input FatalFailure { terminal_cause_kind, error }
+            on input FatalFailure { terminal_cause_kind, failure_class, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_not_terminal" { self.turn_phase != TurnPhase::Completed && self.turn_phase != TurnPhase::Failed && self.turn_phase != TurnPhase::Cancelled }
             guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
@@ -5769,11 +5822,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
                 self.terminal_cause_kind = Some(terminal_cause_kind);
+                self.terminal_failure_class = Some(failure_class);
             }
             to Running
             emit TurnRunFailed {
                 run_id: self.current_run_id.get("value"),
                 terminal_cause_kind: terminal_cause_kind,
+                failure_class: failure_class,
                 error: error
             }
         }
@@ -5855,6 +5910,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.cancel_after_boundary = false;
                 self.terminal_outcome = Some(outcome);
                 self.terminal_cause_kind = None;
+                self.terminal_failure_class = None;
                 self.extraction_attempts = 0;
                 self.max_extraction_retries = 0;
                 self.llm_retry_attempt = 0;
@@ -5873,11 +5929,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::Failed);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TurnLimitReached);
+                self.terminal_failure_class = Some(TurnFailureClass::MaxTurns);
             }
             to Running
             emit TurnRunFailed {
                 run_id: self.current_run_id.get("value"),
                 terminal_cause_kind: TurnTerminalCauseKind::TurnLimitReached,
+                failure_class: TurnFailureClass::MaxTurns,
                 error: "TurnLimitReached"
             }
         }
@@ -5890,11 +5948,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::BudgetExhausted);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::BudgetExhausted);
+                self.terminal_failure_class = Some(TurnFailureClass::Budget);
             }
             to Running
             emit TurnRunFailed {
                 run_id: self.current_run_id.get("value"),
                 terminal_cause_kind: TurnTerminalCauseKind::BudgetExhausted,
+                failure_class: TurnFailureClass::Budget,
                 error: "BudgetExhausted"
             }
         }
@@ -5907,11 +5967,13 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(TurnTerminalOutcome::TimeBudgetExceeded);
                 self.terminal_cause_kind = Some(TurnTerminalCauseKind::TimeBudgetExceeded);
+                self.terminal_failure_class = Some(TurnFailureClass::Budget);
             }
             to Running
             emit TurnRunFailed {
                 run_id: self.current_run_id.get("value"),
                 terminal_cause_kind: TurnTerminalCauseKind::TimeBudgetExceeded,
+                failure_class: TurnFailureClass::Budget,
                 error: "TimeBudgetExceeded"
             }
         }
@@ -5988,7 +6050,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         }
 
         transition RunFailed {
-            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, error }
+            on input RunFailed { run_id, runtime_apply_failure_cause, runtime_apply_failure_message, terminal_outcome, terminal_cause_kind, failure_class, error }
             guard { self.lifecycle_phase == Phase::Running }
             guard "run_matches_binding" { self.current_run_id == Some(run_id) }
             guard "terminal_cause_known" { terminal_cause_kind != TurnTerminalCauseKind::Unknown }
@@ -5996,6 +6058,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 self.turn_phase = TurnPhase::Failed;
                 self.terminal_outcome = Some(terminal_outcome);
                 self.terminal_cause_kind = Some(terminal_cause_kind);
+                self.terminal_failure_class = Some(failure_class);
                 self.last_runtime_apply_failure_cause = runtime_apply_failure_cause;
                 self.last_runtime_apply_failure_message = runtime_apply_failure_message;
             }

@@ -4,6 +4,7 @@ import type {
   TurnResult,
   SessionEvent,
   SessionState,
+  TurnTerminalResult,
   AppendSystemContextOptions,
   AppendSystemContextResult,
   SubscriptionLaggedEvent,
@@ -54,11 +55,27 @@ function normalizeSessionEvents(raw: unknown): SessionEvent[] {
   return raw.map((item) => normalizeSessionEvent(item));
 }
 
+function normalizeTurnTerminal(raw: unknown): TurnTerminalResult {
+  if (!isRecord(raw) || typeof raw.outcome !== 'string' || raw.outcome.length === 0) {
+    throw new Error('Invalid turn result: missing typed terminal result');
+  }
+  return raw as unknown as TurnTerminalResult;
+}
+
 function parseJsonPayload(json: string, context: string): unknown {
   try {
     return JSON.parse(json) as unknown;
   } catch {
     throw new Error(`${context}: invalid JSON`);
+  }
+}
+
+function parseJsonString(value: unknown): unknown {
+  if (typeof value !== 'string') return undefined;
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
   }
 }
 
@@ -76,11 +93,43 @@ function normalizeTurnResult(raw: unknown): TurnResult {
   if (response === undefined) {
     throw new Error(`${context}: missing text`);
   }
+  const terminal = normalizeTurnTerminal(raw.terminal);
   return {
     ...raw,
     text: typeof raw.text === 'string' ? raw.text : response,
     response,
+    terminal,
+    status: terminal.outcome,
   } as TurnResult;
+}
+
+/** Error thrown when a direct turn reaches typed terminal failure. */
+export class TurnTerminalError extends Error {
+  readonly code: string;
+  readonly terminal: TurnTerminalResult;
+  readonly payload: unknown;
+
+  constructor(code: string, message: string, terminal: TurnTerminalResult, payload: unknown) {
+    super(message);
+    this.name = 'TurnTerminalError';
+    this.code = code;
+    this.terminal = terminal;
+    this.payload = payload;
+  }
+}
+
+function normalizeStartTurnError(error: unknown): unknown {
+  const parsed = parseJsonString(error);
+  if (isRecord(parsed) && typeof parsed.message === 'string' && isRecord(parsed.terminal)) {
+    const code = typeof parsed.code === 'string' ? parsed.code : 'agent_error';
+    return new TurnTerminalError(
+      code,
+      parsed.message,
+      normalizeTurnTerminal(parsed.terminal),
+      parsed,
+    );
+  }
+  return error;
 }
 
 /** A direct (non-mob) agent session. */
@@ -114,7 +163,12 @@ export class Session {
   /** Run a turn through the agent loop. */
   async turn(prompt: string | ContentBlock[]): Promise<TurnResult> {
     const promptStr = typeof prompt === 'string' ? prompt : JSON.stringify(prompt);
-    const json = await this.startTurnFn(this.sessionId, promptStr);
+    let json: string;
+    try {
+      json = await this.startTurnFn(this.sessionId, promptStr);
+    } catch (error) {
+      throw normalizeStartTurnError(error);
+    }
     return normalizeTurnResult(parseJsonPayload(json, 'Invalid turn response'));
   }
 

@@ -1780,6 +1780,20 @@ impl ToolCall {
     }
 }
 
+/// Structured, machine-readable error detail for a failed tool result.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ToolResultError {
+    /// Stable semantic error code, such as `timeout` or `access_denied`.
+    pub code: String,
+    /// Human-readable diagnostic message.
+    pub message: String,
+    /// Optional protocol/tool-specific structured detail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+}
+
 /// Result of executing a tool
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1795,6 +1809,9 @@ pub struct ToolResult {
     /// Whether this is an error result
     #[serde(default)]
     pub is_error: bool,
+    /// Structured tool error truth for failed results.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolResultError>,
 }
 
 impl ToolResult {
@@ -1804,6 +1821,7 @@ impl ToolResult {
             tool_use_id,
             content: ContentBlock::text_vec(content),
             is_error,
+            error: None,
         }
     }
 
@@ -1813,6 +1831,7 @@ impl ToolResult {
             tool_use_id: tool_call.id.clone(),
             content: ContentBlock::text_vec(content),
             is_error,
+            error: None,
         }
     }
 
@@ -1822,7 +1841,16 @@ impl ToolResult {
             tool_use_id,
             content,
             is_error,
+            error: None,
         }
+    }
+
+    /// Attach structured error truth to an error result.
+    #[must_use]
+    pub fn with_error(mut self, error: ToolResultError) -> Self {
+        self.is_error = true;
+        self.error = Some(error);
+        self
     }
 
     /// Get concatenated text content (text projection for all blocks).
@@ -2339,6 +2367,12 @@ pub struct ExtractionError {
 pub struct RunResult {
     /// Final committed text response from the main agentic turn.
     pub text: String,
+    /// Ordered assistant blocks from the same terminal output.
+    ///
+    /// `text` remains as the compatibility projection; consumers that need
+    /// multimodal or provider-evidence fidelity should read `content`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<AssistantBlock>,
     /// Session ID for resumption
     pub session_id: SessionId,
     /// Total token usage

@@ -478,6 +478,13 @@ impl std::fmt::Display for BridgeMemberRuntimeState {
     }
 }
 
+impl BridgeMemberRuntimeState {
+    /// Whether this runtime state is terminal for bridge cleanup decisions.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Retired | Self::Stopped | Self::Destroyed)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trusted peer spec (bridge-local, no meerkat-core dependency needed)
 // ---------------------------------------------------------------------------
@@ -952,6 +959,11 @@ impl BridgeObservationResponse {
             last_error,
             observed_at,
         }
+    }
+
+    /// Whether this observation proves the observed member is terminal.
+    pub fn is_terminal(&self) -> bool {
+        self.state.is_terminal()
     }
 }
 
@@ -1541,6 +1553,48 @@ mod tests {
             let decoded: BridgeMemberRuntimeState =
                 serde_json::from_value(value).expect("decode runtime state");
             assert_eq!(decoded, *variant);
+        }
+    }
+
+    #[test]
+    fn bridge_observation_terminality_is_protocol_owned() {
+        for state in [
+            BridgeMemberRuntimeState::Retired,
+            BridgeMemberRuntimeState::Stopped,
+            BridgeMemberRuntimeState::Destroyed,
+        ] {
+            let response = BridgeObservationResponse::new(
+                state,
+                None,
+                None,
+                None,
+                None,
+                "1970-01-01T00:00:00Z".to_string(),
+            );
+            assert!(
+                response.is_terminal(),
+                "{state} observation should be terminal"
+            );
+        }
+
+        for state in [
+            BridgeMemberRuntimeState::Initializing,
+            BridgeMemberRuntimeState::Idle,
+            BridgeMemberRuntimeState::Attached,
+            BridgeMemberRuntimeState::Running,
+        ] {
+            let response = BridgeObservationResponse::new(
+                state,
+                None,
+                None,
+                None,
+                None,
+                "1970-01-01T00:00:00Z".to_string(),
+            );
+            assert!(
+                !response.is_terminal(),
+                "{state} observation should not be terminal"
+            );
         }
     }
 

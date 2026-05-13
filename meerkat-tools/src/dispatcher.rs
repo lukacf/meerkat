@@ -4,6 +4,8 @@
 use crate::error::DispatchError;
 use async_trait::async_trait;
 use meerkat_core::error::ToolError;
+#[cfg(not(target_arch = "wasm32"))]
+use meerkat_core::ops::DEFAULT_TOOL_DISPATCH_TIMEOUT;
 use meerkat_core::ops::{ToolAccessPolicy, ToolDispatchOutcome};
 #[cfg(not(target_arch = "wasm32"))]
 use meerkat_core::types::ToolResult;
@@ -60,7 +62,7 @@ impl ToolDispatcher {
         Self {
             router,
             identity_registry: RwLock::new(ToolIdentityRegistry::from_catalog(&initial_catalog)),
-            default_timeout: Duration::from_secs(30),
+            default_timeout: DEFAULT_TOOL_DISPATCH_TIMEOUT,
         }
     }
 

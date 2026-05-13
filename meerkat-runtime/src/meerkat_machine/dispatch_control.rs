@@ -22,30 +22,24 @@ impl MeerkatMachine {
                 // DSL-first: stage Ingest input before driver mutation.
                 // The DSL transition guards phase ∈ {Idle, Attached, Running}
                 // which subsumes the old manual Retired/Stopped/Destroyed check.
-                let provisional_work_id = uuid::Uuid::new_v4().to_string();
+                let admitted_input_id = input.id().clone();
                 let previous_dsl_state = self
-                    .stage_session_dsl_input(
+                    .stage_session_dsl_transition_typed(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::Ingest {
                             runtime_id: crate::meerkat_machine::dsl::AgentRuntimeId::from_domain(
                                 &runtime_id,
                             ),
-                            work_id: crate::meerkat_machine::dsl::WorkId::from(provisional_work_id),
+                            work_id: crate::meerkat_machine::dsl::WorkId::from(
+                                admitted_input_id.to_string(),
+                            ),
                             origin: crate::meerkat_machine::dsl::WorkOrigin::Ingest,
                         },
                         "Ingest",
                     )
-                    .await;
-                let previous_dsl_state = match previous_dsl_state {
-                    Ok(state) => state,
-                    Err(_) => {
-                        let state = self
-                            .existing_session_runtime_state(&session_id)
-                            .await
-                            .unwrap_or(RuntimeState::Destroyed);
-                        return Err(RuntimeControlPlaneError::InvalidState { state });
-                    }
-                };
+                    .await
+                    .map_err(RuntimeControlPlaneError::DslRejected)?
+                    .previous_state;
 
                 let (outcome, signal, runtime_effect, effect_previous_dsl_state) = {
                     let mut drv = driver.lock().await;
@@ -59,7 +53,7 @@ impl MeerkatMachine {
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
                             input_id: crate::meerkat_machine::dsl::InputId::from_domain(
-                                &InputId::new(),
+                                &admitted_input_id,
                             ),
                             request_immediate_processing: resolved
                                 .coarse_flags
@@ -248,7 +242,10 @@ impl MeerkatMachine {
                         .map_err(|e| RuntimeControlPlaneError::Internal(e.to_string()))?;
                     drop(drv);
                     let mut comp = completions.lock().await;
-                    comp.resolve_all_terminated("retired without runtime loop");
+                    comp.resolve_all_terminated(
+                        "retired without runtime loop",
+                        crate::completion::CompletionRuntimeTerminationKind::RuntimeStopped,
+                    );
                     report.inputs_abandoned += abandoned;
                     report.inputs_pending_drain = 0;
                 }
@@ -350,7 +347,10 @@ impl MeerkatMachine {
                 drop(drv);
 
                 let mut comp = completions.lock().await;
-                comp.resolve_all_terminated("runtime reset");
+                comp.resolve_all_terminated(
+                    "runtime reset",
+                    crate::completion::CompletionRuntimeTerminationKind::RuntimeReset,
+                );
                 Ok(MeerkatMachineCommandResult::ResetReport(report))
             }
             MeerkatMachineCommand::Recover { runtime_id } => {
@@ -465,7 +465,10 @@ impl MeerkatMachine {
                     .sync_control_projection_from_dsl_authority();
 
                 let mut comp = completions.lock().await;
-                comp.resolve_all_terminated("runtime destroyed");
+                comp.resolve_all_terminated(
+                    "runtime destroyed",
+                    crate::completion::CompletionRuntimeTerminationKind::RuntimeDestroyed,
+                );
                 if let Err(reason) = apply_result {
                     return Err(RuntimeControlPlaneError::Internal(reason));
                 }

@@ -41,9 +41,9 @@ use meerkat_machine_schema::identity::{
     CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
 };
 use meerkat_runtime::composition::{
-    CatalogCompositionDispatcher, CompositionBinding, CompositionDispatcher, ConsumerSurface,
-    DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
-    RouteTable,
+    CatalogCompositionDispatcher, CompositionBinding, CompositionDispatcher, ConsumerRefusal,
+    ConsumerSurface, DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect,
+    ProducerInstance, RouteTable,
 };
 
 /// Hand-rolled `MeerkatMobSeamEffect` stand-in covering the Mob producer
@@ -126,7 +126,7 @@ impl ConsumerSurface for RecordingSurface {
         &self,
         variant: InputVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConsumerRefusal> {
         self.log.lock().await.push((variant, projected_fields));
         Ok(())
     }

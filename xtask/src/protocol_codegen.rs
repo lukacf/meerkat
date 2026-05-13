@@ -1347,6 +1347,10 @@ fn generate_terminal_surface_mapping(machine: &MachineSchema) -> Result<String> 
     )?;
     writeln!(
         &mut out,
+        "            | TurnTerminalCauseKind::CheckpointPersistenceFailure"
+    )?;
+    writeln!(
+        &mut out,
         "            | TurnTerminalCauseKind::FatalFailure,"
     )?;
     writeln!(&mut out, "        ) => TerminalCauseClass::OtherFailure,")?;

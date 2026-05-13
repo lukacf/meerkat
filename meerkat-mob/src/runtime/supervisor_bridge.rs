@@ -27,6 +27,12 @@ pub(crate) struct MobSupervisorBridge {
     request_lock: Mutex<()>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SupervisorBridgeTrustInstall {
+    peer_id: PeerId,
+    previous: Option<TrustedPeerDescriptor>,
+}
+
 impl MobSupervisorBridge {
     pub(crate) fn new(
         mob_id: &crate::MobId,
@@ -184,15 +190,63 @@ impl MobSupervisorBridge {
         .await
     }
 
+    fn trusted_peer_descriptor_from_existing(
+        peer_id: PeerId,
+        peer: &meerkat_comms::TrustedPeer,
+    ) -> Result<TrustedPeerDescriptor, MobError> {
+        TrustedPeerDescriptor::unsigned_with_pubkey(
+            peer.name.clone(),
+            peer_id.to_string(),
+            *peer.pubkey.as_bytes(),
+            peer.addr.clone(),
+        )
+        .map_err(|error| {
+            MobError::WiringError(format!("invalid existing bridge trusted peer: {error}"))
+        })
+    }
+
     pub(crate) async fn trust_recipient(
         &self,
         recipient: &TrustedPeerDescriptor,
-    ) -> Result<(), MobError> {
+    ) -> Result<SupervisorBridgeTrustInstall, MobError> {
         let runtime = self.runtime().await;
+        let previous = {
+            let trusted = runtime.trusted_peers_shared();
+            let guard = trusted.read();
+            guard
+                .find_by_peer_id(&recipient.peer_id)
+                .map(|peer| Self::trusted_peer_descriptor_from_existing(recipient.peer_id, peer))
+                .transpose()?
+        };
         runtime
             .add_trusted_peer(recipient.clone())
             .await
-            .map_err(MobError::from)
+            .map_err(MobError::from)?;
+        Ok(SupervisorBridgeTrustInstall {
+            peer_id: recipient.peer_id,
+            previous,
+        })
+    }
+
+    pub(crate) async fn rollback_recipient_trust(
+        &self,
+        install: SupervisorBridgeTrustInstall,
+    ) -> Result<(), MobError> {
+        let runtime = self.runtime().await;
+        match install.previous {
+            Some(previous) => runtime
+                .add_trusted_peer(previous)
+                .await
+                .map_err(MobError::from),
+            None => {
+                let peer_id = install.peer_id.as_str();
+                runtime
+                    .remove_trusted_peer(&peer_id)
+                    .await
+                    .map(|_| ())
+                    .map_err(MobError::from)
+            }
+        }
     }
 
     pub(crate) async fn request_json<T: serde::Serialize>(
@@ -373,8 +427,31 @@ impl BridgeRequestDeadline {
 mod tests {
     use super::*;
 
+    use crate::ids::MobId;
+    use crate::runtime::bridge_protocol;
     use meerkat_core::PeerIngressMachinePolicy;
+    use meerkat_core::comms::PeerAddress;
     use meerkat_core::interaction::{InboxInteraction, InteractionId, ResponseStatus};
+
+    fn bridge_test_peer(name: &str, address: &str, seed: u8) -> TrustedPeerDescriptor {
+        let mut pubkey = [seed; 32];
+        if pubkey == [0; 32] {
+            pubkey[0] = 1;
+        }
+        let peer_id = PeerId::from_ed25519_pubkey(&pubkey);
+        TrustedPeerDescriptor::unsigned_with_pubkey(name, peer_id.to_string(), pubkey, address)
+            .expect("valid bridge test peer")
+    }
+
+    async fn trusted_peer_address(
+        bridge: &MobSupervisorBridge,
+        peer_id: &PeerId,
+    ) -> Option<String> {
+        let runtime = bridge.runtime().await;
+        let trusted = runtime.trusted_peers_shared();
+        let guard = trusted.read();
+        guard.find_by_peer_id(peer_id).map(|peer| peer.addr.clone())
+    }
 
     fn response_candidate(
         request_envelope_id: uuid::Uuid,
@@ -419,6 +496,82 @@ mod tests {
             lifecycle_peer: None,
             response_terminality: classification.response_terminality,
         }
+    }
+
+    #[tokio::test]
+    async fn rollback_recipient_trust_removes_unaccepted_trust() {
+        let bridge = MobSupervisorBridge::new(
+            &MobId::from("bridge-rollback-new"),
+            SupervisorAuthorityRecord::generate(
+                bridge_protocol::supervisor_bridge_default_protocol_version(),
+            ),
+        )
+        .expect("bridge");
+        let peer = bridge_test_peer("peer-new", "inproc://peer-new", 7);
+
+        let install = bridge.trust_recipient(&peer).await.expect("trust peer");
+        assert_eq!(
+            trusted_peer_address(&bridge, &peer.peer_id)
+                .await
+                .as_deref(),
+            Some("inproc://peer-new"),
+            "trust_recipient should install the candidate trust before command dispatch"
+        );
+
+        bridge
+            .rollback_recipient_trust(install)
+            .await
+            .expect("rollback trust");
+        assert_eq!(
+            trusted_peer_address(&bridge, &peer.peer_id).await,
+            None,
+            "unaccepted bridge trust must be removed on terminal send/rejection/decode failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_recipient_trust_restores_previous_descriptor() {
+        let bridge = MobSupervisorBridge::new(
+            &MobId::from("bridge-rollback-restore"),
+            SupervisorAuthorityRecord::generate(
+                bridge_protocol::supervisor_bridge_default_protocol_version(),
+            ),
+        )
+        .expect("bridge");
+        let previous = bridge_test_peer("peer-restore", "inproc://old-address", 11);
+        let replacement = TrustedPeerDescriptor {
+            address: PeerAddress::parse("inproc://new-address").expect("replacement address"),
+            ..previous.clone()
+        };
+        let runtime = bridge.runtime().await;
+        runtime
+            .add_trusted_peer(previous.clone())
+            .await
+            .expect("install previous trust");
+
+        let install = bridge
+            .trust_recipient(&replacement)
+            .await
+            .expect("replace trust");
+        assert_eq!(
+            trusted_peer_address(&bridge, &previous.peer_id)
+                .await
+                .as_deref(),
+            Some("inproc://new-address"),
+            "trust_recipient should replace existing trust while command dispatch is pending"
+        );
+
+        bridge
+            .rollback_recipient_trust(install)
+            .await
+            .expect("rollback replacement");
+        assert_eq!(
+            trusted_peer_address(&bridge, &previous.peer_id)
+                .await
+                .as_deref(),
+            Some("inproc://old-address"),
+            "rollback must restore the exact prior trusted descriptor when authorization fails"
+        );
     }
 
     #[test]

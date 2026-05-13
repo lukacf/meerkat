@@ -298,13 +298,18 @@ pub async fn handle_create(
 }
 
 pub async fn handle_list(id: Option<RpcId>, state: &Arc<MobMcpState>) -> RpcResponse {
-    let mobs = state
-        .mob_list()
-        .await
-        .into_iter()
-        .map(|(mob_id, status)| serde_json::json!({"mob_id": mob_id, "status": status.to_string()}))
-        .collect::<Vec<_>>();
-    RpcResponse::success(id, serde_json::json!({"mobs": mobs}))
+    match state.mob_list().await {
+        Ok(mobs) => {
+            let mobs = mobs
+                .into_iter()
+                .map(|(mob_id, status)| {
+                    serde_json::json!({"mob_id": mob_id, "status": status.to_string()})
+                })
+                .collect::<Vec<_>>();
+            RpcResponse::success(id, serde_json::json!({"mobs": mobs}))
+        }
+        Err(err) => invalid_params(id, err.to_string()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -2211,22 +2216,7 @@ pub async fn handle_reconcile(
                     .iter()
                     .map(std::string::ToString::to_string)
                     .collect(),
-                failures: report
-                    .failures
-                    .iter()
-                    .map(|f| meerkat_contracts::MobReconcileFailureWire {
-                        agent_identity: f.agent_identity.to_string(),
-                        stage: match f.stage {
-                            meerkat_mob::runtime::ReconcileStage::Spawn => {
-                                meerkat_contracts::WireMobReconcileStage::Spawn
-                            }
-                            meerkat_mob::runtime::ReconcileStage::Retire => {
-                                meerkat_contracts::WireMobReconcileStage::Retire
-                            }
-                        },
-                        error: f.error.to_string(),
-                    })
-                    .collect(),
+                failures: report.failures.iter().map(reconcile_failure_wire).collect(),
             };
             RpcResponse::success(
                 id,
@@ -2236,6 +2226,24 @@ pub async fn handle_reconcile(
             )
         }
         Err(err) => invalid_params(id, err.to_string()),
+    }
+}
+
+fn reconcile_failure_wire(
+    failure: &meerkat_mob::runtime::ReconcileFailure,
+) -> meerkat_contracts::MobReconcileFailureWire {
+    meerkat_contracts::MobReconcileFailureWire {
+        agent_identity: failure.agent_identity.to_string(),
+        stage: match failure.stage {
+            meerkat_mob::runtime::ReconcileStage::Spawn => {
+                meerkat_contracts::WireMobReconcileStage::Spawn
+            }
+            meerkat_mob::runtime::ReconcileStage::Retire => {
+                meerkat_contracts::WireMobReconcileStage::Retire
+            }
+        },
+        cause: failure.error.spawn_many_failure_cause(),
+        error: failure.error.to_string(),
     }
 }
 
@@ -2935,6 +2943,25 @@ mod tests {
         let err = serde_json::from_value::<MobWireParams>(value)
             .expect_err("legacy a/b shape must be rejected");
         assert!(err.to_string().contains("unknown field `a`"));
+    }
+
+    #[test]
+    fn reconcile_failure_wire_preserves_typed_mob_error_cause() {
+        let failure = meerkat_mob::runtime::ReconcileFailure {
+            agent_identity: AgentIdentity::from("worker-a"),
+            stage: meerkat_mob::runtime::ReconcileStage::Spawn,
+            error: MobError::ProfileNotFound(meerkat_mob::ProfileName::from("missing")),
+        };
+
+        let wire = reconcile_failure_wire(&failure);
+
+        assert_eq!(wire.agent_identity, "worker-a");
+        assert_eq!(wire.stage, meerkat_contracts::WireMobReconcileStage::Spawn);
+        assert_eq!(
+            wire.cause,
+            meerkat_contracts::MobReconcileFailureCause::ProfileNotFound
+        );
+        assert!(wire.error.contains("profile not found"));
     }
 
     #[test]

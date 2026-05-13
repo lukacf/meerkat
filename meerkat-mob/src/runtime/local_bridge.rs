@@ -451,7 +451,8 @@ mod tests {
                     allow_finish: Arc::clone(&allow_finish),
                 }),
             )
-            .await;
+            .await
+            .expect("runtime executor attachment should succeed");
 
         let input =
             meerkat_runtime::input::Input::Prompt(meerkat_runtime::input::PromptInput::new(

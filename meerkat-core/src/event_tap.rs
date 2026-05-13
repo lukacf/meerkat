@@ -204,6 +204,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: crate::types::Usage::default(),
@@ -225,6 +226,7 @@ mod tests {
             AgentEvent::RunCompleted {
                 session_id: crate::types::SessionId::new(),
                 result: "done".to_string(),
+                content: Vec::new(),
                 structured_output: None,
                 extraction_required: false,
                 usage: crate::types::Usage::default(),

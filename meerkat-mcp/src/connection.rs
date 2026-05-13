@@ -177,8 +177,8 @@ impl McpConnection {
     /// Call a tool, returning multimodal content blocks.
     ///
     /// MCP servers can return text, image, and other content types. Text and
-    /// image content are captured as [`ContentBlock`] variants; other content
-    /// types (resources, audio, etc.) are silently dropped.
+    /// image content are captured as [`ContentBlock`] variants; unsupported
+    /// content fails closed so callers do not observe a lossy success.
     pub async fn call_tool(&self, name: &str, args: &Value) -> Result<Vec<ContentBlock>, McpError> {
         let arguments = args.as_object().cloned();
 
@@ -196,15 +196,20 @@ impl McpConnection {
                 reason: format!("{e}"),
             })?;
 
+        let blocks =
+            extract_content_blocks(result.content).map_err(|message| McpError::ProtocolError {
+                message: format!("Tool '{name}' returned unsupported content: {message}"),
+            })?;
+
         // Check for tool error
         if result.is_error.unwrap_or(false) {
             return Err(McpError::ToolCallFailed {
                 tool: name.to_string(),
-                reason: "Tool returned error".to_string(),
+                reason: tool_error_reason(&blocks),
             });
         }
 
-        Ok(extract_content_blocks(result.content))
+        Ok(blocks)
     }
 
     /// Call a tool, returning only the text content as a concatenated string.
@@ -230,21 +235,32 @@ impl McpConnection {
 
 /// Convert MCP [`Content`] items to [`ContentBlock`] variants.
 ///
-/// Text and image content are captured. Other content types (resources,
-/// audio, resource links) are silently dropped since the core agent loop
-/// does not model them.
-fn extract_content_blocks(contents: Vec<rmcp::model::Content>) -> Vec<ContentBlock> {
-    contents
-        .into_iter()
-        .filter_map(|c| match c.raw {
-            RawContent::Text(text) => Some(ContentBlock::Text { text: text.text }),
-            RawContent::Image(image) => Some(ContentBlock::Image {
+/// Text and image content are captured. Unsupported content is rejected rather
+/// than silently filtered, because dropping content changes tool semantics.
+fn extract_content_blocks(
+    contents: Vec<rmcp::model::Content>,
+) -> Result<Vec<ContentBlock>, String> {
+    let mut blocks = Vec::with_capacity(contents.len());
+    for (index, content) in contents.into_iter().enumerate() {
+        match content.raw {
+            RawContent::Text(text) => blocks.push(ContentBlock::Text { text: text.text }),
+            RawContent::Image(image) => blocks.push(ContentBlock::Image {
                 media_type: image.mime_type,
                 data: meerkat_core::ImageData::Inline { data: image.data },
             }),
-            _ => None,
-        })
-        .collect()
+            other => return Err(format!("item {index}: {other:?}")),
+        }
+    }
+    Ok(blocks)
+}
+
+fn tool_error_reason(blocks: &[ContentBlock]) -> String {
+    let text = meerkat_core::types::text_content(blocks);
+    if text.trim().is_empty() {
+        "Tool returned error without text content".to_string()
+    } else {
+        text
+    }
 }
 
 #[cfg(test)]
@@ -264,7 +280,7 @@ pub mod tests {
             Content::text("Line 3"),
         ];
 
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 3);
         assert_eq!(
             blocks[0],
@@ -291,7 +307,7 @@ pub mod tests {
     fn test_extract_content_blocks_single_text() {
         let contents = vec![Content::text("Only line")];
 
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0],
@@ -305,7 +321,7 @@ pub mod tests {
     #[test]
     fn test_extract_content_blocks_empty() {
         let contents: Vec<Content> = Vec::new();
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert!(blocks.is_empty());
     }
 
@@ -314,7 +330,7 @@ pub mod tests {
     fn mcp_call_tool_captures_image() {
         let contents = vec![Content::image("aW1hZ2VkYXRh", "image/png")];
 
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0],
@@ -334,7 +350,7 @@ pub mod tests {
             Content::text("additional context"),
         ];
 
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 3);
         assert!(
             matches!(&blocks[0], ContentBlock::Text { text } if text == "description of the image")
@@ -348,12 +364,34 @@ pub mod tests {
         assert!(matches!(&blocks[2], ContentBlock::Text { text } if text == "additional context"));
     }
 
+    /// Test that unsupported MCP content fails closed instead of being filtered
+    #[test]
+    fn mcp_call_tool_rejects_unsupported_content() {
+        let contents = vec![Content::embedded_text("file:///artifact.txt", "artifact")];
+
+        let err = extract_content_blocks(contents).unwrap_err();
+        assert!(
+            err.contains("item 0"),
+            "unsupported content error should identify the dropped item: {err}"
+        );
+    }
+
+    /// Test that MCP tool errors preserve returned text as the failure reason
+    #[test]
+    fn mcp_call_tool_error_reason_uses_returned_text() {
+        let blocks = vec![ContentBlock::Text {
+            text: "permission denied by tool".to_string(),
+        }];
+
+        assert_eq!(tool_error_reason(&blocks), "permission denied by tool");
+    }
+
     /// Test that text-only responses still work as before
     #[test]
     fn mcp_call_tool_text_only_compat() {
         let contents = vec![Content::text("Hello, MCP!")];
 
-        let blocks = extract_content_blocks(contents);
+        let blocks = extract_content_blocks(contents).unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(
             blocks[0],

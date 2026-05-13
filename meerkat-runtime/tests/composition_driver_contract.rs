@@ -39,9 +39,9 @@ use meerkat_machine_schema::identity::{
     CompositionId, EffectVariantId, FieldId, InputVariantId, MachineId, MachineInstanceId,
 };
 use meerkat_runtime::composition::{
-    CatalogCompositionDispatcher, CompositionBinding, CompositionDispatcher, ConsumerSurface,
-    DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect, ProducerInstance,
-    RouteTable,
+    CatalogCompositionDispatcher, CompositionBinding, CompositionDispatcher, ConsumerRefusal,
+    ConsumerSurface, DispatchRefusal, EffectPayload, FieldValue, OwnedFieldValue, ProducerEffect,
+    ProducerInstance, RouteTable,
 };
 
 /// Stand-in for the codegen-emitted `MeerkatMobSeamEffect` sum — one
@@ -134,7 +134,7 @@ impl ConsumerSurface for RecordingSurface {
         &self,
         variant: InputVariantId,
         projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
+    ) -> Result<(), ConsumerRefusal> {
         self.log.lock().await.push((variant, projected_fields));
         Ok(())
     }
@@ -153,8 +153,10 @@ impl ConsumerSurface for RejectingSurface {
         &self,
         _variant: InputVariantId,
         _projected_fields: Vec<(FieldId, OwnedFieldValue)>,
-    ) -> Result<(), String> {
-        Err("consumer is closed".to_string())
+    ) -> Result<(), ConsumerRefusal> {
+        Err(ConsumerRefusal::ConsumerUnavailable {
+            reason: "consumer is closed".to_string(),
+        })
     }
 }
 
@@ -425,11 +427,16 @@ async fn consumer_refusal_is_typed_refusal() {
         DispatchRefusal::ConsumerRefused {
             instance,
             variant,
-            reason,
+            refusal,
         } => {
             assert_eq!(instance.as_str(), "meerkat");
             assert_eq!(variant.as_str(), "Retire");
-            assert_eq!(reason, "consumer is closed");
+            assert_eq!(
+                refusal,
+                ConsumerRefusal::ConsumerUnavailable {
+                    reason: "consumer is closed".to_string()
+                }
+            );
         }
         other => panic!("expected ConsumerRefused, got {other:?}"),
     }

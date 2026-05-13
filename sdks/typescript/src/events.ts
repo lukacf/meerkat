@@ -51,6 +51,12 @@ export type StopReason =
 
 export type ToolCallArguments = Readonly<Record<string, unknown>>;
 
+export interface ToolResultError {
+  readonly code: string;
+  readonly message: string;
+  readonly data?: unknown;
+}
+
 /** Which budget dimension triggered a warning. */
 export type BudgetType = "tokens" | "time" | "tool_calls";
 
@@ -229,6 +235,7 @@ export interface ToolResultReceivedEvent {
   readonly name: string;
   readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
+  readonly error?: ToolResultError | null;
 }
 
 export interface TurnCompletedEvent {
@@ -254,6 +261,7 @@ export interface ToolExecutionCompletedEvent {
   readonly result: string;
   readonly content: readonly ContentBlock[];
   readonly isError?: boolean;
+  readonly error?: ToolResultError | null;
   readonly durationMs?: number;
 }
 
@@ -758,6 +766,24 @@ function parseAgentErrorReport(raw: unknown): AgentErrorReport | null | undefine
   };
 }
 
+function parseToolResultError(raw: unknown): ToolResultError | null | undefined {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (raw === null) {
+    return null;
+  }
+  if (!isPlainRecord(raw)) {
+    throw new Error("tool result error must be object");
+  }
+
+  return {
+    code: requireStringField(raw, "code"),
+    message: requireStringField(raw, "message"),
+    ...(hasOwn(raw, "data") ? { data: raw.data } : {}),
+  };
+}
+
 function parseContentInput(raw: unknown): ContentInput {
   if (Array.isArray(raw)) return raw as ContentInput;
   return String(raw ?? "");
@@ -1107,6 +1133,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         name: requireStringField(raw, "name"),
         content: parseContentBlocks(raw.content),
         isError: requireBooleanField(raw, "is_error"),
+        ...(hasOwn(raw, "error") ? { error: parseToolResultError(raw.error) ?? null } : {}),
       };
     case "turn_completed":
       return {
@@ -1130,6 +1157,7 @@ export function parseCoreEvent(raw: Record<string, unknown>): AgentEvent {
         result: requireStringField(raw, "result"),
         content: parseContentBlocks(raw.content, raw.result),
         ...(parseWireBoolean(raw.is_error) != null ? { isError: parseWireBoolean(raw.is_error) } : {}),
+        ...(hasOwn(raw, "error") ? { error: parseToolResultError(raw.error) ?? null } : {}),
         ...(typeof raw.duration_ms === "number" && Number.isFinite(raw.duration_ms)
           ? { durationMs: raw.duration_ms }
           : {}),

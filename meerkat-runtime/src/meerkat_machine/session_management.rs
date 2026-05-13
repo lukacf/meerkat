@@ -255,8 +255,8 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
-    ) {
-        let _ = self
+    ) -> Result<(), RuntimeDriverError> {
+        match self
             .execute_meerkat_machine_command(
                 Some(Arc::clone(self)),
                 MeerkatMachineCommand::EnsureSessionWithExecutor {
@@ -264,7 +264,14 @@ impl MeerkatMachine {
                     executor,
                 },
             )
-            .await;
+            .await
+            .map_err(Self::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            _ => Err(RuntimeDriverError::Internal(
+                "register_session_with_executor: unexpected command result variant".into(),
+            )),
+        }
     }
 
     /// Ensure a runtime driver with executor exists for the session.
@@ -277,8 +284,8 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
-    ) {
-        let _ = self
+    ) -> Result<(), RuntimeDriverError> {
+        match self
             .execute_meerkat_machine_command(
                 Some(Arc::clone(self)),
                 MeerkatMachineCommand::EnsureSessionWithExecutor {
@@ -286,7 +293,14 @@ impl MeerkatMachine {
                     executor,
                 },
             )
-            .await;
+            .await
+            .map_err(Self::driver_error_from_command_error)?
+        {
+            MeerkatMachineCommandResult::Unit => Ok(()),
+            _ => Err(RuntimeDriverError::Internal(
+                "ensure_session_with_executor: unexpected command result variant".into(),
+            )),
+        }
     }
 
     /// Install a temporary live interrupt handle for a prepared session before
@@ -316,7 +330,7 @@ impl MeerkatMachine {
         self: &Arc<Self>,
         session_id: SessionId,
         executor: Box<dyn meerkat_core::lifecycle::CoreExecutor>,
-    ) {
+    ) -> Result<(), RuntimeDriverError> {
         let mut repaired_dead_attachment = false;
         let existing = {
             let mut sessions = self.sessions.write().await;
@@ -341,25 +355,14 @@ impl MeerkatMachine {
         let (driver, completions, ops_lifecycle) =
             if let Some((has_attachment, driver, completions, ops_lifecycle)) = existing {
                 if has_attachment {
-                    return;
+                    return Ok(());
                 }
                 (driver, completions, ops_lifecycle)
             } else {
                 let runtime_id = Self::logical_runtime_id(&session_id);
-                let durable_runtime_state = match self
+                let durable_runtime_state = self
                     .durable_runtime_state_for_registration(&runtime_id)
-                    .await
-                {
-                    Ok(state) => state,
-                    Err(err) => {
-                        tracing::error!(
-                            %session_id,
-                            error = %err,
-                            "failed to load durable runtime state during executor registration"
-                        );
-                        return;
-                    }
-                };
+                    .await?;
                 let initial_runtime_state = durable_runtime_state.unwrap_or(RuntimeState::Idle);
                 let dsl_authority = Arc::new(std::sync::Mutex::new(
                     super::dsl::MeerkatMachineAuthority::from_state(
@@ -379,14 +382,7 @@ impl MeerkatMachine {
                     Arc::clone(&dsl_authority),
                     initial_runtime_state,
                 );
-                if let Err(err) = recovered_entry.as_driver_mut().recover().await {
-                    tracing::error!(
-                        %session_id,
-                        error = %err,
-                        "failed to recover runtime driver during registration"
-                    );
-                    return;
-                }
+                recovered_entry.as_driver_mut().recover().await?;
                 // Recover ops state OUTSIDE the sessions lock to avoid blocking
                 // other adapter operations behind potentially slow disk I/O.
                 let recovered_ops_state = match self
@@ -400,7 +396,7 @@ impl MeerkatMachine {
                             error = %err,
                             "failed to recover ops lifecycle during executor registration"
                         );
-                        return;
+                        return Err(err);
                     }
                 };
                 let (recovered_ops, recovered_epoch, recovered_cursors) = recovered_ops_state;
@@ -411,7 +407,7 @@ impl MeerkatMachine {
                 if let Some(entry) = sessions.get_mut(&session_id) {
                     repaired_dead_attachment = entry.clear_dead_attachment();
                     if entry.has_attachment_or_attaching() {
-                        return;
+                        return Ok(());
                     }
                     entry.phase = RegistrationPhase::Attaching;
                     (
@@ -457,8 +453,8 @@ impl MeerkatMachine {
         // Stage the DSL EnsureSessionWithExecutor transition BEFORE mutating
         // the driver, so a DSL rejection never leaves shell and DSL disagreeing.
         // Session entry exists by this point (inner created it above).
-        if let Err(reason) = self
-            .stage_session_dsl_input(
+        if let Err(error) = self
+            .stage_session_dsl_transition_typed(
                 &session_id,
                 crate::meerkat_machine::dsl::MeerkatMachineInput::EnsureSessionWithExecutor {
                     session_id: crate::meerkat_machine::dsl::SessionId::from_domain(&session_id),
@@ -469,11 +465,11 @@ impl MeerkatMachine {
         {
             tracing::warn!(
                 %session_id,
-                error = %reason,
+                error = %error,
                 "DSL rejected EnsureSessionWithExecutor; aborting attach"
             );
             self.revert_attaching(&session_id).await;
-            return;
+            return Err(error.into());
         }
 
         let should_wake = {
@@ -494,13 +490,8 @@ impl MeerkatMachine {
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        %session_id,
-                        error = %error,
-                        "failed to attach runtime driver before publishing loop attachment"
-                    );
                     self.revert_attaching(&session_id).await;
-                    return;
+                    return Err(error);
                 }
             }
             !driver_guard.as_driver().active_input_ids().is_empty()
@@ -610,12 +601,15 @@ impl MeerkatMachine {
                 machine_unregister_session_projection(&mut driver_guard);
             }
             self.revert_attaching(&session_id).await;
-            return;
+            return Err(RuntimeDriverError::Internal(
+                "runtime loop attachment was not published".into(),
+            ));
         }
 
         if should_wake {
             let _ = wake_tx.try_send(());
         }
+        Ok(())
     }
 
     /// Revert `Attaching → Queuing` if attachment failed. This unblocks
@@ -651,7 +645,10 @@ impl MeerkatMachine {
         drop(driver);
 
         let mut completions = entry.completions.lock().await;
-        completions.resolve_all_terminated("runtime session unregistered");
+        completions.resolve_all_terminated(
+            "runtime session unregistered",
+            crate::completion::CompletionRuntimeTerminationKind::RuntimeSessionUnregistered,
+        );
     }
 
     pub(super) async fn unregister_session_inner(&self, session_id: &SessionId) {

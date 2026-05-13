@@ -930,7 +930,7 @@ impl MobBuilder {
             &definition.id,
             supervisor_authority,
         )?);
-        let mut roster = Roster::try_project(&mob_events).map_err(MobError::Internal)?;
+        let mut roster = Roster::try_project(&mob_events)?;
         #[cfg(not(target_arch = "wasm32"))]
         Self::normalize_sessionless_backend_runtime_modes(&mut roster);
         let seeded_restore_diagnostics = HashMap::new();

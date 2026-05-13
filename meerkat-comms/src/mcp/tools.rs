@@ -516,7 +516,7 @@ async fn dispatch(ctx: &ToolContext, command: CommsCommand) -> Result<Value, Str
                 "peer_unreachable: peer '{}' is unreachable: offline_or_no_ack",
                 peer_for_errors.as_deref().unwrap_or("<unknown>")
             ),
-            SendError::Internal(inner) if is_transport_internal(&inner) => {
+            SendError::Transport(inner) | SendError::Io(inner) => {
                 format!(
                     "peer_unreachable: peer '{}' is unreachable: transport_error ({inner})",
                     peer_for_errors.as_deref().unwrap_or("<unknown>")
@@ -643,92 +643,101 @@ fn format_router_send_error(peer_name: &str, error: crate::router::SendError) ->
     }
 }
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 async fn handle_peers(ctx: &ToolContext) -> Result<Value, String> {
     let entries = if let Some(runtime) = &ctx.runtime {
         runtime.peers().await
     } else {
-        runtime_less_peer_directory(ctx)
+        runtime_less_peer_directory(ctx).map_err(|err| err.to_string())?
     };
 
     serde_json::to_value(CommsPeersResult::from_entries(&entries))
         .map_err(|err| format!("failed to serialize peer directory: {err}"))
 }
 
-fn runtime_less_peer_directory(ctx: &ToolContext) -> Vec<PeerDirectoryEntry> {
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum RuntimeLessPeerDirectoryError {
+    #[error("invalid trusted peer directory: zero pubkey for {name}")]
+    ZeroPubkey { name: String },
+    #[error("invalid trusted peer directory: duplicate peer id {peer_id}")]
+    DuplicatePeerId { peer_id: PeerId },
+    #[error("invalid trusted peer directory: invalid name {name:?} for {peer_id}: {reason}")]
+    InvalidName {
+        name: String,
+        peer_id: PeerId,
+        reason: String,
+    },
+    #[error("invalid trusted peer directory: invalid address {address:?} for {peer_id}: {reason}")]
+    InvalidAddress {
+        address: String,
+        peer_id: PeerId,
+        reason: String,
+    },
+}
+
+fn runtime_less_peer_directory(
+    ctx: &ToolContext,
+) -> Result<Vec<PeerDirectoryEntry>, RuntimeLessPeerDirectoryError> {
     let self_pubkey = ctx.router.keypair_arc().public_key();
     let peers = ctx.trusted_peers.read();
     let sendable_kinds = peer_sendability_authorized_by_tools(ctx);
-    let peer_id_counts: HashMap<PeerId, usize> = peers
-        .peers
-        .iter()
-        .filter(|p| !p.pubkey.is_zero() && p.pubkey != self_pubkey)
-        .fold(HashMap::new(), |mut counts, peer| {
-            *counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
-            counts
-        });
-    peers
+    let eligible_peers = peers
         .peers
         .iter()
         .filter(|p| p.pubkey != self_pubkey)
-        .filter_map(|p| {
-            if p.pubkey.is_zero() {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    "skipping zero-pubkey trusted peer in MCP peer directory"
-                );
-                return None;
+        .collect::<Vec<_>>();
+    for peer in &eligible_peers {
+        if peer.pubkey.is_zero() {
+            return Err(RuntimeLessPeerDirectoryError::ZeroPubkey {
+                name: peer.name.clone(),
+            });
+        }
+    }
+    let peer_id_counts: HashMap<PeerId, usize> =
+        eligible_peers
+            .iter()
+            .fold(HashMap::new(), |mut counts, peer| {
+                *counts.entry(peer.pubkey.to_peer_id()).or_default() += 1;
+                counts
+            });
+    let mut entries = Vec::with_capacity(eligible_peers.len());
+    for p in eligible_peers {
+        let peer_id = p.pubkey.to_peer_id();
+        if peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
+            return Err(RuntimeLessPeerDirectoryError::DuplicatePeerId { peer_id });
+        }
+        let name = match PeerName::new(p.name.clone()) {
+            Ok(name) => name,
+            Err(err) => {
+                return Err(RuntimeLessPeerDirectoryError::InvalidName {
+                    name: p.name.clone(),
+                    peer_id,
+                    reason: err,
+                });
             }
-            let peer_id = p.pubkey.to_peer_id();
-            if peer_id_counts.get(&peer_id).copied().unwrap_or(0) != 1 {
-                tracing::warn!(
-                    peer_name = %p.name,
-                    peer_id = %peer_id,
-                    "skipping duplicate trusted peer id in MCP peer directory"
-                );
-                return None;
+        };
+        let address = match PeerAddress::parse(&p.addr) {
+            Ok(address) => address,
+            Err(err) => {
+                return Err(RuntimeLessPeerDirectoryError::InvalidAddress {
+                    address: p.addr.clone(),
+                    peer_id,
+                    reason: err.to_string(),
+                });
             }
-            let name = match PeerName::new(p.name.clone()) {
-                Ok(name) => name,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        error = %err,
-                        "skipping trusted peer with invalid name in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            let address = match PeerAddress::parse(&p.addr) {
-                Ok(address) => address,
-                Err(err) => {
-                    tracing::warn!(
-                        peer_name = %p.name,
-                        peer_id = %peer_id,
-                        address = %p.addr,
-                        error = %err,
-                        "skipping trusted peer with invalid address in MCP peer directory"
-                    );
-                    return None;
-                }
-            };
-            Some(PeerDirectoryEntry {
-                name,
-                peer_id,
-                address,
-                source: PeerDirectorySource::Trusted,
-                sendable_kinds: sendable_kinds.clone(),
-                capabilities: PeerCapabilitySet::default(),
-                reachability: PeerReachability::Unknown,
-                last_unreachable_reason: None,
-                meta: p.meta.clone(),
-            })
-        })
-        .collect()
+        };
+        entries.push(PeerDirectoryEntry {
+            name,
+            peer_id,
+            address,
+            source: PeerDirectorySource::Trusted,
+            sendable_kinds: sendable_kinds.clone(),
+            capabilities: PeerCapabilitySet::default(),
+            reachability: PeerReachability::Unknown,
+            last_unreachable_reason: None,
+            meta: p.meta.clone(),
+        });
+    }
+    Ok(entries)
 }
 
 fn peer_sendability_authorized_by_tools(ctx: &ToolContext) -> Vec<PeerSendability> {
@@ -1581,8 +1590,8 @@ mod tests {
         assert!(peer["meta"].is_object());
     }
 
-    #[test]
-    fn test_runtime_less_peer_directory_skips_duplicate_canonical_peer_ids() {
+    #[tokio::test]
+    async fn test_runtime_less_peer_directory_fails_on_duplicate_canonical_peer_ids() {
         let sender_keypair = Keypair::generate();
         let peer_keypair = Keypair::generate();
         let peer_pubkey = peer_keypair.public_key();
@@ -1621,10 +1630,23 @@ mod tests {
             "duplicate canonical trust is not send-resolvable"
         );
 
-        let peers = runtime_less_peer_directory(&ctx);
+        let error =
+            runtime_less_peer_directory(&ctx).expect_err("duplicate trust must fail closed");
         assert!(
-            peers.iter().all(|peer| peer.peer_id != peer_id),
-            "runtime-less peer directory must not advertise duplicate canonical ids: {peers:?}"
+            matches!(
+                error,
+                RuntimeLessPeerDirectoryError::DuplicatePeerId { peer_id: duplicate }
+                    if duplicate == peer_id
+            ),
+            "runtime-less peer directory must surface duplicate canonical trust: {error:?}"
+        );
+
+        let error = handle_tools_call(&ctx, "peers", &json!({}))
+            .await
+            .expect_err("public peers tool must fail closed on duplicate trust");
+        assert!(
+            error.contains("duplicate peer id"),
+            "public peers error should name duplicate trust: {error}"
         );
     }
 

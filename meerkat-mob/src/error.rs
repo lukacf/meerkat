@@ -68,6 +68,13 @@ pub enum MobError {
         reason: String,
     },
 
+    /// Supervisor private trust activation failed while rotating supervisor authority.
+    #[error("{reason}")]
+    SupervisorPrivateTrustActivationFailed {
+        reason: String,
+        cleanup_failed: bool,
+    },
+
     /// The member failed to restore durable session state and is broken until repaired.
     #[error(
         "member {member_id} failed to restore {}: {reason}",
@@ -174,6 +181,10 @@ pub enum MobError {
     #[error("reset barrier active")]
     ResetBarrier,
 
+    /// Roster event replay found invalid persisted member/trust facts.
+    #[error("roster projection failed: {0}")]
+    RosterProjectionFailed(#[from] crate::roster::RosterProjectionError),
+
     /// A storage operation failed.
     #[error("storage error: {0}")]
     StorageError(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -212,6 +223,18 @@ pub enum MobError {
     /// The referenced work unit does not exist.
     #[error("work not found: {0}")]
     WorkNotFound(WorkRef),
+
+    /// A bridge session was not present in the live mob authority.
+    #[error("bridge session missing from live mob authority: {0}")]
+    BridgeSessionMissingFromLiveAuthority(meerkat_core::types::SessionId),
+
+    /// The mob actor task has exited before accepting the command.
+    #[error("actor task dropped")]
+    ActorTaskDropped,
+
+    /// The mob actor accepted the command but dropped its reply channel.
+    #[error("actor reply dropped")]
+    ActorReplyDropped,
 
     /// An internal error (unexpected state, logic errors).
     #[error("internal error: {0}")]
@@ -292,6 +315,9 @@ impl MobError {
             Self::InvalidTransition { .. } => MobSpawnManyFailureCause::InvalidTransition,
             Self::WiringError(_) => MobSpawnManyFailureCause::WiringError,
             Self::SupervisorRotationIncomplete { .. } => MobSpawnManyFailureCause::WiringError,
+            Self::SupervisorPrivateTrustActivationFailed { .. } => {
+                MobSpawnManyFailureCause::WiringError
+            }
             Self::BridgeCommandRejected { .. } => MobSpawnManyFailureCause::BridgeCommandRejected,
             Self::MemberRestoreFailed { .. } => MobSpawnManyFailureCause::MemberRestoreFailed,
             Self::KickoffWaitTimedOut { .. } => MobSpawnManyFailureCause::KickoffWaitTimedOut,
@@ -316,6 +342,7 @@ impl MobError {
             Self::SupervisorEscalation(_) => MobSpawnManyFailureCause::SupervisorEscalation,
             Self::UnsupportedForMode { .. } => MobSpawnManyFailureCause::UnsupportedForMode,
             Self::ResetBarrier => MobSpawnManyFailureCause::ResetBarrier,
+            Self::RosterProjectionFailed(_) => MobSpawnManyFailureCause::Internal,
             Self::StorageError(_) => MobSpawnManyFailureCause::StorageError,
             Self::SessionError(_) => MobSpawnManyFailureCause::SessionError,
             Self::CommsError(_) => MobSpawnManyFailureCause::CommsError,
@@ -323,6 +350,8 @@ impl MobError {
             Self::StaleFenceToken { .. } => MobSpawnManyFailureCause::StaleFenceToken,
             Self::StaleEventCursor { .. } => MobSpawnManyFailureCause::StaleEventCursor,
             Self::WorkNotFound(_) => MobSpawnManyFailureCause::WorkNotFound,
+            Self::BridgeSessionMissingFromLiveAuthority(_) => MobSpawnManyFailureCause::Internal,
+            Self::ActorTaskDropped | Self::ActorReplyDropped => MobSpawnManyFailureCause::Internal,
             Self::Internal(_) => MobSpawnManyFailureCause::Internal,
         }
     }

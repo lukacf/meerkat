@@ -18,7 +18,7 @@ pub use types::{CommsContent, CommsMessage, CommsStatus, MessageIntent};
 
 #[cfg(target_arch = "wasm32")]
 use crate::tokio;
-use meerkat_core::error::AgentError;
+use meerkat_core::error::{AgentError, ToolError};
 use meerkat_core::types::RunResult;
 use meerkat_core::{Agent, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
 use tokio::sync::watch;
@@ -94,14 +94,14 @@ where
                         continue;
                     }
                     msg = self.comms_manager.recv_message() => {
-                        msg.ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+                        msg.ok_or_else(|| AgentError::ToolError(ToolError::other("Inbox closed")))?
                     }
                 }
             } else {
                 self.comms_manager
                     .recv_message()
                     .await
-                    .ok_or_else(|| AgentError::ToolError("Inbox closed".to_string()))?
+                    .ok_or_else(|| AgentError::ToolError(ToolError::other("Inbox closed")))?
             };
             let mut messages = vec![first_msg];
             messages.extend(self.comms_manager.drain_messages());

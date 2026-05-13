@@ -72,6 +72,7 @@ impl SessionAgent for MockAgent {
 
         Ok(RunResult {
             text: "Hello from mock".to_string(),
+            content: Vec::new(),
             session_id: self.session_id.clone(),
             usage: Usage {
                 input_tokens: 10,
@@ -370,6 +371,7 @@ fn sync_shared_system_context_to_session(
 fn successful_run_result(session: &Session, text: impl Into<String>) -> RunResult {
     RunResult {
         text: text.into(),
+        content: Vec::new(),
         session_id: session.id().clone(),
         usage: Usage::default(),
         turns: 1,

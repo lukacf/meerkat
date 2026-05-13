@@ -23,7 +23,7 @@ use crate::compact::SessionCompactionCadence;
 use crate::completion_feed::CompletionSeq;
 use crate::config::{AgentConfig, HookRunOverrides};
 use crate::error::AgentError;
-use crate::event::ExternalToolDelta;
+use crate::event::{AgentErrorClass, ExternalToolDelta};
 use crate::hooks::HookEngine;
 use crate::lifecycle::RunId;
 use crate::lifecycle::run_primitive::ProviderParamsOverride;
@@ -164,6 +164,7 @@ pub struct AgentExecutionSnapshot {
     pub cancel_after_boundary: bool,
     pub terminal_outcome: Option<TurnTerminalOutcome>,
     pub terminal_cause_kind: Option<TurnTerminalCauseKind>,
+    pub terminal_failure_class: Option<AgentErrorClass>,
     pub extraction_attempts: u32,
     pub max_extraction_retries: u32,
     pub applied_cursor: CompletionSeq,

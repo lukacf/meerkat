@@ -2423,9 +2423,7 @@ impl CommsRuntime {
                     reason: reason.into(),
                 })
             }
-            Err(
-                error @ (crate::router::SendError::Transport(_) | crate::router::SendError::Io(_)),
-            ) => {
+            Err(error @ crate::router::SendError::Transport(_)) => {
                 if let Some(peer) = resolved_peer.as_ref() {
                     self.peer_directory_reachability.lock().apply(
                         PeerDirectoryReachabilityInput::SendFailed {
@@ -2434,7 +2432,18 @@ impl CommsRuntime {
                         },
                     );
                 }
-                Err(SendError::Internal(error.to_string()))
+                Err(SendError::Transport(error.to_string()))
+            }
+            Err(error @ crate::router::SendError::Io(_)) => {
+                if let Some(peer) = resolved_peer.as_ref() {
+                    self.peer_directory_reachability.lock().apply(
+                        PeerDirectoryReachabilityInput::SendFailed {
+                            key: peer.reachability_key(),
+                            reason: PeerReachabilityReason::TransportError,
+                        },
+                    );
+                }
+                Err(SendError::Io(error.to_string()))
             }
         }
     }
@@ -6289,8 +6298,8 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(result, Err(SendError::Internal(_))),
-            "transport failure should surface as internal send error, got: {result:?}"
+            matches!(result, Err(SendError::Transport(_) | SendError::Io(_))),
+            "transport failure should surface as typed transport/IO send error, got: {result:?}"
         );
 
         let peers = CoreCommsRuntime::peers(&sender).await;

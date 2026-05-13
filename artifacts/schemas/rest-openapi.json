@@ -2301,6 +2301,12 @@
       "HelpResponse": {
         "description": "Canonical run result for wire protocol.",
         "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/WireAssistantBlock"
+            },
+            "type": "array"
+          },
           "extraction_error": {
             "anyOf": [
               {
@@ -3411,7 +3417,7 @@
         "description": "Supported LLM providers.",
         "enum": [
           "anthropic",
-          "open_a_i",
+          "openai",
           "gemini",
           "self_hosted",
           "other"
@@ -4970,7 +4976,7 @@
         "type": "object"
       },
       "SkillName": {
-        "description": "Canonical skill slug (lowercase, dash-separated).",
+        "description": "Canonical skill name.\n\nMost skills are a single lowercase dash-separated slug. Sources whose\ncanonical ownership includes a nested registration path may use slash-\ndelimited slug segments, e.g. `collection/email-extractor`.",
         "type": "string"
       },
       "SkillQuarantineDiagnostic": {
@@ -4987,8 +4993,18 @@
             "minimum": 0,
             "type": "integer"
           },
+          "identity_hint": {
+            "type": "string"
+          },
           "key": {
-            "$ref": "#/components/schemas/SkillKey"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SkillKey"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "last_seen_unix_secs": {
             "format": "uint64",
@@ -5003,7 +5019,7 @@
           }
         },
         "required": [
-          "key",
+          "identity_hint",
           "location",
           "error_code",
           "error_class",
@@ -5834,6 +5850,7 @@
           "retry_exhausted",
           "turn_limit_reached",
           "runtime_apply_failure",
+          "checkpoint_persistence_failure",
           "fatal_failure"
         ],
         "type": "string"
@@ -6094,8 +6111,7 @@
             ],
             "type": "object"
           }
-        ],
-        "title": "WireAssistantBlock"
+        ]
       },
       "WireAuthBindingRef": {
         "description": "Wire projection of [`meerkat_core::AuthBindingRef`].\n\nPure structural shape — no `\"realm:binding\"` string form. Wave-b deleted\n`parse` and `Display` on both the core type and the wire projection so\nthe colon-joined form cannot travel across wire boundaries.",
@@ -7108,6 +7124,12 @@
       "WireRunResult": {
         "description": "Canonical run result for wire protocol.",
         "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/WireAssistantBlock"
+            },
+            "type": "array"
+          },
           "extraction_error": {
             "anyOf": [
               {
@@ -7493,6 +7515,16 @@
           "content": {
             "$ref": "#/components/schemas/WireToolResultContent"
           },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WireToolResultError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "is_error": {
             "default": false,
             "type": "boolean"
@@ -7520,6 +7552,23 @@
           }
         ],
         "description": "Wire-safe tool result content that handles both legacy string and array formats."
+      },
+      "WireToolResultError": {
+        "description": "Wire-safe structured tool error detail.",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "data": true,
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "type": "object"
       },
       "WireTranscriptSource": {
         "description": "Wire projection of `meerkat_core::TranscriptSource`. Lane provenance\nfor spoken-transcript blocks.\n\nR7-4 (P3 dogma): the previous shape used a wildcard arm in\n`From<TranscriptSource>` that fell through to `Spoken`, silently\nmisattributing future core variants as user-spoken transcript. The\nfix mirrors the live-wire pattern from R5-3 / R6-5 — future core\nvariants surface as `Unknown { debug }` (a fail-loud sentinel), and\nthe reverse direction is `TryFrom` returning\n`WireConversionError::TranscriptSource { debug }` for the `Unknown`\ncase rather than fabricating a typed `Spoken`.",

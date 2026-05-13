@@ -305,10 +305,12 @@ async fn ops_lifecycle_contract_runtime_session_entries_get_distinct_registries(
     let registry_a = adapter
         .ops_lifecycle_registry(&session_a)
         .await
+        .expect("session A registry lookup should not fail")
         .expect("session A registry");
     let registry_b = adapter
         .ops_lifecycle_registry(&session_b)
         .await
+        .expect("session B registry lookup should not fail")
         .expect("session B registry");
 
     assert!(

@@ -270,11 +270,13 @@ impl SessionBackend {
     async fn runtime_session_state(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<RuntimeSessionState>> {
-        let adapter = self.runtime_adapter.as_ref()?;
+    ) -> Result<Option<Arc<RuntimeSessionState>>, MobError> {
+        let Some(adapter) = self.runtime_adapter.as_ref() else {
+            return Ok(None);
+        };
         if let Some(existing) = self.runtime_sessions.read().await.get(session_id).cloned() {
             if adapter.session_has_executor(session_id).await {
-                return Some(existing);
+                return Ok(Some(existing));
             }
             existing.clear_queued_turns().await;
             let state = Arc::new(RuntimeSessionState {
@@ -292,12 +294,17 @@ impl SessionBackend {
             // the stale binding before reattaching with a fresh sidecar.
             adapter
                 .ensure_session_with_executor(session_id.clone(), executor)
-                .await;
+                .await
+                .map_err(|error| {
+                    MobError::Internal(format!(
+                        "failed to attach runtime executor for mob session {session_id}: {error}"
+                    ))
+                })?;
             self.runtime_sessions
                 .write()
                 .await
                 .insert(session_id.clone(), state.clone());
-            return Some(state);
+            return Ok(Some(state));
         }
         let state = Arc::new(RuntimeSessionState {
             queued_turns: Mutex::new(RuntimeSessionQueue::default()),
@@ -311,12 +318,17 @@ impl SessionBackend {
         ));
         adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(|error| {
+                MobError::Internal(format!(
+                    "failed to attach runtime executor for mob session {session_id}: {error}"
+                ))
+            })?;
         self.runtime_sessions
             .write()
             .await
             .insert(session_id.clone(), state.clone());
-        Some(state)
+        Ok(Some(state))
     }
 
     async fn remove_runtime_session_state(&self, session_id: &SessionId) {
@@ -376,7 +388,7 @@ impl SessionBackend {
                 "runtime-backed turn requested without runtime adapter: {session_id}"
             ))
         })?;
-        let state = self.runtime_session_state(session_id).await;
+        let state = self.runtime_session_state(session_id).await?;
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let mut context_input_id = requested_input_id.clone();
@@ -475,7 +487,7 @@ impl SessionBackend {
                 "runtime-backed turn requested without runtime adapter: {session_id}"
             ))
         })?;
-        let state = self.runtime_session_state(session_id).await;
+        let state = self.runtime_session_state(session_id).await?;
         let adapter_session_id = session_id.clone();
         let requested_input_id = input.id().clone();
         let mut context_input_id = requested_input_id.clone();
@@ -582,7 +594,7 @@ fn runtime_completion_to_mob_result(
         meerkat_runtime::completion::CompletionOutcome::Cancelled => {
             Err(MobError::Internal("turn cancelled".to_string()))
         }
-        meerkat_runtime::completion::CompletionOutcome::Abandoned(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::Abandoned { reason, .. } => {
             Err(MobError::Internal(format!("turn abandoned: {reason}")))
         }
         meerkat_runtime::completion::CompletionOutcome::AbandonedWithError { reason, error } => {
@@ -606,7 +618,7 @@ fn runtime_completion_to_mob_result(
                 .map(serde_json::Value::to_string)
                 .unwrap_or_else(|| "null".to_string())
         ))),
-        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated(reason) => {
+        meerkat_runtime::completion::CompletionOutcome::RuntimeTerminated { reason, .. } => {
             Err(MobError::Internal(format!("runtime terminated: {reason}")))
         }
     }
@@ -1284,7 +1296,9 @@ impl MobProvisioner for SessionBackend {
                 );
                 adapter.unregister_session(pre_id).await;
             }
-            let _ = self.runtime_session_state(&created_bridge_session_id).await;
+            let _ = self
+                .runtime_session_state(&created_bridge_session_id)
+                .await?;
         }
         if let (Some(owner_bridge_session_id), Some(registry)) =
             (req.owner_bridge_session_id, req.ops_registry)
@@ -1561,7 +1575,7 @@ impl MobProvisioner for SessionBackend {
     async fn ensure_runtime_session_state(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let bridge_session_id = Self::require_session(member_ref, "ensure runtime session for")?;
         self.runtime_session_state(&bridge_session_id)
-            .await
+            .await?
             .ok_or_else(|| {
                 MobError::Internal(format!(
                     "runtime adapter unavailable while ensuring session state for '{bridge_session_id}'"
@@ -1840,6 +1854,19 @@ impl MultiBackendProvisioner {
         MobError::from(rejection)
     }
 
+    fn bridge_trust_rollback_error(
+        context: &'static str,
+        error: MobError,
+        rollback: Result<(), MobError>,
+    ) -> MobError {
+        match rollback {
+            Ok(()) => error,
+            Err(rollback_error) => MobError::WiringError(format!(
+                "{context}: {error}; bridge trust rollback failed: {rollback_error}"
+            )),
+        }
+    }
+
     async fn ensure_supervisor_authorized(
         &self,
         peer: &TrustedPeerDescriptor,
@@ -1848,16 +1875,33 @@ impl MultiBackendProvisioner {
         let payload = self.bridge_supervisor_payload().await?;
         let protocol_version = payload.protocol_version;
         let command = super::bridge_protocol::BridgeCommand::AuthorizeSupervisor(payload);
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, &command, Duration::from_secs(30))
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                return Err(Self::bridge_trust_rollback_error(
+                    "authorize supervisor send failed",
+                    error,
+                    rollback,
+                ));
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(protocol_version, &value) {
             if let Some(cause) = rejection.typed_cause()
                 && super::bridge_fallback::should_fall_back_to_bind(cause)
                 && let Some((peer_id, address, bootstrap_token, pubkey)) = binding
             {
+                self.supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await?;
                 let bind: super::bridge_protocol::BridgeBindResponse = self
                     .bind_peer_only_member(peer, peer_id, address, bootstrap_token)
                     .await?;
@@ -1879,7 +1923,16 @@ impl MultiBackendProvisioner {
                 .await?;
                 return Ok(rebound_peer);
             }
-            return Err(Self::bridge_rejection_error(rejection));
+            let error = Self::bridge_rejection_error(rejection);
+            let rollback = self
+                .supervisor_bridge
+                .rollback_recipient_trust(trust_install)
+                .await;
+            return Err(Self::bridge_trust_rollback_error(
+                "authorize supervisor rejected",
+                error,
+                rollback,
+            ));
         }
         Ok(peer.clone())
     }
@@ -1949,17 +2002,53 @@ impl MultiBackendProvisioner {
         command: &super::bridge_protocol::BridgeCommand,
         timeout: Duration,
     ) -> Result<R, MobError> {
-        self.supervisor_bridge.trust_recipient(peer).await?;
-        let value = self
+        let trust_install = self.supervisor_bridge.trust_recipient(peer).await?;
+        let value = match self
             .supervisor_bridge
             .send_bridge_command(peer, command, timeout)
-            .await?;
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                return Err(Self::bridge_trust_rollback_error(
+                    "bridge command send failed",
+                    error,
+                    rollback,
+                ));
+            }
+        };
         if let Some(rejection) = Self::bridge_rejection_reply(command.protocol_version(), &value) {
-            return Err(Self::bridge_rejection_error(rejection));
+            let error = Self::bridge_rejection_error(rejection);
+            let rollback = self
+                .supervisor_bridge
+                .rollback_recipient_trust(trust_install)
+                .await;
+            return Err(Self::bridge_trust_rollback_error(
+                "bridge command rejected",
+                error,
+                rollback,
+            ));
         }
-        serde_json::from_value(value).map_err(|error| {
-            MobError::Internal(format!("failed to decode bridge command response: {error}"))
-        })
+        match serde_json::from_value(value) {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let rollback = self
+                    .supervisor_bridge
+                    .rollback_recipient_trust(trust_install)
+                    .await;
+                Err(Self::bridge_trust_rollback_error(
+                    "bridge command response decode failed",
+                    MobError::Internal(format!(
+                        "failed to decode bridge command response: {error}"
+                    )),
+                    rollback,
+                ))
+            }
+        }
     }
 
     async fn bind_peer_only_member(

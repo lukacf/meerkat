@@ -1,5 +1,6 @@
 //! Core error types for Meerkat
 
+use crate::checkpoint::SessionCheckpointError;
 use crate::hooks::{HookId, HookPoint, HookReasonCode};
 use crate::tool_catalog::ToolUnavailableReason;
 use crate::types::SessionId;
@@ -284,8 +285,10 @@ pub enum AgentError {
     },
     #[error("Storage error: {0}")]
     StoreError(String),
+    #[error("Session checkpoint failed: {0}")]
+    SessionCheckpointFailed(SessionCheckpointError),
     #[error("Tool error: {0}")]
-    ToolError(String),
+    ToolError(ToolError),
     #[error("MCP error: {0}")]
     McpError(String),
     #[error("Session not found: {0}")]

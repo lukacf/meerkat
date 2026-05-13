@@ -13,10 +13,6 @@ use super::{parse_params, parse_session_id_for_runtime};
 pub use meerkat_contracts::{CommsPeersParams, CommsSendParams};
 use meerkat_contracts::{CommsPeersResult, CommsSendResult};
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 fn normalize_send_error(
     peer_name: Option<&str>,
     error: &meerkat_core::comms::SendError,
@@ -36,9 +32,8 @@ fn normalize_send_error(
                 "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
             })
         }
-        meerkat_core::comms::SendError::Internal(message)
-            if peer_name.is_some() && is_transport_internal(message) =>
-        {
+        meerkat_core::comms::SendError::Transport(message)
+        | meerkat_core::comms::SendError::Io(message) => {
             let peer = peer_name.unwrap_or("<unknown>");
             serde_json::json!({
                 "code": "peer_unreachable",
@@ -55,11 +50,10 @@ fn normalize_send_error(
     }
 }
 
-pub(crate) fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    serde_json::to_value(CommsSendResult::from(receipt)).unwrap_or_else(|error| {
-        tracing::error!(?error, "failed to serialize CommsSendResult");
-        serde_json::Value::Object(serde_json::Map::new())
-    })
+pub(crate) fn send_receipt_json(
+    receipt: meerkat_core::comms::SendReceipt,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(CommsSendResult::from(receipt))
 }
 
 /// Handle `comms/send` — dispatch a canonical comms command.
@@ -106,7 +100,14 @@ pub async fn handle_send(
     };
 
     match comms.send(cmd).await {
-        Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
+        Ok(receipt) => match send_receipt_json(receipt) {
+            Ok(value) => RpcResponse::success(id, value),
+            Err(serialize_error) => RpcResponse::error(
+                id,
+                error::INTERNAL_ERROR,
+                format!("Serialize error: {serialize_error}"),
+            ),
+        },
         Err(e) => {
             let normalized = normalize_send_error(peer_name.as_deref(), &e);
             let message = normalized
@@ -273,7 +274,8 @@ mod tests {
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("receipt serializes");
 
         assert_eq!(
             payload["request_id"],
@@ -283,6 +285,18 @@ mod tests {
             payload["interaction_id"],
             serde_json::json!(interaction_id.0.to_string())
         );
+    }
+
+    #[test]
+    fn normalize_send_error_transport_uses_typed_variant() {
+        let normalized = normalize_send_error(
+            Some("peer-a"),
+            &meerkat_core::comms::SendError::Transport("dial failed".to_string()),
+        );
+
+        assert_eq!(normalized["code"], "peer_unreachable");
+        assert_eq!(normalized["reason"], "transport_error");
+        assert_eq!(normalized["details"], "dial failed");
     }
 
     #[test]

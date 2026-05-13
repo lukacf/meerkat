@@ -30,7 +30,7 @@ use serde_json::json;
 use crate::error;
 use crate::handlers;
 use crate::handlers::RpcResponseExt;
-use crate::protocol::{RpcNotification, RpcRequest, RpcResponse};
+use crate::protocol::{RpcError, RpcNotification, RpcRequest, RpcResponse};
 use crate::session_runtime::SessionRuntime;
 use meerkat::surface::RequestContext;
 
@@ -93,10 +93,6 @@ fn parse_rpc_mob_stream_id(raw: &str) -> Result<(meerkat_mob::MobId, Uuid), Stri
     }
 }
 
-fn is_transport_internal(message: &str) -> bool {
-    message.starts_with("Transport error:") || message.starts_with("IO error:")
-}
-
 #[cfg(feature = "mob")]
 fn mob_destroy_cleanup_error_response(
     id: Option<crate::protocol::RpcId>,
@@ -132,6 +128,17 @@ fn mob_archive_session_error_response(
         }
         other => RpcResponse::error(id, error::INTERNAL_ERROR, other.to_string()),
     }
+}
+
+fn rpc_error_response(id: Option<crate::protocol::RpcId>, rpc_err: RpcError) -> RpcResponse {
+    match rpc_err.data {
+        Some(data) => RpcResponse::error_with_data(id, rpc_err.code, rpc_err.message, data),
+        None => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+    }
+}
+
+fn session_error_response(id: Option<crate::protocol::RpcId>, err: SessionError) -> RpcResponse {
+    rpc_error_response(id, crate::session_runtime::session_error_to_rpc(err))
 }
 
 #[cfg(feature = "mob")]
@@ -373,13 +380,10 @@ fn load_configured_mcp_tools_for_rpc_mob(
 }
 
 #[cfg(feature = "comms")]
-fn send_receipt_json(receipt: meerkat_core::comms::SendReceipt) -> serde_json::Value {
-    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt)).unwrap_or_else(
-        |error| {
-            tracing::error!(?error, "failed to serialize CommsSendResult");
-            serde_json::Value::Object(serde_json::Map::new())
-        },
-    )
+fn send_receipt_json(
+    receipt: meerkat_core::comms::SendReceipt,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(meerkat_contracts::CommsSendResult::from(receipt))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -546,6 +550,25 @@ impl NotificationSink {
         outcome: &str,
         detail: Option<&str>,
     ) {
+        self.emit_mob_stream_end_with_error_code(
+            stream_id,
+            mob_id,
+            outcome,
+            detail,
+            "stream_queue_overflow",
+        )
+        .await;
+    }
+
+    #[cfg(feature = "mob")]
+    async fn emit_mob_stream_end_with_error_code(
+        &self,
+        stream_id: &str,
+        mob_id: &meerkat_mob::MobId,
+        outcome: &str,
+        detail: Option<&str>,
+        error_code: &str,
+    ) {
         let mut params = serde_json::json!({
             "stream_id": stream_id,
             "mob_id": mob_id.to_string(),
@@ -554,7 +577,7 @@ impl NotificationSink {
         });
         if let Some(detail) = detail {
             params["error"] = serde_json::json!({
-                "code": "stream_queue_overflow",
+                "code": error_code,
                 "message": detail,
             });
         }
@@ -907,7 +930,10 @@ impl MethodRouter {
             ));
         }
 
-        let owner = self.resolve_session_owner(session_id).await;
+        let owner = self
+            .resolve_session_owner(session_id)
+            .await
+            .map_err(|error| rpc_error_response(None, error))?;
 
         if owner.is_none() {
             return Err(RpcResponse::error(
@@ -937,7 +963,9 @@ impl MethodRouter {
         };
         self.runtime_adapter
             .ensure_session_with_executor(session_id.clone(), executor)
-            .await;
+            .await
+            .map_err(crate::session_runtime::runtime_driver_error_to_rpc)
+            .map_err(|error| rpc_error_response(None, error))?;
         Ok(())
     }
 
@@ -1151,9 +1179,20 @@ impl MethodRouter {
     // This intentionally does only the minimum owner probe. Handlers perform
     // the authoritative operation-specific read again so they observe the
     // freshest lifecycle state instead of routing off a cached snapshot.
-    async fn resolve_session_owner(&self, session_id: &SessionId) -> Option<SessionOwner> {
+    async fn resolve_session_owner(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<SessionOwner>, RpcError> {
         #[cfg(feature = "mob")]
-        if self.mob_state.owns_live_bridge_session(session_id).await
+        if self
+            .mob_state
+            .owns_live_bridge_session(session_id)
+            .await
+            .map_err(|err| RpcError {
+                code: error::INTERNAL_ERROR,
+                message: format!("failed to restore mob ownership state: {err}"),
+                data: None,
+            })?
             || self
                 .mob_state
                 .owns_service_reported_bridge_session(session_id)
@@ -1163,24 +1202,28 @@ impl MethodRouter {
                 .owns_persisted_bridge_session(session_id)
                 .await
         {
-            return Some(SessionOwner::Mob);
+            return Ok(Some(SessionOwner::Mob));
         }
 
         if self.runtime.pending_session_exists(session_id).await
             || self.runtime.session_state(session_id).await.is_some()
-            || self.runtime.read_session(session_id).await.is_ok()
-            || self
-                .runtime
-                .load_persisted_session(session_id)
-                .await
-                .ok()
-                .flatten()
-                .is_some()
         {
-            return Some(SessionOwner::Runtime);
+            return Ok(Some(SessionOwner::Runtime));
         }
 
-        None
+        match self.runtime.read_session(session_id).await {
+            Ok(_) => return Ok(Some(SessionOwner::Runtime)),
+            Err(err) if err.code == error::SESSION_NOT_FOUND => {}
+            Err(err) => return Err(err),
+        }
+
+        match self.runtime.load_persisted_session(session_id).await {
+            Ok(Some(_)) => return Ok(Some(SessionOwner::Runtime)),
+            Ok(None) => {}
+            Err(err) => return Err(err),
+        }
+
+        Ok(None)
     }
 
     #[cfg(feature = "mob")]
@@ -1205,11 +1248,7 @@ impl MethodRouter {
                 Some(RpcResponse::success(id, history))
             }
             Err(meerkat_core::service::SessionError::NotFound { .. }) => None,
-            Err(err) => Some(RpcResponse::error(
-                id,
-                error::SESSION_NOT_FOUND,
-                err.to_string(),
-            )),
+            Err(err) => Some(session_error_response(id, err)),
         }
     }
 
@@ -1750,23 +1789,24 @@ impl MethodRouter {
 
         // Use resolve_session_owner (from main) with enriched WireSessionInfo (from this PR).
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
-                if let Some(mut info) = self.runtime.read_session_rich(&session_id).await {
-                    info.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, info)
-                } else {
-                    RpcResponse::error(
+            Ok(Some(SessionOwner::Runtime)) => {
+                match self.runtime.try_read_session_rich(&session_id).await {
+                    Ok(Some(mut info)) => {
+                        info.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, info)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    Err(err) => session_error_response(id, err),
                 }
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => {
+            Ok(Some(SessionOwner::Mob)) => {
                 match self.mob_state.session_service().read(&session_id).await {
                     Ok(view) => {
                         let mut info: meerkat_contracts::WireSessionInfo = view.state.into();
@@ -1778,11 +1818,12 @@ impl MethodRouter {
                     Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
                 }
             }
-            None => RpcResponse::error(
+            Ok(None) => RpcResponse::error(
                 id,
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -1812,27 +1853,28 @@ impl MethodRouter {
         };
 
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
-                if let Some(mut history) = self
+            Ok(Some(SessionOwner::Runtime)) => {
+                match self
                     .runtime
-                    .read_session_history_rich(&session_id, query)
+                    .try_read_session_history_rich(&session_id, query)
                     .await
                 {
-                    history.session_ref = self
-                        .runtime
-                        .realm_id()
-                        .map(|realm| meerkat_contracts::format_session_ref(&realm, &session_id));
-                    RpcResponse::success(id, history)
-                } else {
-                    RpcResponse::error(
+                    Ok(Some(mut history)) => {
+                        history.session_ref = self.runtime.realm_id().map(|realm| {
+                            meerkat_contracts::format_session_ref(&realm, &session_id)
+                        });
+                        RpcResponse::success(id, history)
+                    }
+                    Ok(None) => RpcResponse::error(
                         id,
                         error::SESSION_NOT_FOUND,
                         format!("Session not found: {session_id}"),
-                    )
+                    ),
+                    Err(err) => session_error_response(id, err),
                 }
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => match self
+            Ok(Some(SessionOwner::Mob)) => match self
                 .try_read_mob_session_history(id.clone(), &session_id, query)
                 .await
             {
@@ -1843,7 +1885,7 @@ impl MethodRouter {
                     format!("Session not found: {session_id}"),
                 ),
             },
-            None => {
+            Ok(None) => {
                 #[cfg(feature = "mob")]
                 if let Some(resp) = self
                     .try_read_mob_session_history(id.clone(), &session_id, query)
@@ -1857,6 +1899,7 @@ impl MethodRouter {
                     format!("Session not found: {session_id}"),
                 )
             }
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -1880,7 +1923,7 @@ impl MethodRouter {
         };
 
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => match self
+            Ok(Some(SessionOwner::Runtime)) => match self
                 .runtime
                 .fork_session_at(
                     &session_id,
@@ -1900,16 +1943,17 @@ impl MethodRouter {
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => RpcResponse::error(
+            Ok(Some(SessionOwner::Mob)) => RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
                 "mob-owned session transcripts cannot be edited through the generic session surface",
             ),
-            None => RpcResponse::error(
+            Ok(None) => RpcResponse::error(
                 id,
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -1934,7 +1978,7 @@ impl MethodRouter {
         };
 
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => match self
+            Ok(Some(SessionOwner::Runtime)) => match self
                 .runtime
                 .fork_session_replace(
                     &session_id,
@@ -1955,16 +1999,17 @@ impl MethodRouter {
                 Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
             },
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => RpcResponse::error(
+            Ok(Some(SessionOwner::Mob)) => RpcResponse::error(
                 id,
                 error::INVALID_PARAMS,
                 "mob-owned session transcripts cannot be edited through the generic session surface",
             ),
-            None => RpcResponse::error(
+            Ok(None) => RpcResponse::error(
                 id,
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -1986,49 +2031,59 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => match self.runtime.archive_session(&session_id).await {
-                Ok(()) => {
-                    // Clean up session-owned mobs (implicit + explicit).
-                    #[cfg(feature = "mob")]
-                    if let Err(error) = self
-                        .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
-                        .await
-                    {
-                        return mob_destroy_cleanup_error_response(id, error);
-                    }
-                    self.runtime_adapter.unregister_session(&session_id).await;
-                    RpcResponse::success(id, json!({"archived": true}))
-                }
-                Err(rpc_err) => {
-                    #[cfg(feature = "mob")]
-                    {
-                        let retained_cleanup = self
+            Ok(Some(SessionOwner::Runtime)) => {
+                match self.runtime.archive_session(&session_id).await {
+                    Ok(()) => {
+                        // Clean up session-owned mobs (implicit + explicit).
+                        #[cfg(feature = "mob")]
+                        if let Err(error) = self
                             .mob_state
-                            .has_bridge_session_scoped_mobs(&session_id.to_string())
-                            .await;
-                        if rpc_err.code == error::SESSION_NOT_FOUND && retained_cleanup {
-                            return match self
-                                .mob_state
-                                .destroy_bridge_session_mobs(&session_id.to_string())
-                                .await
-                            {
-                                Ok(()) => RpcResponse::success(id, json!({"archived": true})),
-                                Err(error) => mob_destroy_cleanup_error_response(id, error),
-                            };
+                            .destroy_bridge_session_mobs(&session_id.to_string())
+                            .await
+                        {
+                            return mob_destroy_cleanup_error_response(id, error);
                         }
+                        self.runtime_adapter.unregister_session(&session_id).await;
+                        RpcResponse::success(id, json!({"archived": true}))
                     }
-
-                    match rpc_err.data {
-                        Some(data) => {
-                            RpcResponse::error_with_data(id, rpc_err.code, rpc_err.message, data)
+                    Err(rpc_err) => {
+                        #[cfg(feature = "mob")]
+                        {
+                            let retained_cleanup = self
+                                .mob_state
+                                .has_bridge_session_scoped_mobs(&session_id.to_string())
+                                .await
+                                .map_err(meerkat_mob_mcp::MobMcpDestroyError::Mob);
+                            let retained_cleanup = match retained_cleanup {
+                                Ok(retained) => retained,
+                                Err(error) => return mob_destroy_cleanup_error_response(id, error),
+                            };
+                            if rpc_err.code == error::SESSION_NOT_FOUND && retained_cleanup {
+                                return match self
+                                    .mob_state
+                                    .destroy_bridge_session_mobs(&session_id.to_string())
+                                    .await
+                                {
+                                    Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                                    Err(error) => mob_destroy_cleanup_error_response(id, error),
+                                };
+                            }
                         }
-                        None => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+
+                        match rpc_err.data {
+                            Some(data) => RpcResponse::error_with_data(
+                                id,
+                                rpc_err.code,
+                                rpc_err.message,
+                                data,
+                            ),
+                            None => RpcResponse::error(id, rpc_err.code, rpc_err.message),
+                        }
                     }
                 }
-            },
+            }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => match self
+            Ok(Some(SessionOwner::Mob)) => match self
                 .mob_state
                 .archive_mob_owned_bridge_session_with_cleanup(
                     &session_id,
@@ -2038,11 +2093,16 @@ impl MethodRouter {
             {
                 Ok(true) => RpcResponse::success(id, json!({"archived": true})),
                 Ok(false) => {
-                    if self
+                    let retained_cleanup = match self
                         .mob_state
                         .has_bridge_session_scoped_mobs(&session_id.to_string())
                         .await
+                        .map_err(meerkat_mob_mcp::MobMcpDestroyError::Mob)
                     {
+                        Ok(retained) => retained,
+                        Err(error) => return mob_destroy_cleanup_error_response(id, error),
+                    };
+                    if retained_cleanup {
                         match self
                             .mob_state
                             .destroy_bridge_session_mobs(&session_id.to_string())
@@ -2061,21 +2121,28 @@ impl MethodRouter {
                 }
                 Err(error) => mob_archive_session_error_response(id, &session_id, error),
             },
-            None => {
+            Ok(None) => {
                 #[cfg(feature = "mob")]
-                if self
-                    .mob_state
-                    .has_bridge_session_scoped_mobs(&session_id.to_string())
-                    .await
                 {
-                    return match self
+                    let retained_cleanup = match self
                         .mob_state
-                        .destroy_bridge_session_mobs(&session_id.to_string())
+                        .has_bridge_session_scoped_mobs(&session_id.to_string())
                         .await
+                        .map_err(meerkat_mob_mcp::MobMcpDestroyError::Mob)
                     {
-                        Ok(()) => RpcResponse::success(id, json!({"archived": true})),
-                        Err(error) => mob_destroy_cleanup_error_response(id, error),
+                        Ok(retained) => retained,
+                        Err(error) => return mob_destroy_cleanup_error_response(id, error),
                     };
+                    if retained_cleanup {
+                        return match self
+                            .mob_state
+                            .destroy_bridge_session_mobs(&session_id.to_string())
+                            .await
+                        {
+                            Ok(()) => RpcResponse::success(id, json!({"archived": true})),
+                            Err(error) => mob_destroy_cleanup_error_response(id, error),
+                        };
+                    }
                 }
                 RpcResponse::error(
                     id,
@@ -2083,6 +2150,7 @@ impl MethodRouter {
                     format!("Session not found: {session_id}"),
                 )
             }
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -2110,14 +2178,14 @@ impl MethodRouter {
             idempotency_key: params.idempotency_key,
         };
         match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
+            Ok(Some(SessionOwner::Runtime)) => {
                 match self.runtime.append_system_context(&session_id, req).await {
                     Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
                     Err(rpc_err) => RpcResponse::error(id, rpc_err.code, rpc_err.message),
                 }
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => match self
+            Ok(Some(SessionOwner::Mob)) => match self
                 .mob_state
                 .session_service()
                 .append_system_context(&session_id, req)
@@ -2126,11 +2194,12 @@ impl MethodRouter {
                 Ok(result) => RpcResponse::success(id, json!({"status": result.status})),
                 Err(err) => RpcResponse::error(id, error::SESSION_NOT_FOUND, err.to_string()),
             },
-            None => RpcResponse::error(
+            Ok(None) => RpcResponse::error(
                 id,
                 error::SESSION_NOT_FOUND,
                 format!("Session not found: {session_id}"),
             ),
+            Err(err) => rpc_error_response(id, err),
         }
     }
 
@@ -2153,7 +2222,7 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
         let comms = match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
+            Ok(Some(SessionOwner::Runtime)) => {
                 if self.runtime.session_state(&session_id).await.is_none() {
                     return RpcResponse::error(
                         id,
@@ -2164,13 +2233,14 @@ impl MethodRouter {
                 self.runtime.comms_runtime(&session_id).await
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => {
+            Ok(Some(SessionOwner::Mob)) => {
                 self.mob_state
                     .session_service()
                     .comms_runtime(&session_id)
                     .await
             }
-            None => None,
+            Ok(None) => None,
+            Err(err) => return rpc_error_response(id, err),
         };
         let Some(comms) = comms else {
             return RpcResponse::error(
@@ -2195,7 +2265,14 @@ impl MethodRouter {
             }
         };
         match comms.send(cmd).await {
-            Ok(receipt) => RpcResponse::success(id, send_receipt_json(receipt)),
+            Ok(receipt) => match send_receipt_json(receipt) {
+                Ok(value) => RpcResponse::success(id, value),
+                Err(serialize_error) => RpcResponse::error(
+                    id,
+                    error::INTERNAL_ERROR,
+                    format!("Serialize error: {serialize_error}"),
+                ),
+            },
             Err(e) => {
                 let normalized = match &e {
                     meerkat_core::comms::SendError::PeerNotFound(peer) => json!({
@@ -2212,9 +2289,8 @@ impl MethodRouter {
                             "message": format!("peer '{peer}' is unreachable: offline_or_no_ack"),
                         })
                     }
-                    meerkat_core::comms::SendError::Internal(details)
-                        if peer_name.is_some() && is_transport_internal(details) =>
-                    {
+                    meerkat_core::comms::SendError::Transport(details)
+                    | meerkat_core::comms::SendError::Io(details) => {
                         let peer = peer_name.as_deref().unwrap_or("<unknown>");
                         json!({
                             "code": "peer_unreachable",
@@ -2258,7 +2334,7 @@ impl MethodRouter {
             Err(resp) => return resp,
         };
         let comms = match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
+            Ok(Some(SessionOwner::Runtime)) => {
                 if self.runtime.session_state(&session_id).await.is_none() {
                     return RpcResponse::error(
                         id,
@@ -2269,13 +2345,14 @@ impl MethodRouter {
                 self.runtime.comms_runtime(&session_id).await
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => {
+            Ok(Some(SessionOwner::Mob)) => {
                 self.mob_state
                     .session_service()
                     .comms_runtime(&session_id)
                     .await
             }
-            None => None,
+            Ok(None) => None,
+            Err(err) => return rpc_error_response(id, err),
         };
         let Some(comms) = comms else {
             return RpcResponse::error(
@@ -2317,7 +2394,7 @@ impl MethodRouter {
         };
 
         let stream = match self.resolve_session_owner(&session_id).await {
-            Some(SessionOwner::Runtime) => {
+            Ok(Some(SessionOwner::Runtime)) => {
                 match self.runtime.subscribe_session_events(&session_id).await {
                     Ok(stream) => stream,
                     Err(err) => {
@@ -2330,7 +2407,7 @@ impl MethodRouter {
                 }
             }
             #[cfg(feature = "mob")]
-            Some(SessionOwner::Mob) => {
+            Ok(Some(SessionOwner::Mob)) => {
                 let session_service = self.mob_state.session_service();
                 match meerkat_mob::MobSessionService::subscribe_session_events(
                     &*session_service,
@@ -2348,13 +2425,14 @@ impl MethodRouter {
                     }
                 }
             }
-            None => {
+            Ok(None) => {
                 return RpcResponse::error(
                     id,
                     error::SESSION_NOT_FOUND,
                     format!("Session not found: {session_id}"),
                 );
             }
+            Err(err) => return rpc_error_response(id, err),
         };
 
         let stream_nonce = Uuid::new_v4();
@@ -2643,8 +2721,39 @@ impl MethodRouter {
                             match event {
                                 Some(envelope) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&envelope)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serde_json::to_value(&envelope) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            let should_emit = {
+                                                let mut streams = active_mob_streams.lock().await;
+                                                if streams
+                                                    .get(&stream_nonce_for_task)
+                                                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                                {
+                                                    streams.remove(&stream_nonce_for_task);
+                                                    closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            };
+                                            if should_emit {
+                                                let detail = format!(
+                                                    "stream event serialization failed: {error}"
+                                                );
+                                                notification_sink
+                                                    .emit_mob_stream_end_with_error_code(
+                                                        &stream_id_for_task,
+                                                        &mob_id_for_task,
+                                                        "terminal_error",
+                                                        Some(&detail),
+                                                        "stream_serialization_failed",
+                                                    )
+                                                    .await;
+                                            }
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -2737,8 +2846,39 @@ impl MethodRouter {
                             match event {
                                 Some(attributed) => {
                                     sequence += 1;
-                                    let event_json = serde_json::to_value(&attributed)
-                                        .unwrap_or(serde_json::Value::Null);
+                                    let event_json = match serde_json::to_value(&attributed) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            let should_emit = {
+                                                let mut streams = active_mob_streams.lock().await;
+                                                if streams
+                                                    .get(&stream_nonce_for_task)
+                                                    .is_some_and(|s| matches!(s.state, StreamForwarderState::Active { .. }))
+                                                {
+                                                    streams.remove(&stream_nonce_for_task);
+                                                    closed_mob_streams.lock().await.insert(stream_id_for_task.clone());
+                                                    true
+                                                } else {
+                                                    false
+                                                }
+                                            };
+                                            if should_emit {
+                                                let detail = format!(
+                                                    "stream event serialization failed: {error}"
+                                                );
+                                                notification_sink
+                                                    .emit_mob_stream_end_with_error_code(
+                                                        &stream_id_for_task,
+                                                        &mob_id_for_task,
+                                                        "terminal_error",
+                                                        Some(&detail),
+                                                        "stream_serialization_failed",
+                                                    )
+                                                    .await;
+                                            }
+                                            break;
+                                        }
+                                    };
                                     let emit_status = notification_sink
                                         .emit_mob_stream_event(
                                             &stream_id_for_task,
@@ -2941,7 +3081,7 @@ mod tests {
         SourceIdentityRecord, SourceIdentityRegistry, SourceIdentityStatus, SourceTransportKind,
         SourceUuid,
     };
-    use meerkat_core::types::ContentInput;
+    use meerkat_core::types::{ContentBlock, ContentInput};
     use meerkat_core::{
         Config, ConfigRuntime, MemoryConfigStore, Message, StopReason, ToolCallView, ToolDef,
         ToolDispatchOutcome, ToolError,
@@ -3329,7 +3469,8 @@ args = [{}]
             envelope_id,
             interaction_id,
             stream_reserved: true,
-        });
+        })
+        .expect("receipt serializes");
 
         assert_eq!(
             payload["request_id"],
@@ -3500,11 +3641,43 @@ args = [{}]
         Arc::new(meerkat_store::MemoryBlobStore::new())
     }
 
-    async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+    struct FailingListSessionStore;
+
+    #[async_trait]
+    impl meerkat::SessionStore for FailingListSessionStore {
+        async fn save(&self, _session: &Session) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+
+        async fn load(
+            &self,
+            _id: &SessionId,
+        ) -> Result<Option<Session>, meerkat_store::SessionStoreError> {
+            Err(meerkat_store::SessionStoreError::Internal(
+                "forced load failure".to_string(),
+            ))
+        }
+
+        async fn list(
+            &self,
+            _filter: meerkat_store::SessionFilter,
+        ) -> Result<Vec<meerkat_core::SessionMeta>, meerkat_store::SessionStoreError> {
+            Err(meerkat_store::SessionStoreError::Internal(
+                "forced list failure".to_string(),
+            ))
+        }
+
+        async fn delete(&self, _id: &SessionId) -> Result<(), meerkat_store::SessionStoreError> {
+            Ok(())
+        }
+    }
+
+    async fn test_router_with_session_store(
+        store: Arc<dyn meerkat::SessionStore>,
+    ) -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
         let temp = tempfile::tempdir().unwrap();
         let factory = AgentFactory::new(temp.path().join("sessions"));
         let config = Config::default();
-        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
         let mut runtime = SessionRuntime::new(
             factory,
             config,
@@ -3524,6 +3697,11 @@ args = [{}]
         let sink = NotificationSink::new(notif_tx);
         let router = MethodRouter::new(runtime, config_store, sink);
         (router, notif_rx)
+    }
+
+    async fn test_router() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
+        let store: Arc<dyn meerkat::SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        test_router_with_session_store(store).await
     }
 
     async fn test_router_with_v9_runtime() -> (MethodRouter, mpsc::Receiver<RpcNotification>) {
@@ -6553,6 +6731,51 @@ args = [{}]
     }
 
     #[tokio::test]
+    async fn session_stream_event_preserves_tool_result_error_truth() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let sink = NotificationSink::new(tx);
+        let session_id = SessionId::new();
+        let stream_id = rpc_session_stream_id(&session_id, Uuid::new_v4());
+        let tool_outcome = meerkat_core::ops::terminal_tool_outcome_for_error(
+            "tool-call-1",
+            ToolError::timeout("slow_tool", 50),
+        );
+        let envelope = EventEnvelope::new_session(
+            session_id.clone(),
+            1,
+            None,
+            AgentEvent::ToolExecutionCompleted {
+                id: "tool-call-1".to_string(),
+                name: "slow_tool".to_string(),
+                result: tool_outcome.result.text_content(),
+                content: tool_outcome.result.content.clone(),
+                is_error: tool_outcome.result.is_error,
+                error: tool_outcome.result.error.clone(),
+                duration_ms: 50,
+            },
+        );
+
+        assert_eq!(
+            sink.emit_session_stream_event(&stream_id, 1, &session_id, &envelope)
+                .await,
+            StreamEmitStatus::Delivered
+        );
+
+        let notification = rx.recv().await.expect("session stream notification");
+        assert_eq!(notification.method, "session/stream_event");
+        let payload = &notification.params["event"]["payload"];
+        assert_eq!(payload["type"], "tool_execution_completed");
+        assert_eq!(payload["result"], "Tool 'slow_tool' timed out after 50ms");
+        assert_eq!(payload["is_error"], true);
+        assert_eq!(payload["error"]["code"], "timeout");
+        assert_eq!(
+            payload["error"]["message"],
+            "Tool 'slow_tool' timed out after 50ms"
+        );
+        assert_eq!(payload["error"]["data"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
     async fn session_stream_overflow_emits_terminal_error_outcome() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let sink = NotificationSink::new(tx);
@@ -7718,6 +7941,24 @@ args = [{}]
         assert!(found, "Created session should appear in list");
     }
 
+    #[tokio::test]
+    async fn session_list_surfaces_store_failure_instead_of_partial_success() {
+        let (router, _notif_rx) =
+            test_router_with_session_store(Arc::new(FailingListSessionStore)).await;
+
+        let list_resp = router
+            .dispatch(make_request_no_params("session/list"))
+            .await
+            .unwrap();
+
+        assert_eq!(error_code(&list_resp), error::INTERNAL_ERROR);
+        assert!(
+            error_message(&list_resp).contains("forced list failure"),
+            "store failure should be visible, got: {}",
+            error_message(&list_resp)
+        );
+    }
+
     /// 5b. `session/inject_context` stages runtime system context for the session.
     #[tokio::test]
     async fn session_inject_context_returns_staged_status() {
@@ -8113,13 +8354,17 @@ args = [{}]
             "archive should surface the live mob retire failure: {error:?}"
         );
         assert!(
-            mob_state.owns_live_bridge_session(&member_session_id).await,
+            mob_state
+                .owns_live_bridge_session(&member_session_id)
+                .await
+                .expect("restore parent mob ownership"),
             "failed live retire must leave the parent mob ownership anchor intact"
         );
         assert!(
             mob_state
                 .has_bridge_session_scoped_mobs(&member_session_key)
-                .await,
+                .await
+                .expect("restore child cleanup state"),
             "child cleanup anchor must still exist after parent retire failure"
         );
         assert!(
@@ -8255,7 +8500,8 @@ args = [{}]
         assert!(
             mob_state
                 .has_bridge_session_scoped_mobs(&member_session_key)
-                .await,
+                .await
+                .expect("restore child cleanup state"),
             "child cleanup anchor must still exist after parent archive failure"
         );
         assert!(

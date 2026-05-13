@@ -13,7 +13,7 @@ use meerkat_core::{
     AgentBuilder, AgentError, AgentErrorClass, AgentEvent, AgentLlmClient, AgentSessionStore,
     AgentToolDispatcher, HookDecision, HookEngine, HookExecutionReport, HookId, HookInvocation,
     HookOutcome, HookPoint, HookReasonCode, LlmStreamResult, Message, StopReason, ToolCallView,
-    ToolDef, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
+    ToolDef, ToolError, ToolResult, TurnPhase, TurnTerminalOutcome, Usage,
 };
 use serde_json::Value;
 use serde_json::value::RawValue;
@@ -358,9 +358,8 @@ async fn malformed_provider_tool_call_args_fail_closed_before_event_or_hook_proj
         .expect_err("malformed provider tool-call args must fail closed");
 
     assert!(
-        matches!(&err, AgentError::ToolError(message)
-            if message.contains("Invalid arguments")
-                && message.contains("tool call arguments")),
+        matches!(&err, AgentError::ToolError(ToolError::InvalidArguments { reason, .. })
+            if reason.contains("tool call arguments")),
         "unexpected error: {err}"
     );
     assert!(

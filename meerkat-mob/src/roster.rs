@@ -17,6 +17,7 @@ use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
 use meerkat_core::time_compat::SystemTime;
 use meerkat_core::types::SessionId;
+use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,7 +26,29 @@ where
     D: Deserializer<'de>,
 {
     let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.and_then(|value| PeerId::parse(&value).ok()))
+    raw.map(|value| {
+        PeerId::parse(&value).map_err(|error| {
+            de::Error::custom(format!("invalid canonical peer_id '{value}': {error}"))
+        })
+    })
+    .transpose()
+}
+
+/// Typed error returned by fallible roster projection.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RosterProjectionError {
+    #[error("member spawned for '{agent_identity}' is missing canonical bridge_member_ref")]
+    MissingCanonicalMemberRef { agent_identity: AgentIdentity },
+
+    #[error(
+        "invalid external peer descriptor for local member {local}: peer {peer_name} ({peer_id}): {reason}"
+    )]
+    InvalidExternalPeerDescriptor {
+        local: AgentIdentity,
+        peer_name: String,
+        peer_id: PeerId,
+        reason: String,
+    },
 }
 
 /// Lifecycle state for a roster member.
@@ -164,9 +187,9 @@ impl Roster {
         Self::try_project(events).expect("roster projection requires canonical member refs")
     }
 
-    /// Build a roster from a sequence of mob events, failing when replay data
-    /// lacks canonical bridge/member ownership.
-    pub fn try_project(events: &[MobEvent]) -> Result<Self, String> {
+    /// Build a roster from events and fail closed on invalid persisted member
+    /// and trust facts.
+    pub fn try_project(events: &[MobEvent]) -> Result<Self, RosterProjectionError> {
         let mut roster = Self::new();
         for event in events {
             roster.try_apply(event)?;
@@ -180,16 +203,14 @@ impl Roster {
             .expect("roster projection requires canonical member refs");
     }
 
-    /// Apply a single event to update roster state, failing on missing
-    /// canonical member ownership instead of synthesizing a local placeholder.
-    pub fn try_apply(&mut self, event: &MobEvent) -> Result<(), String> {
+    /// Apply a single event, returning typed projection failures.
+    pub fn try_apply(&mut self, event: &MobEvent) -> Result<(), RosterProjectionError> {
         match &event.kind {
             MobEventKind::MemberSpawned(member_spawned) => {
                 let Some(member_ref) = member_spawned.bridge_member_ref.clone() else {
-                    return Err(format!(
-                        "MemberSpawned for '{}' is missing canonical bridge_member_ref",
-                        member_spawned.agent_identity
-                    ));
+                    return Err(RosterProjectionError::MissingCanonicalMemberRef {
+                        agent_identity: member_spawned.agent_identity.clone(),
+                    });
                 };
                 self.add(RosterAddEntry {
                     agent_identity: member_spawned.agent_identity.clone(),
@@ -253,14 +274,12 @@ impl Roster {
                 if let Err(reason) =
                     TrustedPeerDescriptor::validate_pubkey_for_peer_id(spec.peer_id, &spec.pubkey)
                 {
-                    tracing::warn!(
-                        local = %local,
-                        peer_id = %spec.peer_id,
-                        peer_name = %spec.name,
-                        reason = %reason,
-                        "skipping invalid ExternalPeerWired descriptor during roster projection"
-                    );
-                    return Ok(());
+                    return Err(RosterProjectionError::InvalidExternalPeerDescriptor {
+                        local: local.clone(),
+                        peer_name: spec.name.as_str().to_owned(),
+                        peer_id: spec.peer_id,
+                        reason,
+                    });
                 }
                 if let Some(entry) = self.entries.get_mut(local) {
                     entry.external_peer_specs.insert(spec.peer_id, spec.clone());
@@ -895,7 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn test_project_skips_invalid_external_peer_wired_spec() {
+    fn test_try_project_rejects_invalid_external_peer_wired_specs() {
         let local = AgentIdentity::from("local");
         let zero_pubkey_external = AgentIdentity::from("remote-mob/worker/zero");
         let mismatch_external = AgentIdentity::from("remote-mob/worker/mismatch");
@@ -939,17 +958,50 @@ mod tests {
             ),
         ];
 
-        let roster = Roster::project(&events);
-        let entry = roster
-            .get_by_identity(&local)
-            .expect("local member should project");
+        let err = Roster::try_project(&events)
+            .expect_err("invalid external peer specs must fail roster replay");
+        assert!(matches!(
+            err,
+            RosterProjectionError::InvalidExternalPeerDescriptor { .. }
+        ));
+    }
 
-        assert!(
-            entry.external_peer_specs.is_empty(),
-            "invalid external peer specs must not hydrate resume trust state"
-        );
-        assert!(!entry.wired_to.contains(&zero_pubkey_external));
-        assert!(!entry.wired_to.contains(&mismatch_external));
+    #[test]
+    fn test_try_project_fails_invalid_external_peer_wired_spec() {
+        let local = AgentIdentity::from("local");
+        let external = AgentIdentity::from("remote-mob/worker/zero");
+        let spec = TrustedPeerDescriptor::test_only_unsigned_typed(
+            external.as_str(),
+            PeerId::new(),
+            "inproc://remote-mob/worker/zero",
+        )
+        .expect("legacy invalid external peer spec should still decode");
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    local.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                MobEventKind::ExternalPeerWired {
+                    local: local.clone(),
+                    spec,
+                },
+            ),
+        ];
+
+        let err = Roster::try_project(&events)
+            .expect_err("fallible roster projection should reject invalid external peers");
+        assert!(matches!(
+            err,
+            RosterProjectionError::InvalidExternalPeerDescriptor { .. }
+        ));
     }
 
     #[test]
@@ -994,6 +1046,36 @@ mod tests {
         assert!(
             !entry.wired_to.contains(&external),
             "external peers must not masquerade as AgentIdentity wiring endpoints"
+        );
+    }
+
+    #[test]
+    fn test_roster_entry_rejects_invalid_canonical_peer_id() {
+        let entry = RosterEntry {
+            agent_identity: AgentIdentity::from("test"),
+            generation: Generation::INITIAL,
+            fence_token: FenceToken::new(0),
+            agent_runtime_id: AgentRuntimeId::initial(AgentIdentity::from("test")),
+            role: ProfileName::from("worker"),
+            member_ref: MemberRef::from_bridge_session_id(session_id()),
+            runtime_mode: MobRuntimeMode::AutonomousHost,
+            peer_id: None,
+            transport_public_key: None,
+            state: MemberState::default(),
+            wired_to: BTreeSet::new(),
+            external_peer_specs: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            kickoff: None,
+            effective_profile_override: None,
+        };
+        let mut value = serde_json::to_value(&entry).expect("entry should serialize");
+        value["peer_id"] = serde_json::Value::String("not-a-peer-id".to_string());
+
+        let err = serde_json::from_value::<RosterEntry>(value)
+            .expect_err("invalid canonical peer_id should fail deserialization");
+        assert!(
+            err.to_string().contains("invalid canonical peer_id"),
+            "unexpected serde error: {err}"
         );
     }
 
@@ -1359,7 +1441,10 @@ mod tests {
         )];
 
         let err = Roster::try_project(&events).expect_err("missing member ref must fail replay");
-        assert!(err.contains("missing canonical bridge_member_ref"));
+        assert!(matches!(
+            err,
+            RosterProjectionError::MissingCanonicalMemberRef { .. }
+        ));
     }
 
     #[test]

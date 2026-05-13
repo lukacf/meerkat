@@ -180,7 +180,15 @@ impl WorkGraphService {
                 WorkGraphError::not_found(realm_id.clone(), namespace.clone(), request.id.clone())
             })?;
         let expected_previous_revision = item.revision;
-        let (item, event) = WorkGraphMachine::claim_ready_item(item, request, now)?;
+        let unresolved_blockers = self
+            .unresolved_blocker_count_for_item(&realm_id, &namespace, &item)
+            .await?;
+        let (item, event) = WorkGraphMachine::claim_item_with_unresolved_blockers(
+            item,
+            unresolved_blockers,
+            request,
+            now,
+        )?;
         self.store
             .update_item_cas(item, expected_previous_revision, event)
             .await
@@ -522,6 +530,28 @@ impl WorkGraphService {
         }
         Ok(())
     }
+
+    async fn unresolved_blocker_count_for_item(
+        &self,
+        realm_id: &str,
+        namespace: &WorkNamespace,
+        item: &WorkItem,
+    ) -> Result<u64, WorkGraphError> {
+        let all_items = self
+            .store
+            .list_items(WorkItemFilter {
+                realm_id: Some(realm_id.to_string()),
+                namespace: Some(namespace.clone()),
+                include_terminal: true,
+                ..WorkItemFilter::default()
+            })
+            .await?
+            .into_iter()
+            .map(|item| (item.id.clone(), item))
+            .collect::<BTreeMap<_, _>>();
+        let edges = self.store.list_edges(realm_id, namespace).await?;
+        Ok(unresolved_blocker_count(item, &all_items, &edges))
+    }
 }
 
 fn unresolved_blocker_count(
@@ -551,6 +581,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, Utc};
+    use serde_json::json;
 
     use crate::store::WorkGraphEventFilter;
     use crate::types::{
@@ -879,6 +910,100 @@ mod tests {
         let first = service.claim(request.clone()).await;
         let second = service.claim(request).await;
         assert!(first.is_ok() ^ second.is_ok());
+    }
+
+    #[tokio::test]
+    async fn blocker_item_remains_claimable_after_linking_dependents() {
+        let service = WorkGraphService::with_scope(
+            Arc::new(MemoryWorkGraphStore::new()),
+            "realm",
+            WorkNamespace::default(),
+        );
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let dependent = service
+            .create(create_req("dependent"))
+            .await
+            .expect("dependent");
+        service
+            .link(LinkWorkItemsRequest {
+                realm_id: None,
+                namespace: None,
+                kind: WorkEdgeKind::Blocks,
+                from_id: blocker.id.clone(),
+                to_id: dependent.id.clone(),
+            })
+            .await
+            .expect("link");
+
+        let claimed = service
+            .claim(ClaimWorkItemRequest {
+                id: blocker.id.clone(),
+                realm_id: None,
+                namespace: None,
+                expected_revision: blocker.revision,
+                owner: WorkOwner::new(WorkOwnerKey::label("worker").expect("owner key")),
+                lease_seconds: Some(60),
+                lease_expires_at: None,
+            })
+            .await
+            .expect("blocker with outgoing dependencies should remain claimable");
+
+        assert_eq!(claimed.id, blocker.id);
+        assert_eq!(claimed.status, crate::WorkStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn claim_recomputes_dependency_projection_before_admission() {
+        let store = Arc::new(MemoryWorkGraphStore::new());
+        let service =
+            WorkGraphService::with_scope(store.clone(), "realm", WorkNamespace::default());
+        let blocker = service
+            .create(create_req("blocker"))
+            .await
+            .expect("blocker");
+        let dependent = service
+            .create(create_req("dependent"))
+            .await
+            .expect("dependent");
+        let now = store.get_store_time_utc().await.expect("time");
+        store
+            .insert_edge(
+                WorkEdge {
+                    realm_id: "realm".to_string(),
+                    namespace: WorkNamespace::default(),
+                    kind: WorkEdgeKind::Blocks,
+                    from_id: blocker.id,
+                    to_id: dependent.id.clone(),
+                    created_at: now,
+                },
+                WorkGraphEvent::graph(
+                    "realm".to_string(),
+                    WorkNamespace::default(),
+                    WorkGraphEventKind::Linked,
+                    now,
+                    json!({ "test": "stale-projection" }),
+                ),
+            )
+            .await
+            .expect("raw edge insert");
+
+        let error = service
+            .claim(ClaimWorkItemRequest {
+                id: dependent.id,
+                realm_id: None,
+                namespace: None,
+                expected_revision: dependent.revision,
+                owner: WorkOwner::new(WorkOwnerKey::label("worker").expect("owner key")),
+                lease_seconds: Some(60),
+                lease_expires_at: None,
+            })
+            .await
+            .expect_err("fresh graph blockers should reject stale ready projection");
+
+        assert!(matches!(error, crate::WorkGraphError::InvalidTransition(_)));
     }
 
     #[tokio::test]

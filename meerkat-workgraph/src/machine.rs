@@ -172,7 +172,7 @@ impl WorkGraphMachine {
         Ok(Some((item, event)))
     }
 
-    fn claim_item_with_unresolved_blockers(
+    pub(crate) fn claim_item_with_unresolved_blockers(
         mut item: WorkItem,
         unresolved_blocker_count: u64,
         request: ClaimWorkItemRequest,

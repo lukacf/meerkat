@@ -6981,6 +6981,55 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
         .await
     }
 
+    async fn execution_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::service::SessionError>
+    {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::execution_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::ExternalToolSurfaceSnapshot>,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::external_tool_surface_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PeerIngressRuntimeSnapshot>, meerkat_core::service::SessionError>
+    {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::peer_ingress_runtime_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,
@@ -6999,6 +7048,72 @@ impl meerkat_mob::MobSessionService for RunMobSessionService {
             req,
             boundary,
             contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends(
+            &self.inner,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends_with_boundary(
+            &self.inner,
+            session_id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_system_context_for_turn(
+            &self.inner,
+            session_id,
+            appends,
+        )
+        .await
+    }
+
+    async fn discard_live_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <EphemeralSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session(
+            &self.inner,
+            session_id,
         )
         .await
     }
@@ -9368,6 +9483,66 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
         .await
     }
 
+    async fn load_persisted_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<Session>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::load_persisted_session(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn execution_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::AgentExecutionSnapshot>, meerkat_core::service::SessionError>
+    {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::execution_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn tool_scope_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::ToolScopeSnapshot>, meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn external_tool_surface_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<
+        Option<meerkat_core::ExternalToolSurfaceSnapshot>,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::external_tool_surface_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
+    async fn peer_ingress_runtime_snapshot(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<meerkat_core::PeerIngressRuntimeSnapshot>, meerkat_core::service::SessionError>
+    {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::peer_ingress_runtime_snapshot(
+            &self.inner,
+            session_id,
+        )
+        .await
+    }
+
     async fn apply_runtime_turn(
         &self,
         session_id: &SessionId,
@@ -9386,6 +9561,72 @@ impl meerkat_mob::MobSessionService for MobCliSessionService {
             req,
             boundary,
             contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends(
+            &self.inner,
+            session_id,
+            run_id,
+            appends,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_context_appends_with_boundary(
+        &self,
+        session_id: &SessionId,
+        run_id: meerkat_core::RunId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+        contributing_input_ids: Vec<meerkat_core::InputId>,
+    ) -> Result<
+        meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+        meerkat_core::service::SessionError,
+    > {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_context_appends_with_boundary(
+            &self.inner,
+            session_id,
+            run_id,
+            appends,
+            boundary,
+            contributing_input_ids,
+        )
+        .await
+    }
+
+    async fn apply_runtime_system_context_for_turn(
+        &self,
+        session_id: &SessionId,
+        appends: Vec<meerkat_core::PendingSystemContextAppend>,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::apply_runtime_system_context_for_turn(
+            &self.inner,
+            session_id,
+            appends,
+        )
+        .await
+    }
+
+    async fn discard_live_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), meerkat_core::service::SessionError> {
+        <meerkat::PersistentSessionService<FactoryAgentBuilder> as meerkat_mob::MobSessionService>::discard_live_session(
+            &self.inner,
+            session_id,
         )
         .await
     }
@@ -16636,6 +16877,32 @@ capabilities = ["definitely_missing_capability"]
             .await
             .expect("deferred run mob session should be created");
 
+        let expected_tool_scope = service
+            .tool_scope_snapshot(&created.session_id)
+            .await
+            .expect("inner service should read tool scope");
+        let wrapper_tool_scope =
+            <RunMobSessionService as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+                &wrapper,
+                &created.session_id,
+            )
+            .await
+            .expect("run mob wrapper should forward tool scope snapshots");
+        assert_eq!(wrapper_tool_scope.is_some(), expected_tool_scope.is_some());
+
+        let expected_execution = service
+            .execution_snapshot(&created.session_id)
+            .await
+            .expect("inner service should read execution snapshot");
+        let wrapper_execution =
+            <RunMobSessionService as meerkat_mob::MobSessionService>::execution_snapshot(
+                &wrapper,
+                &created.session_id,
+            )
+            .await
+            .expect("run mob wrapper should forward execution snapshots");
+        assert_eq!(wrapper_execution.is_some(), expected_execution.is_some());
+
         let output = <RunMobSessionService as meerkat_mob::MobSessionService>::apply_runtime_turn(
             &wrapper,
             &created.session_id,
@@ -16729,6 +16996,32 @@ capabilities = ["definitely_missing_capability"]
             })
             .await
             .expect("deferred persistent mob session should be created");
+
+        let expected_tool_scope = service
+            .tool_scope_snapshot(&created.session_id)
+            .await
+            .expect("inner service should read tool scope");
+        let wrapper_tool_scope =
+            <MobCliSessionService as meerkat_mob::MobSessionService>::tool_scope_snapshot(
+                &wrapper,
+                &created.session_id,
+            )
+            .await
+            .expect("persistent mob wrapper should forward tool scope snapshots");
+        assert_eq!(wrapper_tool_scope.is_some(), expected_tool_scope.is_some());
+
+        let expected_execution = service
+            .execution_snapshot(&created.session_id)
+            .await
+            .expect("inner service should read execution snapshot");
+        let wrapper_execution =
+            <MobCliSessionService as meerkat_mob::MobSessionService>::execution_snapshot(
+                &wrapper,
+                &created.session_id,
+            )
+            .await
+            .expect("persistent mob wrapper should forward execution snapshots");
+        assert_eq!(wrapper_execution.is_some(), expected_execution.is_some());
 
         let output = <MobCliSessionService as meerkat_mob::MobSessionService>::apply_runtime_turn(
             &wrapper,

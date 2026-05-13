@@ -44,6 +44,29 @@ impl InitialTurnHandle {
 const MAX_PARALLEL_REMOTE_MEMBER_TEARDOWNS: usize = 64;
 const MAX_LIFECYCLE_NOTIFICATION_TASKS: usize = 16;
 
+fn observed_runtime_id(signal: &mob_dsl::MobMachineSignal) -> Option<&mob_dsl::AgentRuntimeId> {
+    match signal {
+        mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id, ..
+        }
+        | mob_dsl::MobMachineSignal::ObserveRuntimeRetired {
+            agent_runtime_id, ..
+        }
+        | mob_dsl::MobMachineSignal::ObserveRuntimeDestroyed {
+            agent_runtime_id, ..
+        } => Some(agent_runtime_id),
+        _ => None,
+    }
+}
+
+fn foreign_runtime_observation<'a>(
+    state: &mob_dsl::MobMachineState,
+    signal: &'a mob_dsl::MobMachineSignal,
+) -> Option<&'a mob_dsl::AgentRuntimeId> {
+    let agent_runtime_id = observed_runtime_id(signal)?;
+    (!state.live_runtime_ids.contains(agent_runtime_id)).then_some(agent_runtime_id)
+}
+
 #[derive(Clone)]
 enum WiringEndpoint {
     Local {
@@ -3287,11 +3310,21 @@ impl MobActor {
                     let _ = reply_tx.send(self.dsl_authority.state.clone());
                 }
                 MobCommand::ProjectMachineSignal { signal } => {
+                    let foreign_runtime_id =
+                        foreign_runtime_observation(&self.dsl_authority.state, &signal).cloned();
                     if let Err(error) = self.apply_dsl_signal(signal, "project_machine_signal") {
-                        tracing::error!(
-                            error = %error,
-                            "typed composition signal projection failed"
-                        );
+                        if let Some(agent_runtime_id) = foreign_runtime_id {
+                            tracing::debug!(
+                                ?agent_runtime_id,
+                                error = %error,
+                                "ignored foreign runtime lifecycle observation"
+                            );
+                        } else {
+                            tracing::error!(
+                                error = %error,
+                                "typed composition signal projection failed"
+                            );
+                        }
                     }
                 }
                 MobCommand::FlowFinished { run_id } => {
@@ -11774,6 +11807,36 @@ impl MobActor {
             sender_comms,
         )
         .await
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod runtime_observation_tests {
+    use super::{foreign_runtime_observation, mob_dsl};
+
+    #[test]
+    fn foreign_runtime_observations_are_identified_for_log_downgrade() {
+        let state = mob_dsl::MobMachineState::default();
+        let signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id: mob_dsl::AgentRuntimeId("rt:session:parent".to_string()),
+            fence_token: mob_dsl::FenceToken(0),
+        };
+
+        assert!(foreign_runtime_observation(&state, &signal).is_some());
+    }
+
+    #[test]
+    fn live_member_runtime_observations_remain_machine_owned() {
+        let runtime_id = mob_dsl::AgentRuntimeId("member:0".to_string());
+        let mut state = mob_dsl::MobMachineState::default();
+        state.live_runtime_ids.insert(runtime_id.clone());
+        let signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id: runtime_id,
+            fence_token: mob_dsl::FenceToken(1),
+        };
+
+        assert!(foreign_runtime_observation(&state, &signal).is_none());
     }
 }
 

@@ -319,8 +319,11 @@ fn maker_image_args() -> Value {
         "request": {
             "intent": "generate",
             "prompt": "a simple cyan square with a small magenta dot, no text",
-            "provider": "gemini",
-            "model": "gemini-3.1-flash-image-preview",
+            "target": {
+                "target": "model",
+                "provider": "gemini",
+                "model": "gemini-3.1-flash-image-preview"
+            },
             "size": "1024x1024",
             "quality": "low",
             "format": "png",
@@ -334,8 +337,11 @@ fn receipt_image_args() -> Value {
         "request": {
             "intent": "generate",
             "prompt": "a tiny generated receipt image with one green check shape, no text",
-            "provider": "gemini",
-            "model": "gemini-3.1-flash-image-preview",
+            "target": {
+                "target": "model",
+                "provider": "gemini",
+                "model": "gemini-3.1-flash-image-preview"
+            },
             "size": "1024x1024",
             "quality": "low",
             "format": "png",
@@ -530,8 +536,8 @@ async fn spawn_generated_image_comms_members(
                 .with_additional_instructions(vec![
                     "When asked to run the generated-image comms smoke, use tools before prose. \
                      If a user says 'Turn 1', your only valid tool action is one generate_image tool call with \
-                     a nested request object: {\"request\":{\"intent\":\"generate\",\"provider\":\"gemini\",\
-                     \"model\":\"gemini-3.1-flash-image-preview\",\"prompt\":\"...\",\"size\":\"1024x1024\",\
+                     a nested request object: {\"request\":{\"intent\":\"generate\",\"target\":{\"target\":\"model\",\
+                     \"provider\":\"gemini\",\"model\":\"gemini-3.1-flash-image-preview\"},\"prompt\":\"...\",\"size\":\"1024x1024\",\
                      \"quality\":\"low\",\"format\":\"png\",\"count\":1}}; after that tool returns, reply exactly \
                      MAKER-GENERATED-IMAGE-TURN1-DONE. \
                      If a user says 'Turn 2', do not generate a new image; send the prior generated blob. \

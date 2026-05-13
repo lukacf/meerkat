@@ -474,7 +474,9 @@ impl MobMcpState {
                 }
 
                 let handle = self
-                    .configure_builder(MobBuilder::for_resume(storage))
+                    .configure_builder(
+                        MobBuilder::for_resume(storage).notify_orchestrator_on_resume(false),
+                    )
                     .resume()
                     .await?;
                 let mob_id = handle.definition().id.clone();

@@ -109,9 +109,18 @@ else
   bad "Release workflow does not use the maintained wasm-bindgen wasm-pack release URL"
 fi
 
-web_timeout="$(
+if grep -Fq 'build_web_sdk_package:' .github/workflows/release.yml &&
+  grep -Fq 'scripts/release-build-web-sdk-package.sh' .github/workflows/release.yml &&
+  grep -Fq 'name: rkat-web-package' .github/workflows/release.yml &&
+  grep -Fq 'scripts/release-publish-web-sdk-package.sh' .github/workflows/release.yml; then
+  pass "Release workflow builds @rkat/web once as an artifact before npm publishing"
+else
+  bad "Release workflow does not publish @rkat/web from a prebuilt package artifact"
+fi
+
+web_build_timeout="$(
   awk '
-    /^  publish_web_sdk_recovery:/ { in_job = 1; next }
+    /^  build_web_sdk_package:/ { in_job = 1; next }
     in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
     in_job && /timeout-minutes:/ {
       gsub(/[^0-9]/, "", $0)
@@ -120,10 +129,27 @@ web_timeout="$(
     }
   ' .github/workflows/release.yml
 )"
-if [[ "${web_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_timeout >= 120)); then
-  pass "Web SDK recovery job has a long timeout (${web_timeout} minutes)"
+if [[ "${web_build_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_build_timeout >= 120)); then
+  pass "Web SDK package build job has a long timeout (${web_build_timeout} minutes)"
 else
-  bad "Web SDK recovery job timeout is '${web_timeout:-missing}'; expected at least 120 minutes"
+  bad "Web SDK package build job timeout is '${web_build_timeout:-missing}'; expected at least 120 minutes"
+fi
+
+web_publish_timeout="$(
+  awk '
+    /^  publish_web_sdk:/ { in_job = 1; next }
+    in_job && /^  [[:alnum:]_-]+:/ { in_job = 0 }
+    in_job && /timeout-minutes:/ {
+      gsub(/[^0-9]/, "", $0)
+      print $0
+      exit
+    }
+  ' .github/workflows/release.yml
+)"
+if [[ "${web_publish_timeout:-0}" =~ ^[0-9]+$ ]] && ((web_publish_timeout <= 30)); then
+  pass "Web SDK publish job is artifact-only (${web_publish_timeout} minute timeout)"
+else
+  bad "Web SDK publish job timeout is '${web_publish_timeout:-missing}'; expected at most 30 minutes for artifact-only publish"
 fi
 
 if grep -Fq 'Too Many Requests' scripts/release-publish-rust-crates.sh &&

@@ -58,13 +58,13 @@ This page is the concept layer for provider abstraction. Use [Auth](/guides/auth
 
     | Model | Context | Best for |
     |-------|---------|----------|
-    | `gemini-3-flash-preview` | 1M | Default Gemini recommendation |
-    | `gemini-3.1-pro-preview` | 1M | Advanced reasoning, complex tasks |
+    | `gemini-3.1-pro-preview` | 1M | Default Gemini recommendation, advanced reasoning |
+    | `gemini-3-flash-preview` | 1M | Fast general-purpose tasks |
     | `gemini-3.1-flash-lite-preview` | 1M | Lightweight fast-path tasks |
 
     ```toml config.toml (active realm)
     [agent]
-    model = "gemini-3-flash-preview"
+    model = "gemini-3.1-pro-preview"
     max_tokens_per_turn = 8192
     ```
   </Tab>

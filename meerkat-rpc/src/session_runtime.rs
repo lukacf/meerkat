@@ -54,8 +54,9 @@ use meerkat_core::types::{Message, RunResult, SessionId};
 use meerkat_core::{
     AgentExecutionSnapshot, Config, ConfigStore, ContentInput, ExternalToolSurfaceSnapshot,
     PeerIngressRuntimeSnapshot, PendingSystemContextAppend, Session, SessionLlmIdentity,
-    SessionSystemContextState, SurfaceSessionRecoveryContext, SurfaceSessionRecoveryError,
-    SurfaceSessionRecoveryOverrides, SystemMessage, ToolScopeSnapshot, build_recovered_session,
+    SessionLlmIdentityOverride, SessionSystemContextState, SurfaceSessionRecoveryContext,
+    SurfaceSessionRecoveryError, SurfaceSessionRecoveryOverrides, SystemMessage, ToolScopeSnapshot,
+    build_recovered_session,
 };
 use meerkat_core::{EventEnvelope, EventStream, InputId, RunId, StreamError};
 use meerkat_runtime::{
@@ -1466,6 +1467,12 @@ impl SessionRuntime {
                 ov.auth_binding.clone().map(TurnMetadataOverride::Set)
             }
         });
+        let provider = overrides.and_then(|ov| {
+            ov.provider
+                .as_deref()
+                .or_else(|| ov.model.as_ref().and(provider_hint))
+                .and_then(|provider| parse_provider_override(provider).ok())
+        });
         let metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
             handling_mode: None,
             keep_alive: overrides.and_then(|ov| Self::turn_keep_alive_policy(ov.keep_alive)),
@@ -1475,9 +1482,7 @@ impl SessionRuntime {
             model: overrides
                 .and_then(|ov| ov.model.clone())
                 .map(meerkat_core::lifecycle::run_primitive::ModelId::new),
-            provider: overrides
-                .and_then(|ov| ov.provider.as_ref())
-                .and_then(|provider| parse_provider_override(provider).ok()),
+            provider,
             provider_params,
             render_metadata: None,
             auth_binding,
@@ -3227,100 +3232,34 @@ impl SessionRuntime {
         current: &SessionLlmIdentity,
         ov: &crate::handlers::turn::TurnOverrides,
     ) -> Result<SessionLlmIdentity, RpcError> {
-        if ov.provider.is_some() && ov.model.is_none() {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "provider override requires model on an existing session".to_string(),
-                data: None,
-            });
-        }
-        if ov.clear_provider_params && ov.provider_params.is_some() {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "clear_provider_params cannot be combined with provider_params"
-                    .to_string(),
-                data: None,
-            });
-        }
-        if ov.clear_auth_binding && ov.auth_binding.is_some() {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: "clear_auth_binding cannot be combined with auth_binding".to_string(),
-                data: None,
-            });
-        }
-
         let registry = self.model_registry().await?;
-        let model = ov.model.clone().unwrap_or_else(|| current.model.clone());
-        let provider = if let Some(provider_name) = ov.provider.as_ref() {
-            parse_provider_override(provider_name).map_err(|message| RpcError {
+        let provider = ov
+            .provider
+            .as_deref()
+            .map(parse_provider_override)
+            .transpose()
+            .map_err(|message| RpcError {
                 code: error::INVALID_PARAMS,
                 message,
                 data: None,
-            })?
-        } else {
-            current.provider
-        };
-        if (ov.model.is_some() || ov.provider.is_some())
-            && let Some(reason) =
-                registered_model_provider_mismatch_reason(&registry, provider, &model)
-        {
-            return Err(RpcError {
-                code: error::INVALID_PARAMS,
-                message: reason,
-                data: None,
-            });
-        }
-        let provider_params = if ov.clear_provider_params {
-            None
-        } else {
-            ov.provider_params
-                .clone()
-                .or_else(|| current.provider_params.clone())
-        };
-        let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
-            if ov.model.is_none() {
-                current.self_hosted_server_id.clone().or_else(|| {
-                    registry
-                        .entry_for_provider(meerkat_core::Provider::SelfHosted, &model)
-                        .and_then(|entry| entry.self_hosted.as_ref())
-                        .map(|server| server.server_id.clone())
-                })
-            } else {
-                match registry.entry_for_provider(meerkat_core::Provider::SelfHosted, &model) {
-                    Some(entry) => entry
-                        .self_hosted
-                        .as_ref()
-                        .map(|server| server.server_id.clone()),
-                    None => {
-                        return Err(RpcError {
-                            code: error::INVALID_PARAMS,
-                            message: format!(
-                                "self-hosted provider requires a registered model alias; '{model}' is not configured"
-                            ),
-                            data: None,
-                        });
-                    }
-                }
-            }
-        } else {
-            None
-        };
+            })?;
 
-        let auth_binding = if ov.clear_auth_binding {
-            None
-        } else {
-            ov.auth_binding
-                .clone()
-                .or_else(|| current.auth_binding.clone())
-        };
-
-        Ok(SessionLlmIdentity {
-            model,
-            provider,
-            self_hosted_server_id,
-            provider_params,
-            auth_binding,
+        meerkat_core::resolve_session_llm_identity_override(
+            current,
+            &registry,
+            SessionLlmIdentityOverride {
+                model: ov.model.as_deref(),
+                provider,
+                provider_params: ov.provider_params.as_ref(),
+                clear_provider_params: ov.clear_provider_params,
+                auth_binding: ov.auth_binding.as_ref(),
+                clear_auth_binding: ov.clear_auth_binding,
+            },
+        )
+        .map_err(|err| RpcError {
+            code: error::INVALID_PARAMS,
+            message: err.to_string(),
+            data: None,
         })
     }
 
@@ -5369,8 +5308,8 @@ impl SessionRuntime {
     ///
     /// `overrides` may contain per-turn overrides. For pending (deferred)
     /// sessions, all overrides are applied to the staged `AgentBuildConfig`.
-    /// For materialized sessions, only `keep_alive` is allowed; all other
-    /// overrides are rejected with an error.
+    /// For materialized sessions, build-only fields are rejected; turn-scoped
+    /// identity and policy overrides are applied through runtime metadata.
     #[allow(clippy::too_many_arguments)]
     #[cfg(test)]
     pub async fn start_turn(
@@ -5604,6 +5543,12 @@ impl SessionRuntime {
             }
         }
 
+        let effective_identity = self
+            .effective_llm_identity_for_turn(session_id, overrides.as_ref())
+            .await?;
+        self.validate_prompt_video_input(&turn_prompt, &effective_identity)
+            .await?;
+
         let keep_alive = match overrides.as_ref().and_then(|ov| ov.keep_alive) {
             Some(keep_alive) => keep_alive,
             None => self
@@ -5617,7 +5562,7 @@ impl SessionRuntime {
             flow_tool_overlay.clone(),
             additional_instructions.clone(),
             overrides.as_ref(),
-            overrides.as_ref().and_then(|ov| ov.provider.as_deref()),
+            Some(effective_identity.provider.as_str()),
         ));
 
         if self.live_session_is_stale(session_id).await? {
@@ -7853,6 +7798,29 @@ mod tests {
             metadata.execution_kind,
             Some(meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn)
         );
+    }
+
+    #[test]
+    fn runtime_turn_metadata_model_override_uses_resolved_provider_hint() {
+        let overrides = crate::handlers::turn::TurnOverrides {
+            model: Some("claude-sonnet-4-5".to_string()),
+            ..Default::default()
+        };
+
+        let metadata = SessionRuntime::turn_metadata_from_overrides(
+            None,
+            None,
+            None,
+            Some(&overrides),
+            Some("anthropic"),
+        )
+        .expect("model override should produce turn metadata");
+
+        assert_eq!(
+            metadata.model.as_ref().map(|m| m.as_str()),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(metadata.provider, Some(meerkat_core::Provider::Anthropic));
     }
 
     /// B19 helper sanity: realtime capability lookup must round-trip the
@@ -11647,13 +11615,13 @@ mod tests {
         assert_eq!(
             resolved.provider,
             meerkat_core::Provider::Anthropic,
-            "model-only turn overrides must not infer a new provider from model id alone"
+            "model-only turn overrides should keep the provider when the target model is owned by it"
         );
         assert_eq!(resolved.model, "claude-opus-4-6");
     }
 
     #[tokio::test]
-    async fn turn_model_override_without_provider_rejects_other_provider_catalog_model() {
+    async fn turn_model_override_without_provider_switches_to_catalog_provider() {
         let temp = tempfile::tempdir().unwrap();
         let runtime = make_runtime(temp_factory(&temp), 10);
         let current = SessionLlmIdentity {
@@ -11661,25 +11629,28 @@ mod tests {
             provider: meerkat_core::Provider::Anthropic,
             self_hosted_server_id: None,
             provider_params: None,
-            auth_binding: None,
+            auth_binding: Some(meerkat_core::AuthBindingRef {
+                realm: meerkat_core::RealmId::parse("tenant_a").expect("valid realm"),
+                binding: meerkat_core::BindingId::parse("anthropic_default")
+                    .expect("valid binding"),
+                profile: None,
+            }),
         };
         let overrides = crate::handlers::turn::TurnOverrides {
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             ..Default::default()
         };
 
-        let err = runtime
+        let resolved = runtime
             .resolve_target_llm_identity(&current, &overrides)
             .await
-            .expect_err("model owned by another provider must fail closed");
+            .expect("model-only override should infer the catalog provider");
 
-        assert_eq!(err.code, error::INVALID_PARAMS);
+        assert_eq!(resolved.provider, meerkat_core::Provider::OpenAI);
+        assert_eq!(resolved.model, "gpt-5.5");
         assert!(
-            err.message.contains("openai")
-                && err.message.contains("anthropic")
-                && err.message.contains("gpt-5.4"),
-            "error should identify the rejected provider/model pair: {}",
-            err.message
+            resolved.auth_binding.is_none(),
+            "provider switches must not inherit a binding from the previous provider"
         );
     }
 

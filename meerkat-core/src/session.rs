@@ -2070,6 +2070,125 @@ pub struct SessionLlmIdentity {
     pub auth_binding: Option<crate::AuthBindingRef>,
 }
 
+/// Typed per-turn override request for a session LLM identity.
+pub struct SessionLlmIdentityOverride<'a> {
+    pub model: Option<&'a str>,
+    pub provider: Option<Provider>,
+    pub provider_params: Option<&'a serde_json::Value>,
+    pub clear_provider_params: bool,
+    pub auth_binding: Option<&'a crate::AuthBindingRef>,
+    pub clear_auth_binding: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SessionLlmIdentityOverrideError {
+    #[error("provider override requires model on an existing session")]
+    ProviderRequiresModel,
+    #[error("clear_provider_params cannot be combined with provider_params")]
+    SetAndClearProviderParams,
+    #[error("clear_auth_binding cannot be combined with auth_binding")]
+    SetAndClearAuthBinding,
+    #[error("{0}")]
+    ProviderModelMismatch(String),
+    #[error("self-hosted provider requires a registered model alias; '{model}' is not configured")]
+    MissingSelfHostedAlias { model: String },
+}
+
+/// Resolve a turn-time model/provider/auth override against the current
+/// durable session identity.
+///
+/// The model registry is the authority for catalog ownership. A model-only
+/// override follows catalog ownership when the target model is registered;
+/// uncatalogued models keep the current provider so custom aliases remain
+/// possible.
+pub fn resolve_session_llm_identity_override(
+    current: &SessionLlmIdentity,
+    registry: &crate::ModelRegistry,
+    overrides: SessionLlmIdentityOverride<'_>,
+) -> Result<SessionLlmIdentity, SessionLlmIdentityOverrideError> {
+    if overrides.provider.is_some() && overrides.model.is_none() {
+        return Err(SessionLlmIdentityOverrideError::ProviderRequiresModel);
+    }
+    if overrides.clear_provider_params && overrides.provider_params.is_some() {
+        return Err(SessionLlmIdentityOverrideError::SetAndClearProviderParams);
+    }
+    if overrides.clear_auth_binding && overrides.auth_binding.is_some() {
+        return Err(SessionLlmIdentityOverrideError::SetAndClearAuthBinding);
+    }
+
+    let model = overrides
+        .model
+        .map(str::to_string)
+        .unwrap_or_else(|| current.model.clone());
+    let provider = if let Some(provider) = overrides.provider {
+        provider
+    } else if overrides.model.is_some() {
+        registry
+            .entry(&model)
+            .map_or(current.provider, |entry| entry.provider)
+    } else {
+        current.provider
+    };
+
+    if (overrides.model.is_some() || overrides.provider.is_some())
+        && let Some(reason) = registry.provider_override_mismatch_reason(provider, &model)
+    {
+        return Err(SessionLlmIdentityOverrideError::ProviderModelMismatch(
+            reason,
+        ));
+    }
+
+    let provider_params = if overrides.clear_provider_params {
+        None
+    } else {
+        overrides
+            .provider_params
+            .cloned()
+            .or_else(|| current.provider_params.clone())
+    };
+    let self_hosted_server_id = if provider == Provider::SelfHosted {
+        if overrides.model.is_none() {
+            current.self_hosted_server_id.clone().or_else(|| {
+                registry
+                    .entry_for_provider(Provider::SelfHosted, &model)
+                    .and_then(|entry| entry.self_hosted.as_ref())
+                    .map(|server| server.server_id.clone())
+            })
+        } else {
+            let entry = registry
+                .entry_for_provider(Provider::SelfHosted, &model)
+                .ok_or_else(|| SessionLlmIdentityOverrideError::MissingSelfHostedAlias {
+                    model: model.clone(),
+                })?;
+            entry
+                .self_hosted
+                .as_ref()
+                .map(|server| server.server_id.clone())
+        }
+    } else {
+        None
+    };
+
+    let auth_binding = if overrides.clear_auth_binding
+        || (provider != current.provider && overrides.auth_binding.is_none())
+    {
+        None
+    } else {
+        overrides
+            .auth_binding
+            .cloned()
+            .or_else(|| current.auth_binding.clone())
+    };
+
+    Ok(SessionLlmIdentity {
+        model,
+        provider,
+        self_hosted_server_id,
+        provider_params,
+        auth_binding,
+    })
+}
+
 /// Live request policy paired with a session LLM identity hot-swap.
 ///
 /// `SessionLlmIdentity` is the durable semantic identity. This projection is
@@ -2615,6 +2734,72 @@ mod tests {
         assert_eq!(session.version(), SESSION_VERSION);
         assert!(session.messages().is_empty());
         assert!(session.created_at() <= session.updated_at());
+    }
+
+    #[test]
+    fn llm_identity_model_override_switches_to_catalog_provider() {
+        let registry = crate::Config::default().model_registry().unwrap();
+        let current = SessionLlmIdentity {
+            model: "claude-sonnet-4-5".to_string(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: Some(crate::AuthBindingRef {
+                realm: crate::RealmId::parse("tenant_a").unwrap(),
+                binding: crate::BindingId::parse("anthropic_default").unwrap(),
+                profile: None,
+            }),
+        };
+
+        let resolved = resolve_session_llm_identity_override(
+            &current,
+            &registry,
+            SessionLlmIdentityOverride {
+                model: Some("gpt-5.5"),
+                provider: None,
+                provider_params: None,
+                clear_provider_params: false,
+                auth_binding: None,
+                clear_auth_binding: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model, "gpt-5.5");
+        assert_eq!(resolved.provider, Provider::OpenAI);
+        assert!(
+            resolved.auth_binding.is_none(),
+            "provider switches must not inherit a binding from the previous provider"
+        );
+    }
+
+    #[test]
+    fn llm_identity_model_override_keeps_uncatalogued_model_on_current_provider() {
+        let registry = crate::Config::default().model_registry().unwrap();
+        let current = SessionLlmIdentity {
+            model: "custom-model".to_string(),
+            provider: Provider::Anthropic,
+            self_hosted_server_id: None,
+            provider_params: None,
+            auth_binding: None,
+        };
+
+        let resolved = resolve_session_llm_identity_override(
+            &current,
+            &registry,
+            SessionLlmIdentityOverride {
+                model: Some("uncatalogued-custom-model"),
+                provider: None,
+                provider_params: None,
+                clear_provider_params: false,
+                auth_binding: None,
+                clear_auth_binding: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.model, "uncatalogued-custom-model");
+        assert_eq!(resolved.provider, Provider::Anthropic);
     }
 
     #[test]

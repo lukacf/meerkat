@@ -261,10 +261,11 @@ pub use session::{
     SESSION_DEFERRED_TURN_STATE_KEY, SESSION_METADATA_SCHEMA_VERSION,
     SESSION_SYSTEM_CONTEXT_STATE_KEY, SESSION_TOOL_VISIBILITY_STATE_KEY, SESSION_VERSION,
     SYSTEM_CONTEXT_SEPARATOR, SeenSystemContextKey, SeenSystemContextState, Session,
-    SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionLlmRequestPolicy,
-    SessionMeta, SessionMetadata, SessionSystemContextState, SessionToolVisibilityState,
-    SessionTooling, SystemContextStageError, ToolCategoryOverride, ToolVisibilityWitness,
-    VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter, capability_base_filter_for_image_tool_results,
+    SessionBuildState, SessionDeferredTurnState, SessionLlmIdentity, SessionLlmIdentityOverride,
+    SessionLlmIdentityOverrideError, SessionLlmRequestPolicy, SessionMeta, SessionMetadata,
+    SessionSystemContextState, SessionToolVisibilityState, SessionTooling, SystemContextStageError,
+    ToolCategoryOverride, ToolVisibilityWitness, VIEW_IMAGE_TOOL_NAME, WitnessedToolFilter,
+    capability_base_filter_for_image_tool_results, resolve_session_llm_identity_override,
 };
 pub use session_recovery::{
     BUILD_ONLY_RECOVERY_OVERRIDE_ERROR, RecoveredSessionBuild, SurfaceSessionRecoveryContext,

@@ -1190,13 +1190,15 @@ async fn in_session_model_switch_via_turn_start() {
         first_text.contains("Hello from mock"),
         "First turn should produce mock text, got: {first_text}"
     );
-    // Default model is claude-opus-4-7; verify it
+    // Default model is the best available global default; verify it.
     assert!(
-        first_text.contains("model=claude-opus-4-7"),
-        "First turn should use default model (claude-opus-4-7), got: {first_text}"
+        first_text.contains("model=gpt-5.5"),
+        "First turn should use default model (gpt-5.5), got: {first_text}"
     );
 
-    // 2. turn/start with model override on the materialized session
+    // 2. turn/start with model override on the materialized session.
+    // Model-only overrides may switch providers between turns when the
+    // target model has catalog ownership.
     let turn_req = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 2,

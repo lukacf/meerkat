@@ -2654,12 +2654,8 @@ async fn handle_run_command(
         .as_ref()
         .map(|binding| resolve_cli_auth_binding_selection(&config, binding))
         .transpose()?;
-    let model = model.unwrap_or_else(|| {
-        auth_binding_selection
-            .as_ref()
-            .and_then(|selection| selection.default_model.clone())
-            .unwrap_or_else(|| resolve_cli_default_agent_model(&config))
-    });
+    let model =
+        resolve_cli_effective_model(&config, model, provider, auth_binding_selection.as_ref());
     let max_tokens = max_tokens.unwrap_or(config.agent.max_tokens_per_turn);
     let resolved_provider = resolve_cli_provider_with_auth_binding(
         &config,
@@ -3221,12 +3217,70 @@ async fn load_config(scope: &RuntimeScope) -> anyhow::Result<(Config, PathBuf)> 
 
 const LEGACY_AGENT_MODEL_DEFAULTS: &[&str] = &["claude-opus-4-7"];
 
+fn model_provider(config: &Config, model: &str) -> Option<Provider> {
+    config
+        .model_registry()
+        .ok()
+        .and_then(|registry| registry.entry(model).map(|entry| entry.provider))
+        .and_then(Provider::from_core)
+}
+
+fn provider_default_model(config: &Config, provider: Provider) -> Option<String> {
+    let model = match provider {
+        Provider::Anthropic => &config.models.anthropic,
+        Provider::Openai => &config.models.openai,
+        Provider::Gemini => &config.models.gemini,
+        Provider::SelfHosted => return None,
+    };
+    (!model.is_empty()).then(|| model.clone())
+}
+
+fn best_available_default_model(config: &Config) -> String {
+    [Provider::Openai, Provider::Anthropic, Provider::Gemini]
+        .into_iter()
+        .find_map(|provider| provider_default_model(config, provider))
+        .unwrap_or_else(|| config.agent.model.clone())
+}
+
 fn resolve_cli_default_agent_model(config: &Config) -> String {
     if LEGACY_AGENT_MODEL_DEFAULTS.contains(&config.agent.model.as_str()) {
-        return config.models.openai.clone();
+        return best_available_default_model(config);
     }
 
     config.agent.model.clone()
+}
+
+fn resolve_provider_constrained_default_model(config: &Config, provider: Provider) -> String {
+    match model_provider(config, &config.agent.model) {
+        Some(model_provider) if model_provider == provider => config.agent.model.clone(),
+        Some(_) => {
+            provider_default_model(config, provider).unwrap_or_else(|| config.agent.model.clone())
+        }
+        None => config.agent.model.clone(),
+    }
+}
+
+fn resolve_cli_effective_model(
+    config: &Config,
+    explicit_model: Option<String>,
+    explicit_provider: Option<Provider>,
+    auth_binding: Option<&CliAuthBindingSelection>,
+) -> String {
+    if let Some(model) = explicit_model {
+        return model;
+    }
+
+    if let Some(model) = auth_binding.and_then(|selection| selection.default_model.clone()) {
+        return model;
+    }
+
+    if let Some(provider) =
+        explicit_provider.or_else(|| auth_binding.map(|selection| selection.provider))
+    {
+        return resolve_provider_constrained_default_model(config, provider);
+    }
+
+    resolve_cli_default_agent_model(config)
 }
 
 async fn handle_config_get(
@@ -17276,6 +17330,24 @@ capabilities = ["definitely_missing_capability"]
     }
 
     #[test]
+    fn test_resolve_cli_default_agent_model_falls_back_by_best_available_priority() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        config.models.openai.clear();
+
+        assert_eq!(
+            resolve_cli_default_agent_model(&config),
+            config.models.anthropic
+        );
+
+        config.models.anthropic.clear();
+        assert_eq!(
+            resolve_cli_default_agent_model(&config),
+            config.models.gemini
+        );
+    }
+
+    #[test]
     fn test_resolve_cli_default_agent_model_preserves_custom_model() {
         let mut config = Config::default();
         config.agent.model = "claude-sonnet-4-6".to_string();
@@ -17283,6 +17355,71 @@ capabilities = ["definitely_missing_capability"]
         assert_eq!(
             resolve_cli_default_agent_model(&config),
             "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_effective_model_keeps_legacy_default_when_provider_matches() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
+            "claude-opus-4-7"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_effective_model_uses_constrained_provider_default_on_mismatch() {
+        let config = Config::default();
+
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, Some(Provider::Anthropic), None),
+            config.models.anthropic
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_effective_model_uses_auth_binding_provider_without_binding_default() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        let selection = CliAuthBindingSelection {
+            provider: Provider::Anthropic,
+            default_model: None,
+        };
+
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, None, Some(&selection)),
+            "claude-opus-4-7"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_effective_model_uses_binding_default_before_provider_default() {
+        let config = Config::default();
+        let selection = CliAuthBindingSelection {
+            provider: Provider::Anthropic,
+            default_model: Some("claude-sonnet-4-6".to_string()),
+        };
+
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, None, Some(&selection)),
+            "claude-sonnet-4-6"
+        );
+    }
+
+    #[test]
+    fn test_resolve_cli_effective_model_uses_gemini_default_for_gemini_binding_mismatch() {
+        let mut config = Config::default();
+        config.agent.model = "claude-opus-4-7".to_string();
+        let selection = CliAuthBindingSelection {
+            provider: Provider::Gemini,
+            default_model: None,
+        };
+
+        assert_eq!(
+            resolve_cli_effective_model(&config, None, None, Some(&selection)),
+            config.models.gemini
         );
     }
 

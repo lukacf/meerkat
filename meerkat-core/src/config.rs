@@ -2640,7 +2640,7 @@ model = "custom-model"
                 assert_eq!(config.args, vec!["-c", "printf '{}'"]);
                 assert_eq!(config.env.get("A").map(String::as_str), Some("B"));
             }
-            other => panic!("expected command adapter config, got {other:?}"),
+            other => unreachable!("expected command adapter config, got {other:?}"),
         }
 
         let value = serde_json::to_value(&runtime).expect("serialize runtime");
@@ -2670,7 +2670,7 @@ model = "custom-model"
                     Some("yes")
                 );
             }
-            other => panic!("expected http adapter config, got {other:?}"),
+            other => unreachable!("expected http adapter config, got {other:?}"),
         }
 
         let err = HookRuntimeConfig::new(

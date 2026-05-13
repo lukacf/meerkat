@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.8] - 2026-05-13
+
+Meerkat 0.6.8 is a hotfix release for long-context model compaction defaults
+and Web SDK release publishing.
+
+### Changed
+
+- **Model-aware compaction defaults** (#704) — default session compaction now
+  scales from the selected model catalog context window, using 80% of the
+  resolved context window for known long-context models while preserving
+  explicit custom thresholds and the conservative fallback for unknown models.
+- **Web SDK release publishing** (#705) — release workflows now build the
+  `@rkat/web` package once as an artifact and publish that tarball from the
+  credentialed npm step, so Rust/Python/TypeScript publishing no longer waits on
+  a cold WebAssembly rebuild.
+
+### Fixed
+
+- **OpenAI long-context sessions** (#704) — `gpt-5.5` and other large-context
+  catalog models no longer compact prematurely at the old static 100k-token
+  threshold.
+- **Web SDK npm metadata** (#705) — normalized the `rkat-web-proxy` bin path so
+  npm publish no longer auto-corrects the package metadata.
+
 ## [0.6.7] - 2026-05-13
 
 Meerkat 0.6.7 is a feature-bearing release: WorkGraph,

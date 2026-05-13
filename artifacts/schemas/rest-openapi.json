@@ -2547,7 +2547,6 @@
           "compaction": {
             "$ref": "#/components/schemas/CompactionRuntimeConfig",
             "default": {
-              "auto_compact_threshold": 100000,
               "max_summary_tokens": 4096,
               "min_turns_between_compactions": 3,
               "recent_turn_budget": 4

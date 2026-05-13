@@ -16,8 +16,7 @@ use crate::{
 use schemars::JsonSchema;
 use serde::de::Deserializer;
 use serde::ser::SerializeStruct;
-use serde::{Deserialize, Serialize};
-use serde_json::value::RawValue;
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
@@ -1362,6 +1361,7 @@ impl Default for CommsRuntimeConfig {
 /// `meerkat_core::CompactionConfig` when wiring the session compactor.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[cfg_attr(feature = "schema", serde(default))]
 pub struct CompactionRuntimeConfig {
     /// Trigger compaction when input tokens for a turn reach this threshold.
     pub auto_compact_threshold: u64,

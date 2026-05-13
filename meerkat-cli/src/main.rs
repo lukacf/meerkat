@@ -34,6 +34,7 @@ use meerkat_core::AgentToolDispatcher;
 use meerkat_core::CommsRuntimeMode;
 #[cfg(feature = "mob")]
 use meerkat_core::config::CliOverrides;
+use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{
     CreateSessionRequest, DeferredPromptPolicy, SessionBuildOptions, SessionQuery, SessionService,
     SessionServiceCommsExt, StartTurnRequest, TurnToolOverlay,
@@ -7991,7 +7992,8 @@ async fn resume_session_with_llm_override(
         let recovery_overrides = meerkat_core::session_recovery::SurfaceSessionRecoveryOverrides {
             model: model_override,
             provider: provider.map(Provider::as_core),
-            provider_params: merged_provider_params,
+            provider_params: merged_provider_params.map(TurnMetadataOverride::Set),
+            auth_binding: auth_binding.clone().map(TurnMetadataOverride::Set),
             max_tokens,
             system_prompt,
             output_schema: parsed_output_schema,
@@ -8027,9 +8029,6 @@ async fn resume_session_with_llm_override(
         build.llm_client_override =
             llm_override.map(meerkat::encode_llm_client_override_for_service);
         build.runtime_build_mode = meerkat_core::RuntimeBuildMode::SessionOwned(resume_bindings);
-        if let Some(auth_binding) = auth_binding {
-            build.auth_binding = Some(auth_binding);
-        }
         build.mob_tools = mob_tools_factory;
 
         let parsed_labels = if labels.is_empty() {
@@ -10920,9 +10919,14 @@ async fn execute_mob_web_build(
     let verified =
         load_verified_mobpack(scope, pack, cli_trust_policy, "mob web build failed").await?;
     if let Some(requires) = &verified.archive.manifest.requires {
-        for cap in &requires.capabilities {
-            if matches!(cap.as_str(), "shell" | "mcp_stdio" | "process_spawn") {
-                anyhow::bail!("forbidden capability '{cap}' is not allowed for web builds");
+        for requirement in requires.typed_capabilities() {
+            if meerkat_contracts::capability::browser_mobpack_capability_decision(requirement)
+                .is_forbidden()
+            {
+                anyhow::bail!(
+                    "forbidden capability '{}' is not allowed for web builds",
+                    requirement.raw()
+                );
             }
         }
     }
@@ -11214,18 +11218,27 @@ fn project_trust_store_path(scope: &RuntimeScope) -> PathBuf {
 }
 
 #[cfg(feature = "mob")]
-fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet<String> {
+fn runtime_capabilities(
+    surface: DeploySurfaceArg,
+) -> std::collections::BTreeSet<meerkat_contracts::capability::MobpackCapabilityId> {
+    use meerkat_contracts::capability::{
+        CapabilityId, MobpackCapabilityId, MobpackRuntimeCapabilityId,
+    };
     let mut caps = std::collections::BTreeSet::from([
-        "core".to_string(),
-        "skills".to_string(),
-        "hooks".to_string(),
+        MobpackCapabilityId::Runtime(MobpackRuntimeCapabilityId::Core),
+        MobpackCapabilityId::Known(CapabilityId::Skills),
+        MobpackCapabilityId::Known(CapabilityId::Hooks),
     ]);
     #[cfg(feature = "comms")]
-    caps.insert("comms".to_string());
+    caps.insert(MobpackCapabilityId::Known(CapabilityId::Comms));
     #[cfg(feature = "mcp")]
-    caps.insert("mcp".to_string());
+    caps.insert(MobpackCapabilityId::Runtime(
+        MobpackRuntimeCapabilityId::Mcp,
+    ));
     if matches!(surface, DeploySurfaceArg::Rpc) {
-        caps.insert("rpc".to_string());
+        caps.insert(MobpackCapabilityId::Runtime(
+            MobpackRuntimeCapabilityId::Rpc,
+        ));
     }
     caps
 }
@@ -11233,14 +11246,14 @@ fn runtime_capabilities(surface: DeploySurfaceArg) -> std::collections::BTreeSet
 #[cfg(feature = "mob")]
 fn validate_required_capabilities(
     manifest: &meerkat_mob_pack::manifest::MobpackManifest,
-    runtime_caps: &std::collections::BTreeSet<String>,
+    runtime_caps: &std::collections::BTreeSet<meerkat_contracts::capability::MobpackCapabilityId>,
 ) -> Result<(), meerkat_mob_pack::validate::PackValidationError> {
     if let Some(requires) = &manifest.requires {
-        for required in &requires.capabilities {
-            if !runtime_caps.contains(required) {
+        for requirement in requires.typed_capabilities() {
+            if !runtime_caps.contains(&requirement.id()) {
                 return Err(
                     meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(
-                        required.clone(),
+                        requirement.raw().to_string(),
                     ),
                 );
             }
@@ -15165,6 +15178,46 @@ capabilities = ["definitely_missing_capability"]
             err.to_string()
                 .contains("required capability missing: definitely_missing_capability"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[cfg(feature = "mob")]
+    #[test]
+    fn test_deploy_capability_validation_uses_typed_manifest_capabilities() {
+        let manifest: meerkat_mob_pack::manifest::MobpackManifest = toml::from_str(
+            r#"
+[mobpack]
+name = "typed-caps"
+version = "1.0.0"
+
+[requires]
+capabilities = ["core", "skills", "hooks", "rpc"]
+"#,
+        )
+        .expect("manifest");
+
+        validate_required_capabilities(&manifest, &runtime_capabilities(DeploySurfaceArg::Rpc))
+            .expect("typed runtime capabilities should satisfy rpc manifest");
+
+        let manifest: meerkat_mob_pack::manifest::MobpackManifest = toml::from_str(
+            r#"
+[mobpack]
+name = "typed-caps"
+version = "1.0.0"
+
+[requires]
+capabilities = ["process_spawn"]
+"#,
+        )
+        .expect("manifest");
+        let err =
+            validate_required_capabilities(&manifest, &runtime_capabilities(DeploySurfaceArg::Cli))
+                .expect_err("host-process capability must not be satisfied by raw strings");
+        assert_eq!(
+            err,
+            meerkat_mob_pack::validate::PackValidationError::CapabilityMismatch(
+                "process_spawn".to_string()
+            )
         );
     }
 

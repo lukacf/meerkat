@@ -44,12 +44,11 @@ impl AgentBuilder {
     /// Create a builder with default config and the default user state root.
     pub fn new() -> Self {
         let config = Config::default();
-        let model = config.agent.model.clone();
         let factory = AgentFactory::new(meerkat_core::default_state_root().join("sessions"));
         Self {
             factory,
+            build_config: AgentBuildConfig::from_config_model(&config, None),
             config,
-            build_config: AgentBuildConfig::new(model),
             model_explicit: false,
             unsupported_core_injections: Vec::new(),
         }
@@ -65,7 +64,7 @@ impl AgentBuilder {
     /// Use a specific config snapshot for the factory build.
     pub fn with_config(mut self, config: Config) -> Self {
         if !self.model_explicit {
-            self.build_config.model = config.agent.model.clone();
+            self.build_config.model = AgentBuildConfig::from_config_model(&config, None).model;
         }
         self.config = config;
         self

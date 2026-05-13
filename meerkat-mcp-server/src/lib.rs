@@ -3030,10 +3030,7 @@ async fn handle_meerkat_run(
         .await
         .map(|snapshot| snapshot.config)
         .unwrap_or_default();
-    let model = input
-        .model
-        .clone()
-        .unwrap_or_else(|| config.agent.model.clone());
+    let model = meerkat::AgentBuildConfig::from_config_model(&config, input.model.clone()).model;
 
     // Build callback tools supplied by the MCP client. The per-session live
     // MCP router is created after runtime bindings are prepared so its surface
@@ -3419,11 +3416,14 @@ async fn handle_meerkat_resume(
             "keep_alive requires comms_name",
         ));
     }
-    let model = input
-        .model
-        .clone()
-        .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone()))
-        .unwrap_or_else(|| config.agent.model.clone());
+    let model = meerkat::AgentBuildConfig::from_config_model(
+        &config,
+        input
+            .model
+            .clone()
+            .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone())),
+    )
+    .model;
     let max_tokens = input
         .max_tokens
         .or_else(|| stored_metadata.as_ref().map(|meta| meta.max_tokens));

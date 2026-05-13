@@ -15212,9 +15212,7 @@ async fn modeled_stage_persistent_filter_matches_runtime_after_active_ahead_reco
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         },
     )
     .await
@@ -15276,9 +15274,7 @@ async fn modeled_request_deferred_tools_matches_runtime_after_active_ahead_recon
             model: Some("gpt-5.2".to_string()),
             provider: Some("openai".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         },
     )
     .await
@@ -15512,9 +15508,7 @@ async fn reconfigure_session_llm_identity_rejects_idle_session() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await
@@ -15614,10 +15608,12 @@ async fn reconfigure_session_llm_identity_updates_machine_owned_visibility_on_at
             SessionLlmReconfigureRequest {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
-                provider_params: Some(serde_json::json!({ "reasoning_effort": "high" })),
-                clear_provider_params: false,
+                provider_params: Some(
+                    meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(
+                        serde_json::json!({ "reasoning_effort": "high" }),
+                    ),
+                ),
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await
@@ -15764,9 +15760,7 @@ async fn reconfigure_session_llm_identity_succeeds_while_running() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await
@@ -15888,9 +15882,7 @@ async fn reconfigure_session_llm_identity_rolls_back_on_persist_failure() {
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await
@@ -16089,9 +16081,7 @@ async fn reconfigure_session_llm_identity_discards_live_session_when_rollback_fa
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await
@@ -19127,9 +19117,7 @@ async fn execute_runtime_parity_probe(
                 model: Some("gpt-5.2".to_string()),
                 provider: Some("openai".to_string()),
                 provider_params: None,
-                clear_provider_params: false,
                 auth_binding: None,
-                clear_auth_binding: false,
             },
         )
         .await

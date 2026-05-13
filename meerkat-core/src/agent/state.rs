@@ -114,36 +114,73 @@ fn is_synthetic_notice(message: &Message, kind: SystemNoticeKind) -> bool {
     matches!(message, Message::SystemNotice(notice) if notice.kind == kind)
 }
 
-fn merge_provider_param_patch(target: &mut Value, patch: &Value) {
-    match (target, patch) {
-        (Value::Object(target_obj), Value::Object(patch_obj)) => {
-            for (key, value) in patch_obj {
-                if value.is_null() {
-                    target_obj.remove(key);
-                } else {
-                    merge_provider_param_patch(
-                        target_obj.entry(key.clone()).or_insert(Value::Null),
-                        value,
-                    );
-                }
-            }
-        }
-        (target, patch) => {
-            *target = patch.clone();
-        }
+fn legacy_provider_params_value(params: Option<&ProviderParamsOverride>) -> Option<Value> {
+    params.map(ProviderParamsOverride::to_legacy_provider_value)
+}
+
+fn strip_provider_tool_defaults(params: &mut ProviderParamsOverride) {
+    use crate::lifecycle::run_primitive::ProviderTag;
+
+    match params.provider_tag.as_mut() {
+        Some(ProviderTag::Anthropic(tag)) => tag.web_search = None,
+        Some(ProviderTag::OpenAi(tag)) => tag.web_search = None,
+        Some(ProviderTag::Gemini(tag)) => tag.google_search = None,
+        _ => {}
     }
 }
 
-fn merged_provider_params(defaults: Option<&Value>, explicit: Option<&Value>) -> Option<Value> {
-    match (defaults, explicit) {
-        (None, None) => None,
-        (Some(defaults), None) => Some(defaults.clone()),
-        (None, Some(explicit)) => Some(explicit.clone()),
-        (Some(defaults), Some(explicit)) => {
-            let mut merged = defaults.clone();
-            merge_provider_param_patch(&mut merged, explicit);
-            Some(merged)
-        }
+fn inject_structured_output(
+    provider: &str,
+    params: &mut ProviderParamsOverride,
+    output_schema: &crate::OutputSchema,
+) {
+    use crate::lifecycle::run_primitive::{
+        AnthropicProviderTag, GeminiProviderTag, OpenAiProviderTag, ProviderTag,
+    };
+
+    match provider {
+        "anthropic" => match params.provider_tag.take() {
+            Some(ProviderTag::Anthropic(mut tag)) => {
+                tag.structured_output = Some(output_schema.clone());
+                params.provider_tag = Some(ProviderTag::Anthropic(tag));
+            }
+            other => {
+                params.provider_tag = other.or_else(|| {
+                    Some(ProviderTag::Anthropic(AnthropicProviderTag {
+                        structured_output: Some(output_schema.clone()),
+                        ..Default::default()
+                    }))
+                });
+            }
+        },
+        "gemini" | "google" => match params.provider_tag.take() {
+            Some(ProviderTag::Gemini(mut tag)) => {
+                tag.structured_output = Some(output_schema.clone());
+                params.provider_tag = Some(ProviderTag::Gemini(tag));
+            }
+            other => {
+                params.provider_tag = other.or_else(|| {
+                    Some(ProviderTag::Gemini(GeminiProviderTag {
+                        structured_output: Some(output_schema.clone()),
+                        ..Default::default()
+                    }))
+                });
+            }
+        },
+        _ => match params.provider_tag.take() {
+            Some(ProviderTag::OpenAi(mut tag)) => {
+                tag.structured_output = Some(output_schema.clone());
+                params.provider_tag = Some(ProviderTag::OpenAi(tag));
+            }
+            other => {
+                params.provider_tag = other.or_else(|| {
+                    Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                        structured_output: Some(output_schema.clone()),
+                        ..Default::default()
+                    }))
+                });
+            }
+        },
     }
 }
 
@@ -325,7 +362,9 @@ where
                 // Consult the injected resolver with the current model/provider.
                 self.model_defaults_resolver
                     .as_ref()
-                    .and_then(|r| r.call_timeout_for(self.client.provider(), self.client.model()))
+                    .and_then(|r| {
+                        r.call_timeout_for(self.client.provider_id(), self.client.model())
+                    })
                     // Fall through to RetryPolicy.call_timeout for direct builder users.
                     .or(self.retry_policy.call_timeout)
             }
@@ -1447,7 +1486,7 @@ where
 
                     let effective_max_tokens = self.config.max_tokens_per_turn;
                     let mut effective_temperature = self.config.temperature;
-                    let mut effective_provider_params = merged_provider_params(
+                    let mut effective_provider_params = ProviderParamsOverride::merged(
                         self.config.provider_tool_defaults.as_ref(),
                         self.config.provider_params.as_ref(),
                     );
@@ -1464,7 +1503,9 @@ where
                         llm_request: Some(HookLlmRequest {
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
-                            provider_params: effective_provider_params.clone(),
+                            provider_params: legacy_provider_params_value(
+                                effective_provider_params.as_ref(),
+                            ),
                             message_count: self.session.messages().len(),
                         }),
                         llm_response: None,
@@ -1516,19 +1557,16 @@ where
                     if in_extraction {
                         // Force temperature 0.0 for deterministic output
                         effective_temperature = Some(0.0_f32);
-                        // Inject structured_output into provider params
-                        let mut params =
-                            effective_provider_params.unwrap_or_else(|| serde_json::json!({}));
-                        if let Some(output_schema) = &self.config.output_schema
-                            && let Some(obj) = params.as_object_mut()
-                        {
-                            obj.insert("structured_output".to_string(), output_schema.to_value());
+                        let mut params = effective_provider_params.unwrap_or_default();
+                        if let Some(output_schema) = &self.config.output_schema {
+                            inject_structured_output(
+                                self.client.provider(),
+                                &mut params,
+                                output_schema,
+                            );
                         }
-                        // Strip provider-native tool keys — extraction is deterministic, no tools.
-                        if let Some(obj) = params.as_object_mut() {
-                            obj.remove("web_search");
-                            obj.remove("google_search");
-                        }
+                        // Strip provider-native tool defaults — extraction is deterministic, no tools.
+                        strip_provider_tool_defaults(&mut params);
                         effective_provider_params = Some(params);
                     }
 
@@ -1539,16 +1577,6 @@ where
                     } else {
                         &tool_defs
                     };
-                    let typed_provider_params = effective_provider_params
-                        .as_ref()
-                        .map(|params| {
-                            ProviderParamsOverride::from_legacy_provider_value(
-                                self.client.provider(),
-                                params,
-                            )
-                        })
-                        .filter(|params| !params.is_empty());
-
                     // Call LLM with retry — route errors through machine authority
                     let boundary_system_context = self.take_pending_system_context_boundary();
                     let request_messages =
@@ -1562,7 +1590,7 @@ where
                             tools: call_tool_defs,
                             max_tokens: effective_max_tokens,
                             temperature: effective_temperature,
-                            provider_params: typed_provider_params.as_ref(),
+                            provider_params: effective_provider_params.as_ref(),
                         })
                         .await
                     {
@@ -4498,10 +4526,29 @@ mod tests {
 
     #[tokio::test]
     async fn hot_swap_request_policy_updates_next_turn_provider_params() {
+        use crate::lifecycle::run_primitive::{
+            OpaqueProviderBody, OpenAiProviderTag, ProviderParamsOverride, ProviderTag,
+        };
+
+        fn openai_web_search_defaults(tool_type: &str) -> ProviderParamsOverride {
+            ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": tool_type}),
+                    )),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }
+        }
+
         let client = Arc::new(RecordingLlmClient::new());
         let mut agent = with_test_turn_state_handle(AgentBuilder::new())
-            .provider_params(serde_json::json!({"old": true}))
-            .provider_tool_defaults(serde_json::json!({"stale_tool": {"type": "old"}}))
+            .provider_params(ProviderParamsOverride {
+                temperature: Some(0.9),
+                ..Default::default()
+            })
+            .provider_tool_defaults(openai_web_search_defaults("old"))
             .build_standalone(client.clone(), Arc::new(NoTools), Arc::new(NoopStore))
             .await;
         agent.config.max_turns = Some(1);
@@ -4510,10 +4557,11 @@ mod tests {
             client.clone(),
             crate::SessionLlmRequestPolicy {
                 model: "new-model".to_string(),
-                provider_params: Some(serde_json::json!({"temperature": 0.2})),
-                provider_tool_defaults: Some(serde_json::json!({
-                    "web_search": {"type": "web_search"}
-                })),
+                provider_params: Some(ProviderParamsOverride {
+                    temperature: Some(0.2),
+                    ..Default::default()
+                }),
+                provider_tool_defaults: Some(openai_web_search_defaults("web_search")),
             },
         );
 
@@ -4526,22 +4574,16 @@ mod tests {
         let seen_params = client.seen_params();
         assert_eq!(
             seen_params.last(),
-            Some(&Some(
-                crate::lifecycle::run_primitive::ProviderParamsOverride {
-                    temperature: Some(0.2),
-                    provider_tag: Some(crate::lifecycle::run_primitive::ProviderTag::OpenAi(
-                        crate::lifecycle::run_primitive::OpenAiProviderTag {
-                            web_search: Some(
-                                crate::lifecycle::run_primitive::OpaqueProviderBody::from_value(
-                                    &serde_json::json!({"type": "web_search"}),
-                                ),
-                            ),
-                            ..Default::default()
-                        },
+            Some(&Some(ProviderParamsOverride {
+                temperature: Some(0.2),
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": "web_search"}),
                     )),
                     ..Default::default()
-                }
-            )),
+                })),
+                ..Default::default()
+            })),
             "next LLM request must use typed hot-swapped provider params/defaults, not the build-time JSON bag",
         );
     }

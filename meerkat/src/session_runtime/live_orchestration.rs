@@ -804,9 +804,7 @@ mod orchestrator {
                         model: Some(new_global_model.clone()),
                         provider: None,
                         provider_params: None,
-                        clear_provider_params: false,
                         auth_binding: None,
-                        clear_auth_binding: false,
                     };
                     if let Err(err) = crate::session_runtime::llm_reconfigure::hot_swap_llm_client_on_idle_session(
                         self.llm_reconfigure_host,

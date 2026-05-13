@@ -1086,11 +1086,24 @@ impl RealmConfigSection {
     ///   - an `AuthProfileConfig` with `CredentialSourceSpec::InlineSecret`
     ///   - a `ProviderBindingConfig` wiring the two
     ///
-    /// The first provider in the input list becomes the
-    /// `default_binding` so that build_agent's auth_binding-less
-    /// code path can resolve through this realm. Plan §6.10 replacement
-    /// for the deleted `ProviderSettings.api_keys` map.
+    /// Legacy compatibility constructor. The first provider in the input list
+    /// becomes the `default_binding`. New typed bootstrap paths should use
+    /// [`Self::from_inline_provider_api_keys`] so default binding ownership can
+    /// follow the resolved model/provider identity instead of input ordering.
     pub fn from_inline_api_keys(entries: &[(&str, &str)]) -> Self {
+        let typed_entries = entries
+            .iter()
+            .filter_map(|(provider, secret)| {
+                Provider::parse_strict(provider).map(|provider| (provider, *secret))
+            })
+            .collect::<Vec<_>>();
+        if typed_entries.len() == entries.len() {
+            return Self::from_inline_provider_api_keys(
+                &typed_entries,
+                typed_entries.first().map(|(provider, _)| *provider),
+            );
+        }
+
         let mut backend = BTreeMap::new();
         let mut auth = BTreeMap::new();
         let mut binding = BTreeMap::new();
@@ -1135,6 +1148,76 @@ impl RealmConfigSection {
                 },
             );
             if idx == 0 {
+                default_binding = Some(id);
+            }
+        }
+
+        Self {
+            backend,
+            auth,
+            binding,
+            default_binding,
+        }
+    }
+
+    /// Programmatic constructor for typed provider-key bootstrap.
+    ///
+    /// The default binding is selected from `default_provider` when present,
+    /// or from the only configured provider when the credential set is
+    /// unambiguous. Multi-provider uncatalogued bootstraps intentionally do not
+    /// synthesize a default binding from map/input order; callers must resolve
+    /// the model/provider identity first or pass an explicit auth binding.
+    pub fn from_inline_provider_api_keys(
+        entries: &[(Provider, &str)],
+        default_provider: Option<Provider>,
+    ) -> Self {
+        let mut backend = BTreeMap::new();
+        let mut auth = BTreeMap::new();
+        let mut binding = BTreeMap::new();
+        let fallback_default = (entries.len() == 1).then_some(entries[0].0);
+        let selected_default = default_provider.or(fallback_default);
+        let mut default_binding: Option<String> = None;
+
+        for (provider, secret) in entries {
+            let provider_name = provider.as_str();
+            let id = format!("default_{provider_name}");
+            let backend_kind = match provider {
+                Provider::Anthropic => "anthropic_api",
+                Provider::OpenAI => "openai_api",
+                Provider::Gemini => "google_genai",
+                Provider::SelfHosted | Provider::Other => provider_name,
+            };
+            backend.insert(
+                id.clone(),
+                BackendProfileConfig {
+                    provider: provider_name.to_string(),
+                    backend_kind: backend_kind.to_string(),
+                    base_url: None,
+                    options: serde_json::Value::Null,
+                },
+            );
+            auth.insert(
+                id.clone(),
+                AuthProfileConfig {
+                    provider: provider_name.to_string(),
+                    auth_method: "api_key".to_string(),
+                    source: CredentialSourceSpec::InlineSecret {
+                        secret: (*secret).to_string(),
+                    },
+                    constraints: AuthConstraints::default(),
+                    metadata_defaults: AuthMetadataDefaults::default(),
+                },
+            );
+            binding.insert(
+                id.clone(),
+                ProviderBindingConfig {
+                    backend_profile: id.clone(),
+                    auth_profile: id.clone(),
+                    default_model: None,
+                    policy: BindingPolicy::default(),
+                },
+            );
+            if selected_default == Some(*provider) {
                 default_binding = Some(id);
             }
         }

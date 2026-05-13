@@ -136,7 +136,7 @@ pub fn validate_definition(def: &MobDefinition) -> Vec<Diagnostic> {
     // Check profile names are valid identifiers and cross-references
     for (name, binding) in &def.profiles {
         // Validate profile name
-        if !is_valid_identifier(name.as_str()) {
+        if !is_valid_profile_name(name.as_str()) {
             diagnostics.push(Diagnostic {
                 code: DiagnosticCode::InvalidProfileName,
                 message: format!("profile name '{}' is not a valid identifier", name.as_str()),
@@ -267,7 +267,7 @@ pub fn partition_diagnostics(
 }
 
 /// Check if a string is a valid identifier (alphanumeric, hyphens, underscores).
-fn is_valid_identifier(s: &str) -> bool {
+pub fn is_valid_profile_name(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
@@ -590,14 +590,14 @@ model = "claude-sonnet-4-5"
 
     #[test]
     fn test_valid_identifier_patterns() {
-        assert!(is_valid_identifier("worker"));
-        assert!(is_valid_identifier("lead_agent"));
-        assert!(is_valid_identifier("agent-1"));
-        assert!(is_valid_identifier("_private"));
-        assert!(!is_valid_identifier(""));
-        assert!(!is_valid_identifier("123bad"));
-        assert!(!is_valid_identifier("-start"));
-        assert!(!is_valid_identifier("has space"));
+        assert!(is_valid_profile_name("worker"));
+        assert!(is_valid_profile_name("lead_agent"));
+        assert!(is_valid_profile_name("agent-1"));
+        assert!(is_valid_profile_name("_private"));
+        assert!(!is_valid_profile_name(""));
+        assert!(!is_valid_profile_name("123bad"));
+        assert!(!is_valid_profile_name("-start"));
+        assert!(!is_valid_profile_name("has space"));
     }
 
     #[test]

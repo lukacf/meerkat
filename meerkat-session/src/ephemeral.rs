@@ -95,7 +95,7 @@ enum SessionCommand {
     HotSwapLlmIdentity {
         client: Arc<dyn meerkat_core::AgentLlmClient>,
         identity: SessionLlmIdentity,
-        request_policy: meerkat_core::SessionLlmRequestPolicy,
+        request_policy: Box<meerkat_core::SessionLlmRequestPolicy>,
         reply_tx: oneshot::Sender<Result<(), meerkat_core::error::AgentError>>,
     },
     StageToolFilter {
@@ -918,7 +918,6 @@ impl<B: SessionAgentBuilder + 'static> EphemeralSessionService<B> {
             .build
             .as_ref()
             .and_then(|build| build.provider)
-            .or_else(|| meerkat_core::Provider::infer_from_model(&req.model))
             .unwrap_or(meerkat_core::Provider::Other);
         let provider_params = req
             .build
@@ -2459,7 +2458,7 @@ impl<B: SessionAgentBuilder + 'static> SessionService for EphemeralSessionServic
             .send(SessionCommand::HotSwapLlmIdentity {
                 client,
                 identity,
-                request_policy,
+                request_policy: Box::new(request_policy),
                 reply_tx,
             })
             .await
@@ -3318,7 +3317,7 @@ async fn session_task<A: SessionAgent>(
                 request_policy,
                 reply_tx,
             } => {
-                let result = agent.hot_swap_llm_identity(client, identity.clone(), request_policy);
+                let result = agent.hot_swap_llm_identity(client, identity.clone(), *request_policy);
                 if result.is_ok() {
                     control.llm_identity_tx.send_replace(identity);
                 }

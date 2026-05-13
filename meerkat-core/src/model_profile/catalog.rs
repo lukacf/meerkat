@@ -117,6 +117,19 @@ pub struct ImageGenerationProviderDefaults {
     pub models: Vec<ImageGenerationModelProfile>,
 }
 
+/// Catalog-owned OpenAI realtime operational defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct OpenAiRealtimeOperationalDefaults {
+    /// Default voice for realtime audio output.
+    pub voice: &'static str,
+    /// Default transcription model for realtime input audio.
+    pub transcription_model: &'static str,
+    /// Default ISO-639 language code for realtime input transcription.
+    pub input_language: &'static str,
+    /// Default ISO-639 language code for realtime output instructions.
+    pub output_language: &'static str,
+}
+
 // ---------------------------------------------------------------------------
 // Static catalog data
 // ---------------------------------------------------------------------------
@@ -136,6 +149,11 @@ const IMAGE_DEFAULT_GEMINI: &str = "gemini-3.1-flash-image-preview";
 /// OpenAI hosted image tool host model. This route detail is deliberately
 /// catalog-owned so provider executors do not infer policy from model names.
 const OPENAI_HOSTED_IMAGE_PROVIDER_CALL_MODEL: &str = "gpt-5.4";
+
+const OPENAI_REALTIME_DEFAULT_VOICE: &str = "marin";
+const OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
+const OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE: &str = "en";
+const OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE: &str = "en";
 
 /// Image-generation-only model rows. OpenAI text catalog models are admitted by
 /// `image_generation_model()` below and route through the same hosted tool.
@@ -374,6 +392,16 @@ pub fn image_generation_provider_defaults() -> &'static [ImageGenerationProvider
     })
 }
 
+/// Return catalog-owned operational defaults for OpenAI realtime sessions.
+pub fn openai_realtime_operational_defaults() -> OpenAiRealtimeOperationalDefaults {
+    OpenAiRealtimeOperationalDefaults {
+        voice: OPENAI_REALTIME_DEFAULT_VOICE,
+        transcription_model: OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL,
+        input_language: OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE,
+        output_language: OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -553,6 +581,24 @@ mod tests {
             image_generation_provider_for_model("gemini-3-flash-preview"),
             None,
             "Gemini text catalog rows are not image-generation model authority"
+        );
+    }
+
+    #[test]
+    fn openai_realtime_operational_defaults_are_catalog_owned() {
+        let defaults = openai_realtime_operational_defaults();
+        assert_eq!(defaults.voice, OPENAI_REALTIME_DEFAULT_VOICE);
+        assert_eq!(
+            defaults.transcription_model,
+            OPENAI_REALTIME_DEFAULT_TRANSCRIPTION_MODEL
+        );
+        assert_eq!(
+            defaults.input_language,
+            OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE
+        );
+        assert_eq!(
+            defaults.output_language,
+            OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE
         );
     }
 

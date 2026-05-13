@@ -520,8 +520,13 @@ impl MeerkatMachine {
                     .dsl_authority
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let baseline_provider = entry
+                    .current_llm_identity
+                    .as_ref()
+                    .map(|identity| identity.provider)
+                    .unwrap_or(meerkat_core::Provider::Other);
                 Ok(MeerkatMachineCommandResult::SessionModelRoutingStatus(
-                    project_model_routing_status(&authority.state),
+                    project_model_routing_status(&authority.state, baseline_provider),
                 ))
             }
             MeerkatMachineCommand::RequestSwitchTurn {
@@ -596,9 +601,7 @@ impl MeerkatMachine {
                                         model: Some(request.intent.target_model.to_string()),
                                         provider: None,
                                         provider_params: None,
-                                        clear_provider_params: false,
                                         auth_binding: None,
-                                        clear_auth_binding: false,
                                     },
                                 )
                                 .await
@@ -996,6 +999,7 @@ fn image_terminal_from_routing(
 
 fn project_model_routing_status(
     state: &super::dsl::MeerkatMachineState,
+    baseline_provider: meerkat_core::Provider,
 ) -> meerkat_core::image_generation::SessionModelRoutingStatus {
     use meerkat_core::image_generation::{
         FiniteScopedTurnDuration, ScopedModelOverrideId, ScopedModelOverrideKind,
@@ -1039,6 +1043,7 @@ fn project_model_routing_status(
                         .clone()
                         .unwrap_or_default(),
                 ),
+                target_provider: None,
                 topology_epoch,
             })
         });
@@ -1062,6 +1067,7 @@ fn project_model_routing_status(
                             .clone()
                             .unwrap_or_default(),
                     ),
+                    target_provider: None,
                     topology_epoch,
                 })
             });
@@ -1079,6 +1085,7 @@ fn project_model_routing_status(
                         .clone()
                         .unwrap_or_default(),
                 ),
+                target_provider: None,
                 duration: state
                     .model_routing_pending_switch_turns
                     .map(|turns| SwitchTurnDuration::Finite {
@@ -1100,6 +1107,7 @@ fn project_model_routing_status(
 
     SessionModelRoutingStatus::new(
         baseline,
+        baseline_provider,
         active_turn_override,
         active_operation_override,
         pending_switch_turn,

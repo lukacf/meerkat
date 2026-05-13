@@ -12,7 +12,12 @@
 //!
 //! Credentials are read from either an explicit `AwsCredentialProvider::Static`
 //! or from env (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-//! `AWS_SESSION_TOKEN`) via `AwsCredentialProvider::Env`.
+//! `AWS_SESSION_TOKEN`) via `AwsCredentialProvider::Env`. SigV4 signing is
+//! gated by an AuthMachine lease observer; the authorizer publishes/checks the
+//! long-lived credential lease before every signature.
+
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use aws_credential_types::Credentials as SdkCredentials;
@@ -21,7 +26,8 @@ use aws_sigv4::http_request::{
 };
 use thiserror::Error;
 
-use super::EnvLookup;
+use super::{EnvLookup, LeaseFreshnessObserver};
+use meerkat_core::handles::{AuthLeaseHandle, LeaseKey};
 use meerkat_core::{AuthError, HttpAuthorizationRequest, HttpAuthorizer};
 
 #[derive(Debug, Error)]
@@ -105,6 +111,8 @@ pub struct AwsStsAuthorizer {
     service: String,
     provider: AwsCredentialProvider,
     label: String,
+    lease_observer: Option<LeaseFreshnessObserver>,
+    signing_time_source: Arc<dyn Fn() -> SystemTime + Send + Sync>,
 }
 
 impl AwsStsAuthorizer {
@@ -126,7 +134,26 @@ impl AwsStsAuthorizer {
             service,
             provider,
             label,
+            lease_observer: None,
+            signing_time_source: Arc::new(SystemTime::now),
         }
+    }
+
+    pub fn with_auth_lease_observer(
+        mut self,
+        handle: Arc<dyn AuthLeaseHandle>,
+        lease_key: LeaseKey,
+    ) -> Self {
+        self.lease_observer = Some(LeaseFreshnessObserver::new(handle, lease_key));
+        self
+    }
+
+    pub fn with_signing_time_source<F>(mut self, signing_time_source: F) -> Self
+    where
+        F: Fn() -> SystemTime + Send + Sync + 'static,
+    {
+        self.signing_time_source = Arc::new(signing_time_source);
+        self
     }
 
     pub fn region(&self) -> &str {
@@ -149,7 +176,7 @@ impl AwsStsAuthorizer {
             .identity(&identity)
             .region(&self.region)
             .name(&self.service)
-            .time(std::time::SystemTime::now())
+            .time((self.signing_time_source)())
             .settings(settings)
             .build()
             .map_err(|e| AwsAuthError::Sign(e.to_string()))?;
@@ -182,6 +209,15 @@ impl AwsStsAuthorizer {
         }
         Ok(signed_headers)
     }
+
+    async fn ensure_sigv4_lease(&self) -> Result<(), AuthError> {
+        let Some(observer) = &self.lease_observer else {
+            return Err(AuthError::HostOwnedUnavailable);
+        };
+        observer
+            .ensure_long_lived_credential_lease(&self.label)
+            .await
+    }
 }
 
 #[async_trait]
@@ -195,6 +231,7 @@ impl HttpAuthorizer for AwsStsAuthorizer {
             }
             other => {
                 let creds = other.resolve_sigv4().map_err(AuthError::from)?;
+                self.ensure_sigv4_lease().await?;
                 let signed = self.sign_sigv4(&creds, req).map_err(AuthError::from)?;
                 for (k, v) in signed {
                     req.headers.push((k, v));
@@ -206,5 +243,11 @@ impl HttpAuthorizer for AwsStsAuthorizer {
 
     fn label(&self) -> &str {
         &self.label
+    }
+
+    fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.lease_observer
+            .as_ref()
+            .and_then(LeaseFreshnessObserver::expires_at)
     }
 }

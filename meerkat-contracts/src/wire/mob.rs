@@ -9,7 +9,7 @@ use meerkat_core::{
     HandlingMode,
     types::{RenderClass, RenderMetadata, RenderSalience},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -1657,7 +1657,7 @@ pub struct MobForceCancelResult {
 }
 
 /// Request payload for `mob/turn_start`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MobTurnStartParams {
@@ -1685,13 +1685,102 @@ pub struct MobTurnStartParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured_output_retries: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<Value>,
+    pub provider_params: Option<crate::wire::runtime::WireTurnMetadataOverride<Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_binding: Option<crate::wire::runtime::WireTurnMetadataOverride<WireAuthBindingRef>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MobTurnStartParamsFields {
+    pub mob_id: String,
+    pub agent_identity: String,
+    pub prompt: WireContentInput,
+    #[serde(default)]
+    pub skill_refs: Option<Vec<meerkat_core::skills::SkillRef>>,
+    #[serde(default)]
+    pub flow_tool_overlay: Option<meerkat_core::service::TurnToolOverlay>,
+    #[serde(default)]
+    pub additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    pub keep_alive: Option<bool>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub output_schema: Option<Value>,
+    #[serde(default)]
+    pub structured_output_retries: Option<u32>,
+    #[serde(default)]
+    pub provider_params: Option<crate::wire::runtime::WireTurnMetadataOverride<Value>>,
     #[serde(default)]
     pub clear_provider_params: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_binding: Option<WireAuthBindingRef>,
+    #[serde(default)]
+    pub auth_binding: Option<crate::wire::runtime::WireTurnMetadataOverride<WireAuthBindingRef>>,
     #[serde(default)]
     pub clear_auth_binding: bool,
+}
+
+impl<'de> Deserialize<'de> for MobTurnStartParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = MobTurnStartParamsFields::deserialize(deserializer)?;
+        Ok(Self {
+            mob_id: fields.mob_id,
+            agent_identity: fields.agent_identity,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params: legacy_wire_turn_override_from_split_fields(
+                fields.provider_params,
+                fields.clear_provider_params,
+                "provider_params",
+                "clear_provider_params",
+            )?,
+            auth_binding: legacy_wire_turn_override_from_split_fields(
+                fields.auth_binding,
+                fields.clear_auth_binding,
+                "auth_binding",
+                "clear_auth_binding",
+            )?,
+        })
+    }
+}
+
+fn legacy_wire_turn_override_from_split_fields<T, E>(
+    set_value: Option<crate::wire::runtime::WireTurnMetadataOverride<T>>,
+    clear: bool,
+    set_field: &'static str,
+    clear_field: &'static str,
+) -> Result<Option<crate::wire::runtime::WireTurnMetadataOverride<T>>, E>
+where
+    E: de::Error,
+{
+    if clear && set_value.is_some() {
+        return Err(E::custom(format!(
+            "{clear_field} cannot be combined with {set_field}"
+        )));
+    }
+    if clear {
+        Ok(Some(crate::wire::runtime::WireTurnMetadataOverride::Clear))
+    } else {
+        Ok(set_value)
+    }
 }
 
 /// Response payload for `mob/member_status`.
@@ -2432,6 +2521,36 @@ mod tests {
             Some(serde_json::json!({ "type": "object" }))
         );
         assert_eq!(params.structured_output_retries, Some(2));
+
+        let clear_params = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "prompt": "continue",
+            "provider_params": { "action": "clear" },
+            "auth_binding": { "action": "clear" }
+        }))
+        .expect("turn_start should accept explicit clear overrides");
+        assert_eq!(
+            clear_params.provider_params,
+            Some(crate::wire::runtime::WireTurnMetadataOverride::Clear)
+        );
+        assert_eq!(
+            clear_params.auth_binding,
+            Some(crate::wire::runtime::WireTurnMetadataOverride::Clear)
+        );
+
+        let err = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
+            "mob_id": "mob-1",
+            "agent_identity": "worker",
+            "prompt": "continue",
+            "provider_params": { "temperature": 0.2 },
+            "clear_provider_params": true
+        }))
+        .expect_err("legacy set plus clear must fail at the mob turn boundary");
+        assert!(
+            err.to_string().contains("clear_provider_params"),
+            "unexpected error: {err}"
+        );
 
         let err = serde_json::from_value::<MobTurnStartParams>(serde_json::json!({
             "mob_id": "mob-1",

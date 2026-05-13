@@ -56,9 +56,14 @@ impl<'a> MobpackCapabilityRequirement<'a> {
     pub fn parse(raw: &'a str) -> Self {
         let id = CapabilityId::from_str(raw).map_or_else(
             |_| {
-                HostProcessCapabilityId::parse(raw).map_or(
-                    MobpackCapabilityId::Unknown,
-                    MobpackCapabilityId::HostProcess,
+                MobpackRuntimeCapabilityId::parse(raw).map_or_else(
+                    || {
+                        HostProcessCapabilityId::parse(raw).map_or(
+                            MobpackCapabilityId::Unknown,
+                            MobpackCapabilityId::HostProcess,
+                        )
+                    },
+                    MobpackCapabilityId::Runtime,
                 )
             },
             MobpackCapabilityId::Known,
@@ -76,15 +81,44 @@ impl<'a> MobpackCapabilityRequirement<'a> {
 }
 
 /// Typed identity for a mobpack capability requirement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum MobpackCapabilityId {
     Known(CapabilityId),
+    Runtime(MobpackRuntimeCapabilityId),
     HostProcess(HostProcessCapabilityId),
     Unknown,
 }
 
+/// Runtime/surface capabilities named by existing mobpack manifests but not
+/// part of the general feature registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MobpackRuntimeCapabilityId {
+    Core,
+    Mcp,
+    Rpc,
+}
+
+impl MobpackRuntimeCapabilityId {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "core" => Some(Self::Core),
+            "mcp" => Some(Self::Mcp),
+            "rpc" => Some(Self::Rpc),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Core => "core",
+            Self::Mcp => "mcp",
+            Self::Rpc => "rpc",
+        }
+    }
+}
+
 /// Host process capabilities named by existing mobpack manifests.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum HostProcessCapabilityId {
     McpStdio,
     ProcessSpawn,
@@ -129,9 +163,9 @@ pub fn browser_mobpack_capability_decision(
                 capability: requirement.id(),
             }
         }
-        MobpackCapabilityId::Known(_) | MobpackCapabilityId::Unknown => {
-            BrowserMobpackCapabilityDecision::Allowed
-        }
+        MobpackCapabilityId::Known(_)
+        | MobpackCapabilityId::Runtime(_)
+        | MobpackCapabilityId::Unknown => BrowserMobpackCapabilityDecision::Allowed,
     }
 }
 
@@ -348,6 +382,22 @@ mod tests {
         assert_eq!(
             MobpackCapabilityRequirement::parse("process_spawn").id(),
             MobpackCapabilityId::HostProcess(HostProcessCapabilityId::ProcessSpawn)
+        );
+    }
+
+    #[test]
+    fn mobpack_capability_requirement_classifies_runtime_capabilities() {
+        assert_eq!(
+            MobpackCapabilityRequirement::parse("core").id(),
+            MobpackCapabilityId::Runtime(MobpackRuntimeCapabilityId::Core)
+        );
+        assert_eq!(
+            MobpackCapabilityRequirement::parse("mcp").id(),
+            MobpackCapabilityId::Runtime(MobpackRuntimeCapabilityId::Mcp)
+        );
+        assert_eq!(
+            MobpackCapabilityRequirement::parse("rpc").id(),
+            MobpackCapabilityId::Runtime(MobpackRuntimeCapabilityId::Rpc)
         );
     }
 

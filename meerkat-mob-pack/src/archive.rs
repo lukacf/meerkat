@@ -77,7 +77,7 @@ impl MobpackArchive {
 #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::manifest::{MobpackManifest, MobpackSection};
+    use crate::manifest::{MobpackManifest, MobpackSection, MobpackSurfaceSelector};
     use crate::targz::create_targz;
     use crate::test_utils::build_custom_archive;
     use crate::validate::PackValidationError;
@@ -96,7 +96,7 @@ mod tests {
                 requires: None,
                 models: BTreeMap::new(),
                 profiles: BTreeMap::new(),
-                surfaces: std::collections::BTreeSet::from(["cli".to_string()]),
+                surfaces: std::collections::BTreeSet::from([MobpackSurfaceSelector::Cli]),
             },
             serde_json::from_str::<MobDefinition>("{\"id\":\"mob\"}").unwrap(),
             BTreeMap::new(),

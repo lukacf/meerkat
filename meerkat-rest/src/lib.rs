@@ -974,9 +974,10 @@ async fn resolve_validation_identity(
     provider: Option<meerkat_core::Provider>,
 ) -> Result<SessionLlmIdentity, String> {
     let snapshot = config_runtime.get().await.ok().map(|state| state.config);
-    let registry = snapshot
-        .as_ref()
-        .and_then(|config| config.model_registry().ok());
+    let registry = snapshot.as_ref().map_or_else(
+        || meerkat_core::Config::default().model_registry().ok(),
+        |config| config.model_registry().ok(),
+    );
     let entry = registry.as_ref().and_then(|registry| registry.entry(model));
     if let (Some(registry), Some(provider)) = (registry.as_ref(), provider)
         && let Some(reason) = registry.provider_override_mismatch_reason(provider, model)
@@ -985,7 +986,6 @@ async fn resolve_validation_identity(
     }
     let provider = provider
         .or_else(|| entry.map(|entry| entry.provider))
-        .or_else(|| meerkat_core::Provider::infer_from_model(model))
         .unwrap_or(meerkat_core::Provider::Other);
     let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
         entry
@@ -1236,10 +1236,9 @@ async fn apply_runtime_turn(
                         agent_llm_client_decorator: None,
                         external_tools: None,
                         checkpointer: None,
-                        runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                            bindings,
-                        )),
-                        require_runtime_build_mode: true,
+                        runtime_build_mode: meerkat_core::SurfaceRecoveryRuntimeBuildMode::Provided(
+                            Box::new(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                        ),
                         realm_id: Some(context.realm.to_string()),
                         instance_id: context.instance_id.clone(),
                         backend: Some(context.backend.clone()),
@@ -1482,10 +1481,9 @@ async fn apply_runtime_turn(
                     agent_llm_client_decorator: None,
                     external_tools: None,
                     checkpointer: None,
-                    runtime_build_mode: Some(meerkat_core::RuntimeBuildMode::SessionOwned(
-                        bindings,
-                    )),
-                    require_runtime_build_mode: true,
+                    runtime_build_mode: meerkat_core::SurfaceRecoveryRuntimeBuildMode::Provided(
+                        Box::new(meerkat_core::RuntimeBuildMode::SessionOwned(bindings)),
+                    ),
                     realm_id: Some(context.realm.to_string()),
                     instance_id: context.instance_id.clone(),
                     backend: Some(context.backend.clone()),
@@ -3921,6 +3919,24 @@ fn create_session_error_to_api(err: SessionError) -> ApiError {
     }
 }
 
+async fn resolve_surface_model_override(
+    state: &AppState,
+    model_override: Option<String>,
+) -> String {
+    let config = state
+        .config_runtime
+        .get()
+        .await
+        .ok()
+        .map(|snapshot| snapshot.config)
+        .unwrap_or_else(|| {
+            let mut config = Config::default();
+            config.agent.model = state.default_model.to_string();
+            config
+        });
+    meerkat::AgentBuildConfig::from_config_model(&config, model_override).model
+}
+
 /// Create and run a new session (typed-terminal inner body).
 async fn create_session_inner(
     state: &AppState,
@@ -3943,7 +3959,7 @@ async fn create_session_inner(
     let keep_alive = keep_alive_override.unwrap_or(false);
     let model_was_explicit = req.model.is_some();
     let provider_was_explicit = req.provider.is_some();
-    let model = req.model.unwrap_or_else(|| state.default_model.clone());
+    let model = resolve_surface_model_override(state, req.model.clone().map(Cow::into_owned)).await;
     let max_tokens = req.max_tokens.unwrap_or(state.max_tokens);
     let skill_references = match canonical_skill_keys_for_state(state, req.skill_refs.clone()).await
     {
@@ -4147,7 +4163,7 @@ async fn create_session_inner(
         shell_env: req.shell_env,
         resume_override_mask: ResumeOverrideMask {
             model: model_was_explicit,
-            provider: req.provider.is_some(),
+            provider: provider_was_explicit,
             max_tokens: req.max_tokens.is_some(),
             structured_output_retries: req.structured_output_retries.is_some(),
             provider_params: req.provider_params.is_some(),
@@ -4987,6 +5003,14 @@ async fn continue_session_inner(
                 return RequestTerminal::RespondWithoutPublish(Err(ApiError::Internal(message)));
             }
         };
+        let model = resolve_surface_model_override(
+            state,
+            req.model
+                .clone()
+                .map(Cow::into_owned)
+                .or_else(|| stored_metadata.as_ref().map(|meta| meta.model.clone())),
+        )
+        .await;
         let llm_binding = meerkat_core::session_recovery::resolve_resume_llm_binding(
             session
                 .session_metadata()
@@ -5063,11 +5087,7 @@ async fn continue_session_inner(
         };
         build.apply_generated_create_only_mob_operator_access(ToolCategoryOverride::Inherit);
         let create_req = SvcCreateSessionRequest {
-            model: req
-                .model
-                .clone()
-                .unwrap_or_else(|| state.default_model.clone())
-                .to_string(),
+            model: model.clone(),
             prompt: turn_prompt.clone(),
             render_metadata: None,
             system_prompt: req.system_prompt.clone(),
@@ -5334,10 +5354,13 @@ async fn continue_session_inner(
             comms_rt
         };
 
+        let model = resolve_surface_model_override(
+            state,
+            stored_metadata.as_ref().map(|meta| meta.model.clone()),
+        )
+        .await;
         let fallback_identity =
-            match resolve_validation_identity(&state.config_runtime, &state.default_model, None)
-                .await
-            {
+            match resolve_validation_identity(&state.config_runtime, &model, None).await {
                 Ok(identity) => identity,
                 Err(err) => {
                     unregister_rest_runtime_if_new_idle_locked(

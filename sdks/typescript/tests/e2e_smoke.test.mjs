@@ -700,8 +700,7 @@ describe("Live Smoke: TypeScript SDK", { skip: !binaryPath }, () => {
         scenario,
         "create OpenAI image session",
         client.createSession(
-          `Use the generate_image tool exactly once. Pass request.provider="openai",
-request.model="${openaiImageModel()}", request.intent="generate",
+          `Use the generate_image tool exactly once. Pass request.target={"target":"model","provider":"openai","model":"${openaiImageModel()}"}, request.intent="generate",
 request.prompt="A clean white placard with TS-OPENAI-75 written in large blue letters",
 request.size="1024x1024", request.quality="low", request.format="webp",
 request.count=1, and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
@@ -750,7 +749,7 @@ After the tool returns, reply with TS-OPENAI-75-DONE and no extra prose.`,
         "OpenAI turn delegates image generation to Gemini",
         client.createSession(
           `Use the generate_image tool exactly once. You are an OpenAI model, but the image target must be Gemini.
-Pass request.provider="gemini", request.model="${geminiImageModel()}", request.intent="generate",
+Pass request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"}, request.intent="generate",
 request.prompt="A flat white sign with the single word Hello centered in large crisp black letters",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
@@ -784,7 +783,7 @@ After the tool returns, reply with CROSS-IMAGE-76-FIRST and no extra prose.`,
         "Gemini turn edits previous generated image",
         initial.turn(
           `Switch to Gemini now and use generate_image exactly once to edit the previous assistant image.
-Pass request.provider="gemini", request.model="${geminiImageModel()}", request.intent="edit",
+Pass request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"}, request.intent="edit",
 request.source_images=[{"kind":"assistant_image","image_id":"${firstImage.imageId}"}],
 request.instruction="Modify only the sign text so it says Hello Meerkat in large crisp black letters",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
@@ -796,7 +795,7 @@ After the tool returns, reply with CROSS-IMAGE-76-EDITED and no extra prose.`,
             enableBuiltins: true,
           },
         ),
-        240000,
+        420000,
       );
       assert.match(edit.text.toLowerCase(), /cross-image-76-edited/);
 
@@ -858,11 +857,11 @@ Reply with CROSS-IMAGE-76-DESCRIBE and a short phrase containing the text you ca
         "run stacked image tool turn",
         client.createSession(
           `Complete this as a single assistant turn. Before your final answer, call generate_image twice in sequence.
-First call: request.provider="gemini", request.model="${geminiImageModel()}", request.intent="generate",
+First call: request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"}, request.intent="generate",
 request.prompt="A neat museum placard portrait of Johann Sebastian Bach beside a pipe organ, with the text BACH-77 visible",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
-Second call: request.provider="gemini", request.model="${geminiImageModel()}", request.intent="edit",
+Second call: request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"}, request.intent="edit",
 use the assistant image returned by the first call as request.source_images, and transform it into a bright yellow
 animated sitcom-style composer portrait with BACH-77 still visible.
 After both tool calls finish, describe the second image in detail and rate it on a 1-10 Simpson-like scale.
@@ -880,7 +879,11 @@ Your final reply must include STACKED-IMAGE-77-DONE.`,
       const history = await withStepTimeout(
         scenario,
         "read stacked image history",
-        client.readSessionHistory(session.id),
+        waitFor(
+          () => client.readSessionHistory(session.id),
+          (candidate) => assistantImageBlocks(candidate).length >= 2,
+          { timeoutMs: 60000, intervalMs: 500 },
+        ),
       );
       const images = assistantImageBlocks(history);
       assert.ok(images.length >= 2, "stacked turn should commit two assistant image blocks");
@@ -910,7 +913,7 @@ Your final reply must include STACKED-IMAGE-77-DONE.`,
         scenario,
         "OpenAI session routes image generation to Gemini",
         client.createSession(
-          `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
+          `Use generate_image exactly once with request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"},
 request.intent="generate", request.prompt="A clean product sketch of a tiny glass terrarium containing a lighthouse, with RELAY-78 printed on the base",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
@@ -1003,7 +1006,7 @@ After the image is generated, reply with CROSS-RELAY-78-GENERATED and no extra p
         scenario,
         "send maker image task",
         mob.member("maker-1").send(
-          `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+          `Use generate_image exactly once with request.target={"target":"model","provider":"openai","model":"${openaiImageModel()}"},
 request.intent="generate", request.prompt="A gallery postcard showing a blue teapot orbiting a small moon, with ART-CRITIC-79 on the border",
 request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
 and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
@@ -1054,7 +1057,7 @@ After it returns, summarize the image in one sentence and include ART-CRITIC-79-
         scenario,
         "create persisted image session",
         clientA.createSession(
-          `Use generate_image exactly once with request.provider="gemini", request.model="${geminiImageModel()}",
+          `Use generate_image exactly once with request.target={"target":"model","provider":"gemini","model":"${geminiImageModel()}"},
 request.intent="generate", request.prompt="A durable archive card with RESUME-80 printed in green ink beside a small brass key",
 request.size="1536x1024", request.quality="auto", request.format="png", request.count=1,
 and request.provider_params={"aspect_ratio":"16:9","image_size":"1K"}.
@@ -1126,7 +1129,7 @@ After the image is generated, reply with RESUME-80-GENERATED.`,
         "run parallel image sessions",
         Promise.all(markers.map((marker) =>
           client.createSession(
-            `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+            `Use generate_image exactly once with request.target={"target":"model","provider":"openai","model":"${openaiImageModel()}"},
 request.intent="generate", request.prompt="A minimal square badge with ${marker} written in crisp black letters",
 request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
 and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.
@@ -1177,7 +1180,7 @@ After the image is generated, reply with ${marker}-DONE and no extra prose.`,
         scenario,
         "generate SDK roundtrip image",
         client.createSession(
-          `Use generate_image exactly once with request.provider="openai", request.model="${openaiImageModel()}",
+          `Use generate_image exactly once with request.target={"target":"model","provider":"openai","model":"${openaiImageModel()}"},
 request.intent="generate", request.prompt="A simple postcard with SDK-ROUNDTRIP-82 printed above a red compass",
 request.size="1024x1024", request.quality="low", request.format="webp", request.count=1,
 and request.provider_params={"background":"opaque","moderation":"low","action":"generate"}.

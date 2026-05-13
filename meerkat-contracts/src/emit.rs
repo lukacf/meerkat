@@ -1434,7 +1434,14 @@ mod tests {
         );
         assert_eq!(
             contracts["provider_backend_kinds"]["openai"],
-            serde_json::json!(["openai_api", "chatgpt_backend"])
+            serde_json::json!(["openai_api", "chatgpt_backend", "azure_openai"])
+        );
+        assert!(
+            contracts["provider_auth_methods"]["openai"]
+                .as_array()
+                .expect("openai auth methods")
+                .contains(&serde_json::json!("azure_api_key")),
+            "provider auth relation map must include Azure OpenAI api-key auth"
         );
         assert!(
             contracts["provider_auth_methods"]["openai"]

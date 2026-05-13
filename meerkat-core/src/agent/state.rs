@@ -60,6 +60,9 @@ struct LlmRetryRequest<'a> {
     provider_params: Option<&'a ProviderParamsOverride>,
 }
 
+const EMPTY_VISIBLE_LLM_RECOVERY_ATTEMPTS: u32 = 1;
+const EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY: &str = "llm_empty_visible_completion_recovery";
+
 fn public_terminal_cause_kind(
     cause_kind: Option<TurnTerminalCauseKind>,
 ) -> Option<TurnTerminalCauseKind> {
@@ -85,6 +88,34 @@ fn assistant_image_events_from_effects(
         }
     }
     images
+}
+
+fn empty_visible_response_recovery_message(
+    recovery_attempt: u32,
+    max_recovery_attempts: u32,
+    in_extraction: bool,
+) -> Message {
+    let body = if in_extraction {
+        "The previous model completion ended without user-visible assistant text, image output, \
+         or tool calls. Continue the same turn now by returning the required structured output \
+         JSON. Do not return reasoning-only content."
+    } else {
+        "The previous model completion ended without user-visible assistant text, image output, \
+         or tool calls. Continue the same turn now with a visible assistant response or an \
+         available tool call. Do not return reasoning-only content."
+    };
+
+    Message::SystemNotice(SystemNoticeMessage::with_block(
+        SystemNoticeKind::Generic,
+        Some(body.to_string()),
+        crate::types::SystemNoticeBlock::RuntimeNotice {
+            category: EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY.to_string(),
+            detail: Some(format!(
+                "recovery_attempt={recovery_attempt}; max_recovery_attempts={max_recovery_attempts}"
+            )),
+            payload: None,
+        },
+    ))
 }
 
 fn budget_warning_event(exceeded: BudgetExceeded) -> AgentEvent {
@@ -411,6 +442,8 @@ where
         };
         let messages = hydrated_messages.as_deref().unwrap_or(messages);
         let mut attempt = 0u32;
+        let mut empty_visible_recovery_attempt = 0u32;
+        let mut recovery_messages: Option<Vec<Message>> = None;
         let retry_authority = LlmRetryLifecycleAuthority::new(self.retry_policy.clone());
 
         loop {
@@ -431,11 +464,18 @@ where
             }
 
             // 4. Determine whether to wrap the call and select timeout source
+            let active_messages = recovery_messages.as_deref().unwrap_or(messages);
             let call_result = match (effective_call_timeout, remaining_turn) {
                 (None, None) => {
                     // No timeout wrapper needed
                     self.client
-                        .stream_response(messages, tools, max_tokens, temperature, provider_params)
+                        .stream_response(
+                            active_messages,
+                            tools,
+                            max_tokens,
+                            temperature,
+                            provider_params,
+                        )
                         .await
                 }
                 (call_to, turn_remaining) => {
@@ -456,7 +496,7 @@ where
                     match tokio::time::timeout(
                         effective_timeout,
                         self.client.stream_response(
-                            messages,
+                            active_messages,
                             tools,
                             max_tokens,
                             temperature,
@@ -505,7 +545,45 @@ where
 
             // 5. Handle call result
             match call_result {
-                Ok(result) => return Ok(result),
+                Ok(result) => {
+                    if crate::types::assistant_blocks_have_visible_or_actionable_output(
+                        result.blocks(),
+                    ) {
+                        return Ok(result);
+                    }
+
+                    if empty_visible_recovery_attempt < EMPTY_VISIBLE_LLM_RECOVERY_ATTEMPTS {
+                        empty_visible_recovery_attempt += 1;
+                        tracing::warn!(
+                            provider = %self.client.provider(),
+                            model = self.client.model(),
+                            recovery_attempt = empty_visible_recovery_attempt,
+                            max_recovery_attempts = EMPTY_VISIBLE_LLM_RECOVERY_ATTEMPTS,
+                            "LLM completed without visible or actionable output; retrying with continuation notice"
+                        );
+                        self.budget.record_usage(result.usage());
+                        self.session.record_usage(result.usage().clone());
+                        if let Some(exceeded) = self.budget.observe().exceeded() {
+                            return Err(exceeded.to_agent_error());
+                        }
+                        let mut next_messages = active_messages.to_vec();
+                        next_messages.push(empty_visible_response_recovery_message(
+                            empty_visible_recovery_attempt,
+                            EMPTY_VISIBLE_LLM_RECOVERY_ATTEMPTS,
+                            self.turn_in_extraction_flow()?,
+                        ));
+                        recovery_messages = Some(next_messages);
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        provider = %self.client.provider(),
+                        model = self.client.model(),
+                        recovery_attempts = empty_visible_recovery_attempt,
+                        "LLM completed without visible or actionable output after recovery budget; accepting empty completion"
+                    );
+                    return Ok(result);
+                }
                 Err(e) => {
                     if let Some(retry_lifecycle) = retry_authority.plan_recoverable_failure(
                         &e,
@@ -1631,22 +1709,17 @@ where
                     let assistant_text = assistant_msg.to_string();
                     let assistant_blocks = assistant_msg.blocks.clone();
 
-                    if !assistant_msg.has_visible_or_actionable_output() {
+                    if !assistant_msg.has_visible_or_actionable_output() && in_extraction {
                         let error = AgentError::llm_empty_response(self.client.provider());
-                        if in_extraction {
-                            return self
-                                .complete_extraction_failed(
-                                    &run_id,
-                                    turn_count,
-                                    tool_call_count,
-                                    error.to_string(),
-                                    &event_tx,
-                                )
-                                .await;
-                        }
-                        self.terminalize_fatal_error(&run_id, turn_count, &event_tx, &error)
-                            .await?;
-                        return Err(error);
+                        return self
+                            .complete_extraction_failed(
+                                &run_id,
+                                turn_count,
+                                tool_call_count,
+                                error.to_string(),
+                                &event_tx,
+                            )
+                            .await;
                     }
 
                     let post_llm_invocation = HookInvocation {
@@ -2529,7 +2602,7 @@ impl ToolCallOwned {
     clippy::manual_async_fn
 )]
 mod tests {
-    use super::{SystemNoticeKind, is_synthetic_notice};
+    use super::{EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY, SystemNoticeKind, is_synthetic_notice};
     use crate::agent::{AgentBuilder, AgentLlmClient, AgentSessionStore, AgentToolDispatcher};
     use crate::blob::{BlobId, BlobPayload, BlobRef, BlobStore, BlobStoreError};
     use crate::budget::{Budget, BudgetLimits};
@@ -6129,47 +6202,143 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct EmptyThenTextLlmClient {
+        saw_recovery_notice: Mutex<Vec<bool>>,
+    }
+
+    impl EmptyThenTextLlmClient {
+        fn saw_recovery_notice(&self) -> Vec<bool> {
+            self.saw_recovery_notice.lock().unwrap().clone()
+        }
+    }
+
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl AgentLlmClient for EmptyThenTextLlmClient {
+        async fn stream_response(
+            &self,
+            messages: &[Message],
+            _tools: &[Arc<ToolDef>],
+            _max_tokens: u32,
+            _temperature: Option<f32>,
+            _provider_params: Option<&crate::lifecycle::run_primitive::ProviderParamsOverride>,
+        ) -> Result<super::LlmStreamResult, AgentError> {
+            let saw_recovery_notice = messages.iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| matches!(
+                        block,
+                        crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY
+                    ))
+                )
+            });
+            let call_index = {
+                let mut calls = self.saw_recovery_notice.lock().unwrap();
+                calls.push(saw_recovery_notice);
+                calls.len()
+            };
+
+            if call_index == 1 {
+                return Ok(super::LlmStreamResult::new(
+                    vec![AssistantBlock::Reasoning {
+                        text: "Need to answer visibly".to_string(),
+                        meta: None,
+                    }],
+                    StopReason::EndTurn,
+                    Usage::default(),
+                ));
+            }
+
+            Ok(super::LlmStreamResult::new(
+                vec![AssistantBlock::Text {
+                    text: "visible after recovery".to_string(),
+                    meta: None,
+                }],
+                StopReason::EndTurn,
+                Usage::default(),
+            ))
+        }
+
+        fn provider(&self) -> crate::Provider {
+            crate::Provider::Other
+        }
+
+        fn model(&self) -> &'static str {
+            "mock-model"
+        }
+    }
+
     #[tokio::test]
-    async fn reasoning_only_llm_response_does_not_complete_turn() {
+    async fn empty_visible_llm_response_gets_transient_continuation_nudge() {
+        let client = Arc::new(EmptyThenTextLlmClient::default());
+        let mut agent = build_agent(client.clone()).await;
+        agent.config.max_turns = Some(1);
+
+        let result = agent.run("Use a tool".to_string().into()).await.unwrap();
+
+        assert_eq!(result.text, "visible after recovery");
+        assert_eq!(client.saw_recovery_notice(), vec![false, true]);
+        assert!(
+            !agent.session().messages().iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| matches!(
+                        block,
+                        crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY
+                    ))
+                )
+            }),
+            "recovery nudge should be provider-facing only"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_llm_response_does_not_kill_session() {
         let mut agent = build_agent(Arc::new(ReasoningOnlyLlmClient)).await;
         agent.config.max_turns = Some(1);
 
-        let err = agent
+        let result = agent
             .run("Use a tool".to_string().into())
             .await
-            .expect_err("reasoning-only LLM response should terminalize as a failure");
-
-        match err {
-            AgentError::Llm {
-                reason, message, ..
-            } => {
-                assert!(
-                    message.contains("user-visible text"),
-                    "unexpected message: {message}"
-                );
-                assert!(matches!(
-                    reason,
-                    crate::error::LlmFailureReason::ProviderError(crate::error::LlmProviderError {
-                        kind: crate::error::LlmProviderErrorKind::IncompleteResponse,
-                        ..
-                    })
-                ));
-            }
-            other => panic!("expected LLM incomplete-response failure, got {other:?}"),
-        }
+            .expect("reasoning-only LLM response should complete as an empty provider turn");
+        assert_eq!(result.text, "");
+        assert!(
+            result
+                .content
+                .iter()
+                .all(|block| matches!(block, AssistantBlock::Reasoning { .. })),
+            "unexpected content: {:?}",
+            result.content
+        );
+        assert!(
+            !agent.session().messages().iter().any(|message| {
+                matches!(
+                    message,
+                    Message::SystemNotice(notice)
+                    if notice.blocks.iter().any(|block| matches!(
+                        block,
+                        crate::types::SystemNoticeBlock::RuntimeNotice { category, .. }
+                        if category == EMPTY_VISIBLE_LLM_RECOVERY_CATEGORY
+                    ))
+                )
+            }),
+            "empty-completion recovery notice must remain provider-facing only"
+        );
 
         let snapshot = agent
             .execution_snapshot()
             .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
         assert_eq!(
             snapshot.terminal_outcome,
-            Some(crate::TurnTerminalOutcome::Failed)
+            Some(crate::TurnTerminalOutcome::Completed)
         );
-        assert_eq!(
-            snapshot.terminal_cause_kind,
-            Some(crate::TurnTerminalCauseKind::LlmFailure)
-        );
+        assert_eq!(snapshot.terminal_cause_kind, None);
     }
 
     #[tokio::test]

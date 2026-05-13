@@ -2848,9 +2848,10 @@ export interface WireAuthBindingRef {
 }
 
 export interface WireBackendProfile {
-  backend_kind: "open_ai_api" | "chatgpt_backend" | "azure_openai" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible" | "other_api";
+  backend_kind: "openai_api" | "chatgpt_backend" | "azure_openai" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "openai_compatible" | "other_api";
   base_url?: string;
   id: string;
+  options?: unknown;
   provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 }
 

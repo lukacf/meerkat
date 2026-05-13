@@ -19,10 +19,21 @@ export const OAUTH_PROVIDER_IDENTITIES = [
   "google_code_assist"
 ] as const;
 
-export type OAuthProviderIdentity = typeof OAUTH_PROVIDER_IDENTITIES[number];
+export const OAUTH_PROVIDER_IDENTITY_ALIASES = {
+  "anthropic": "anthropic_claude_ai",
+  "claude": "anthropic_claude_ai",
+  "claude.ai": "anthropic_claude_ai",
+  "openai": "open_ai_chat_gpt",
+  "chatgpt": "open_ai_chat_gpt",
+  "google": "google_code_assist",
+  "gemini": "google_code_assist",
+  "code_assist": "google_code_assist",
+} as const satisfies Record<string, typeof OAUTH_PROVIDER_IDENTITIES[number]>;
+export type OAuthProviderIdentityAlias = keyof typeof OAUTH_PROVIDER_IDENTITY_ALIASES;
+export type OAuthProviderIdentity = typeof OAUTH_PROVIDER_IDENTITIES[number] | OAuthProviderIdentityAlias;
 
 export const WIRE_BACKEND_KINDS = [
-  "open_ai_api",
+  "openai_api",
   "chatgpt_backend",
   "azure_openai",
   "anthropic_api",
@@ -33,7 +44,7 @@ export const WIRE_BACKEND_KINDS = [
   "vertex_ai",
   "google_code_assist",
   "self_hosted",
-  "open_ai_compatible",
+  "openai_compatible",
   "other_api"
 ] as const;
 
@@ -90,7 +101,7 @@ export const WIRE_PROVIDER_BACKEND_KINDS = {
     "foundry",
   ],
   openai: [
-    "open_ai_api",
+    "openai_api",
     "chatgpt_backend",
     "azure_openai",
   ],
@@ -101,7 +112,7 @@ export const WIRE_PROVIDER_BACKEND_KINDS = {
   ],
   self_hosted: [
     "self_hosted",
-    "open_ai_compatible",
+    "openai_compatible",
   ],
   other: [
     "other_api",
@@ -255,6 +266,7 @@ export interface WireBackendProfile {
   provider: WireAuthProvider;
   backend_kind: WireBackendKind;
   base_url?: string | null;
+  options?: unknown;
 }
 
 export interface WireAuthProfile {
@@ -484,6 +496,9 @@ export function parseWireAuthProvider(value: unknown, path = 'provider'): WireAu
 }
 
 export function parseOAuthProviderIdentity(value: unknown, path = 'provider'): OAuthProviderIdentity {
+  if (typeof value === 'string' && hasOwn(OAUTH_PROVIDER_IDENTITY_ALIASES, value)) {
+    return value as OAuthProviderIdentity;
+  }
   return parseLiteral(value, OAUTH_PROVIDER_IDENTITIES, path, 'oauth provider identity');
 }
 

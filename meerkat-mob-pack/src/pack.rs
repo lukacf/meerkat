@@ -10,7 +10,7 @@ use crate::validate::PackValidationError;
 use ed25519_dalek::SigningKey;
 use meerkat_mob::{MobDefinition, definition::SkillSource};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Component, Path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackResult {
@@ -57,9 +57,9 @@ pub fn pack_directory_with_excludes(
     excluded_paths: &[&Path],
 ) -> Result<PackResult, PackValidationError> {
     let mut files = scan_directory(directory)?;
-    exclude_paths_from_pack(directory, excluded_paths, &mut files);
+    exclude_paths_from_pack(directory, excluded_paths, &mut files)?;
     if let Some(request) = signing {
-        exclude_paths_from_pack(directory, &[request.key_path], &mut files);
+        exclude_paths_from_pack(directory, &[request.key_path], &mut files)?;
     }
     validate_extracted_pack_files(&files)?;
 
@@ -272,22 +272,75 @@ fn scan_directory_inner(
         let rel = path
             .strip_prefix(root)
             .map_err(|err| PackValidationError::Archive(err.to_string()))?;
-        let rel_path = normalize_rel_path(&rel.to_string_lossy());
-        out.insert(rel_path, std::fs::read(&path)?);
+        let archive_path = source_archive_path(rel)?;
+        insert_archive_file(out, archive_path, std::fs::read(&path)?)?;
     }
     Ok(())
 }
 
-fn exclude_paths_from_pack(root: &Path, paths: &[&Path], files: &mut BTreeMap<String, Vec<u8>>) {
+fn exclude_paths_from_pack(
+    root: &Path,
+    paths: &[&Path],
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), PackValidationError> {
     for path in paths {
         if let Ok(relative) = path.strip_prefix(root) {
-            files.remove(&normalize_rel_path(&relative.to_string_lossy()));
+            let archive_path = source_archive_path(relative)?;
+            files.remove(archive_path.as_str());
         }
     }
+    Ok(())
 }
 
-fn normalize_rel_path(path: &str) -> String {
-    path.replace('\\', "/").trim_start_matches("./").to_string()
+fn source_archive_path(relative: &Path) -> Result<MobpackArchivePath, PackValidationError> {
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                let segment = part
+                    .to_str()
+                    .ok_or_else(|| PackValidationError::UnsafeEntry {
+                        path: relative.display().to_string(),
+                        reason: "source path segment is not valid UTF-8".to_string(),
+                    })?;
+                if segment.contains('\\') {
+                    return Err(PackValidationError::UnsafeEntry {
+                        path: relative.display().to_string(),
+                        reason: "source path segment may not contain backslashes".to_string(),
+                    });
+                }
+                parts.push(segment);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(PackValidationError::UnsafeEntry {
+                    path: relative.display().to_string(),
+                    reason: "path traversal is not allowed".to_string(),
+                });
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(PackValidationError::UnsafeEntry {
+                    path: relative.display().to_string(),
+                    reason: "absolute paths are not allowed".to_string(),
+                });
+            }
+        }
+    }
+    let raw = parts.join("/");
+    MobpackArchivePath::parse(&raw)
+}
+
+fn insert_archive_file(
+    out: &mut BTreeMap<String, Vec<u8>>,
+    archive_path: MobpackArchivePath,
+    bytes: Vec<u8>,
+) -> Result<(), PackValidationError> {
+    let key = archive_path.into_string();
+    if out.contains_key(&key) {
+        return Err(PackValidationError::DuplicateArchiveEntry { path: key });
+    }
+    out.insert(key, bytes);
+    Ok(())
 }
 
 fn load_signing_key(path: &Path) -> Result<SigningKey, PackValidationError> {
@@ -360,6 +413,45 @@ mod tests {
 
         assert_eq!(baseline.digest, with_excluded_outside.digest);
         assert_eq!(baseline.archive_bytes, with_excluded_outside.archive_bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_pack_rejects_backslash_source_path_segment() {
+        let temp = fixture_mob_dir();
+        std::fs::write(temp.path().join("skills\\review.md"), "# Colliding skill\n").unwrap();
+
+        let err = pack_directory(temp.path(), None).unwrap_err();
+
+        assert!(matches!(
+            err,
+            PackValidationError::UnsafeEntry { path, reason }
+                if path.contains('\\') && reason.contains("backslashes")
+        ));
+    }
+
+    #[test]
+    fn test_insert_archive_file_rejects_duplicate_before_overwrite() {
+        let mut files = BTreeMap::new();
+        insert_archive_file(
+            &mut files,
+            MobpackArchivePath::parse("skills/review.md").unwrap(),
+            b"first".to_vec(),
+        )
+        .unwrap();
+
+        let err = insert_archive_file(
+            &mut files,
+            MobpackArchivePath::parse("skills/review.md").unwrap(),
+            b"second".to_vec(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            PackValidationError::DuplicateArchiveEntry { path } if path == "skills/review.md"
+        ));
+        assert_eq!(files.get("skills/review.md"), Some(&b"first".to_vec()));
     }
 
     #[test]

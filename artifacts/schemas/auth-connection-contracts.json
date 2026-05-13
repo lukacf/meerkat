@@ -29,7 +29,7 @@
     "unknown"
   ],
   "backend_kinds": [
-    "open_ai_api",
+    "openai_api",
     "chatgpt_backend",
     "azure_openai",
     "anthropic_api",
@@ -40,7 +40,7 @@
     "vertex_ai",
     "google_code_assist",
     "self_hosted",
-    "open_ai_compatible",
+    "openai_compatible",
     "other_api"
   ],
   "credential_source_kinds": [
@@ -60,6 +60,23 @@
     "ready"
   ],
   "login_ready_state": "ready",
+  "oauth_provider_identity_aliases": {
+    "anthropic_claude_ai": [
+      "anthropic",
+      "claude",
+      "claude.ai"
+    ],
+    "anthropic_console_api_key": [],
+    "google_code_assist": [
+      "google",
+      "gemini",
+      "code_assist"
+    ],
+    "open_ai_chat_gpt": [
+      "openai",
+      "chatgpt"
+    ]
+  },
   "provider_auth_methods": {
     "anthropic": [
       "api_key",
@@ -114,7 +131,7 @@
       "google_code_assist"
     ],
     "openai": [
-      "open_ai_api",
+      "openai_api",
       "chatgpt_backend",
       "azure_openai"
     ],
@@ -123,7 +140,7 @@
     ],
     "self_hosted": [
       "self_hosted",
-      "open_ai_compatible"
+      "openai_compatible"
     ]
   },
   "providers": [

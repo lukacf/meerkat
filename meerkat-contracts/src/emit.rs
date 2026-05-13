@@ -570,10 +570,28 @@ pub fn emit_all_schemas(output_dir: &std::path::Path) -> Result<(), Box<dyn std:
         .copied()
         .map(meerkat_core::AuthStatusPhase::as_public_str)
         .collect();
+    let oauth_provider_identity_aliases: serde_json::Map<String, serde_json::Value> =
+        meerkat_core::OAuthProviderIdentity::ALL
+            .iter()
+            .copied()
+            .map(|identity| {
+                (
+                    identity.canonical_alias().to_string(),
+                    serde_json::Value::Array(
+                        identity
+                            .compatibility_aliases()
+                            .iter()
+                            .map(|alias| serde_json::Value::String((*alias).to_string()))
+                            .collect(),
+                    ),
+                )
+            })
+            .collect();
     let auth_connection_contracts = serde_json::json!({
         "providers": providers,
         "backend_kinds": backend_kinds,
         "auth_methods": auth_methods,
+        "oauth_provider_identity_aliases": oauth_provider_identity_aliases,
         "credential_source_kinds": serialized_contract_values(&[
             crate::wire::WireCredentialSourceKind::InlineSecret,
             crate::wire::WireCredentialSourceKind::ManagedStore,
@@ -1054,7 +1072,7 @@ mod tests {
             contracts["backend_kinds"]
                 .as_array()
                 .expect("backend kinds")
-                .contains(&serde_json::json!("open_ai_api")),
+                .contains(&serde_json::json!("openai_api")),
             "backend vocabulary must include wire enum names"
         );
         assert!(
@@ -1084,7 +1102,7 @@ mod tests {
         );
         assert_eq!(
             contracts["provider_backend_kinds"]["openai"],
-            serde_json::json!(["open_ai_api", "chatgpt_backend", "azure_openai"])
+            serde_json::json!(["openai_api", "chatgpt_backend", "azure_openai"])
         );
         assert!(
             contracts["provider_auth_methods"]["openai"]
@@ -1100,6 +1118,13 @@ mod tests {
         assert_eq!(
             contracts["provider_auth_methods"]["other"],
             serde_json::json!(["api_key", "static_bearer", "none"])
+        );
+        assert!(
+            contracts["oauth_provider_identity_aliases"]["open_ai_chat_gpt"]
+                .as_array()
+                .expect("openai oauth aliases")
+                .contains(&serde_json::json!("openai")),
+            "OAuth provider identity aliases must preserve legacy OpenAI web inputs"
         );
         assert!(
             contracts["provider_auth_methods"]["openai"]

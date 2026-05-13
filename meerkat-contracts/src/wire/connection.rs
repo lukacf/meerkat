@@ -38,6 +38,7 @@ pub enum WireConnectionProjectionError {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WireBackendKind {
+    #[serde(rename = "openai_api")]
     OpenAiApi,
     ChatgptBackend,
     #[serde(rename = "azure_openai")]
@@ -50,6 +51,7 @@ pub enum WireBackendKind {
     VertexAi,
     GoogleCodeAssist,
     SelfHosted,
+    #[serde(rename = "openai_compatible")]
     OpenAiCompatible,
     OtherApi,
 }
@@ -363,6 +365,8 @@ pub struct WireBackendProfile {
     pub backend_kind: WireBackendKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub options: serde_json::Value,
 }
 
 impl TryFrom<&meerkat_core::BackendProfile> for WireBackendProfile {
@@ -374,6 +378,7 @@ impl TryFrom<&meerkat_core::BackendProfile> for WireBackendProfile {
             provider: value.provider,
             backend_kind: WireBackendKind::from_provider_raw(value.provider, &value.backend_kind)?,
             base_url: value.base_url.clone(),
+            options: value.options.clone(),
         })
     }
 }
@@ -773,17 +778,18 @@ mod tests {
     }
 
     #[test]
-    fn backend_profile_projects_provider_as_string() {
+    fn backend_profile_projects_typed_contract_without_dropping_options() {
         let bp = meerkat_core::BackendProfile {
             id: "openai_api".into(),
             provider: meerkat_core::Provider::OpenAI,
             backend_kind: "openai_api".into(),
             base_url: None,
-            options: serde_json::Value::Null,
+            options: serde_json::json!({"image_generation_deployment": "gpt-image-2"}),
         };
         let w = WireBackendProfile::try_from(&bp).unwrap();
         assert_eq!(w.provider, meerkat_core::Provider::OpenAI);
         assert_eq!(w.backend_kind, WireBackendKind::OpenAiApi);
+        assert_eq!(w.options["image_generation_deployment"], "gpt-image-2");
     }
 
     #[test]

@@ -21,7 +21,7 @@ const authProfile = {
 const backendProfile = {
   id: 'openai_api',
   provider: 'openai',
-  backend_kind: 'open_ai_api',
+  backend_kind: 'openai_api',
   base_url: 'https://api.openai.com',
   options: { region: 'us-east-1' },
 };
@@ -81,7 +81,36 @@ test('generated realm connection parser round-trips valid connection payloads', 
   assert.deepEqual(JSON.parse(JSON.stringify(result)), payload);
 });
 
-test('Auth helpers fail closed before transport for provider aliases and auth method strings', async () => {
+test('Auth helpers accept OAuth aliases and fail closed for unknown provider/auth strings', async () => {
+  const loginStart = {
+    authorize_url: 'https://chatgpt.com/oauth/authorize',
+    state: 'state-1',
+    redirect_uri: 'http://localhost:1455/callback',
+    provider: 'openai',
+  };
+  const { auth: aliasAuth, calls } = authWithResponse(loginStart);
+
+  assert.deepEqual(
+    await aliasAuth.loginStart({
+      provider: 'openai',
+      redirect_uri: 'http://localhost:1455/callback',
+      realm_id: 'dev',
+      binding_id: 'default_openai',
+    }),
+    loginStart,
+  );
+  assert.deepEqual(calls, [
+    {
+      method: 'auth/login/start',
+      params: {
+        provider: 'openai',
+        redirect_uri: 'http://localhost:1455/callback',
+        realm_id: 'dev',
+        binding_id: 'default_openai',
+      },
+    },
+  ]);
+
   let called = false;
   const auth = new Auth({
     async request() {
@@ -93,7 +122,7 @@ test('Auth helpers fail closed before transport for provider aliases and auth me
   await assert.rejects(
     () =>
       auth.loginStart({
-        provider: 'openai',
+        provider: 'future_provider',
         redirect_uri: 'http://localhost:1455/callback',
         realm_id: 'dev',
         binding_id: 'default_openai',

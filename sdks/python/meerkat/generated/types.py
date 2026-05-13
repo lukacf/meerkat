@@ -2583,10 +2583,11 @@ the colon-joined form cannot travel across wire boundaries."""
 @dataclass
 class WireBackendProfile:
     """Wire projection of [`meerkat_core::BackendProfile`]."""
-    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'azure_openai', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible', 'other_api']
+    backend_kind: Literal['openai_api', 'chatgpt_backend', 'azure_openai', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'openai_compatible', 'other_api']
     id: str
     provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     base_url: Optional[str] = None
+    options: Optional[Any] = None
 
 
 @dataclass
@@ -3381,14 +3382,13 @@ WireToolResultContent = str | list[WireContentBlock]
 
 # Wire-safe projection of [`meerkat_core::Provider`].
 #
-# The core `Provider` enum uses `#[serde(rename_all = "snake_case")]` which
-# transforms `OpenAI` to `"open_a_i"` on the wire -- not the conventional
-# `"openai"`. `WireProvider` pins the correct wire names with explicit
+# `WireProvider` pins the public provider vocabulary with explicit
 # `#[serde(rename)]` on each variant so SDK consumers see `"openai"`,
-# `"anthropic"`, `"gemini"`, etc.
+# `"anthropic"`, `"gemini"`, etc., regardless of Rust variant spelling.
 #
-# Includes an `Unknown { debug: String }` variant for future-proofing per
-# the wire-mirror dogma used throughout this module.
+# Includes a flat `"unknown"` sentinel for future-proofing. The debug payload
+# is carried by [`WireConversionError::Provider`] when converting back into
+# core types.
 WireProvider = Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other'] | Literal['unknown']
 
 # Wire projection of `meerkat_core::TranscriptSource`. Lane provenance

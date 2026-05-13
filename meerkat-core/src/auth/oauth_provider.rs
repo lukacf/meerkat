@@ -42,6 +42,18 @@ impl OAuthProviderIdentity {
         }
     }
 
+    /// Legacy input aliases accepted at request-deserialization boundaries.
+    ///
+    /// These are compatibility spellings, not canonical persisted/wire output.
+    pub const fn compatibility_aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::AnthropicClaudeAi => &["anthropic", "claude", "claude.ai"],
+            Self::AnthropicConsoleApiKey => &[],
+            Self::OpenAiChatGpt => &["openai", "chatgpt"],
+            Self::GoogleCodeAssist => &["google", "gemini", "code_assist"],
+        }
+    }
+
     /// Compatibility path segment used only by local OAuth endpoint fixtures.
     pub const fn fixture_path_segment(self) -> &'static str {
         match self {

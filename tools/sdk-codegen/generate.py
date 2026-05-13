@@ -2114,6 +2114,11 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
         providers,
     )
     oauth_provider_identities = _schema_string_enum_values(params_schema, "OAuthProviderIdentity")
+    oauth_provider_identity_aliases = _contract_string_map(
+        contracts,
+        "oauth_provider_identity_aliases",
+        oauth_provider_identities,
+    )
     persisted_auth_modes = _schema_string_enum_values(wire_schema, "PersistedAuthMode")
     source_kinds = _contract_string_list(contracts, "credential_source_kinds")
     status_states = _contract_string_list(contracts, "auth_status_states")
@@ -2134,7 +2139,16 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
     lines.append("export type WireAuthProvider = typeof WIRE_AUTH_PROVIDERS[number];")
     lines.append("")
     lines.extend(_ts_const_array("OAUTH_PROVIDER_IDENTITIES", oauth_provider_identities))
-    lines.append("export type OAuthProviderIdentity = typeof OAUTH_PROVIDER_IDENTITIES[number];")
+    lines.append("export const OAUTH_PROVIDER_IDENTITY_ALIASES = {")
+    for canonical, aliases in oauth_provider_identity_aliases.items():
+        for alias in aliases:
+            lines.append(f"  {json.dumps(alias)}: {json.dumps(canonical)},")
+    lines.append("} as const satisfies Record<string, typeof OAUTH_PROVIDER_IDENTITIES[number]>;")
+    lines.append("export type OAuthProviderIdentityAlias = keyof typeof OAUTH_PROVIDER_IDENTITY_ALIASES;")
+    lines.append(
+        "export type OAuthProviderIdentity = "
+        "typeof OAUTH_PROVIDER_IDENTITIES[number] | OAuthProviderIdentityAlias;"
+    )
     lines.append("")
     lines.extend(_ts_const_array("WIRE_BACKEND_KINDS", backend_kinds))
     lines.append("export type WireBackendKind = typeof WIRE_BACKEND_KINDS[number];")
@@ -2239,6 +2253,7 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "  provider: WireAuthProvider;",
             "  backend_kind: WireBackendKind;",
             "  base_url?: string | null;",
+            "  options?: unknown;",
             "}",
             "",
             "export interface WireAuthProfile {",
@@ -2468,6 +2483,9 @@ def generate_web_auth_types(schemas: dict, output_dir: Path) -> None:
             "}",
             "",
             "export function parseOAuthProviderIdentity(value: unknown, path = 'provider'): OAuthProviderIdentity {",
+            "  if (typeof value === 'string' && hasOwn(OAUTH_PROVIDER_IDENTITY_ALIASES, value)) {",
+            "    return value as OAuthProviderIdentity;",
+            "  }",
             "  return parseLiteral(value, OAUTH_PROVIDER_IDENTITIES, path, 'oauth provider identity');",
             "}",
             "",

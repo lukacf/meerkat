@@ -10407,7 +10407,7 @@
       },
       "WireBackendKind": {
         "enum": [
-          "open_ai_api",
+          "openai_api",
           "chatgpt_backend",
           "azure_openai",
           "anthropic_api",
@@ -10418,7 +10418,7 @@
           "vertex_ai",
           "google_code_assist",
           "self_hosted",
-          "open_ai_compatible",
+          "openai_compatible",
           "other_api"
         ],
         "type": "string"
@@ -10438,6 +10438,7 @@
           "id": {
             "type": "string"
           },
+          "options": true,
           "provider": {
             "$ref": "#/components/schemas/Provider"
           }

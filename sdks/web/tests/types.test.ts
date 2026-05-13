@@ -172,6 +172,7 @@ const authStatusBody: AuthStatus = {
 };
 const validAuthProvider: WireAuthProvider = 'openai';
 const validOAuthProviderIdentity: OAuthProviderIdentity = 'open_ai_chat_gpt';
+const validOAuthProviderIdentityAlias: OAuthProviderIdentity = 'openai';
 const validBackendKind: WireBackendKind = 'chatgpt_backend';
 const validAuthMethod: WireAuthMethod = 'managed_chatgpt_oauth';
 const validPersistedAuthMode: PersistedAuthMode = 'chatgpt_oauth';
@@ -179,8 +180,8 @@ const validSourceKind: WireCredentialSourceKind = 'external_resolver';
 const validAuthStatusState: WireAuthStatusState = 'reauth_required';
 // @ts-expect-error unknown providers are not behavior-driving Web auth truth.
 const rejectedAuthProvider: WireAuthProvider = 'future_provider';
-// @ts-expect-error OAuth provider identity is not the broad provider family.
-const rejectedOAuthProviderIdentity: OAuthProviderIdentity = 'openai';
+// @ts-expect-error unknown OAuth provider identities are not behavior-driving Web auth truth.
+const rejectedOAuthProviderIdentity: OAuthProviderIdentity = 'future_oauth_provider';
 // @ts-expect-error unknown backend kinds are not behavior-driving Web auth truth.
 const rejectedBackendKind: WireBackendKind = 'future_backend';
 // @ts-expect-error unknown auth methods are not behavior-driving Web auth truth.

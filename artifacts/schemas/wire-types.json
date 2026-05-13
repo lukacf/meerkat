@@ -33310,7 +33310,7 @@
       },
       "WireBackendKind": {
         "enum": [
-          "open_ai_api",
+          "openai_api",
           "chatgpt_backend",
           "azure_openai",
           "anthropic_api",
@@ -33321,7 +33321,7 @@
           "vertex_ai",
           "google_code_assist",
           "self_hosted",
-          "open_ai_compatible",
+          "openai_compatible",
           "other_api"
         ],
         "type": "string"
@@ -33341,6 +33341,7 @@
           "id": {
             "type": "string"
           },
+          "options": true,
           "provider": {
             "$ref": "#/$defs/Provider"
           }
@@ -33901,7 +33902,7 @@
       },
       "WireBackendKind": {
         "enum": [
-          "open_ai_api",
+          "openai_api",
           "chatgpt_backend",
           "azure_openai",
           "anthropic_api",
@@ -33912,7 +33913,7 @@
           "vertex_ai",
           "google_code_assist",
           "self_hosted",
-          "open_ai_compatible",
+          "openai_compatible",
           "other_api"
         ],
         "type": "string"
@@ -33933,6 +33934,7 @@
       "id": {
         "type": "string"
       },
+      "options": true,
       "provider": {
         "$ref": "#/$defs/Provider"
       }
@@ -37262,7 +37264,7 @@
         ]
       },
       "WireProvider": {
-        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins the public provider vocabulary with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc., regardless of Rust variant spelling.\n\nIncludes a flat `\"unknown\"` sentinel for future-proofing. The debug payload\nis carried by [`WireConversionError::Provider`] when converting back into\ncore types.",
         "oneOf": [
           {
             "enum": [
@@ -38257,7 +38259,7 @@
         ]
       },
       "WireProvider": {
-        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\nThe core `Provider` enum uses `#[serde(rename_all = \"snake_case\")]` which\ntransforms `OpenAI` to `\"open_a_i\"` on the wire -- not the conventional\n`\"openai\"`. `WireProvider` pins the correct wire names with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc.\n\nIncludes an `Unknown { debug: String }` variant for future-proofing per\nthe wire-mirror dogma used throughout this module.",
+        "description": "Wire-safe projection of [`meerkat_core::Provider`].\n\n`WireProvider` pins the public provider vocabulary with explicit\n`#[serde(rename)]` on each variant so SDK consumers see `\"openai\"`,\n`\"anthropic\"`, `\"gemini\"`, etc., regardless of Rust variant spelling.\n\nIncludes a flat `\"unknown\"` sentinel for future-proofing. The debug payload\nis carried by [`WireConversionError::Provider`] when converting back into\ncore types.",
         "oneOf": [
           {
             "enum": [
@@ -44334,7 +44336,7 @@
       },
       "WireBackendKind": {
         "enum": [
-          "open_ai_api",
+          "openai_api",
           "chatgpt_backend",
           "azure_openai",
           "anthropic_api",
@@ -44345,7 +44347,7 @@
           "vertex_ai",
           "google_code_assist",
           "self_hosted",
-          "open_ai_compatible",
+          "openai_compatible",
           "other_api"
         ],
         "type": "string"
@@ -44365,6 +44367,7 @@
           "id": {
             "type": "string"
           },
+          "options": true,
           "provider": {
             "$ref": "#/$defs/Provider"
           }

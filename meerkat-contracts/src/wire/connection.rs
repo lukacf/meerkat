@@ -40,6 +40,7 @@ pub enum WireConnectionProjectionError {
 pub enum WireBackendKind {
     OpenAiApi,
     ChatgptBackend,
+    #[serde(rename = "azure_openai")]
     AzureOpenAi,
     AnthropicApi,
     Bedrock,

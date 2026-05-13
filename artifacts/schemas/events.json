@@ -410,6 +410,36 @@
         ],
         "type": "object"
       },
+      "AnthropicServerToolKind": {
+        "oneOf": [
+          {
+            "enum": [
+              "web_search"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider_defined": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "provider_defined"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "AssistantImageEvent": {
         "description": "Typed public event payload for a canonical assistant image block appended to history.",
         "properties": {
@@ -611,6 +641,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content.",
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -878,6 +923,26 @@
         ],
         "type": "object"
       },
+      "OpenAiServerToolItemKind": {
+        "enum": [
+          "web_search_call",
+          "web_search_result",
+          "file_search_call",
+          "computer_call",
+          "code_interpreter_call",
+          "image_generation_call",
+          "mcp_call",
+          "mcp_list_tools",
+          "mcp_approval_request"
+        ],
+        "type": "string"
+      },
+      "OpenAiWebSearchCallEventKind": {
+        "enum": [
+          "searching"
+        ],
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -1028,6 +1093,197 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolContent": {
+        "description": "Provider-executed tool evidence, such as web-search citations or provider\ngrounding metadata. The variant is the semantic tool kind; provider-native\nJSON is kept only as the evidence payload inside that typed variant.",
+        "oneOf": [
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "annotations": true
+                },
+                "required": [
+                  "annotations"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_message_annotations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "item": true,
+                  "item_kind": {
+                    "$ref": "#/$defs/OpenAiServerToolItemKind"
+                  }
+                },
+                "required": [
+                  "item_kind",
+                  "item"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_response_item",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "event_kind": {
+                    "$ref": "#/$defs/OpenAiWebSearchCallEventKind"
+                  },
+                  "item_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "output_index": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "sequence_number": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "event_kind"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_web_search_call_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "citations": true
+                },
+                "required": [
+                  "citations"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_text_citations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "result": true
+                },
+                "required": [
+                  "result"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_web_search_tool_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "input": true,
+                  "tool": {
+                    "$ref": "#/$defs/AnthropicServerToolKind"
+                  }
+                },
+                "required": [
+                  "tool",
+                  "input"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_server_tool_use",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "grounding_metadata": true
+                },
+                "required": [
+                  "grounding_metadata"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "gemini_grounding_metadata",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionCheckpointErrorKind": {
         "description": "Machine-owned classifier for a failed session checkpoint.",
@@ -1439,22 +1695,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -1495,18 +1735,8 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -1515,7 +1745,7 @@
         "required": [
           "operation",
           "target",
-          "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"
@@ -1744,10 +1974,6 @@
       {
         "description": "Agent run failed",
         "properties": {
-          "error": {
-            "description": "Display projection of `error_report.message`.",
-            "type": "string"
-          },
           "error_class": {
             "$ref": "#/$defs/AgentErrorClass"
           },
@@ -1782,8 +2008,7 @@
         "required": [
           "type",
           "session_id",
-          "error_class",
-          "error"
+          "error_class"
         ],
         "type": "object"
       },
@@ -1980,15 +2205,14 @@
       {
         "description": "Provider-executed tool content surfaced during a model turn.",
         "properties": {
-          "content": true,
+          "content": {
+            "$ref": "#/$defs/ServerToolContent"
+          },
           "id": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "name": {
-            "type": "string"
           },
           "type": {
             "const": "server_tool_content",
@@ -1997,7 +2221,6 @@
         },
         "required": [
           "type",
-          "name",
           "content"
         ],
         "type": "object"
@@ -2081,6 +2304,7 @@
           "type",
           "id",
           "name",
+          "content",
           "is_error"
         ],
         "type": "object"
@@ -2161,10 +2385,6 @@
           "name": {
             "type": "string"
           },
-          "result": {
-            "description": "Legacy text projection retained for existing event consumers.",
-            "type": "string"
-          },
           "type": {
             "const": "tool_execution_completed",
             "type": "string"
@@ -2174,7 +2394,7 @@
           "type",
           "id",
           "name",
-          "result",
+          "content",
           "is_error",
           "duration_ms"
         ],
@@ -2394,23 +2614,9 @@
       {
         "description": "A skill reference could not be resolved.",
         "properties": {
-          "error": {
-            "default": "",
-            "description": "Legacy display mirror for consumers still reading string errors.",
-            "type": "string"
-          },
           "reason": {
             "$ref": "#/$defs/SkillResolutionFailureReason",
-            "default": {
-              "message": "",
-              "reason_type": "unknown"
-            },
             "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-          },
-          "reference": {
-            "default": "",
-            "description": "Legacy display mirror for consumers still reading string references.",
-            "type": "string"
           },
           "skill_key": {
             "anyOf": [
@@ -2429,7 +2635,8 @@
           }
         },
         "required": [
-          "type"
+          "type",
+          "reason"
         ],
         "type": "object"
       },
@@ -2546,13 +2753,6 @@
           },
           "job_id": {
             "type": "string"
-          },
-          "status": {
-            "description": "Legacy display mirror for consumers still rendering string status.",
-            "type": [
-              "string",
-              "null"
-            ]
           },
           "terminal_status": {
             "$ref": "#/$defs/BackgroundJobTerminalStatus"
@@ -3119,10 +3319,6 @@
           {
             "description": "Agent run failed",
             "properties": {
-              "error": {
-                "description": "Display projection of `error_report.message`.",
-                "type": "string"
-              },
               "error_class": {
                 "$ref": "#/$defs/AgentErrorClass"
               },
@@ -3157,8 +3353,7 @@
             "required": [
               "type",
               "session_id",
-              "error_class",
-              "error"
+              "error_class"
             ],
             "type": "object"
           },
@@ -3355,15 +3550,14 @@
           {
             "description": "Provider-executed tool content surfaced during a model turn.",
             "properties": {
-              "content": true,
+              "content": {
+                "$ref": "#/$defs/ServerToolContent"
+              },
               "id": {
                 "type": [
                   "string",
                   "null"
                 ]
-              },
-              "name": {
-                "type": "string"
               },
               "type": {
                 "const": "server_tool_content",
@@ -3372,7 +3566,6 @@
             },
             "required": [
               "type",
-              "name",
               "content"
             ],
             "type": "object"
@@ -3456,6 +3649,7 @@
               "type",
               "id",
               "name",
+              "content",
               "is_error"
             ],
             "type": "object"
@@ -3536,10 +3730,6 @@
               "name": {
                 "type": "string"
               },
-              "result": {
-                "description": "Legacy text projection retained for existing event consumers.",
-                "type": "string"
-              },
               "type": {
                 "const": "tool_execution_completed",
                 "type": "string"
@@ -3549,7 +3739,7 @@
               "type",
               "id",
               "name",
-              "result",
+              "content",
               "is_error",
               "duration_ms"
             ],
@@ -3769,23 +3959,9 @@
           {
             "description": "A skill reference could not be resolved.",
             "properties": {
-              "error": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string errors.",
-                "type": "string"
-              },
               "reason": {
                 "$ref": "#/$defs/SkillResolutionFailureReason",
-                "default": {
-                  "message": "",
-                  "reason_type": "unknown"
-                },
                 "description": "Structured reason for the failure. Legacy payloads deserialize as `unknown`."
-              },
-              "reference": {
-                "default": "",
-                "description": "Legacy display mirror for consumers still reading string references.",
-                "type": "string"
               },
               "skill_key": {
                 "anyOf": [
@@ -3804,7 +3980,8 @@
               }
             },
             "required": [
-              "type"
+              "type",
+              "reason"
             ],
             "type": "object"
           },
@@ -3922,13 +4099,6 @@
               "job_id": {
                 "type": "string"
               },
-              "status": {
-                "description": "Legacy display mirror for consumers still rendering string status.",
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
               "terminal_status": {
                 "$ref": "#/$defs/BackgroundJobTerminalStatus"
               },
@@ -3943,6 +4113,36 @@
               "display_name",
               "terminal_status",
               "detail"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "AnthropicServerToolKind": {
+        "oneOf": [
+          {
+            "enum": [
+              "web_search"
+            ],
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider_defined": {
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "provider_defined"
             ],
             "type": "object"
           }
@@ -4149,6 +4349,21 @@
               "type",
               "media_type",
               "duration_ms"
+            ],
+            "type": "object"
+          },
+          {
+            "description": "Structured JSON content.",
+            "properties": {
+              "type": {
+                "const": "json",
+                "type": "string"
+              },
+              "value": true
+            },
+            "required": [
+              "type",
+              "value"
             ],
             "type": "object"
           }
@@ -4416,6 +4631,26 @@
         ],
         "type": "object"
       },
+      "OpenAiServerToolItemKind": {
+        "enum": [
+          "web_search_call",
+          "web_search_result",
+          "file_search_call",
+          "computer_call",
+          "code_interpreter_call",
+          "image_generation_call",
+          "mcp_call",
+          "mcp_list_tools",
+          "mcp_approval_request"
+        ],
+        "type": "string"
+      },
+      "OpenAiWebSearchCallEventKind": {
+        "enum": [
+          "searching"
+        ],
+        "type": "string"
+      },
       "PromptText": {
         "properties": {
           "content": {
@@ -4566,6 +4801,197 @@
           "message"
         ],
         "type": "object"
+      },
+      "ServerToolContent": {
+        "description": "Provider-executed tool evidence, such as web-search citations or provider\ngrounding metadata. The variant is the semantic tool kind; provider-native\nJSON is kept only as the evidence payload inside that typed variant.",
+        "oneOf": [
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "annotations": true
+                },
+                "required": [
+                  "annotations"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_message_annotations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "item": true,
+                  "item_kind": {
+                    "$ref": "#/$defs/OpenAiServerToolItemKind"
+                  }
+                },
+                "required": [
+                  "item_kind",
+                  "item"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_response_item",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "event_kind": {
+                    "$ref": "#/$defs/OpenAiWebSearchCallEventKind"
+                  },
+                  "item_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "output_index": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "sequence_number": {
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "event_kind"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "open_ai_web_search_call_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "citations": true
+                },
+                "required": [
+                  "citations"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_text_citations",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "result": true
+                },
+                "required": [
+                  "result"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_web_search_tool_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "input": true,
+                  "tool": {
+                    "$ref": "#/$defs/AnthropicServerToolKind"
+                  }
+                },
+                "required": [
+                  "tool",
+                  "input"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "anthropic_server_tool_use",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          },
+          {
+            "properties": {
+              "data": {
+                "properties": {
+                  "grounding_metadata": true
+                },
+                "required": [
+                  "grounding_metadata"
+                ],
+                "type": "object"
+              },
+              "kind": {
+                "const": "gemini_grounding_metadata",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "data"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "SessionCheckpointErrorKind": {
         "description": "Machine-owned classifier for a failed session checkpoint.",
@@ -5020,22 +5446,6 @@
               "phase"
             ],
             "type": "object"
-          },
-          {
-            "properties": {
-              "kind": {
-                "const": "legacy_status",
-                "type": "string"
-              },
-              "status": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "kind",
-              "status"
-            ],
-            "type": "object"
           }
         ]
       },
@@ -5076,18 +5486,8 @@
           "persisted": {
             "type": "boolean"
           },
-          "status": {
-            "type": "string"
-          },
           "status_info": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/ToolConfigChangeStatus"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "$ref": "#/$defs/ToolConfigChangeStatus"
           },
           "target": {
             "type": "string"
@@ -5096,7 +5496,7 @@
         "required": [
           "operation",
           "target",
-          "status",
+          "status_info",
           "persisted"
         ],
         "type": "object"

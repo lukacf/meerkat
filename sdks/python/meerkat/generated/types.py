@@ -222,7 +222,7 @@ class BindingIdParams:
 @dataclass
 class CreateProfileParams:
     """Request payload for `auth/profile/create`."""
-    auth_method: str
+    auth_method: Literal['api_key', 'static_bearer', 'chatgpt_oauth', 'claude_ai_oauth', 'oauth_to_api_key', 'google_oauth', 'adc', 'compute_adc', 'bedrock', 'vertex', 'foundry', 'external_tokens', 'external_authorizer', 'command']
     binding_id: str
     realm_id: str
     secret: str
@@ -233,7 +233,7 @@ class CreateProfileParams:
 class LoginStartParams:
     """Request payload for `auth/login/start`."""
     binding_id: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     redirect_uri: str
     profile_id: Optional[str] = None
@@ -244,7 +244,7 @@ class LoginCompleteParams:
     """Request payload for `auth/login/complete`."""
     binding_id: str
     code: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     redirect_uri: str
     state: str
@@ -255,7 +255,7 @@ class LoginCompleteParams:
 class DeviceStartParams:
     """Request payload for `auth/login/device_start`."""
     binding_id: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     profile_id: Optional[str] = None
 
@@ -265,7 +265,7 @@ class DeviceCompleteParams:
     """Request payload for `auth/login/device_complete`."""
     binding_id: str
     device_code: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     profile_id: Optional[str] = None
 
@@ -812,16 +812,14 @@ class MobTurnStartParams:
     mob_id: str
     prompt: WireContentInput
     additional_instructions: Optional[list[str]] = None
-    auth_binding: Optional[WireAuthBindingRef] = None
-    clear_auth_binding: Optional[bool] = None
-    clear_provider_params: Optional[bool] = None
+    auth_binding: Optional[dict[str, Any]] = None
     flow_tool_overlay: Optional[dict[str, Any]] = None
     keep_alive: Optional[bool] = None
     max_tokens: Optional[int] = None
     model: Optional[str] = None
     output_schema: Optional[Any] = None
     provider: Optional[str] = None
-    provider_params: Optional[Any] = None
+    provider_params: Optional[dict[str, Any]] = None
     skill_refs: Optional[list[dict[str, Any]]] = None
     structured_output_retries: Optional[int] = None
     system_prompt: Optional[str] = None
@@ -2496,7 +2494,7 @@ class ProviderCatalog:
     """Provider-level grouping in the catalog response."""
     default_model_id: str
     models: list[dict[str, Any]]
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
 
 
 @dataclass
@@ -2511,7 +2509,7 @@ class WireModelProfile:
     """Runtime profile for a model — capabilities and parameter schema."""
     model_family: str
     params_schema: Any
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     supports_reasoning: bool
     supports_temperature: bool
     supports_thinking: bool
@@ -2585,9 +2583,9 @@ the colon-joined form cannot travel across wire boundaries."""
 @dataclass
 class WireBackendProfile:
     """Wire projection of [`meerkat_core::BackendProfile`]."""
-    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible', 'other_api']
+    backend_kind: Literal['open_ai_api', 'chatgpt_backend', 'azure_openai', 'anthropic_api', 'bedrock', 'vertex', 'foundry', 'google_genai', 'vertex_ai', 'google_code_assist', 'self_hosted', 'open_ai_compatible', 'other_api']
     id: str
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     base_url: Optional[str] = None
 
 
@@ -2599,9 +2597,9 @@ the server-side `auth.profile.get` RPC or the
 `GET /auth/bindings/{binding_id}` REST path; both return typed redacted
 shapes. `source_kind` is a
 discriminator for the credential-source variant."""
-    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
+    auth_method: Literal['api_key', 'azure_api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     id: str
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     source_kind: Literal['inline_secret', 'managed_store', 'env', 'external_resolver', 'platform_default', 'command', 'file_descriptor']
 
 
@@ -2644,10 +2642,10 @@ slug form for wire consumers that key by string."""
 class WireAuthProfileCreated:
     """`POST /auth/profiles` (create) success body."""
     auth_binding: WireAuthBindingRef
-    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
+    auth_method: Literal['api_key', 'azure_api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     binding_id: str
     profile_id: str
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     realm_id: str
     stored: bool
 
@@ -2731,7 +2729,7 @@ class WireDeviceCompleteResultReady(TypedDict, total=False):
     expires_at: NotRequired[str]
     has_refresh_token: Required[bool]
     profile_id: Required[str]
-    provider: Required[str]
+    provider: Required[Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']]
     realm_id: Required[str]
     scopes: Required[list[str]]
     state: Required[Literal['ready']]
@@ -2742,11 +2740,11 @@ WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDeviceCompleteR
 class WireProvisionApiKeyResult:
     """`auth/login/provision_api_key` success body."""
     auth_binding: WireAuthBindingRef
-    auth_mode: str
+    auth_mode: Literal['api_key', 'static_bearer', 'chatgpt_oauth', 'claude_ai_oauth', 'oauth_to_api_key', 'google_oauth', 'adc', 'compute_adc', 'bedrock', 'vertex', 'foundry', 'external_tokens', 'external_authorizer', 'command']
     binding_id: str
     has_api_key: bool
     profile_id: str
-    provider: str
+    provider: Literal['anthropic_claude_ai', 'anthropic_console_api_key', 'open_ai_chat_gpt', 'google_code_assist']
     realm_id: str
     scopes: list[str]
 
@@ -2781,9 +2779,9 @@ auth, and binding profiles."""
 class WireAuthStatus:
     """Wire projection of the auth-profile status. Returned from
 `auth.status.get` / `GET /auth/bindings/{binding_id}/status`."""
-    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
+    auth_method: Literal['api_key', 'azure_api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     profile_id: str
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None
     expires_at: Optional[str] = None
@@ -2798,11 +2796,11 @@ class WireAuthStatusDetail:
 `auth_binding` / `has_refresh_token` so the caller can key by
 binding directly."""
     auth_binding: WireAuthBindingRef
-    auth_method: Literal['api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
+    auth_method: Literal['api_key', 'azure_api_key', 'static_bearer', 'managed_chatgpt_oauth', 'external_chatgpt_tokens', 'external_authorizer', 'claude_ai_oauth', 'oauth_to_api_key', 'bedrock_bearer', 'bedrock_aws_sigv4', 'vertex_google_auth', 'foundry_api_key', 'foundry_azure_ad', 'bearer_api_key', 'adc', 'api_key_express', 'google_oauth', 'compute_adc', 'none']
     binding_id: str
     has_refresh_token: bool
     profile_id: str
-    provider: Literal['anthropic', 'open_a_i', 'gemini', 'self_hosted', 'other']
+    provider: Literal['anthropic', 'openai', 'gemini', 'self_hosted', 'other']
     realm_id: str
     state: Literal['valid', 'expiring', 'expired', 'reauth_required', 'refresh_failed', 'unknown']
     account_id: Optional[str] = None

@@ -549,6 +549,7 @@ export interface MobReconcileReportWire {
 
 export interface MobReconcileFailureWire {
   agent_identity: string;
+  cause: MobSpawnManyFailureCause;
   error: string;
   stage: WireMobReconcileStage;
 }
@@ -581,7 +582,7 @@ export interface MobListResult {
 
 export interface MobStatusResult {
   mob_id: string;
-  status: string;
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobLifecycleParams {
@@ -847,7 +848,7 @@ export interface MobAppendSystemContextParams {
 export interface MobAppendSystemContextResult {
   agent_identity: string;
   mob_id: string;
-  status: string;
+  status: "applied" | "staged" | "duplicate";
 }
 
 export interface MobFlowsResult {
@@ -959,9 +960,7 @@ export interface MobForceCancelResult {
 export interface MobTurnStartParams {
   additional_instructions?: string[];
   agent_identity: string;
-  auth_binding?: WireAuthBindingRef;
-  clear_auth_binding?: boolean;
-  clear_provider_params?: boolean;
+  auth_binding?: Record<string, unknown>;
   flow_tool_overlay?: Record<string, unknown>;
   keep_alive?: boolean;
   max_tokens?: number;
@@ -970,7 +969,7 @@ export interface MobTurnStartParams {
   output_schema?: unknown;
   prompt: WireContentInput;
   provider?: string;
-  provider_params?: unknown;
+  provider_params?: Record<string, unknown>;
   skill_refs?: Record<string, unknown>[];
   structured_output_retries?: number;
   system_prompt?: string;
@@ -991,9 +990,9 @@ export interface MobMemberStatusResult {
 }
 
 export interface MobSnapshotResult {
-  members: unknown[];
+  members: MobMemberListEntryWire[];
   mob_id: string;
-  status: "applied" | "staged" | "duplicate";
+  status: "Creating" | "Running" | "Stopped" | "Completed" | "Destroyed";
 }
 
 export interface MobDestroyResult {
@@ -1138,11 +1137,16 @@ export interface WireContentBlockVideo {
   type: "video";
 }
 
+export interface WireContentBlockJson {
+  type: "json";
+  value: unknown;
+}
+
 export interface WireContentBlockUnknown {
   type: "unknown";
 }
 
-export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockUnknown;
+export type WireContentBlock = WireContentBlockText | WireContentBlockImage | WireContentBlockVideo | WireContentBlockJson | WireContentBlockUnknown;
 
 export type WireContentInput = string | WireContentBlock[];
 

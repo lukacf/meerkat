@@ -152,7 +152,7 @@ export interface BindingIdParams {
 }
 
 export interface CreateProfileParams {
-  auth_method: string;
+  auth_method: "api_key" | "static_bearer" | "chatgpt_oauth" | "claude_ai_oauth" | "oauth_to_api_key" | "google_oauth" | "adc" | "compute_adc" | "bedrock" | "vertex" | "foundry" | "external_tokens" | "external_authorizer" | "command";
   binding_id: string;
   profile_id?: string;
   realm_id: string;
@@ -162,7 +162,7 @@ export interface CreateProfileParams {
 export interface LoginStartParams {
   binding_id: string;
   profile_id?: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
   redirect_uri: string;
 }
@@ -171,7 +171,7 @@ export interface LoginCompleteParams {
   binding_id: string;
   code: string;
   profile_id?: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
   redirect_uri: string;
   state: string;
@@ -180,7 +180,7 @@ export interface LoginCompleteParams {
 export interface DeviceStartParams {
   binding_id: string;
   profile_id?: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
 }
 
@@ -188,7 +188,7 @@ export interface DeviceCompleteParams {
   binding_id: string;
   device_code: string;
   profile_id?: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
 }
 
@@ -600,9 +600,7 @@ export interface MobForceCancelResult {
 export interface MobTurnStartParams {
   additional_instructions?: string[];
   agent_identity: string;
-  auth_binding?: WireAuthBindingRef;
-  clear_auth_binding?: boolean;
-  clear_provider_params?: boolean;
+  auth_binding?: Record<string, unknown>;
   flow_tool_overlay?: Record<string, unknown>;
   keep_alive?: boolean;
   max_tokens?: number;
@@ -611,7 +609,7 @@ export interface MobTurnStartParams {
   output_schema?: unknown;
   prompt: WireContentInput;
   provider?: string;
-  provider_params?: unknown;
+  provider_params?: Record<string, unknown>;
   skill_refs?: Record<string, unknown>[];
   structured_output_retries?: number;
   system_prompt?: string;
@@ -2781,7 +2779,7 @@ export interface CatalogModelEntry {
 export interface ProviderCatalog {
   default_model_id: string;
   models: Record<string, unknown>[];
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 }
 
 export interface ModelsCatalogResponse {
@@ -2797,7 +2795,7 @@ export interface WireModelProfile {
   inline_video?: boolean;
   model_family: string;
   params_schema: unknown;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
   realtime?: boolean;
   supports_reasoning: boolean;
   supports_temperature: boolean;
@@ -2850,16 +2848,16 @@ export interface WireAuthBindingRef {
 }
 
 export interface WireBackendProfile {
-  backend_kind: "open_ai_api" | "chatgpt_backend" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible" | "other_api";
+  backend_kind: "open_ai_api" | "chatgpt_backend" | "azure_openai" | "anthropic_api" | "bedrock" | "vertex" | "foundry" | "google_genai" | "vertex_ai" | "google_code_assist" | "self_hosted" | "open_ai_compatible" | "other_api";
   base_url?: string;
   id: string;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
 }
 
 export interface WireAuthProfile {
-  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
+  auth_method: "api_key" | "azure_api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   id: string;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
   source_kind: "inline_secret" | "managed_store" | "env" | "external_resolver" | "platform_default" | "command" | "file_descriptor";
 }
 
@@ -2889,10 +2887,10 @@ export interface WireBindingIdentity {
 
 export interface WireAuthProfileCreated {
   auth_binding: WireAuthBindingRef;
-  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
+  auth_method: "api_key" | "azure_api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   binding_id: string;
   profile_id: string;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
   realm_id: string;
   stored: boolean;
 }
@@ -2963,7 +2961,7 @@ export interface WireDeviceCompleteResultReady {
   expires_at?: string;
   has_refresh_token: boolean;
   profile_id: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
   scopes: string[];
   state: "ready";
@@ -2973,11 +2971,11 @@ export type WireDeviceCompleteResult = WireDeviceCompleteResultPending | WireDev
 
 export interface WireProvisionApiKeyResult {
   auth_binding: WireAuthBindingRef;
-  auth_mode: string;
+  auth_mode: "api_key" | "static_bearer" | "chatgpt_oauth" | "claude_ai_oauth" | "oauth_to_api_key" | "google_oauth" | "adc" | "compute_adc" | "bedrock" | "vertex" | "foundry" | "external_tokens" | "external_authorizer" | "command";
   binding_id: string;
   has_api_key: boolean;
   profile_id: string;
-  provider: string;
+  provider: "anthropic_claude_ai" | "anthropic_console_api_key" | "open_ai_chat_gpt" | "google_code_assist";
   realm_id: string;
   scopes: string[];
 }
@@ -3003,25 +3001,25 @@ export interface WireAuthProfilesList {
 
 export interface WireAuthStatus {
   account_id?: string;
-  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
+  auth_method: "api_key" | "azure_api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   expires_at?: string;
   last_error?: Record<string, unknown>;
   last_refresh_at?: string;
   profile_id: string;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
   state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }
 
 export interface WireAuthStatusDetail {
   account_id?: string;
   auth_binding: WireAuthBindingRef;
-  auth_method: "api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
+  auth_method: "api_key" | "azure_api_key" | "static_bearer" | "managed_chatgpt_oauth" | "external_chatgpt_tokens" | "external_authorizer" | "claude_ai_oauth" | "oauth_to_api_key" | "bedrock_bearer" | "bedrock_aws_sigv4" | "vertex_google_auth" | "foundry_api_key" | "foundry_azure_ad" | "bearer_api_key" | "adc" | "api_key_express" | "google_oauth" | "compute_adc" | "none";
   binding_id: string;
   expires_at?: string;
   has_refresh_token: boolean;
   last_refresh_at?: string;
   profile_id: string;
-  provider: "anthropic" | "open_a_i" | "gemini" | "self_hosted" | "other";
+  provider: "anthropic" | "openai" | "gemini" | "self_hosted" | "other";
   realm_id: string;
   state: "valid" | "expiring" | "expired" | "reauth_required" | "refresh_failed" | "unknown";
 }

@@ -331,7 +331,7 @@ mod tests {
         Arc::new(meerkat_store::MemoryBlobStore::new())
     }
 
-    fn missing_target_schedule_tool_args() -> CreateScheduleRequest {
+    fn missing_target_schedule_tool_args() -> Result<CreateScheduleRequest, serde_json::Error> {
         serde_json::from_value(json!({
             "name": "missing-target",
             "description": "create a due schedule through the tool surface",
@@ -352,11 +352,10 @@ mod tests {
             "planning_horizon_days": 1,
             "planning_horizon_occurrences": 1
         }))
-        .expect("valid schedule request")
     }
 
     fn missing_target_schedule_request() -> Result<CreateScheduleRequest, serde_json::Error> {
-        Ok(missing_target_schedule_tool_args())
+        missing_target_schedule_tool_args()
     }
 
     fn test_runtime(temp: &TempDir) -> Arc<SessionRuntime> {
@@ -438,9 +437,16 @@ mod tests {
             return;
         };
         let runtime = test_runtime(&temp);
-        let serialized_result = serde_json::to_string(&ScheduleToolCallParams::Create {
-            arguments: missing_target_schedule_tool_args(),
-        });
+        let request_result = missing_target_schedule_tool_args();
+        assert!(
+            request_result.is_ok(),
+            "valid schedule request: {request_result:?}"
+        );
+        let Ok(arguments) = request_result else {
+            return;
+        };
+        let serialized_result =
+            serde_json::to_string(&ScheduleToolCallParams::Create { arguments });
         assert!(
             serialized_result.is_ok(),
             "serialize params: {serialized_result:?}"

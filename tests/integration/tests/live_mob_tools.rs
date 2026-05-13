@@ -314,7 +314,7 @@ async fn e2e_agent_tools_surface_present() {
     // mob_list was called (we can't verify the LLM saw the result, but the
     // implicit mob's existence proves delegate ran, and mob_list is dispatched
     // in the same turn).
-    let all_mobs = mob_state.mob_list().await;
+    let all_mobs = mob_state.mob_list().await.expect("list mobs");
     assert!(
         !all_mobs.is_empty(),
         "mob_list should show at least the implicit mob"
@@ -344,6 +344,7 @@ async fn e2e_delegate_creates_implicit_mob() {
     let mob_id = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
+        .expect("find implicit mob after delegate")
         .expect("implicit mob should exist after delegate");
 
     // Assert: mob is classified as implicit
@@ -400,6 +401,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     let mob_id_1 = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
+        .expect("find implicit mob after first delegate")
         .expect("implicit mob after first delegate");
 
     // Second turn: another delegate
@@ -414,6 +416,7 @@ async fn e2e_delegate_reuses_implicit_mob_across_turns() {
     let mob_id_2 = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
+        .expect("find implicit mob after second delegate")
         .expect("implicit mob after second delegate");
 
     // Same mob reused
@@ -576,7 +579,7 @@ async fn e2e_mob_create_spawn_check_retire_destroy_full_roundtrip() {
     .await;
 
     // Assert: mob gone
-    let all = mob_state.mob_list().await;
+    let all = mob_state.mob_list().await.expect("list mobs");
     assert!(
         !all.iter().any(|(id, _)| id == &mob_id),
         "destroyed mob should not appear in mob_list"
@@ -645,6 +648,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
         mob_state
             .mob_list()
             .await
+            .expect("list mobs")
             .iter()
             .any(|(id, _)| id == &a_mob_id),
         "A's mob should still exist in global state"
@@ -663,6 +667,7 @@ async fn e2e_agent_cannot_see_other_sessions_mobs() {
         mob_state
             .mob_list()
             .await
+            .expect("list mobs")
             .iter()
             .any(|(id, _)| id == &a_mob_id),
         "A's mob should survive B's destroy attempt"
@@ -733,7 +738,7 @@ async fn e2e_archive_cleans_both_implicit_and_explicit_mobs() {
     );
 
     // Neither mob in global list
-    let all = mob_state.mob_list().await;
+    let all = mob_state.mob_list().await.expect("list mobs");
     for mob_id in &owned {
         assert!(
             !all.iter().any(|(id, _)| id == mob_id),
@@ -764,6 +769,7 @@ async fn e2e_tool_error_contracts() {
     let implicit_mob_id = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
+        .expect("find implicit mob")
         .expect("implicit mob");
 
     // Try to destroy implicit mob (should fail)
@@ -873,6 +879,7 @@ async fn e2e_resume_model_override_recreates_implicit_mob() {
     let mob_id_a = mob_state
         .find_implicit_mob_for_bridge_session(&session_id.to_string())
         .await
+        .expect("find implicit mob after first delegate")
         .expect("implicit mob after first delegate");
 
     // Verify profile model is model A

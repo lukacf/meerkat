@@ -542,24 +542,6 @@ impl MeerkatMachine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn control_plane_not_found_maps_to_driver_not_found() {
-        let runtime_id = LogicalRuntimeId::new("missing-runtime");
-        let mapped = MeerkatMachine::driver_error_from_control_plane_error(
-            RuntimeControlPlaneError::NotFound(runtime_id.clone()),
-        );
-
-        assert!(
-            matches!(mapped, RuntimeDriverError::NotFound(ref id) if id == &runtime_id),
-            "not-found control-plane truth must not become destroyed/not-ready: {mapped:?}"
-        );
-    }
-}
-
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeControlPlane for MeerkatMachine {
@@ -751,5 +733,23 @@ impl crate::traits::RuntimeControlPlane for MeerkatMachine {
                 "unexpected MeerkatMachineCommandResult for load_boundary_receipt: {other:?}"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_plane_not_found_maps_to_driver_not_found() {
+        let runtime_id = LogicalRuntimeId::new("missing-runtime");
+        let mapped = MeerkatMachine::driver_error_from_control_plane_error(
+            RuntimeControlPlaneError::NotFound(runtime_id.clone()),
+        );
+
+        assert!(
+            matches!(mapped, RuntimeDriverError::NotFound(ref id) if id == &runtime_id),
+            "not-found control-plane truth must not become destroyed/not-ready: {mapped:?}"
+        );
     }
 }

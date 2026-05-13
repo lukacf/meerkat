@@ -5221,7 +5221,9 @@ mod tests {
             panic!("OpenAI defaults should use OpenAI provider tag");
         };
         assert_eq!(
-            tag.web_search.as_ref().map(|body| body.as_value()),
+            tag.web_search
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::as_value),
             Some(serde_json::json!({"type": "web_search"}))
         );
 
@@ -5301,7 +5303,9 @@ mod tests {
         };
         assert_eq!(tag.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(
-            tag.web_search.as_ref().map(|body| body.as_value()),
+            tag.web_search
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::as_value),
             Some(serde_json::json!({ "type": "web_search" }))
         );
 
@@ -5313,7 +5317,10 @@ mod tests {
         };
         assert_eq!(adapter_tag.reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(
-            adapter_tag.web_search.as_ref().map(|body| body.as_value()),
+            adapter_tag
+                .web_search
+                .as_ref()
+                .map(meerkat_core::lifecycle::run_primitive::OpaqueProviderBody::as_value),
             Some(serde_json::json!({ "type": "web_search" }))
         );
     }

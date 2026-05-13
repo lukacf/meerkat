@@ -1513,31 +1513,35 @@ export class MeerkatClient {
       mob_id: mobId,
       agent_identity: agentIdentity,
     });
-    const memberRef =
-      typeof result.member_ref === "string" && result.member_ref.length > 0
-        ? result.member_ref
-        : undefined;
-    if (!memberRef) {
-      throw new MeerkatError(
-        "INVALID_RESPONSE",
-        "Invalid mob/member_status response: missing member_ref",
-      );
-    }
+    const status = MeerkatClient.requireStringField(
+      result,
+      "status",
+      "Invalid mob/member_status response",
+    );
+    const memberRef = MeerkatClient.requireStringField(
+      result,
+      "member_ref",
+      "Invalid mob/member_status response",
+    );
     const rawConnectivity =
       result.peer_connectivity && typeof result.peer_connectivity === "object"
         ? (result.peer_connectivity as Record<string, unknown>)
         : undefined;
     return {
-      status: MeerkatClient.requireStringField(
-        result,
-        "status",
-        "Invalid mob/member_status response",
-      ),
+      status,
       memberRef,
       outputPreview: result.output_preview != null ? String(result.output_preview) : undefined,
       error: result.error != null ? String(result.error) : undefined,
-      tokensUsed: Number(result.tokens_used ?? 0),
-      isFinal: Boolean(result.is_final),
+      tokensUsed: MeerkatClient.requireNumberField(
+        result,
+        "tokens_used",
+        "Invalid mob/member_status response",
+      ),
+      isFinal: MeerkatClient.requireBooleanField(
+        result,
+        "is_final",
+        "Invalid mob/member_status response",
+      ),
       peerConnectivity: rawConnectivity
         ? {
             reachablePeerCount: Number(rawConnectivity.reachable_peer_count ?? 0),

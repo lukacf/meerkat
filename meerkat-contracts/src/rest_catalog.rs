@@ -104,9 +104,7 @@ impl RestOperationContract {
 }
 
 pub fn rest_operation_contract(path: &str, method: &str) -> RestOperationContract {
-    if let Some(response_schema) =
-        meerkat_workgraph::workgraph_rest_response_schema(path, method)
-    {
+    if let Some(response_schema) = meerkat_workgraph::workgraph_rest_response_schema(path, method) {
         return RestOperationContract::json(response_schema);
     }
 

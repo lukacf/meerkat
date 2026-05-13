@@ -729,6 +729,15 @@ pub trait CommsRuntime: Send + Sync {
         None
     }
 
+    /// Runtime-local canonical comms routing name, if available.
+    ///
+    /// This is the peer name used in trusted-peer descriptors and peer
+    /// directories. It is separate from the advertised transport address so
+    /// callers do not recover identity by parsing transport strings.
+    fn comms_name(&self) -> Option<String> {
+        None
+    }
+
     /// Runtime-local advertised comms address, if available.
     ///
     /// This is the canonical address the runtime expects peers to use when

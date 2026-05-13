@@ -304,6 +304,36 @@ impl meerkat_core::service::MobToolsFactory for RecordingMobToolsFactory {
     }
 }
 
+#[cfg(feature = "comms")]
+#[derive(Debug, Default)]
+struct RecordedMobToolCommsArgs {
+    comms_name: Option<String>,
+    comms_runtime_present: bool,
+}
+
+#[cfg(feature = "comms")]
+struct RecordingMobCommsFactory {
+    observed: Arc<std::sync::Mutex<Vec<RecordedMobToolCommsArgs>>>,
+}
+
+#[cfg(feature = "comms")]
+#[async_trait]
+impl meerkat_core::service::MobToolsFactory for RecordingMobCommsFactory {
+    async fn build_mob_tools(
+        &self,
+        args: meerkat_core::service::MobToolsBuildArgs,
+    ) -> Result<Arc<dyn AgentToolDispatcher>, Box<dyn std::error::Error + Send + Sync>> {
+        self.observed
+            .lock()
+            .expect("recording mutex")
+            .push(RecordedMobToolCommsArgs {
+                comms_name: args.comms_name,
+                comms_runtime_present: args.comms_runtime.is_some(),
+            });
+        Ok(Arc::new(EmptyDispatcher))
+    }
+}
+
 #[cfg_attr(not(feature = "comms"), allow(dead_code))]
 struct StaticMobToolsFactory {
     dispatcher: Arc<dyn AgentToolDispatcher>,
@@ -2116,6 +2146,71 @@ async fn explicit_mob_override_generates_create_only_operator_capabilities() {
     let observed = observed.lock().expect("recording mutex");
     assert_eq!(observed.len(), 1);
     assert_generated_create_only_authority(observed[0].as_ref());
+}
+
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn explicit_mob_override_builds_parent_comms_identity_for_delegate_wiring() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobCommsFactory {
+        observed: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .comms(true)
+        .mob(false)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        override_mob: ToolCategoryOverride::Enable,
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.len(), 1);
+    assert!(
+        observed[0].comms_name.is_some(),
+        "mob-enabled parent sessions must get a canonical comms_name so delegate() can wire helpers"
+    );
+    assert!(
+        observed[0].comms_runtime_present,
+        "mob-enabled parent sessions must get a comms runtime so delegate() can install parent<->child trust"
+    );
+}
+
+#[cfg(feature = "comms")]
+#[tokio::test]
+async fn ambient_mob_enable_without_authority_does_not_create_parent_comms_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mob_factory = Arc::new(RecordingMobCommsFactory {
+        observed: Arc::clone(&observed),
+    });
+    let factory = temp_factory(&temp)
+        .comms(true)
+        .mob(true)
+        .mob_tools_factory(mob_factory);
+    let config = Config::default();
+
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(Arc::new(MockLlmClient)),
+        ..AgentBuildConfig::new("claude-sonnet-4-5")
+    };
+
+    let _agent = factory.build_agent(build_config, &config).await.unwrap();
+    let observed = observed.lock().expect("recording mutex");
+    assert_eq!(observed.len(), 1);
+    assert_eq!(
+        observed[0].comms_name, None,
+        "ambient mob availability without operator authority must not synthesize a parent comms_name"
+    );
+    assert!(
+        !observed[0].comms_runtime_present,
+        "ambient mob availability without operator authority must not create delegate wiring comms"
+    );
 }
 
 #[tokio::test]

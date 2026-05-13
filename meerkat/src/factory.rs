@@ -3757,6 +3757,19 @@ impl AgentFactory {
             }
         }
 
+        #[cfg(feature = "comms")]
+        {
+            let mob_operator_tools_available = build_config.mob_tool_authority_context.is_some()
+                && (build_config.mob_tools.is_some() || self.mob_tools.is_some());
+            if mob_operator_tools_available
+                && self.enable_comms
+                && self.comms_runtime.is_none()
+                && build_config.comms_name.is_none()
+            {
+                build_config.comms_name = Some(format!("mob-owner/{}", session.id()));
+            }
+        }
+
         // 6b. Create comms runtime before tool wiring.
         // If the factory has a pre-built runtime (surface with stable identity),
         // use it directly. Otherwise create a per-session runtime from config.
@@ -4167,6 +4180,13 @@ impl AgentFactory {
                 .map(|r| Arc::clone(r) as Arc<dyn meerkat_core::agent::CommsRuntime>);
             #[cfg(not(feature = "comms"))]
             let mob_comms: Option<Arc<dyn meerkat_core::agent::CommsRuntime>> = None;
+            #[cfg(feature = "comms")]
+            let mob_comms_name = build_config
+                .comms_name
+                .clone()
+                .or_else(|| mob_comms.as_ref().and_then(|runtime| runtime.comms_name()));
+            #[cfg(not(feature = "comms"))]
+            let mob_comms_name = build_config.comms_name.clone();
 
             // Create the shared effective-authority handle. The agent owns the
             // write side (via apply_session_effects); mob tools get a read view.
@@ -4189,7 +4209,7 @@ impl AgentFactory {
                 model: model.clone(),
                 authority_context: build_config.mob_tool_authority_context.clone(),
                 effective_authority: mob_authority_handle.clone(),
-                comms_name: build_config.comms_name.clone(),
+                comms_name: mob_comms_name,
                 comms_runtime: mob_comms,
                 snapshot_context: meerkat_core::service::MobToolSnapshotContext::ParentOwned(
                     snapshot_provider,

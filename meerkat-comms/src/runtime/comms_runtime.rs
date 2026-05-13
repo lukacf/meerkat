@@ -321,6 +321,10 @@ impl CoreCommsRuntime for CommsRuntime {
         Some(*self.public_key.as_bytes())
     }
 
+    fn comms_name(&self) -> Option<String> {
+        Some(self.participant_name().to_string())
+    }
+
     fn advertised_address(&self) -> Option<String> {
         #[cfg(not(target_arch = "wasm32"))]
         {

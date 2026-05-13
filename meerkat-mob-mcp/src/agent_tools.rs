@@ -2404,6 +2404,14 @@ mod tests {
             Some(self.public_key_bytes)
         }
 
+        fn comms_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
+        fn advertised_address(&self) -> Option<String> {
+            Some(format!("inproc://{}", self.name))
+        }
+
         async fn add_trusted_peer(&self, peer: TrustedPeerDescriptor) -> Result<(), SendError> {
             TrustedPeerDescriptor::validate_pubkey_for_peer_id(peer.peer_id, &peer.pubkey)
                 .map_err(SendError::Validation)?;
@@ -3544,6 +3552,97 @@ mod tests {
         assert_eq!(audit_events[0].0, "mob_spawn_member");
         assert_eq!(audit_events[0].1.as_str(), "scope-principal");
         assert_eq!(audit_events[0].2.as_deref(), Some("audit-scope"));
+    }
+
+    #[tokio::test]
+    async fn test_delegate_dispatch_auto_wires_parent_and_helper_peers() {
+        struct TestSnapshotProvider;
+        impl VisibleToolSnapshotProvider for TestSnapshotProvider {
+            fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+                vec![Arc::new(ToolDef {
+                    name: "read_file".into(),
+                    description: "read_file tool".to_string(),
+                    input_schema: json!({"type": "object"}),
+                    provenance: Some(ToolProvenance {
+                        kind: ToolSourceKind::Builtin,
+                        source_id: "test-read-file".into(),
+                    }),
+                })]
+            }
+        }
+
+        let service = Arc::new(RealCommsSessionSvc::new());
+        let state = Arc::new(MobMcpState::new(service.clone()));
+        let parent_name = "parent/lead/l-1".to_string();
+        let parent_comms = service.register_external_comms(&parent_name).await;
+        let parent_peer_id = parent_comms.peer_id().expect("parent peer id");
+        let provider: Arc<dyn VisibleToolSnapshotProvider> = Arc::new(TestSnapshotProvider);
+        let session_id = SessionId::new();
+        let surface = AgentMobToolSurface::new_with_effective_authority(
+            Arc::clone(&state),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            session_id,
+            Some(parent_name.clone()),
+            Some(parent_peer_id),
+            Some(parent_comms.clone() as Arc<dyn CoreCommsRuntime>),
+            MobToolSnapshotContext::ParentOwned(provider),
+        );
+
+        let delegate_args = serde_json::value::RawValue::from_string(
+            json!({
+                "member_id": "helper-dispatch-1",
+                "task": "report back"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let result = surface
+            .dispatch(ToolCallView {
+                id: "delegate-wired",
+                name: "delegate",
+                args: &delegate_args,
+            })
+            .await
+            .expect("delegate should spawn and wire helper");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&result.result.text_content()).expect("delegate JSON");
+        assert_eq!(
+            parsed["wired"].as_bool(),
+            Some(true),
+            "delegate() must report wired=true when parent comms are available"
+        );
+
+        let mob_id = parsed["mob_id"].as_str().expect("mob id");
+        let helper_name = format!("{mob_id}/delegate/helper-dispatch-1");
+        let parent_peers = CoreCommsRuntime::peers(&*parent_comms).await;
+        assert!(
+            parent_peers
+                .iter()
+                .any(|entry| entry.name.as_str() == helper_name),
+            "delegate() should add the helper to the parent peer directory"
+        );
+
+        let handle = state
+            .handle_for(&MobId::from(mob_id))
+            .await
+            .expect("mob handle");
+        let helper_bridge_session_id = handle
+            .resolve_bridge_session_id(&AgentIdentity::from("helper-dispatch-1"))
+            .await
+            .expect("helper bridge session id");
+        let helper_comms = service
+            .real_comms(&helper_bridge_session_id)
+            .await
+            .expect("helper comms");
+        let helper_peers = CoreCommsRuntime::peers(&*helper_comms).await;
+        assert!(
+            helper_peers
+                .iter()
+                .any(|entry| entry.name.as_str() == parent_name),
+            "delegate() should add the parent to the helper peer directory"
+        );
     }
 
     #[tokio::test]

@@ -12,9 +12,11 @@
 //! B2 split (2026-04-18).
 
 pub use meerkat_llm_core::{
-    BlockAssembler, BlockKey, FactoryError, LlmClient, LlmClientAdapter, LlmDoneOutcome, LlmError,
-    LlmEvent, LlmRequest, LlmResponse, RealtimeExternalSessionTarget, RealtimeSession,
-    RealtimeSessionEvent, RealtimeSessionFactory, StreamAssemblyError, TestClient, ToolCallBuffer,
+    BlockAssembler, BlockKey, FactoryError, ImageGenerationExecutor, LlmClient, LlmClientAdapter,
+    LlmDoneOutcome, LlmError, LlmEvent, LlmRequest, LlmResponse, ProviderGeneratedImage,
+    ProviderImageGenerationOutput, ProviderImageGenerationRequest, RealtimeExternalSessionTarget,
+    RealtimeSession, RealtimeSessionEvent, RealtimeSessionFactory, StreamAssemblyError, TestClient,
+    ToolCallBuffer,
 };
 
 #[cfg(feature = "anthropic")]

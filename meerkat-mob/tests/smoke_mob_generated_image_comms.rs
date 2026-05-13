@@ -1,12 +1,21 @@
 #![cfg(all(feature = "integration-real-tests", not(target_arch = "wasm32")))]
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
+use async_trait::async_trait;
+use futures::stream;
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
+use meerkat_client::{
+    ImageGenerationExecutor, LlmClient, LlmDoneOutcome, LlmError, LlmEvent, LlmRequest,
+    ProviderGeneratedImage, ProviderImageGenerationOutput, ProviderImageGenerationRequest,
+};
 use meerkat_core::types::{
     AssistantBlock, ContentBlock, ContentInput, HandlingMode, ImageData, Message,
     SystemNoticeBlock, SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, text_content,
 };
-use meerkat_core::{AssistantImageRef, BlobRef};
+use meerkat_core::{
+    AssistantImageRef, BlobRef, ImageOperationTerminalClass, MediaType, ProviderImageMetadata,
+    RevisedPromptDisposition,
+};
 use meerkat_mob::definition::{RoleWiringRule, WiringRules};
 use meerkat_mob::{
     AgentIdentity, MobBuilder, MobDefinition, MobHandle, MobId, MobRuntimeMode, MobSessionService,
@@ -15,9 +24,11 @@ use meerkat_mob::{
 use meerkat_runtime::MeerkatMachine;
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::TempDir;
 use tokio::time::{Duration, Instant, sleep};
 
@@ -99,8 +110,365 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
     definition
 }
 
+#[derive(Default)]
+struct ScriptedGeneratedImageCommsClient {
+    call_id: AtomicUsize,
+}
+
+struct DeterministicImageExecutor;
+
+#[async_trait]
+impl ImageGenerationExecutor for DeterministicImageExecutor {
+    async fn execute_image_generation(
+        &self,
+        request: ProviderImageGenerationRequest,
+    ) -> Result<ProviderImageGenerationOutput, LlmError> {
+        Ok(ProviderImageGenerationOutput {
+            operation_id: request.operation_id,
+            terminal: ImageOperationTerminalClass::Generated,
+            images: vec![ProviderGeneratedImage {
+                media_type: MediaType::new("image/png"),
+                base64_data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=".to_string(),
+                width: 1,
+                height: 1,
+            }],
+            provider_text: None,
+            revised_prompt: RevisedPromptDisposition::NotRequested,
+            native_metadata: ProviderImageMetadata::NotEmitted,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+#[async_trait]
+impl LlmClient for ScriptedGeneratedImageCommsClient {
+    fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+        Ok(messages.to_vec())
+    }
+
+    fn stream<'a>(
+        &'a self,
+        request: &'a LlmRequest,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<LlmEvent, LlmError>> + Send + 'a>> {
+        let events = scripted_generated_image_comms_events(
+            request,
+            self.call_id.fetch_add(1, Ordering::SeqCst),
+        );
+        Box::pin(stream::iter(events.into_iter().map(Ok)))
+    }
+
+    fn provider(&self) -> &'static str {
+        "scripted-generated-image-comms"
+    }
+
+    async fn health_check(&self) -> Result<(), LlmError> {
+        Ok(())
+    }
+}
+
+fn scripted_generated_image_comms_events(request: &LlmRequest, call_id: usize) -> Vec<LlmEvent> {
+    if let Some(results) = current_boundary_tool_results(&request.messages) {
+        let has_peer_request = request_text(request).contains("Peer request from peer_id");
+        if let Some(peers) = peers_result(results) {
+            let Some(image) = latest_generated_image(&request.messages) else {
+                return text_events("script error: missing maker image before send_request");
+            };
+            let peer_id = peer_id_from_peers(&peers, "reviewer")
+                .unwrap_or_else(|| first_peer_id(&peers).unwrap_or_default());
+            return tool_events(
+                call_id,
+                "send_request",
+                json!({
+                    "peer_id": peer_id,
+                    "display_name": "reviewer",
+                    "intent": "checksum_token",
+                    "params": {"subject": "image_receipt_check"},
+                    "blocks": [
+                        {"type": "text", "text": "Please confirm receipt and answer with a generated image receipt."},
+                        {"type": "image_ref", "source": "blob", "blob_id": image.blob_ref.blob_id.as_str(), "media_type": image.media_type.as_str()}
+                    ],
+                    "handling_mode": "steer"
+                }),
+            );
+        }
+
+        if let Some(image) = generated_image_from_results(results) {
+            if has_peer_request {
+                let text = request_text(request);
+                let Some((peer_id, display_name, request_id)) = peer_request_route(&text) else {
+                    return text_events(
+                        "script error: missing peer request route before send_response",
+                    );
+                };
+                return tool_events(
+                    call_id,
+                    "send_response",
+                    json!({
+                        "peer_id": peer_id,
+                        "display_name": display_name,
+                        "in_reply_to": request_id,
+                        "status": "completed",
+                        "result": {
+                            "request_intent": "checksum_token",
+                            "request_subject": "image_receipt_check",
+                            "token": "generated-image-response-ok"
+                        },
+                        "blocks": [
+                            {"type": "image_ref", "source": "blob", "blob_id": image.blob_ref.blob_id.as_str(), "media_type": image.media_type.as_str()}
+                        ],
+                        "handling_mode": "steer"
+                    }),
+                );
+            }
+            return text_events("generated image ready");
+        }
+
+        return text_events("peer tool call complete");
+    }
+
+    let text = request_text(request);
+    if text.contains("Peer terminal response") {
+        return text_events("response image received");
+    }
+    if text.contains("Peer request from peer_id") && text.contains("image_receipt_check") {
+        if has_tool_use(&request.messages, "send_response") {
+            return text_events("response sent");
+        }
+        if let Some(image) = latest_generated_image(&request.messages) {
+            let Some((peer_id, display_name, request_id)) = peer_request_route(&text) else {
+                return text_events(
+                    "script error: missing peer request route before send_response",
+                );
+            };
+            return tool_events(
+                call_id,
+                "send_response",
+                json!({
+                    "peer_id": peer_id,
+                    "display_name": display_name,
+                    "in_reply_to": request_id,
+                    "status": "completed",
+                    "result": {
+                        "request_intent": "checksum_token",
+                        "request_subject": "image_receipt_check",
+                        "token": "generated-image-response-ok"
+                    },
+                    "blocks": [
+                        {"type": "image_ref", "source": "blob", "blob_id": image.blob_ref.blob_id.as_str(), "media_type": image.media_type.as_str()}
+                    ],
+                    "handling_mode": "steer"
+                }),
+            );
+        }
+        return tool_events(call_id, "generate_image", receipt_image_args());
+    }
+    if text.contains("Turn 2 of the generated-image comms smoke") {
+        if has_tool_use(&request.messages, "send_request") {
+            return text_events("request sent");
+        }
+        return tool_events(call_id, "peers", json!({}));
+    }
+    if text.contains("Turn 1 of the generated-image comms smoke") {
+        if latest_generated_image(&request.messages).is_some() {
+            return text_events("generated image ready");
+        }
+        return tool_events(call_id, "generate_image", maker_image_args());
+    }
+    if text.contains("REVIEWER-GENERATED-IMAGE-COMMS-READY") {
+        return text_events("REVIEWER-GENERATED-IMAGE-COMMS-READY");
+    }
+    if text.contains("MAKER-GENERATED-IMAGE-COMMS-READY") {
+        return text_events("MAKER-GENERATED-IMAGE-COMMS-READY");
+    }
+
+    text_events("scripted generated-image comms idle")
+}
+
+fn tool_events(call_id: usize, name: &str, args: Value) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::ToolCallComplete {
+            id: format!("scripted-{name}-{call_id}"),
+            name: name.to_string(),
+            args,
+            meta: None,
+        },
+        LlmEvent::Done {
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: meerkat_core::StopReason::ToolUse,
+            },
+        },
+    ]
+}
+
+fn text_events(text: &str) -> Vec<LlmEvent> {
+    vec![
+        LlmEvent::TextDelta {
+            delta: text.to_string(),
+            meta: None,
+        },
+        LlmEvent::Done {
+            outcome: LlmDoneOutcome::Success {
+                stop_reason: meerkat_core::StopReason::EndTurn,
+            },
+        },
+    ]
+}
+
+fn maker_image_args() -> Value {
+    json!({
+        "request": {
+            "intent": "generate",
+            "prompt": "a simple cyan square with a small magenta dot, no text",
+            "provider": "gemini",
+            "model": "gemini-3.1-flash-image-preview",
+            "size": "1024x1024",
+            "quality": "low",
+            "format": "png",
+            "count": 1
+        }
+    })
+}
+
+fn receipt_image_args() -> Value {
+    json!({
+        "request": {
+            "intent": "generate",
+            "prompt": "a tiny generated receipt image with one green check shape, no text",
+            "provider": "gemini",
+            "model": "gemini-3.1-flash-image-preview",
+            "size": "1024x1024",
+            "quality": "low",
+            "format": "png",
+            "count": 1
+        }
+    })
+}
+
+fn current_boundary_tool_results(messages: &[Message]) -> Option<&[meerkat_core::ToolResult]> {
+    match messages.last()? {
+        Message::ToolResults { results, .. } => Some(results),
+        _ => None,
+    }
+}
+
+fn request_text(request: &LlmRequest) -> String {
+    request
+        .messages
+        .iter()
+        .map(message_projection_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn message_projection_text(message: &Message) -> String {
+    match message {
+        Message::System(system) => system.content.clone(),
+        Message::SystemNotice(notice) => notice.model_projection_text(),
+        Message::User(user) => user.text_content(),
+        Message::Assistant(assistant) => assistant.content.clone(),
+        Message::BlockAssistant(assistant) => assistant.to_string(),
+        Message::ToolResults { results, .. } => results
+            .iter()
+            .map(|result| text_content(&result.content))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+fn peers_result(results: &[meerkat_core::ToolResult]) -> Option<Value> {
+    results.iter().find_map(|result| {
+        let value: Value = serde_json::from_str(&text_content(&result.content)).ok()?;
+        value.get("peers")?;
+        Some(value)
+    })
+}
+
+fn first_peer_id(peers: &Value) -> Option<String> {
+    peers
+        .get("peers")?
+        .as_array()?
+        .iter()
+        .find_map(|peer| peer.get("peer_id")?.as_str().map(ToOwned::to_owned))
+}
+
+fn peer_id_from_peers(peers: &Value, role: &str) -> Option<String> {
+    peers
+        .get("peers")?
+        .as_array()?
+        .iter()
+        .find(|peer| {
+            let name_matches = peer
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.contains(role));
+            let description_matches = peer
+                .pointer("/meta/description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.contains(role));
+            name_matches || description_matches
+        })?
+        .get("peer_id")?
+        .as_str()
+        .map(ToOwned::to_owned)
+}
+
+fn generated_image_from_results(results: &[meerkat_core::ToolResult]) -> Option<AssistantImageRef> {
+    results
+        .iter()
+        .find_map(|result| {
+            if result.is_error {
+                return None;
+            }
+            serde_json::from_str::<meerkat_core::ImageGenerationToolResult>(&text_content(
+                &result.content,
+            ))
+            .ok()
+        })
+        .and_then(|result| result.images.into_iter().next())
+}
+
+fn latest_generated_image(messages: &[Message]) -> Option<AssistantImageRef> {
+    messages
+        .iter()
+        .rev()
+        .find_map(successful_generate_image_result)
+        .and_then(|result| result.images.into_iter().next())
+}
+
+fn peer_request_route(text: &str) -> Option<(String, Option<String>, String)> {
+    let peer_id = text
+        .split_once("Peer request from peer_id ")?
+        .1
+        .split_whitespace()
+        .next()?
+        .to_string();
+    let request_id = text
+        .split_once("Request ID: ")?
+        .1
+        .lines()
+        .next()?
+        .trim()
+        .to_string();
+    let display_name = text
+        .split_once("(display_name: ")
+        .and_then(|(_, rest)| {
+            rest.split_once(')')
+                .map(|(name, _)| name.trim().to_string())
+        })
+        .filter(|name| !name.is_empty());
+    Some((peer_id, display_name, request_id))
+}
+
+fn has_tool_use(messages: &[Message], tool_name: &str) -> bool {
+    messages.iter().any(|message| {
+        tool_uses(message)
+            .iter()
+            .any(|(name, _)| *name == tool_name)
+    })
+}
+
 async fn setup_generated_image_comms_mob(
-    api_key: String,
+    _api_key: String,
     model: &str,
 ) -> Result<(MobHandle, Arc<dyn MobSessionService>, TempDir), Box<dyn std::error::Error>> {
     let temp_dir = TempDir::new()?;
@@ -121,10 +489,10 @@ async fn setup_generated_image_comms_mob(
         .comms(true)
         .with_image_generation_machine(runtime_adapter.clone());
     let mut builder = FactoryAgentBuilder::new(factory, Config::default());
-    builder.default_image_generation_executor =
-        Some(Arc::new(meerkat_client::GeminiClient::new(api_key)));
+    builder.default_image_generation_executor = Some(Arc::new(DeterministicImageExecutor));
     let store = Arc::new(JsonlStore::new(root.join("sessions-jsonl")));
     builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
+    builder.default_llm_client = Some(Arc::new(ScriptedGeneratedImageCommsClient::default()));
 
     let store_dyn: Arc<dyn meerkat::SessionStore> = store;
     let session_service = Arc::new(PersistentSessionService::new(

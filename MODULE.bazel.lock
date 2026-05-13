@@ -505,7 +505,7 @@
           "REPO_MAPPING:rules_rust+,bazel_tools bazel_tools",
           "REPO_MAPPING:rules_rust+,rules_cc rules_cc+",
           "REPO_MAPPING:rules_rust+,rules_rust rules_rust+",
-          "FILE:@@//Cargo.lock e57408789e6470fbd4302451612d260bc0810d01514cb031328680074b07ac00",
+          "FILE:@@//Cargo.lock 893362d1b80c9a8bf7bb3f001933cf3927a88dc7aa635964bf9e1981b0235209",
           "FILE:@@//Cargo.toml 575555cc70576d47cee68e4bc0bce28ad37fb58241e7fd72a1f77c8995123d12",
           "FILE:@@//meerkat-machine-derive/Cargo.toml f91da732cdc018477e0db4a1e89ea66cbbf1659bc4eae29782f9b6ba2ac487a6",
           "FILE:@@//meerkat-models/Cargo.toml d2c34db2fbe0ef549bec09bb87d7d048cd4af937ae50fe77a74ddecd92308379",

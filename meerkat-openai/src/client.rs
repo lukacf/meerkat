@@ -337,24 +337,16 @@ pub(crate) fn project_openai_replay_messages(
 }
 
 impl OpenAiClient {
-    fn model_supports_temperature(model: &str) -> bool {
-        meerkat_core::model_profile::openai::supports_temperature(model)
-    }
-
-    fn model_supports_reasoning_payload(model: &str) -> bool {
-        meerkat_core::model_profile::openai::supports_reasoning(model)
-    }
-
     fn request_supports_temperature(request: &LlmRequest) -> bool {
         openai_tag(request)
             .and_then(|t| t.supports_temperature_override)
-            .unwrap_or_else(|| Self::model_supports_temperature(&request.model))
+            .unwrap_or(false)
     }
 
     fn request_supports_reasoning_payload(request: &LlmRequest) -> bool {
         openai_tag(request)
             .and_then(|t| t.supports_reasoning_override)
-            .unwrap_or_else(|| Self::model_supports_reasoning_payload(&request.model))
+            .unwrap_or(false)
     }
 
     /// Create a new OpenAI client with the given API key
@@ -1503,9 +1495,6 @@ impl LlmClient for OpenAiClient {
 
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let inner: LlmStream<'a> = Box::pin(async_stream::try_stream! {
-            let mut projected_request = request.clone();
-            projected_request.messages = self.project_replay_messages(&request.messages)?;
-            let request = &projected_request;
             let body = self.build_request_body(request)?;
 
             let endpoint = self.responses_endpoint();
@@ -2103,6 +2092,10 @@ impl LlmClient for OpenAiClient {
 
     fn provider(&self) -> &'static str {
         "openai"
+    }
+
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {
@@ -3211,7 +3204,8 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.4",
             vec![Message::User(UserMessage::text("Hello".to_string()))],
-        );
+        )
+        .with_openai_tag_merge(|t| t.supports_reasoning_override = Some(true));
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -3540,7 +3534,8 @@ mod tests {
         let request = LlmRequest::new(
             "gpt-5.4",
             vec![Message::User(UserMessage::text("test".to_string()))],
-        );
+        )
+        .with_openai_tag_merge(|t| t.supports_reasoning_override = Some(true));
 
         let body = client.build_request_body(&request).expect("build request");
 
@@ -3560,6 +3555,7 @@ mod tests {
         .with_openai_tag_merge(|t| {
             t.reasoning_effort =
                 Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
+            t.supports_reasoning_override = Some(true);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -3577,6 +3573,7 @@ mod tests {
         .with_openai_tag_merge(|t| {
             t.reasoning_effort =
                 Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::None);
+            t.supports_reasoning_override = Some(true);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -3594,6 +3591,7 @@ mod tests {
         .with_openai_tag_merge(|t| {
             t.reasoning_effort =
                 Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::XHigh);
+            t.supports_reasoning_override = Some(true);
         });
 
         let body = client.build_request_body(&request).expect("build request");
@@ -3835,7 +3833,8 @@ mod tests {
             "gpt-realtime-2",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_temperature(0.3);
+        .with_temperature(0.3)
+        .with_openai_tag_merge(|t| t.supports_temperature_override = Some(true));
 
         let body = client.build_request_body(&request).expect("build request");
         let temp = body["temperature"]
@@ -3854,6 +3853,7 @@ mod tests {
         .with_openai_tag_merge(|t| {
             t.reasoning_effort =
                 Some(meerkat_core::lifecycle::run_primitive::ReasoningEffort::High);
+            t.supports_reasoning_override = Some(true);
         })
         .with_openai_tag_merge(|t| t.seed = Some(999))
         .with_openai_tag_merge(|t| t.frequency_penalty = Some(0.3))

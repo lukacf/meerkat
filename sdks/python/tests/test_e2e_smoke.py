@@ -671,8 +671,7 @@ if include_scenario(74):
         async with live_client(realm_id="env_default") as client:
             prompt = f"""
 Use the generate_image tool exactly once. You are an Anthropic chat model, but the image target must be Gemini.
-Pass request.provider="gemini",
-request.model="{gemini_image_model()}", request.intent="generate",
+Pass request.target={{"target":"model","provider":"gemini","model":"{gemini_image_model()}"}}, request.intent="generate",
 request.prompt="A crisp poster with the text PY-GEMINI-74 clearly written in large black letters",
 request.size="1536x1024", request.quality="auto", request.format="png",
 request.count=1, and request.provider_params={{"aspect_ratio":"16:9","image_size":"1K"}}.

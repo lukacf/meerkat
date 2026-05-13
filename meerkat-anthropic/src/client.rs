@@ -364,14 +364,10 @@ fn project_anthropic_replay_messages(messages: &[Message]) -> Result<Vec<Message
 }
 
 impl AnthropicClient {
-    fn model_supports_temperature(model: &str) -> bool {
-        meerkat_core::model_profile::anthropic::supports_temperature(model)
-    }
-
     fn request_supports_temperature(request: &LlmRequest) -> bool {
         anthropic_tag(request)
             .and_then(|t| t.supports_temperature_override)
-            .unwrap_or_else(|| Self::model_supports_temperature(&request.model))
+            .unwrap_or(false)
     }
 
     /// Create a new Anthropic client with the given API key and default HTTP settings
@@ -1399,6 +1395,10 @@ impl LlmClient for AnthropicClient {
         "anthropic"
     }
 
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::Anthropic
+    }
+
     async fn health_check(&self) -> Result<(), LlmError> {
         Ok(())
     }
@@ -2055,7 +2055,8 @@ mod tests {
             "claude-opus-4-6",
             vec![Message::User(UserMessage::text("test".to_string()))],
         )
-        .with_temperature(0.3);
+        .with_temperature(0.3)
+        .with_anthropic_tag_merge(|t| t.supports_temperature_override = Some(true));
 
         let body = client.build_request_body(&request)?;
         let temp = body

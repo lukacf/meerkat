@@ -9,10 +9,9 @@ use meerkat_core::image_generation::{
     ImageGenerationTargetPreference, ImageGenerationToolResult, ImageOperationDenialReason,
     ImageOperationId, ImageOperationPhase, ImageOperationTerminalClass, ImageQualityPreference,
     ImageSizePreference, ImageSourceRef, PostActivationImageDenialReason,
-    PostActivationImageTerminal, PromptSource, PromptText, ProviderId, ProviderTextDisposition,
+    PostActivationImageTerminal, PromptSource, PromptText, ProviderTextDisposition,
     TextArtifactRef, ToolCallId,
 };
-use meerkat_core::lifecycle::run_primitive::ModelId;
 use meerkat_core::ops::SessionEffect;
 use meerkat_core::types::{AssistantBlock, ToolDef, ToolProvenance, ToolSourceKind};
 use meerkat_core::{BlobStore, SessionId};
@@ -139,9 +138,8 @@ Use a simple request shape unless you explicitly need the canonical internal sha
 Routing and defaults:
 - target defaults to "auto".
 - On image-capable sessions, auto uses the current provider's registered image default.
-- On non-image-capable session providers, auto is unsupported; set provider:"openai" or provider:"gemini".
-- provider:"openai" or provider:"gemini" uses that provider's registered image default.
-- To force a model, pass provider plus model. Passing only model is accepted when the catalog identifies a configured provider for that model.
+- On non-image-capable session providers, auto is unsupported; pass canonical target:{"target":"provider_default","provider":"openai"} or target:{"target":"provider_default","provider":"gemini"}.
+- To force a model, pass canonical target:{"target":"model","provider":"openai","model":"..."}.
 - For image-only requests that need current or recent information, pass the freshness requirement in the prompt and, when using OpenAI hosted image generation, prefer provider_params.web_search here instead of doing a separate manual web search first.
 
 Supported request fields:
@@ -154,7 +152,7 @@ Supported request fields:
 - provider_params: optional provider-specific JSON parameters documented by the selected provider profile.
 - count/n: currently only 1 is supported.
 
-Do not pass size as a bare top-level string outside request. Do not use intent:{type:"create"} unless you mean the compatibility alias for generate; prefer intent:"generate"."#;
+Do not pass size as a bare top-level string outside request. Use intent:"generate" or intent:"edit"; legacy intent aliases are rejected."#;
 
 impl GenerateImageTool {
     pub fn new(runtime: ImageGenerationToolRuntime) -> Self {
@@ -214,10 +212,6 @@ struct GenerateImageToolRequestSchema {
     format: Option<String>,
     #[schemars(description = "Optional number of images to generate. Defaults to 1.")]
     count: Option<u32>,
-    #[schemars(description = "Optional provider override such as \"openai\" or \"gemini\".")]
-    provider: Option<String>,
-    #[schemars(description = "Optional model override for the selected provider.")]
-    model: Option<String>,
     #[schemars(
         description = "Provider-specific image model parameters validated by the selected provider."
     )]
@@ -500,7 +494,7 @@ impl BuiltinTool for GenerateImageTool {
 fn parse_generate_image_request(
     request: Value,
     operation_id: ImageOperationId,
-    planner: &dyn ImageGenerationPlanner,
+    _planner: &dyn ImageGenerationPlanner,
 ) -> Result<GenerateImageRequest, BuiltinToolError> {
     if let Ok(canonical) = serde_json::from_value::<GenerateImageRequest>(request.clone()) {
         return Ok(canonical);
@@ -556,7 +550,6 @@ fn parse_generate_image_request(
             simple.target.as_ref(),
             simple.provider.as_deref(),
             simple.model.as_deref(),
-            planner,
         )?,
         parse_simple_size(simple.size.as_ref())?,
         parse_simple_quality(simple.quality.as_deref())?,
@@ -588,7 +581,6 @@ fn parse_simple_intent_kind(
         Value::String(value) => parse_intent_name(value),
         Value::Object(map) => map
             .get("intent")
-            .or_else(|| map.get("type"))
             .and_then(Value::as_str)
             .map(parse_intent_name)
             .unwrap_or_else(|| {
@@ -604,8 +596,8 @@ fn parse_simple_intent_kind(
 
 fn parse_intent_name(value: &str) -> Result<SimpleImageIntentKind, BuiltinToolError> {
     match normalize_choice(value).as_str() {
-        "generate" | "create" | "new" => Ok(SimpleImageIntentKind::Generate),
-        "edit" | "modify" => Ok(SimpleImageIntentKind::Edit),
+        "generate" => Ok(SimpleImageIntentKind::Generate),
+        "edit" => Ok(SimpleImageIntentKind::Edit),
         other => Err(BuiltinToolError::invalid_args(format!(
             "unsupported image intent '{other}'; use 'generate' or 'edit'"
         ))),
@@ -640,8 +632,18 @@ fn parse_simple_target(
     target: Option<&Value>,
     provider: Option<&str>,
     model: Option<&str>,
-    planner: &dyn ImageGenerationPlanner,
 ) -> Result<ImageGenerationTargetPreference, BuiltinToolError> {
+    if provider.is_some() || model.is_some() {
+        if target.is_some() {
+            return Err(BuiltinToolError::invalid_args(
+                "request.target cannot be combined with request.provider or request.model",
+            ));
+        }
+        return Err(BuiltinToolError::invalid_args(
+            "request.provider and request.model are not accepted; use request.target with a canonical provider_default or model object",
+        ));
+    }
+
     if let Some(target) = target {
         if let Ok(canonical) =
             serde_json::from_value::<ImageGenerationTargetPreference>(target.clone())
@@ -652,33 +654,13 @@ fn parse_simple_target(
             if normalize_choice(value) == "auto" {
                 return Ok(ImageGenerationTargetPreference::Auto);
             }
-            return Ok(ImageGenerationTargetPreference::ProviderDefault {
-                provider: ProviderId::new(value),
-            });
+            return Err(BuiltinToolError::invalid_args(
+                "request.target string only accepts \"auto\"; use canonical target object for provider/model routing",
+            ));
         }
     }
 
-    match (provider, model) {
-        (Some(provider), Some(model)) => Ok(ImageGenerationTargetPreference::Model {
-            provider: ProviderId::new(provider),
-            model: ModelId::new(model),
-        }),
-        (Some(provider), None) => Ok(ImageGenerationTargetPreference::ProviderDefault {
-            provider: ProviderId::new(provider),
-        }),
-        (None, Some(model)) => {
-            let provider = planner.infer_provider_for_model(model).ok_or_else(|| {
-                BuiltinToolError::invalid_args(
-                    "request.model requires request.provider unless the configured image providers own that model",
-                )
-            })?;
-            Ok(ImageGenerationTargetPreference::Model {
-                provider,
-                model: ModelId::new(model),
-            })
-        }
-        (None, None) => Ok(ImageGenerationTargetPreference::Auto),
-    }
+    Ok(ImageGenerationTargetPreference::Auto)
 }
 
 fn parse_simple_size(size: Option<&Value>) -> Result<ImageSizePreference, BuiltinToolError> {
@@ -1007,6 +989,7 @@ mod tests {
             Ok(
                 meerkat_core::image_generation::SessionModelRoutingStatus::new(
                     ModelId::new("hosted-session-model"),
+                    meerkat_core::Provider::OpenAI,
                     None,
                     None,
                     None,
@@ -1196,7 +1179,7 @@ mod tests {
 
         for expected in [
             "registered image default",
-            "catalog identifies a configured provider for that model",
+            "auto uses the current provider's registered image default",
             "count/n: currently only 1 is supported",
             "provider_params",
             "Size support is model/provider dependent",
@@ -1266,12 +1249,77 @@ mod tests {
     }
 
     #[test]
-    fn generate_image_accepts_model_only_for_known_image_models() {
+    fn generate_image_rejects_top_level_provider_model_target() {
+        let err = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "provider": "openai",
+                "model": "owned-openai-image-model"
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .expect_err("top-level provider/model target aliases should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("request.provider and request.model are not accepted"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generate_image_rejects_top_level_model_target_alias() {
+        let err = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "model": "owned-gemini-image-model"
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .expect_err("top-level model target alias should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("request.provider and request.model are not accepted"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn generate_image_accepts_canonical_model_target() {
+        let err = parse_generate_image_request(
+            json!({
+                "intent": "generate",
+                "prompt": "draw a cozy tabby cat",
+                "target": {
+                    "target": "model",
+                    "provider": "openai",
+                    "model": "owned-openai-image-model"
+                },
+                "provider": "openai"
+            }),
+            ImageOperationId::new(uuid::Uuid::new_v4()),
+            &FakePlanner,
+        )
+        .expect_err("canonical target must not be mixed with legacy target fields");
+        assert!(
+            err.to_string().contains("cannot be combined"),
+            "unexpected error: {err}"
+        );
+
         let parsed = parse_generate_image_request(
             json!({
                 "intent": "generate",
                 "prompt": "draw a cozy tabby cat",
-                "model": "owned-openai-image-model"
+                "target": {
+                    "target": "model",
+                    "provider": "openai",
+                    "model": "owned-openai-image-model"
+                }
             }),
             ImageOperationId::new(uuid::Uuid::new_v4()),
             &FakePlanner,
@@ -1282,23 +1330,6 @@ mod tests {
             parsed.target,
             ImageGenerationTargetPreference::Model { ref provider, ref model }
                 if provider.0 == "openai" && model.as_str() == "owned-openai-image-model"
-        ));
-
-        let parsed = parse_generate_image_request(
-            json!({
-                "intent": "generate",
-                "prompt": "draw a cozy tabby cat",
-                "model": "owned-gemini-image-model"
-            }),
-            ImageOperationId::new(uuid::Uuid::new_v4()),
-            &FakePlanner,
-        )
-        .unwrap();
-
-        assert!(matches!(
-            parsed.target,
-            ImageGenerationTargetPreference::Model { ref provider, ref model }
-                if provider.0 == "gemini" && model.as_str() == "owned-gemini-image-model"
         ));
     }
 
@@ -1326,8 +1357,8 @@ mod tests {
     }
 
     #[test]
-    fn generate_image_accepts_create_intent_object() {
-        let parsed = parse_generate_image_request(
+    fn generate_image_rejects_legacy_create_intent_object_alias() {
+        let err = parse_generate_image_request(
             json!({
                 "intent": { "type": "create" },
                 "prompt": "draw a cozy tabby cat"
@@ -1335,12 +1366,14 @@ mod tests {
             ImageOperationId::new(uuid::Uuid::new_v4()),
             &FakePlanner,
         )
-        .unwrap();
+        .expect_err("legacy intent type alias should be rejected");
 
-        assert!(matches!(
-            parsed.intent,
-            ImageGenerationIntent::Generate { .. }
-        ));
+        assert!(
+            err.to_string().contains(
+                "request.intent object must include intent=\"generate\" or intent=\"edit\""
+            ),
+            "unexpected error: {err}"
+        );
     }
 
     #[tokio::test]

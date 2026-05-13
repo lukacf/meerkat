@@ -296,6 +296,7 @@ fn model_routing_wire_aliases_roundtrip() {
 
     let status: WireSessionModelRoutingStatus = WireSessionModelRoutingStatus::new(
         ModelId::new("baseline"),
+        meerkat_core::Provider::OpenAI,
         None,
         Some(ScopedModelOverrideSummary {
             id: ScopedModelOverrideId::new(uuid(8)),
@@ -303,6 +304,7 @@ fn model_routing_wire_aliases_roundtrip() {
                 operation_id: ImageOperationId::new(uuid(9)),
             },
             target_model: ModelId::new("operation"),
+            target_provider: Some(meerkat_core::Provider::Gemini),
             topology_epoch: TopologyEpoch(10),
         }),
         None,

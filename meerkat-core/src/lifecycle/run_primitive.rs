@@ -930,6 +930,31 @@ impl ProviderParamsOverride {
             && self.provider_tag.is_none()
     }
 
+    pub fn merged(defaults: Option<&Self>, explicit: Option<&Self>) -> Option<Self> {
+        match (defaults, explicit) {
+            (None, None) => None,
+            (Some(defaults), None) => Some(defaults.clone()).filter(|params| !params.is_empty()),
+            (None, Some(explicit)) => Some(explicit.clone()).filter(|params| !params.is_empty()),
+            (Some(defaults), Some(explicit)) => {
+                let mut merged = defaults.clone();
+                merged.merge_from(explicit);
+                Some(merged).filter(|params| !params.is_empty())
+            }
+        }
+    }
+
+    pub fn merge_from(&mut self, explicit: &Self) {
+        assign_if_some(&mut self.temperature, &explicit.temperature);
+        assign_if_some(&mut self.top_p, &explicit.top_p);
+        assign_if_some(&mut self.max_output_tokens, &explicit.max_output_tokens);
+        assign_if_some(&mut self.reasoning, &explicit.reasoning);
+        assign_if_some(
+            &mut self.thinking_budget_tokens,
+            &explicit.thinking_budget_tokens,
+        );
+        merge_provider_tag(&mut self.provider_tag, &explicit.provider_tag);
+    }
+
     pub fn from_legacy_provider_value(provider: &str, value: &serde_json::Value) -> Self {
         let Some(obj) = value.as_object() else {
             if value.is_null() {
@@ -1021,6 +1046,89 @@ impl ProviderParamsOverride {
         }
         serde_json::Value::Object(object)
     }
+}
+
+fn assign_if_some<T: Clone>(target: &mut Option<T>, explicit: &Option<T>) {
+    if explicit.is_some() {
+        *target = explicit.clone();
+    }
+}
+
+fn merge_provider_tag(target: &mut Option<ProviderTag>, explicit: &Option<ProviderTag>) {
+    let Some(explicit) = explicit else {
+        return;
+    };
+
+    match (target.as_mut(), explicit) {
+        (Some(ProviderTag::Anthropic(target)), ProviderTag::Anthropic(explicit)) => {
+            merge_anthropic_provider_tag(target, explicit);
+        }
+        (Some(ProviderTag::OpenAi(target)), ProviderTag::OpenAi(explicit)) => {
+            merge_openai_provider_tag(target, explicit);
+        }
+        (Some(ProviderTag::Gemini(target)), ProviderTag::Gemini(explicit)) => {
+            merge_gemini_provider_tag(target, explicit);
+        }
+        _ => {
+            *target = Some(explicit.clone());
+        }
+    }
+}
+
+fn merge_anthropic_provider_tag(
+    target: &mut AnthropicProviderTag,
+    explicit: &AnthropicProviderTag,
+) {
+    assign_if_some(&mut target.thinking, &explicit.thinking);
+    assign_if_some(
+        &mut target.thinking_budget_tokens,
+        &explicit.thinking_budget_tokens,
+    );
+    assign_if_some(&mut target.web_search, &explicit.web_search);
+    assign_if_some(&mut target.top_k, &explicit.top_k);
+    assign_if_some(&mut target.effort, &explicit.effort);
+    assign_if_some(&mut target.structured_output, &explicit.structured_output);
+    assign_if_some(&mut target.inference_geo, &explicit.inference_geo);
+    assign_if_some(&mut target.compaction, &explicit.compaction);
+    assign_if_some(&mut target.context, &explicit.context);
+    assign_if_some(
+        &mut target.supports_temperature_override,
+        &explicit.supports_temperature_override,
+    );
+}
+
+fn merge_openai_provider_tag(target: &mut OpenAiProviderTag, explicit: &OpenAiProviderTag) {
+    assign_if_some(&mut target.reasoning_effort, &explicit.reasoning_effort);
+    assign_if_some(&mut target.seed, &explicit.seed);
+    assign_if_some(&mut target.frequency_penalty, &explicit.frequency_penalty);
+    assign_if_some(&mut target.presence_penalty, &explicit.presence_penalty);
+    assign_if_some(&mut target.web_search, &explicit.web_search);
+    assign_if_some(&mut target.structured_output, &explicit.structured_output);
+    assign_if_some(&mut target.reasoning, &explicit.reasoning);
+    assign_if_some(
+        &mut target.chat_template_kwargs,
+        &explicit.chat_template_kwargs,
+    );
+    assign_if_some(&mut target.thinking, &explicit.thinking);
+    assign_if_some(
+        &mut target.supports_temperature_override,
+        &explicit.supports_temperature_override,
+    );
+    assign_if_some(
+        &mut target.supports_reasoning_override,
+        &explicit.supports_reasoning_override,
+    );
+}
+
+fn merge_gemini_provider_tag(target: &mut GeminiProviderTag, explicit: &GeminiProviderTag) {
+    assign_if_some(&mut target.thinking, &explicit.thinking);
+    assign_if_some(&mut target.thinking_budget, &explicit.thinking_budget);
+    assign_if_some(&mut target.thinking_level, &explicit.thinking_level);
+    assign_if_some(&mut target.top_k, &explicit.top_k);
+    assign_if_some(&mut target.top_p, &explicit.top_p);
+    assign_if_some(&mut target.structured_output, &explicit.structured_output);
+    assign_if_some(&mut target.google_search, &explicit.google_search);
+    assign_if_some(&mut target.candidate_count, &explicit.candidate_count);
 }
 
 fn parse_reasoning_mode(value: &str) -> Option<ReasoningMode> {

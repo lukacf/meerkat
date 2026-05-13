@@ -50,14 +50,23 @@ pub trait LlmClient: Send + Sync {
         })
     }
 
-    /// Stream a completion request
+    /// Stream a completion request.
     ///
-    /// Returns a stream of normalized events. The stream completes
-    /// when the model finishes (either with EndTurn or ToolUse).
+    /// `request.messages` must already be the provider-safe replay projection
+    /// returned by [`Self::project_replay_messages`]. The adapter/factory path
+    /// owns invoking that projection once; provider implementations only lower
+    /// this typed request to their wire API. The stream completes when the
+    /// model finishes (either with EndTurn or ToolUse).
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a>;
 
     /// Get the provider name (for logging/debugging)
     fn provider(&self) -> &'static str;
+
+    /// Get the typed provider identity for policy/default resolution.
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::parse_strict(self.provider())
+            .unwrap_or(meerkat_core::Provider::Other)
+    }
 
     /// Check if the client is healthy/connected
     async fn health_check(&self) -> Result<(), LlmError>;

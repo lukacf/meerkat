@@ -17,6 +17,7 @@ use std::sync::Arc;
 use crate::LlmClient;
 use meerkat_core::error::AgentError;
 use meerkat_core::handles::AuthLeaseHandle;
+use meerkat_core::lifecycle::run_primitive::TurnMetadataOverride;
 use meerkat_core::service::{SessionError, SessionService};
 use meerkat_core::types::SessionId;
 use meerkat_core::{
@@ -268,17 +269,6 @@ impl SessionRuntimeLlmReconfigureHost {
                 reason: "provider override requires model on an existing session".to_string(),
             });
         }
-        if request.clear_provider_params && request.provider_params.is_some() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "clear_provider_params cannot be combined with provider_params".to_string(),
-            });
-        }
-        if request.clear_auth_binding && request.auth_binding.is_some() {
-            return Err(RuntimeDriverError::ValidationFailed {
-                reason: "clear_auth_binding cannot be combined with auth_binding".to_string(),
-            });
-        }
-
         let registry = self.model_registry().await?;
         let model = request
             .model
@@ -296,13 +286,10 @@ impl SessionRuntimeLlmReconfigureHost {
         {
             return Err(RuntimeDriverError::ValidationFailed { reason });
         }
-        let provider_params = if request.clear_provider_params {
-            None
-        } else {
-            request
-                .provider_params
-                .clone()
-                .or_else(|| current.provider_params.clone())
+        let provider_params = match &request.provider_params {
+            Some(TurnMetadataOverride::Set(params)) => Some(params.clone()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => current.provider_params.clone(),
         };
         let self_hosted_server_id = if provider == meerkat_core::Provider::SelfHosted {
             if request.model.is_none() {
@@ -331,13 +318,10 @@ impl SessionRuntimeLlmReconfigureHost {
             None
         };
 
-        let auth_binding = if request.clear_auth_binding {
-            None
-        } else {
-            request
-                .auth_binding
-                .clone()
-                .or_else(|| current.auth_binding.clone())
+        let auth_binding = match &request.auth_binding {
+            Some(TurnMetadataOverride::Set(auth_binding)) => Some(auth_binding.clone()),
+            Some(TurnMetadataOverride::Clear) => None,
+            None => current.auth_binding.clone(),
         };
 
         Ok(SessionLlmIdentity {

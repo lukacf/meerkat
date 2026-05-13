@@ -198,8 +198,9 @@ mod context {
                     agent_llm_client_decorator: self.agent_llm_client_decorator.clone(),
                     external_tools: self.external_tools.clone(),
                     checkpointer: None,
-                    runtime_build_mode: Some(RuntimeBuildMode::SessionOwned(bindings)),
-                    require_runtime_build_mode: true,
+                    runtime_build_mode: meerkat_core::SurfaceRecoveryRuntimeBuildMode::Provided(
+                        Box::new(RuntimeBuildMode::SessionOwned(bindings)),
+                    ),
                     realm_id: self.realm_id.map(ToString::to_string),
                     instance_id: self.instance_id.map(ToString::to_string),
                     backend: self.backend.map(ToString::to_string),

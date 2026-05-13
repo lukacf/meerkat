@@ -2670,6 +2670,38 @@ async fn explicit_provider_search_param_can_reenable_search_under_tool_policy() 
     );
 }
 
+#[tokio::test]
+async fn config_provider_params_project_at_factory_seam() {
+    let temp = tempfile::tempdir().unwrap();
+    let factory = temp_factory(&temp);
+    let config: Config = toml::from_str(
+        r#"
+[agent]
+model = "gpt-5.4"
+provider_params = { reasoning_effort = "xhigh", web_search = { type = "web_search" } }
+"#,
+    )
+    .unwrap();
+    let client = Arc::new(ParamsCaptureClient::new());
+    let build_config = AgentBuildConfig {
+        llm_client_override: Some(client.clone()),
+        ..AgentBuildConfig::from_config_model(&config, None)
+    };
+
+    let mut agent = factory.build_agent(build_config, &config).await.unwrap();
+    let _ = agent.run("test".to_string().into()).await.unwrap();
+
+    let params = client
+        .captured_params()
+        .expect("config provider params should reach the adapter");
+    assert_eq!(params["provider"], "open_ai");
+    assert_eq!(params["reasoning_effort"], "xhigh");
+    assert!(
+        params.get("web_search").is_some(),
+        "config web_search should survive provider-aware projection: {params}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Deferral §2: auth_binding hot-swap mid-session
 // ---------------------------------------------------------------------------

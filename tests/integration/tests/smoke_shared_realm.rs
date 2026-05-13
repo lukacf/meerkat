@@ -3755,6 +3755,14 @@ fn live_capture_has_assistant_text(capture: &LiveObservationCapture) -> bool {
     !normalize_semantic_text(&capture.output_text).is_empty()
 }
 
+fn live_capture_has_output_activity(capture: &LiveObservationCapture) -> bool {
+    !capture.output_text.is_empty()
+        || !capture.output_audio_pcm.is_empty()
+        || !capture.tool_call_requests.is_empty()
+        || !capture.tool_call_completions.is_empty()
+        || !capture.tool_call_failures.is_empty()
+}
+
 async fn openai_tts_pcm(text: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let api_key = openai_api_key().ok_or("OpenAI API key is required for live audio smokes")?;
     let model = openai_tts_model();
@@ -3808,11 +3816,17 @@ struct LiveObservationCapture {
     frame_log: Vec<String>,
     saw_ready: bool,
     saw_turn_completed: bool,
+    saw_turn_completed_after_input: bool,
     saw_interrupted: bool,
 }
 
 impl LiveObservationCapture {
     fn merge_from(&mut self, other: Self) {
+        let self_had_input = !self.input_finals.is_empty();
+        let self_had_turn_completed = self.saw_turn_completed;
+        let other_had_input = !other.input_finals.is_empty();
+        let other_had_turn_completed = other.saw_turn_completed;
+
         self.input_finals.extend(other.input_finals);
         self.output_text.push_str(&other.output_text);
         self.output_audio_pcm.extend(other.output_audio_pcm);
@@ -3826,6 +3840,9 @@ impl LiveObservationCapture {
         self.frame_log.extend(other.frame_log);
         self.saw_ready |= other.saw_ready;
         self.saw_turn_completed |= other.saw_turn_completed;
+        self.saw_turn_completed_after_input |= other.saw_turn_completed_after_input
+            || (self_had_input && other_had_turn_completed)
+            || (self_had_turn_completed && other_had_input);
         self.saw_interrupted |= other.saw_interrupted;
     }
 }
@@ -3894,6 +3911,9 @@ fn observe_live_json_frame(
             capture.tool_call_requests.push(tool_name);
         }
         "turn_completed" => {
+            if !capture.input_finals.is_empty() {
+                capture.saw_turn_completed_after_input = true;
+            }
             capture.saw_turn_completed = true;
         }
         "turn_interrupted" => {
@@ -3923,6 +3943,54 @@ fn live_capture_has_turn_activity(capture: &LiveObservationCapture) -> bool {
         || !capture.tool_call_requests.is_empty()
         || !capture.tool_call_completions.is_empty()
         || !capture.tool_call_failures.is_empty()
+}
+
+#[test]
+fn live_capture_distinguishes_stale_completion_before_input() {
+    let mut capture = LiveObservationCapture::default();
+    observe_live_json_frame(
+        &mut capture,
+        r#"{"observation":"turn_completed","response_id":"stale","stop_reason":"cancelled"}"#,
+    )
+    .expect("stale completion frame should parse");
+
+    assert!(capture.saw_turn_completed);
+    assert!(!capture.saw_turn_completed_after_input);
+
+    observe_live_json_frame(
+        &mut capture,
+        r#"{"observation":"user_transcript_final","text":"Please say the code word once."}"#,
+    )
+    .expect("input final frame should parse");
+    observe_live_json_frame(
+        &mut capture,
+        r#"{"observation":"turn_completed","response_id":"current","stop_reason":"end_turn"}"#,
+    )
+    .expect("current completion frame should parse");
+
+    assert!(capture.saw_turn_completed_after_input);
+}
+
+#[test]
+fn live_capture_merge_marks_completion_after_prior_input() {
+    let mut input_capture = LiveObservationCapture::default();
+    observe_live_json_frame(
+        &mut input_capture,
+        r#"{"observation":"user_transcript_final","text":"Say only the codeword once."}"#,
+    )
+    .expect("input final frame should parse");
+
+    let mut completion_capture = LiveObservationCapture::default();
+    observe_live_json_frame(
+        &mut completion_capture,
+        r#"{"observation":"turn_completed","response_id":"current","stop_reason":"end_turn"}"#,
+    )
+    .expect("completion frame should parse");
+
+    input_capture.merge_from(completion_capture);
+
+    assert!(input_capture.saw_turn_completed);
+    assert!(input_capture.saw_turn_completed_after_input);
 }
 
 type LiveWsWrite = futures::stream::SplitSink<
@@ -4163,30 +4231,41 @@ async fn settle_live_turn_after_input(
     prior_capture: &LiveObservationCapture,
     timeout_secs: u64,
 ) -> Result<LiveObservationCapture, Box<dyn std::error::Error>> {
-    if prior_capture.saw_turn_completed {
+    let output_already_started = live_capture_has_output_activity(prior_capture);
+    if prior_capture.saw_turn_completed_after_input
+        || (prior_capture.saw_turn_completed && output_already_started)
+    {
         return Ok(LiveObservationCapture::default());
     }
-    let output_already_started = !prior_capture.output_text.is_empty()
-        || !prior_capture.output_audio_pcm.is_empty()
-        || !prior_capture.tool_call_requests.is_empty()
-        || !prior_capture.tool_call_completions.is_empty()
-        || !prior_capture.tool_call_failures.is_empty();
+    let turn_completed_grace_secs = timeout_secs.min(10);
     let mut capture = if output_already_started {
-        collect_live_observations_until_turn_completed(reader, timeout_secs).await?
+        collect_live_observations_until_turn_completed(reader, turn_completed_grace_secs)
+            .await
+            .unwrap_or_default()
     } else {
         let mut capture =
             collect_live_observations_until_output_settles(reader, timeout_secs).await?;
         if !capture.saw_turn_completed {
-            capture.merge_from(
-                collect_live_observations_until_turn_completed(reader, timeout_secs).await?,
-            );
+            match collect_live_observations_until_turn_completed(reader, turn_completed_grace_secs)
+                .await
+            {
+                Ok(turn_completed) => capture.merge_from(turn_completed),
+                Err(err) if !live_capture_has_output_activity(&capture) => return Err(err),
+                Err(_) => {}
+            }
         }
         capture
     };
     if !capture.saw_turn_completed {
-        capture.merge_from(
-            collect_live_observations_until_turn_completed(reader, timeout_secs).await?,
-        );
+        match collect_live_observations_until_turn_completed(reader, turn_completed_grace_secs)
+            .await
+        {
+            Ok(turn_completed) => capture.merge_from(turn_completed),
+            Err(err) if !output_already_started && !live_capture_has_output_activity(&capture) => {
+                return Err(err);
+            }
+            Err(_) => {}
+        }
     }
     Ok(capture)
 }

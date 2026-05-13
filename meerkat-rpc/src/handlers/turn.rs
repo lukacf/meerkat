@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, de};
 use serde_json::value::RawValue;
 use tokio::sync::mpsc;
 
@@ -28,53 +28,38 @@ use meerkat_runtime::SessionServiceRuntimeExt;
 // ---------------------------------------------------------------------------
 
 /// Parameters for `turn/start`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 pub struct StartTurnParams {
     pub session_id: String,
     pub prompt: ContentInput,
     /// Structured refs for Skills V2.1.
-    #[serde(default)]
     pub skill_refs: Option<Vec<SkillRef>>,
     /// Retired legacy string refs. Kept only to return a typed ingress error
     /// when old clients send the field.
-    #[serde(default, deserialize_with = "reject_retired_skill_references")]
     pub skill_references: Option<Vec<String>>,
     /// Optional per-turn tool visibility overlay.
-    #[serde(default)]
     pub flow_tool_overlay: Option<TurnToolOverlay>,
     /// Additional instruction sections prepended as system notices for this turn.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_instructions: Option<Vec<String>>,
     /// Override keep-alive mode for this turn. Only applies to pending (deferred) sessions.
-    #[serde(default)]
     pub keep_alive: Option<bool>,
     // -- Per-turn overrides ---------------------------------------------------
     /// Override model. On pending sessions, sets the model before materialization.
     /// On materialized sessions, hot-swaps the LLM client for the remainder of the session.
-    #[serde(default)]
     pub model: Option<String>,
     /// Override provider. Typically inferred from model.
-    #[serde(default)]
     pub provider: Option<String>,
     /// Override max_tokens. On pending sessions only.
-    #[serde(default)]
     pub max_tokens: Option<u32>,
     /// Override system prompt. On pending sessions only.
-    #[serde(default)]
     pub system_prompt: Option<String>,
     /// Override output schema. On pending sessions only.
-    #[serde(default)]
     pub output_schema: Option<serde_json::Value>,
     /// Override structured output retries. On pending sessions only.
-    #[serde(default)]
     pub structured_output_retries: Option<u32>,
     /// Override provider-specific parameters. Applied alongside model/provider override.
-    #[serde(default)]
-    pub provider_params: Option<serde_json::Value>,
-    /// Clear durable provider-specific parameters. Omitted `provider_params`
-    /// inherits the current value; this flag explicitly disables it.
-    #[serde(default)]
-    pub clear_provider_params: bool,
+    pub provider_params:
+        Option<meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<serde_json::Value>>,
     /// Override realm-scoped auth binding for this turn (deferral
     /// §2). On materialized sessions this scopes the hot-swap credential
     /// fetch to a specific realm + binding — preventing cross-realm
@@ -82,12 +67,107 @@ pub struct StartTurnParams {
     /// flows into `SessionBuildOptions.auth_binding`. Dogma §10
     /// inherit/set: `None` keeps the session's current binding;
     /// `Some(...)` sets a new one explicitly.
+    pub auth_binding: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<meerkat_core::AuthBindingRef>,
+    >,
+}
+
+#[derive(Deserialize)]
+struct StartTurnParamsFields {
+    session_id: String,
+    prompt: ContentInput,
     #[serde(default)]
-    pub auth_binding: Option<meerkat_core::AuthBindingRef>,
-    /// Clear the durable auth binding. Omitted `auth_binding`
-    /// inherits the current value; this flag explicitly disables it.
+    skill_refs: Option<Vec<SkillRef>>,
+    #[serde(default, deserialize_with = "reject_retired_skill_references")]
+    skill_references: Option<Vec<String>>,
     #[serde(default)]
-    pub clear_auth_binding: bool,
+    flow_tool_overlay: Option<TurnToolOverlay>,
+    #[serde(default)]
+    additional_instructions: Option<Vec<String>>,
+    #[serde(default)]
+    keep_alive: Option<bool>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    #[serde(default)]
+    system_prompt: Option<String>,
+    #[serde(default)]
+    output_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    structured_output_retries: Option<u32>,
+    #[serde(default)]
+    provider_params:
+        Option<meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<serde_json::Value>>,
+    #[serde(default)]
+    clear_provider_params: bool,
+    #[serde(default)]
+    auth_binding: Option<
+        meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<meerkat_core::AuthBindingRef>,
+    >,
+    #[serde(default)]
+    clear_auth_binding: bool,
+}
+
+impl<'de> Deserialize<'de> for StartTurnParams {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = StartTurnParamsFields::deserialize(deserializer)?;
+        Ok(Self {
+            session_id: fields.session_id,
+            prompt: fields.prompt,
+            skill_refs: fields.skill_refs,
+            skill_references: fields.skill_references,
+            flow_tool_overlay: fields.flow_tool_overlay,
+            additional_instructions: fields.additional_instructions,
+            keep_alive: fields.keep_alive,
+            model: fields.model,
+            provider: fields.provider,
+            max_tokens: fields.max_tokens,
+            system_prompt: fields.system_prompt,
+            output_schema: fields.output_schema,
+            structured_output_retries: fields.structured_output_retries,
+            provider_params: legacy_turn_metadata_override_from_split_fields(
+                fields.provider_params,
+                fields.clear_provider_params,
+                "provider_params",
+                "clear_provider_params",
+            )?,
+            auth_binding: legacy_turn_metadata_override_from_split_fields(
+                fields.auth_binding,
+                fields.clear_auth_binding,
+                "auth_binding",
+                "clear_auth_binding",
+            )?,
+        })
+    }
+}
+
+fn legacy_turn_metadata_override_from_split_fields<T, E>(
+    set_value: Option<meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<T>>,
+    clear: bool,
+    set_field: &'static str,
+    clear_field: &'static str,
+) -> Result<Option<meerkat_core::lifecycle::run_primitive::TurnMetadataOverride<T>>, E>
+where
+    E: de::Error,
+{
+    if clear && set_value.is_some() {
+        return Err(E::custom(format!(
+            "{clear_field} cannot be combined with {set_field}"
+        )));
+    }
+    if clear {
+        Ok(Some(
+            meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear,
+        ))
+    } else {
+        Ok(set_value)
+    }
 }
 
 /// Parameters for `turn/interrupt`.
@@ -215,19 +295,32 @@ pub async fn handle_start(
         }
     };
 
-    let overrides = TurnOverrides {
-        keep_alive: params.keep_alive,
-        model: params.model,
-        provider: params.provider,
-        max_tokens: params.max_tokens,
-        system_prompt: params.system_prompt,
-        output_schema: params.output_schema,
-        structured_output_retries: params.structured_output_retries,
-        provider_params: params.provider_params,
-        clear_provider_params: params.clear_provider_params,
-        auth_binding: params.auth_binding,
-        clear_auth_binding: params.clear_auth_binding,
-    };
+    let overrides =
+        TurnOverrides {
+            keep_alive: params.keep_alive,
+            model: params.model,
+            provider: params.provider,
+            max_tokens: params.max_tokens,
+            system_prompt: params.system_prompt,
+            output_schema: params.output_schema,
+            structured_output_retries: params.structured_output_retries,
+            provider_params: params
+                .provider_params
+                .as_ref()
+                .and_then(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_set)
+                .cloned(),
+            clear_provider_params: params.provider_params.as_ref().is_some_and(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::is_clear,
+            ),
+            auth_binding: params
+                .auth_binding
+                .as_ref()
+                .and_then(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::as_set)
+                .cloned(),
+            clear_auth_binding: params.auth_binding.as_ref().is_some_and(
+                meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::is_clear,
+            ),
+        };
 
     let result = match runtime
         .start_turn_via_runtime(

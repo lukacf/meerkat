@@ -8,12 +8,13 @@ use crate::model_profile::catalog::ModelTier;
 use crate::{
     budget::BudgetLimits,
     hooks::{HookCapability, HookExecutionMode, HookFailurePolicy, HookId, HookPoint},
+    lifecycle::run_primitive::ProviderParamsOverride,
     retry::RetryPolicy,
     types::{OutputSchema, SecurityMode},
 };
 use schemars::JsonSchema;
 use serde::de::Deserializer;
-use serde::ser::SerializeStruct;
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -489,10 +490,15 @@ impl Config {
             return;
         };
 
+        if self_hosted.contains_key("default_model") {
+            self.self_hosted.default_model = layer.default_model.clone();
+        }
+
         if let Some(servers) = self_hosted.get("servers").and_then(toml::Value::as_table) {
             if servers.is_empty() {
                 self.self_hosted.servers.clear();
                 self.self_hosted.models.clear();
+                self.self_hosted.default_model = None;
             } else {
                 let mut merged_servers = self.self_hosted.servers.clone();
                 for (server_id, server_value) in servers {
@@ -532,6 +538,7 @@ impl Config {
         if let Some(models) = self_hosted.get("models").and_then(toml::Value::as_table) {
             if models.is_empty() {
                 self.self_hosted.models.clear();
+                self.self_hosted.default_model = None;
             } else {
                 let mut merged_models = self.self_hosted.models.clone();
                 for (model_id, model_value) in models {
@@ -751,13 +758,18 @@ pub struct AgentConfig {
     pub budget_warning_threshold: f32,
     /// Maximum turns before forced stop
     pub max_turns: Option<u32>,
-    /// Provider-specific parameters (e.g., thinking config, reasoning effort)
+    /// Provider-specific request parameters resolved by the owning facade.
     ///
-    /// This is a generic JSON bag that providers can extract provider-specific
-    /// options from. Each provider implementation is responsible for reading
-    /// and applying relevant parameters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    /// Public surfaces may still accept legacy JSON for compatibility, but the
+    /// factory/profile seam must project it into this typed carrier before core
+    /// starts an agent turn.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_agent_provider_params",
+        serialize_with = "serialize_agent_provider_params",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub provider_params: Option<ProviderParamsOverride>,
     /// Provider-native tool defaults resolved at factory build time.
     ///
     /// **Intentionally non-persisted** (`#[serde(skip)]`): re-derived on every
@@ -767,9 +779,10 @@ pub struct AgentConfig {
     /// requiring session recreation. Explicit per-request overrides live in
     /// `provider_params` which IS persisted.
     ///
-    /// Merged with `provider_params` per-turn via RFC 7396 merge-patch.
+    /// Merged with explicit `provider_params` per-turn through
+    /// [`ProviderParamsOverride`] so defaults and overrides remain typed facts.
     #[serde(skip)]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    pub provider_tool_defaults: Option<ProviderParamsOverride>,
     /// Output schema for structured output extraction.
     ///
     /// When set, the agent will perform an extraction turn after completing
@@ -788,6 +801,40 @@ pub struct AgentConfig {
     /// built-in prompt if `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extraction_prompt: Option<String>,
+}
+
+fn deserialize_agent_provider_params<'de, D>(
+    deserializer: D,
+) -> Result<Option<ProviderParamsOverride>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let Some(value) = Option::<Value>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    if value.get("provider_tag").is_some() {
+        serde_json::from_value(value)
+            .map(Some)
+            .map_err(serde::de::Error::custom)
+    } else {
+        Ok(Some(ProviderParamsOverride::from_legacy_provider_value(
+            "config", &value,
+        )))
+    }
+}
+
+fn serialize_agent_provider_params<S>(
+    params: &Option<ProviderParamsOverride>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match params {
+        Some(params) => params.to_legacy_provider_value().serialize(serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl Default for AgentConfig {
@@ -1107,6 +1154,8 @@ impl Default for SelfHostedModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, JsonSchema)]
 #[serde(default)]
 pub struct SelfHostedConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
     pub servers: BTreeMap<String, SelfHostedServerConfig>,
     pub models: BTreeMap<String, SelfHostedModelConfig>,
 }
@@ -2998,16 +3047,50 @@ model = "custom-model"
 
     #[test]
     fn test_provider_tool_defaults_not_serialized() {
+        use crate::lifecycle::run_primitive::{OpaqueProviderBody, OpenAiProviderTag, ProviderTag};
+
         let agent_config = AgentConfig {
-            provider_tool_defaults: Some(
-                serde_json::json!({"web_search": {"type": "web_search_20250305"}}),
-            ),
+            provider_tool_defaults: Some(ProviderParamsOverride {
+                provider_tag: Some(ProviderTag::OpenAi(OpenAiProviderTag {
+                    web_search: Some(OpaqueProviderBody::from_value(
+                        &serde_json::json!({"type": "web_search"}),
+                    )),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
             ..Default::default()
         };
         let json = serde_json::to_value(&agent_config).unwrap();
         assert!(
             json.get("provider_tool_defaults").is_none(),
             "provider_tool_defaults must not be serialized: {json}"
+        );
+    }
+
+    #[test]
+    fn agent_provider_params_config_preserves_legacy_provider_native_keys() {
+        let config: Config = toml::from_str(
+            r#"
+[agent]
+model = "gpt-5.4"
+provider_params = { temperature = 0.2, reasoning_effort = "xhigh", web_search = { type = "web_search" } }
+"#,
+        )
+        .expect("legacy provider params config parses");
+
+        let params = config
+            .agent
+            .provider_params
+            .expect("provider params should be retained");
+        let legacy = params.to_legacy_provider_value();
+
+        assert_eq!(legacy["reasoning_effort"], "xhigh");
+        assert_eq!(legacy["web_search"]["type"], "web_search");
+        let temperature = legacy["temperature"].as_f64().expect("temperature");
+        assert!(
+            (temperature - 0.2).abs() < 0.000_001,
+            "unexpected temperature: {temperature}"
         );
     }
 }

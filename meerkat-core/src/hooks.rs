@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 /// Stable identifier for a configured hook.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Hash)]
@@ -388,6 +389,125 @@ pub fn default_failure_policy(capability: HookCapability) -> HookFailurePolicy {
     }
 }
 
+/// Core-owned execution policy for one hook invocation point.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookExecutionPlan {
+    pub foreground: Vec<PlannedHookEntry>,
+    pub background: Vec<PlannedHookEntry>,
+}
+
+impl HookExecutionPlan {
+    pub fn is_empty(&self) -> bool {
+        self.foreground.is_empty() && self.background.is_empty()
+    }
+
+    pub fn matching_hook_ids(&self) -> Vec<HookId> {
+        self.foreground
+            .iter()
+            .chain(self.background.iter())
+            .map(|entry| entry.entry.id.clone())
+            .collect()
+    }
+}
+
+/// One hook entry after config/run override policy has been applied.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedHookEntry {
+    pub registration_index: usize,
+    pub timeout_ms: u64,
+    pub entry: crate::config::HookEntryConfig,
+}
+
+/// Invalid hook execution policy.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum HookExecutionPolicyError {
+    #[error("hook id cannot be empty")]
+    EmptyHookId,
+    #[error("pre_* background hooks must be observe-only: {0}")]
+    BackgroundPreHookMustObserve(HookId),
+}
+
+impl From<HookExecutionPolicyError> for AgentError {
+    fn from(error: HookExecutionPolicyError) -> Self {
+        AgentError::HookConfigInvalid {
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl crate::config::HooksConfig {
+    /// Compose run-time hook policy from layered config plus explicit run overrides.
+    ///
+    /// The hook engine executes this plan; it does not own enabled/disabled
+    /// selection, timeout inheritance, foreground ordering, or background
+    /// observe-only admission.
+    pub fn execution_plan(
+        &self,
+        point: HookPoint,
+        overrides: Option<&crate::config::HookRunOverrides>,
+    ) -> Result<HookExecutionPlan, HookExecutionPolicyError> {
+        let mut entries = self.entries.clone();
+        if let Some(overrides) = overrides {
+            if !overrides.disable.is_empty() {
+                let disabled: HashSet<HookId> = overrides.disable.iter().cloned().collect();
+                entries.retain(|entry| !disabled.contains(&entry.id));
+            }
+            entries.extend(overrides.entries.clone());
+        }
+
+        let mut foreground = Vec::new();
+        let mut background = Vec::new();
+        for (registration_index, entry) in entries
+            .into_iter()
+            .filter(|entry| entry.enabled && entry.point == point)
+            .enumerate()
+        {
+            validate_planned_hook_entry(&entry)?;
+            let planned = PlannedHookEntry {
+                registration_index,
+                timeout_ms: entry.timeout_ms.unwrap_or(self.default_timeout_ms),
+                entry,
+            };
+            if planned.entry.mode == HookExecutionMode::Background {
+                background.push(planned);
+            } else {
+                foreground.push(planned);
+            }
+        }
+
+        foreground.sort_by(|a, b| {
+            a.entry
+                .priority
+                .cmp(&b.entry.priority)
+                .then_with(|| a.registration_index.cmp(&b.registration_index))
+        });
+
+        Ok(HookExecutionPlan {
+            foreground,
+            background,
+        })
+    }
+}
+
+fn validate_planned_hook_entry(
+    entry: &crate::config::HookEntryConfig,
+) -> Result<(), HookExecutionPolicyError> {
+    if entry.id.0.trim().is_empty() {
+        return Err(HookExecutionPolicyError::EmptyHookId);
+    }
+
+    if entry.mode == HookExecutionMode::Background
+        && entry.point.is_pre()
+        && entry.capability != HookCapability::Observe
+    {
+        return Err(HookExecutionPolicyError::BackgroundPreHookMustObserve(
+            entry.id.clone(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Engine-level failures that prevented hook execution.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum HookEngineError {
@@ -455,6 +575,69 @@ pub trait HookEngine: Send + Sync {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::config::{HookEntryConfig, HookRunOverrides, HooksConfig};
+
+    fn hook(id: &str, point: HookPoint, priority: i32) -> HookEntryConfig {
+        HookEntryConfig {
+            id: HookId::new(id),
+            point,
+            priority,
+            ..HookEntryConfig::default()
+        }
+    }
+
+    #[test]
+    fn hook_execution_plan_owns_order_disable_and_timeout_policy() {
+        let mut config = HooksConfig {
+            default_timeout_ms: 42,
+            ..HooksConfig::default()
+        };
+        config.entries = vec![
+            hook("base-late", HookPoint::PreLlmRequest, 100),
+            hook("base-disabled", HookPoint::PreLlmRequest, 1),
+            hook("other-point", HookPoint::PostLlmResponse, 0),
+        ];
+        let mut override_entry = hook("override-early", HookPoint::PreLlmRequest, 1);
+        override_entry.timeout_ms = Some(7);
+
+        let plan = config
+            .execution_plan(
+                HookPoint::PreLlmRequest,
+                Some(&HookRunOverrides {
+                    entries: vec![override_entry],
+                    disable: vec![HookId::new("base-disabled")],
+                }),
+            )
+            .expect("valid hook plan");
+
+        assert_eq!(
+            plan.matching_hook_ids(),
+            vec![HookId::new("override-early"), HookId::new("base-late")]
+        );
+        assert_eq!(plan.foreground[0].timeout_ms, 7);
+        assert_eq!(plan.foreground[1].timeout_ms, 42);
+        assert!(plan.background.is_empty());
+    }
+
+    #[test]
+    fn hook_execution_plan_rejects_background_pre_guardrails() {
+        let mut config = HooksConfig::default();
+        config.entries = vec![HookEntryConfig {
+            id: HookId::new("guardrail"),
+            point: HookPoint::PreToolExecution,
+            mode: HookExecutionMode::Background,
+            capability: HookCapability::Guardrail,
+            ..HookEntryConfig::default()
+        }];
+
+        let err = config
+            .execution_plan(HookPoint::PreToolExecution, None)
+            .expect_err("background pre guardrails are invalid");
+        assert_eq!(
+            err,
+            HookExecutionPolicyError::BackgroundPreHookMustObserve(HookId::new("guardrail"))
+        );
+    }
     use crate::types::{ContentBlock, ToolResult};
 
     fn text_block(s: &str) -> ContentBlock {

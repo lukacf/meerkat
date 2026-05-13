@@ -804,12 +804,13 @@ fn openai_refresh_instructions_from_snapshot(
 }
 
 fn openai_realtime_voice() -> Voice {
+    let defaults = meerkat_core::model_profile::catalog::openai_realtime_operational_defaults();
     Voice::from(
         std::env::var("RKAT_REALTIME_OPENAI_VOICE")
             .ok()
             .or_else(|| std::env::var("OPENAI_REALTIME_VOICE").ok())
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "marin".to_string()),
+            .unwrap_or_else(|| defaults.voice.to_string()),
     )
 }
 
@@ -822,13 +823,6 @@ fn openai_realtime_voice() -> Voice {
 /// deployments can opt out via `RKAT_REALTIME_INPUT_LANGUAGE` (set to a
 /// different ISO code) or `RKAT_REALTIME_INPUT_LANGUAGE=auto` to restore
 /// auto-detection.
-const OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE: &str = "en";
-/// Default ISO-639 language code for realtime output (text + audio
-/// transcript). Shares the default with input so the two modalities
-/// stay coherent under drift. `RKAT_REALTIME_OUTPUT_LANGUAGE=none`
-/// skips the instruction entirely.
-const OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE: &str = "en";
-
 fn openai_realtime_input_language() -> Option<String> {
     let raw = std::env::var("RKAT_REALTIME_INPUT_LANGUAGE")
         .ok()
@@ -841,11 +835,12 @@ fn openai_realtime_input_language() -> Option<String> {
 /// default, `auto` → None, otherwise pass through" policy. Split so
 /// unit tests can exercise the policy without touching process env.
 fn resolve_realtime_input_language(raw: Option<&str>) -> Option<String> {
+    let defaults = meerkat_core::model_profile::catalog::openai_realtime_operational_defaults();
     let value = raw
         .map(str::trim)
         .filter(|trimmed| !trimmed.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_INPUT_LANGUAGE.to_string());
+        .unwrap_or_else(|| defaults.input_language.to_string());
     if value.eq_ignore_ascii_case("auto") {
         None
     } else {
@@ -873,11 +868,12 @@ fn openai_realtime_output_language_instruction() -> Option<String> {
 /// takes the raw env value (or `None` when unset) and applies the
 /// "blank → default, `none` → None, otherwise render directive" policy.
 fn resolve_realtime_output_language_instruction(raw: Option<&str>) -> Option<String> {
+    let defaults = meerkat_core::model_profile::catalog::openai_realtime_operational_defaults();
     let value = raw
         .map(str::trim)
         .filter(|trimmed| !trimmed.is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| OPENAI_REALTIME_DEFAULT_OUTPUT_LANGUAGE.to_string());
+        .unwrap_or_else(|| defaults.output_language.to_string());
     if value.eq_ignore_ascii_case("none") {
         return None;
     }
@@ -962,6 +958,7 @@ fn openai_audio_response_config() -> ResponseConfig {
 }
 
 fn openai_realtime_transcription_model() -> String {
+    let defaults = meerkat_core::model_profile::catalog::openai_realtime_operational_defaults();
     [
         "RKAT_OPENAI_REALTIME_TRANSCRIPTION_MODEL",
         "OPENAI_REALTIME_TRANSCRIPTION_MODEL",
@@ -973,7 +970,7 @@ fn openai_realtime_transcription_model() -> String {
     .find_map(|key| std::env::var(key).ok())
     .map(|value| value.trim().to_string())
     .filter(|value| !value.is_empty())
-    .unwrap_or_else(|| "gpt-4o-mini-transcribe".to_string())
+    .unwrap_or_else(|| defaults.transcription_model.to_string())
 }
 
 fn openai_realtime_tools(visible_tools: &[ToolDef]) -> Vec<Tool> {

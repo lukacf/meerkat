@@ -1783,13 +1783,17 @@ mod tests {
             "output_schema",
             "structured_output_retries",
             "provider_params",
-            "clear_provider_params",
             "auth_binding",
-            "clear_auth_binding",
         ] {
             assert!(
                 properties.contains_key(field),
                 "mob/turn_start params missing explicit turn override field {field}"
+            );
+        }
+        for legacy_field in ["clear_provider_params", "clear_auth_binding"] {
+            assert!(
+                !properties.contains_key(legacy_field),
+                "mob/turn_start params must expose {legacy_field} through the typed turn override field, not a split clear boolean"
             );
         }
         assert_eq!(

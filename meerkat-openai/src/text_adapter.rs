@@ -247,9 +247,6 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
     fn stream<'a>(&'a self, request: &'a LlmRequest) -> LlmStream<'a> {
         let api_key = self.api_key.clone();
         Box::pin(try_stream! {
-            let mut projected_request = request.clone();
-            projected_request.messages = self.project_replay_messages(&request.messages)?;
-            let request = &projected_request;
             let (instructions, history_items) = convert_messages(&request.messages)?;
             let tools = build_tools(request);
 
@@ -414,6 +411,10 @@ impl LlmClient for OpenAiRealtimeTextAdapter {
         // Share the "openai" provider label so factory-level provider
         // inference / logging treats realtime sessions uniformly.
         "openai"
+    }
+
+    fn provider_id(&self) -> meerkat_core::Provider {
+        meerkat_core::Provider::OpenAI
     }
 
     async fn health_check(&self) -> Result<(), LlmError> {

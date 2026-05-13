@@ -2881,10 +2881,24 @@ impl SessionRuntime {
                     message,
                     data: None,
                 })?,
-            provider_params: overrides.and_then(|ov| ov.provider_params.clone()),
-            clear_provider_params: overrides.is_some_and(|ov| ov.clear_provider_params),
-            auth_binding: overrides.and_then(|ov| ov.auth_binding.clone()),
-            clear_auth_binding: overrides.is_some_and(|ov| ov.clear_auth_binding),
+            provider_params: overrides.and_then(|ov| {
+                if ov.clear_provider_params {
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                } else {
+                    ov.provider_params
+                        .clone()
+                        .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set)
+                }
+            }),
+            auth_binding: overrides.and_then(|ov| {
+                if ov.clear_auth_binding {
+                    Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+                } else {
+                    ov.auth_binding
+                        .clone()
+                        .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set)
+                }
+            }),
             max_tokens: overrides.and_then(|ov| ov.max_tokens),
             system_prompt: overrides.and_then(|ov| ov.system_prompt.clone()),
             output_schema,
@@ -3326,10 +3340,20 @@ impl SessionRuntime {
         let request = SessionLlmReconfigureRequest {
             model: ov.model.clone(),
             provider: ov.provider.clone(),
-            provider_params: ov.provider_params.clone(),
-            clear_provider_params: ov.clear_provider_params,
-            auth_binding: ov.auth_binding.clone(),
-            clear_auth_binding: ov.clear_auth_binding,
+            provider_params: if ov.clear_provider_params {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+            } else {
+                ov.provider_params
+                    .clone()
+                    .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set)
+            },
+            auth_binding: if ov.clear_auth_binding {
+                Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+            } else {
+                ov.auth_binding
+                    .clone()
+                    .map(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set)
+            },
         };
 
         if !self.runtime_adapter.contains_session(session_id).await
@@ -5429,10 +5453,19 @@ impl SessionRuntime {
             build.instance_id = build.instance_id.or_else(|| self.inner.instance_id());
             build.backend = build.backend.or_else(|| self.inner.backend());
             build.config_generation = build.config_generation.or(runtime_generation);
-            let initial_turn_provider_hint = build_config
-                .provider
-                .or_else(|| meerkat_core::Provider::infer_from_model(&build_config.model))
-                .map(|provider| provider.as_str());
+            let initial_turn_provider_hint = if let Some(provider) = build_config.provider {
+                Some(provider.as_str())
+            } else {
+                self.model_registry()
+                    .await
+                    .ok()
+                    .and_then(|registry| {
+                        registry
+                            .entry(&build_config.model)
+                            .map(|entry| entry.provider)
+                    })
+                    .map(|provider| provider.as_str())
+            };
             build.initial_turn_metadata =
                 Some(Self::runtime_stamped_prompt_turn_metadata_from_overrides(
                     skill_references.clone(),
@@ -11457,9 +11490,7 @@ mod tests {
             model: Some("gpt-5.4".to_string()),
             provider: Some("anthropic".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         };
 
         let err = host
@@ -11488,9 +11519,7 @@ mod tests {
             model: Some("unknown-model-xyz".to_string()),
             provider: Some("provider-shaped-cache-key".to_string()),
             provider_params: None,
-            clear_provider_params: false,
             auth_binding: None,
-            clear_auth_binding: false,
         };
 
         let err = host
@@ -18842,9 +18871,40 @@ mod tests {
         assert_eq!(params.system_prompt.as_deref(), Some("You are helpful"));
         assert!(params.output_schema.is_some());
         assert_eq!(params.structured_output_retries, Some(3));
-        assert!(params.provider_params.is_some());
-        assert!(!params.clear_provider_params);
-        assert!(params.clear_auth_binding);
+        assert!(matches!(
+            params.provider_params,
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(_))
+        ));
+        assert!(matches!(
+            params.auth_binding,
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+        ));
+    }
+
+    #[test]
+    fn turn_start_params_reject_legacy_set_and_clear_pairs() {
+        use crate::handlers::turn::StartTurnParams;
+
+        let provider_params = serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "provider_params": {"temperature": 0.2},
+            "clear_provider_params": true
+        });
+        let err = serde_json::from_value::<StartTurnParams>(provider_params).unwrap_err();
+        assert!(err.to_string().contains("clear_provider_params"));
+
+        let auth_binding = serde_json::json!({
+            "session_id": "test-id",
+            "prompt": "hello",
+            "auth_binding": {
+                "realm": "dev",
+                "binding": "anthropic_default"
+            },
+            "clear_auth_binding": true
+        });
+        let err = serde_json::from_value::<StartTurnParams>(auth_binding).unwrap_err();
+        assert!(err.to_string().contains("clear_auth_binding"));
     }
 
     #[test]
@@ -18942,10 +19002,14 @@ mod tests {
             .recovery_overrides_from_turn(Some(&overrides), false)
             .expect("valid recovery overrides");
 
-        assert!(recovered.clear_provider_params);
-        assert_eq!(recovered.provider_params, None);
-        assert_eq!(recovered.auth_binding, Some(auth_binding));
-        assert!(!recovered.clear_auth_binding);
+        assert_eq!(
+            recovered.provider_params,
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+        );
+        assert_eq!(
+            recovered.auth_binding,
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Set(auth_binding))
+        );
 
         let clear_connection = TurnOverrides {
             clear_auth_binding: true,
@@ -18954,8 +19018,10 @@ mod tests {
         let recovered = runtime
             .recovery_overrides_from_turn(Some(&clear_connection), false)
             .expect("valid clear connection recovery override");
-        assert!(recovered.clear_auth_binding);
-        assert_eq!(recovered.auth_binding, None);
+        assert_eq!(
+            recovered.auth_binding,
+            Some(meerkat_core::lifecycle::run_primitive::TurnMetadataOverride::Clear)
+        );
     }
 
     // -----------------------------------------------------------------------

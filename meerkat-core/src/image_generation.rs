@@ -952,6 +952,8 @@ pub struct ScopedModelOverrideSummary {
     pub kind: ScopedModelOverrideKind,
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub target_model: ModelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_provider: Option<crate::Provider>,
     pub topology_epoch: TopologyEpoch,
 }
 
@@ -961,6 +963,8 @@ pub struct SwitchTurnRequestSummary {
     pub request_id: SwitchTurnRequestId,
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub target_model: ModelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_provider: Option<crate::Provider>,
     pub duration: SwitchTurnDuration,
     pub phase: SwitchTurnPhase,
 }
@@ -970,8 +974,11 @@ pub struct SwitchTurnRequestSummary {
 pub struct SessionModelRoutingStatus {
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub baseline_model: ModelId,
+    pub baseline_provider: crate::Provider,
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub effective_model: ModelId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_provider: Option<crate::Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_turn_override: Option<ScopedModelOverrideSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -983,19 +990,26 @@ pub struct SessionModelRoutingStatus {
 impl SessionModelRoutingStatus {
     pub fn new(
         baseline_model: ModelId,
+        baseline_provider: crate::Provider,
         active_turn_override: Option<ScopedModelOverrideSummary>,
         active_operation_override: Option<ScopedModelOverrideSummary>,
         pending_switch_turn: Option<SwitchTurnRequestSummary>,
     ) -> Self {
-        let effective_model = active_operation_override
+        let active_override = active_operation_override
             .as_ref()
-            .or(active_turn_override.as_ref())
+            .or(active_turn_override.as_ref());
+        let effective_model = active_override
             .map(|summary| summary.target_model.clone())
             .unwrap_or_else(|| baseline_model.clone());
+        let effective_provider = active_override
+            .and_then(|summary| summary.target_provider)
+            .or(Some(baseline_provider));
 
         Self {
             baseline_model,
+            baseline_provider,
             effective_model,
+            effective_provider,
             active_turn_override,
             active_operation_override,
             pending_switch_turn,
@@ -1208,6 +1222,7 @@ mod tests {
                 duration: FiniteScopedTurnDuration::OneTurn,
             },
             target_model: ModelId::new("turn-model"),
+            target_provider: Some(crate::Provider::Anthropic),
             topology_epoch: TopologyEpoch(1),
         };
         let operation = ScopedModelOverrideSummary {
@@ -1216,23 +1231,59 @@ mod tests {
                 operation_id: ImageOperationId::new(uuid(21)),
             },
             target_model: ModelId::new("operation-model"),
+            target_provider: Some(crate::Provider::OpenAI),
             topology_epoch: TopologyEpoch(2),
         };
 
-        let baseline_only =
-            SessionModelRoutingStatus::new(ModelId::new("baseline"), None, None, None);
+        let baseline_only = SessionModelRoutingStatus::new(
+            ModelId::new("baseline"),
+            crate::Provider::Gemini,
+            None,
+            None,
+            None,
+        );
         assert_eq!(baseline_only.effective_model, ModelId::new("baseline"));
+        assert_eq!(
+            baseline_only.effective_provider,
+            Some(crate::Provider::Gemini)
+        );
 
         let turn_active = SessionModelRoutingStatus::new(
             ModelId::new("baseline"),
+            crate::Provider::Gemini,
             Some(turn.clone()),
             None,
             None,
         );
         assert_eq!(turn_active.effective_model, ModelId::new("turn-model"));
+        assert_eq!(
+            turn_active.effective_provider,
+            Some(crate::Provider::Anthropic)
+        );
+
+        let providerless_turn = ScopedModelOverrideSummary {
+            target_provider: None,
+            ..turn.clone()
+        };
+        let providerless_turn_active = SessionModelRoutingStatus::new(
+            ModelId::new("baseline"),
+            crate::Provider::Gemini,
+            Some(providerless_turn),
+            None,
+            None,
+        );
+        assert_eq!(
+            providerless_turn_active.effective_model,
+            ModelId::new("turn-model")
+        );
+        assert_eq!(
+            providerless_turn_active.effective_provider,
+            Some(crate::Provider::Gemini)
+        );
 
         let operation_active = SessionModelRoutingStatus::new(
             ModelId::new("baseline"),
+            crate::Provider::Gemini,
             Some(turn),
             Some(operation),
             None,
@@ -1240,6 +1291,10 @@ mod tests {
         assert_eq!(
             operation_active.effective_model,
             ModelId::new("operation-model")
+        );
+        assert_eq!(
+            operation_active.effective_provider,
+            Some(crate::Provider::OpenAI)
         );
     }
 

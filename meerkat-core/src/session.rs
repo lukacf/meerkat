@@ -2200,9 +2200,9 @@ pub fn resolve_session_llm_identity_override(
 pub struct SessionLlmRequestPolicy {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_params: Option<serde_json::Value>,
+    pub provider_params: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub provider_tool_defaults: Option<serde_json::Value>,
+    pub provider_tool_defaults: Option<crate::lifecycle::run_primitive::ProviderParamsOverride>,
 }
 
 impl SessionMetadata {

@@ -273,25 +273,17 @@ pub async fn handle_create(
     }
 
     let model_was_explicit = params.model.is_some();
-    let runtime_default_model = if let Some(config_runtime) = runtime.config_runtime() {
+    let provider_was_explicit = params.provider.is_some();
+    let config = if let Some(config_runtime) = runtime.config_runtime() {
         config_runtime
             .get()
             .await
             .ok()
-            .map(|snapshot| snapshot.config.agent.model)
+            .map(|snapshot| snapshot.config)
+            .unwrap_or_default()
     } else {
-        None
+        meerkat_core::Config::default()
     };
-    let model_name = params
-        .model
-        .clone()
-        .or(runtime_default_model)
-        .unwrap_or_else(|| {
-            meerkat_models::default_model("anthropic")
-                .unwrap_or("claude-sonnet-4-5")
-                .to_string()
-        });
-    let provider_was_explicit = params.provider.is_some();
     let provider = match params
         .provider
         .as_deref()
@@ -317,7 +309,7 @@ pub async fn handle_create(
         None => None,
     };
 
-    let mut build_config = AgentBuildConfig::new(model_name);
+    let mut build_config = AgentBuildConfig::from_config_model(&config, params.model.clone());
     build_config.provider = if provider_was_explicit || model_was_explicit {
         provider
     } else {

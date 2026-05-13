@@ -9,6 +9,8 @@
 
 use std::time::Duration;
 
+use crate::Provider;
+
 /// Resolver for model-specific operational defaults.
 ///
 /// Implemented by the facade/factory layer using `meerkat-models::profile::profile_for(...)`.
@@ -17,5 +19,5 @@ use std::time::Duration;
 pub trait ModelOperationalDefaultsResolver: Send + Sync {
     /// Return the profile-derived default call timeout for the given model/provider,
     /// or `None` if the model is unknown or has no profiled default.
-    fn call_timeout_for(&self, provider: &str, model: &str) -> Option<Duration>;
+    fn call_timeout_for(&self, provider: Provider, model: &str) -> Option<Duration>;
 }

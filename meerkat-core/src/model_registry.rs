@@ -292,10 +292,9 @@ fn append_self_hosted(
         return Ok(());
     }
 
-    let default_model = config.models.keys().min().cloned().ok_or_else(|| {
-        ConfigError::InternalError("self-hosted models unexpectedly empty".to_string())
-    })?;
-    defaults.insert(Provider::SelfHosted, default_model);
+    if let Some(default_model) = resolve_self_hosted_default_model(config)? {
+        defaults.insert(Provider::SelfHosted, default_model);
+    }
 
     for (model_id, model) in &config.models {
         let server = config.servers.get(&model.server).ok_or_else(|| {
@@ -353,6 +352,30 @@ fn append_self_hosted(
     }
 
     Ok(())
+}
+
+fn resolve_self_hosted_default_model(
+    config: &SelfHostedConfig,
+) -> Result<Option<String>, ConfigError> {
+    if let Some(default_model) = config
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        if config.models.contains_key(default_model) {
+            return Ok(Some(default_model.to_string()));
+        }
+        return Err(ConfigError::Validation(format!(
+            "self_hosted.default_model references unknown model alias '{default_model}'"
+        )));
+    }
+
+    if config.models.len() == 1 {
+        return Ok(config.models.keys().next().cloned());
+    }
+
+    Ok(None)
 }
 
 fn insert_unique(
@@ -462,6 +485,59 @@ mod tests {
         assert_eq!(
             registry.default_model(Provider::SelfHosted),
             Some("gemma-4-31b")
+        );
+    }
+
+    #[test]
+    fn self_hosted_default_model_is_explicit_for_multi_model_configs() {
+        let mut config = config_with_self_hosted();
+        config.self_hosted.models.insert(
+            "aaa-lexicographic-trap".to_string(),
+            SelfHostedModelConfig {
+                server: "local".to_string(),
+                remote_model: "other".to_string(),
+                display_name: "Other".to_string(),
+                family: "other".to_string(),
+                tier: ModelTier::Supported,
+                context_window: None,
+                max_output_tokens: None,
+                vision: false,
+                image_tool_results: false,
+                inline_video: false,
+                supports_temperature: true,
+                supports_thinking: false,
+                supports_reasoning: false,
+                supports_web_search: false,
+                call_timeout_secs: None,
+            },
+        );
+
+        let registry = ModelRegistry::from_config(&config).expect("registry");
+        assert_eq!(
+            registry.default_model(Provider::SelfHosted),
+            None,
+            "multi-model self-hosted configs must not publish a lexicographic default"
+        );
+
+        config.self_hosted.default_model = Some("gemma-4-31b".to_string());
+        let registry = ModelRegistry::from_config(&config).expect("registry");
+        assert_eq!(
+            registry.default_model(Provider::SelfHosted),
+            Some("gemma-4-31b")
+        );
+    }
+
+    #[test]
+    fn self_hosted_default_model_must_reference_configured_alias() {
+        let mut config = config_with_self_hosted();
+        config.self_hosted.default_model = Some("missing".to_string());
+
+        let err = ModelRegistry::from_config(&config)
+            .expect_err("missing default model alias should fail registry build");
+        assert!(
+            err.to_string()
+                .contains("self_hosted.default_model references unknown model alias 'missing'"),
+            "unexpected error: {err}"
         );
     }
 

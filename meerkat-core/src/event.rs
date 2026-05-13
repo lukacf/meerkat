@@ -2992,10 +2992,7 @@ mod tests {
         match roundtrip {
             AgentEvent::SkillResolutionFailed { skill_key, reason } => {
                 assert_eq!(skill_key, Some(key.clone()));
-                assert_eq!(
-                    reason,
-                    SkillResolutionFailureReason::NotFound { key: key.clone() }
-                );
+                assert_eq!(reason, SkillResolutionFailureReason::NotFound { key });
             }
             other => unreachable!("unexpected event: {other:?}"),
         }

@@ -203,7 +203,10 @@ skills = ["skills/review.md"]
 "#
                 .to_vec(),
             ),
-            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#.to_vec(),
+            ),
             ("skills/review.md".to_string(), b"selected".to_vec()),
             (
                 "skills/unreferenced.md".to_string(),
@@ -236,17 +239,19 @@ skills = ["skills/missing.md"]
 "#
                 .to_vec(),
             ),
-            ("definition.json".to_string(), br#"{"id":"mob"}"#.to_vec()),
+            (
+                "definition.json".to_string(),
+                br#"{"id":"mob","profiles":{"worker":{"model":"gpt-5"}}}"#.to_vec(),
+            ),
         ]);
         let archive_bytes = create_targz(&files).unwrap();
-        let archive = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap();
-
-        let err = archive.manifest_profile_skill_texts().unwrap_err();
+        let err = MobpackArchive::from_archive_bytes(&archive_bytes).unwrap_err();
 
         assert!(matches!(
             err,
-            PackValidationError::MissingSkillFile { skill_name, path }
-                if skill_name == "worker" && path == "skills/missing.md"
+            PackValidationError::InvalidManifestField { field, reason }
+                if field == "profiles.worker.skills[0]"
+                    && reason.contains("skill file 'skills/missing.md' missing from archive")
         ));
     }
 

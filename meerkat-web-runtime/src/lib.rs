@@ -3084,7 +3084,11 @@ skills = ["skills/review.md"]
         let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
         append_test_mobpack_file(&mut builder, "manifest.toml", manifest);
-        append_test_mobpack_file(&mut builder, "definition.json", br#"{"id":"browser-test"}"#);
+        append_test_mobpack_file(
+            &mut builder,
+            "definition.json",
+            br#"{"id":"browser-test","profiles":{"worker":{"model":"gpt-5"}}}"#,
+        );
         append_test_mobpack_file(&mut builder, "skills/review.md", b"selected");
         append_test_mobpack_file(&mut builder, "skills/unreferenced.md", b"not selected");
         builder.finish().expect("finish tar archive");

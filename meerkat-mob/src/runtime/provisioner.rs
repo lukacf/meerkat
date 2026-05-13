@@ -146,6 +146,11 @@ pub trait MobProvisioner: Send + Sync {
         member_ref: &MemberRef,
         req: StartTurnRequest,
     ) -> Result<(), MobError>;
+    async fn admit_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError>;
     async fn start_flow_step(
         &self,
         member_ref: &MemberRef,
@@ -462,6 +467,38 @@ impl SessionBackend {
         }
 
         runtime_completion_to_mob_result(session_id, completion)
+    }
+
+    fn runtime_input_from_turn_request(req: &StartTurnRequest) -> Input {
+        let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+            handling_mode: Some(req.runtime.handling_mode),
+            keep_alive: None,
+            skill_references: req.runtime.skill_references.clone(),
+            flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
+            render_metadata: req.runtime.render_metadata.clone(),
+            ..Default::default()
+        };
+        let prompt = req.prompt.clone();
+        Input::Prompt(PromptInput {
+            header: InputHeader {
+                id: meerkat_core::InputId::new(),
+                timestamp: chrono::Utc::now(),
+                source: InputOrigin::Operator,
+                durability: InputDurability::Durable,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            text: prompt.text_content(),
+            blocks: if prompt.has_images() {
+                Some(prompt.into_blocks())
+            } else {
+                None
+            },
+            typed_turn_appends: req.runtime.typed_turn_appends.clone(),
+            turn_metadata: Some(turn_metadata),
+        })
     }
 
     async fn admit_runtime_input(
@@ -1463,35 +1500,7 @@ impl MobProvisioner for SessionBackend {
             self.ops_adapter
                 .report_member_progress(member_ref, "turn dispatched")
                 .await?;
-            let turn_metadata = meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
-                handling_mode: Some(req.runtime.handling_mode),
-                keep_alive: None,
-                skill_references: req.runtime.skill_references.clone(),
-                flow_tool_overlay: req.runtime.flow_tool_overlay.clone(),
-                render_metadata: req.runtime.render_metadata.clone(),
-                ..Default::default()
-            };
-            let prompt = req.prompt.clone();
-            let input = Input::Prompt(PromptInput {
-                header: InputHeader {
-                    id: meerkat_core::InputId::new(),
-                    timestamp: chrono::Utc::now(),
-                    source: InputOrigin::Operator,
-                    durability: InputDurability::Durable,
-                    visibility: InputVisibility::default(),
-                    idempotency_key: None,
-                    supersession_key: None,
-                    correlation_id: None,
-                },
-                text: prompt.text_content(),
-                blocks: if prompt.has_images() {
-                    Some(prompt.into_blocks())
-                } else {
-                    None
-                },
-                typed_turn_appends: req.runtime.typed_turn_appends.clone(),
-                turn_metadata: Some(turn_metadata),
-            });
+            let input = Self::runtime_input_from_turn_request(&req);
             return self
                 .execute_runtime_input(&session_id, input, req.event_tx)
                 .await;
@@ -1502,6 +1511,42 @@ impl MobProvisioner for SessionBackend {
             .await
             .map(|_| ())
             .map_err(|error| session_turn_error_to_mob_error(&session_id, error))
+    }
+
+    async fn admit_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError> {
+        let session_id = Self::require_session(member_ref, "admit turn")?;
+        if self.runtime_adapter.is_some() {
+            self.ops_adapter
+                .report_member_progress(member_ref, "turn dispatched")
+                .await?;
+            let input = Self::runtime_input_from_turn_request(&req);
+            return self
+                .admit_runtime_input(&session_id, input, req.event_tx)
+                .await;
+        }
+
+        let session_service = self.session_service.clone();
+        let task_session_id = session_id.clone();
+        let mut task = tokio::spawn(async move {
+            session_service
+                .start_turn(&task_session_id, req)
+                .await
+                .map(|_| ())
+                .map_err(|error| session_turn_error_to_mob_error(&task_session_id, error))
+        });
+
+        tokio::select! {
+            result = &mut task => {
+                result.map_err(|error| {
+                    MobError::Internal(format!("turn admission task failed: {error}"))
+                })?
+            }
+            () = tokio::task::yield_now() => Ok(()),
+        }
     }
 
     async fn start_flow_step(
@@ -2341,6 +2386,19 @@ impl MobProvisioner for MultiBackendProvisioner {
                 Ok(())
             }
             _ => self.session.start_turn(member_ref, req).await,
+        }
+    }
+
+    async fn admit_turn(
+        &self,
+        member_ref: &MemberRef,
+        req: StartTurnRequest,
+    ) -> Result<(), MobError> {
+        match member_ref {
+            MemberRef::BackendPeer {
+                session_id: None, ..
+            } => self.start_turn(member_ref, req).await,
+            _ => self.session.admit_turn(member_ref, req).await,
         }
     }
 

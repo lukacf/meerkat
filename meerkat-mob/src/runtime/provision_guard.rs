@@ -184,6 +184,14 @@ mod tests {
             Ok(())
         }
 
+        async fn admit_turn(
+            &self,
+            _member_ref: &MemberRef,
+            _req: StartTurnRequest,
+        ) -> Result<(), MobError> {
+            Ok(())
+        }
+
         async fn interaction_event_injector(
             &self,
             _session_id: &SessionId,

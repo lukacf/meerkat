@@ -155,6 +155,7 @@ pub(super) struct SubmitWorkPayload {
     pub origin: WorkOrigin,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    pub ack_mode: crate::mob_machine::SubmitWorkAckMode,
 }
 
 // ---------------------------------------------------------------------------

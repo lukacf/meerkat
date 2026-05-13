@@ -151,6 +151,18 @@ pub(crate) enum MobMachineCommand {
     },
 }
 
+/// Runtime-shell acknowledgement policy for an admitted SubmitWork command.
+///
+/// This does not decide whether the mob machine accepts the transition. It only
+/// selects how long the runtime actor waits while realizing the admitted effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SubmitWorkAckMode {
+    /// Return once the turn has been accepted by the runtime/session ingress.
+    IngressAccepted,
+    /// Return after the member turn completes.
+    TurnCompleted,
+}
+
 /// Payload for [`MobMachineCommand::SubmitWork`].
 pub(crate) struct SubmitWorkCommand {
     pub runtime_id: AgentRuntimeId,
@@ -159,6 +171,7 @@ pub(crate) struct SubmitWorkCommand {
     pub spec: WorkSpec,
     pub handling_mode: meerkat_core::types::HandlingMode,
     pub render_metadata: Option<meerkat_core::types::RenderMetadata>,
+    pub ack_mode: SubmitWorkAckMode,
 }
 
 #[allow(clippy::large_enum_variant)]

@@ -9967,6 +9967,7 @@ impl MobActor {
             origin,
             handling_mode,
             render_metadata,
+            ack_mode,
         } = *payload;
         self.ensure_pending_spawn_alignment("handle_submit_work preflight")?;
 
@@ -10116,7 +10117,7 @@ impl MobActor {
             ));
         }
 
-        self.dispatch_member_turn(&entry, content, handling_mode, render_metadata)
+        self.dispatch_member_turn(&entry, content, handling_mode, render_metadata, ack_mode)
             .await
     }
 
@@ -10195,6 +10196,7 @@ impl MobActor {
         content: ContentInput,
         handling_mode: meerkat_core::types::HandlingMode,
         render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
         match entry.runtime_mode {
@@ -10245,7 +10247,14 @@ impl MobActor {
                         None,
                     ),
                 };
-                self.provisioner.start_turn(&entry.member_ref, req).await?;
+                match ack_mode {
+                    crate::mob_machine::SubmitWorkAckMode::IngressAccepted => {
+                        self.provisioner.admit_turn(&entry.member_ref, req).await?;
+                    }
+                    crate::mob_machine::SubmitWorkAckMode::TurnCompleted => {
+                        self.provisioner.start_turn(&entry.member_ref, req).await?;
+                    }
+                }
                 Ok(())
             }
         }

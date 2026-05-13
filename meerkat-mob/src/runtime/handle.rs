@@ -1366,6 +1366,7 @@ impl MobHandle {
                     spec,
                     handling_mode,
                     render_metadata,
+                    ack_mode,
                 } = *cmd;
                 let receipt_work_ref = work_ref.clone();
                 let payload = Box::new(super::state::SubmitWorkPayload {
@@ -1376,6 +1377,7 @@ impl MobHandle {
                     origin: spec.origin,
                     handling_mode,
                     render_metadata,
+                    ack_mode,
                 });
                 self.send_actor_command(|reply_tx| MobCommand::SubmitWork { payload, reply_tx })
                     .await??;
@@ -2771,6 +2773,7 @@ impl MobHandle {
             spec: WorkSpec::new(message, WorkOrigin::External),
             handling_mode,
             render_metadata,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
@@ -2805,6 +2808,7 @@ impl MobHandle {
             spec: WorkSpec::new(message, WorkOrigin::Internal),
             handling_mode: HandlingMode::Queue,
             render_metadata: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::TurnCompleted,
         });
         self.execute_machine_command(MobMachineCommand::SubmitWork(cmd))
             .await?;
@@ -2835,6 +2839,7 @@ impl MobHandle {
             spec,
             handling_mode: HandlingMode::Queue,
             render_metadata: None,
+            ack_mode: crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
         });
         match self
             .execute_machine_command(MobMachineCommand::SubmitWork(cmd))

@@ -17651,7 +17651,7 @@ async fn test_external_turn_turn_driven_mode_uses_start_turn_dispatch() {
 }
 
 #[tokio::test]
-async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() {
+async fn test_runtime_backed_turn_driven_dispatch_returns_after_ingress_admission() {
     let (handle, service) = create_test_mob_with_runtime_adapter(sample_definition()).await;
     handle
         .spawn_with_options(
@@ -17675,14 +17675,17 @@ async fn test_runtime_backed_turn_driven_dispatch_surfaces_start_turn_failure() 
     let debug = format!("{result:?}");
 
     assert!(
-        matches!(&result, Err(MobError::Internal(message)) if message.contains("mock start_turn failure")),
-        "runtime-backed turn dispatch must surface the underlying turn failure, got: {debug}"
+        result.is_ok(),
+        "runtime-backed turn dispatch should return after ingress admission, got: {debug}"
     );
-    assert_eq!(
-        service.start_turn_call_count(),
-        baseline_start_turn_calls + 1,
-        "runtime-backed dispatch should still attempt exactly one turn"
-    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.start_turn_call_count() < baseline_start_turn_calls + 1 {
+        assert!(
+            Instant::now() < deadline,
+            "runtime-backed dispatch should still attempt exactly one turn"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -28789,6 +28792,85 @@ async fn test_submit_work_external_origin_succeeds() {
         .await
         .expect("submit_work external should succeed for externally addressable member");
     assert_eq!(receipt.runtime_id, entry.agent_runtime_id);
+}
+
+#[tokio::test]
+async fn test_wire_external_peer_not_blocked_by_delayed_turn_driven_submit_work() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("l-busy-turn-driven");
+    handle
+        .spawn_with_options(
+            ProfileName::from("lead"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven lead");
+
+    let entry = handle
+        .get_member(&AgentIdentity::from(member_id.as_str()))
+        .await
+        .expect("member exists");
+    service.set_start_turn_delay_ms(600_000);
+
+    let submit_handle = handle.clone();
+    let submit_runtime_id = entry.agent_runtime_id.clone();
+    let submit_fence = entry.fence_token;
+    let submit = tokio::spawn(async move {
+        submit_handle
+            .submit_work(
+                submit_runtime_id,
+                submit_fence,
+                WorkRef::new(),
+                WorkSpec::new("long running work".to_string(), WorkOrigin::External),
+            )
+            .await
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.start_turn_call_count() == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "delayed turn-driven work should reach the runtime executor"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let external = test_trusted_peer_descriptor(
+        "remote-mob/worker/busy-peer",
+        "inproc://remote-mob/worker/busy-peer",
+    );
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        handle.wire(
+            AgentIdentity::from(member_id.as_str()),
+            PeerTarget::External(external.clone()),
+        ),
+    )
+    .await
+    .expect("wire must not wait behind turn completion")
+    .expect("wire external peer");
+
+    let trusted = entry
+        .member_ref
+        .bridge_session_id()
+        .map(|session_id| service.trusted_peer_names(session_id));
+    if let Some(trusted) = trusted {
+        let trusted = trusted.await;
+        assert!(
+            trusted.iter().any(|name| name == external.name.as_str()),
+            "external peer trust should be installed after wire"
+        );
+    }
+
+    tokio::time::timeout(Duration::from_millis(100), submit)
+        .await
+        .expect("submit_work should return after ingress admission")
+        .expect("submit task should not panic")
+        .expect("submit_work should be accepted");
 }
 
 #[tokio::test]

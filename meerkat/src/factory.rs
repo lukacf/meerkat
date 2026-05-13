@@ -836,6 +836,37 @@ fn provider_tool_defaults_for(
     }
 }
 
+#[cfg(any(feature = "session-compaction", test))]
+fn model_aware_compaction_config(
+    config: &Config,
+    registry: &ModelRegistry,
+    provider: Provider,
+    model: &str,
+) -> meerkat_core::CompactionConfig {
+    let mut compaction: meerkat_core::CompactionConfig = config.compaction.clone().into();
+    let default_threshold = meerkat_core::CompactionConfig::default().auto_compact_threshold;
+    if config.compaction.auto_compact_threshold_explicit
+        || compaction.auto_compact_threshold != default_threshold
+    {
+        return compaction;
+    }
+
+    if let Some(context_window) = registry
+        .entry_for_provider(provider, model)
+        .and_then(|entry| entry.context_window)
+    {
+        // The static default is intentionally conservative for unknown models.
+        // Cataloged large-context models should compact near the model window,
+        // with enough headroom for the active turn's output.
+        let context_window = u64::from(context_window);
+        if context_window > 0 {
+            compaction.auto_compact_threshold = context_window.saturating_mul(4) / 5;
+        }
+    }
+
+    compaction
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn provider_web_search_enabled(config: &Config, provider: Provider) -> bool {
     match provider {
@@ -4699,7 +4730,7 @@ impl AgentFactory {
         #[cfg(feature = "session-compaction")]
         {
             let compactor = Arc::new(meerkat_session::DefaultCompactor::new(
-                config.compaction.clone().into(),
+                model_aware_compaction_config(config, &registry, provider, &model),
             ));
             builder = builder.compactor(compactor);
         }
@@ -5030,6 +5061,42 @@ mod tests {
 
         assert_eq!(provider, Provider::OpenAI);
         assert_eq!(server_id, None);
+    }
+
+    #[test]
+    fn default_compaction_threshold_scales_with_large_context_model() {
+        let config = Config::default();
+        let registry = config.model_registry().expect("registry");
+
+        let compaction =
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+
+        assert_eq!(compaction.auto_compact_threshold, 840_000);
+    }
+
+    #[test]
+    fn explicit_compaction_threshold_is_preserved() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 42_000;
+        let registry = config.model_registry().expect("registry");
+
+        let compaction =
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+
+        assert_eq!(compaction.auto_compact_threshold, 42_000);
+    }
+
+    #[test]
+    fn explicit_default_compaction_threshold_is_preserved() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold = 100_000;
+        config.compaction.auto_compact_threshold_explicit = true;
+        let registry = config.model_registry().expect("registry");
+
+        let compaction =
+            model_aware_compaction_config(&config, &registry, Provider::OpenAI, "gpt-5.5");
+
+        assert_eq!(compaction.auto_compact_threshold, 100_000);
     }
 
     #[test]

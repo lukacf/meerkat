@@ -13,6 +13,7 @@ use crate::{
 };
 use schemars::JsonSchema;
 use serde::de::Deserializer;
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
@@ -1291,11 +1292,15 @@ impl Default for CommsRuntimeConfig {
 ///
 /// This config is serialized/deserialized in realm config and mapped to
 /// `meerkat_core::CompactionConfig` when wiring the session compactor.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompactionRuntimeConfig {
     /// Trigger compaction when input tokens for a turn reach this threshold.
     pub auto_compact_threshold: u64,
+    /// Whether `auto_compact_threshold` was explicitly present in config.
+    ///
+    /// This preserves the difference between inheriting Meerkat's default
+    /// threshold and deliberately pinning that same numeric value.
+    pub auto_compact_threshold_explicit: bool,
     /// Number of recent complete turns to retain after compaction.
     pub recent_turn_budget: usize,
     /// Maximum tokens for the compaction summary response.
@@ -1308,10 +1313,71 @@ impl Default for CompactionRuntimeConfig {
     fn default() -> Self {
         Self {
             auto_compact_threshold: 100_000,
+            auto_compact_threshold_explicit: false,
             recent_turn_budget: 4,
             max_summary_tokens: 4096,
             min_turns_between_compactions: 3,
         }
+    }
+}
+
+impl Serialize for CompactionRuntimeConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let defaults = Self::default();
+        let include_threshold = self.auto_compact_threshold_explicit
+            || self.auto_compact_threshold != defaults.auto_compact_threshold;
+        let mut len = 3;
+        if include_threshold {
+            len += 1;
+        }
+
+        let mut state = serializer.serialize_struct("CompactionRuntimeConfig", len)?;
+        if include_threshold {
+            state.serialize_field("auto_compact_threshold", &self.auto_compact_threshold)?;
+        }
+        state.serialize_field("recent_turn_budget", &self.recent_turn_budget)?;
+        state.serialize_field("max_summary_tokens", &self.max_summary_tokens)?;
+        state.serialize_field(
+            "min_turns_between_compactions",
+            &self.min_turns_between_compactions,
+        )?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CompactionRuntimeConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Seed {
+            auto_compact_threshold: Option<u64>,
+            recent_turn_budget: Option<usize>,
+            max_summary_tokens: Option<u32>,
+            min_turns_between_compactions: Option<u32>,
+        }
+
+        let seed = Seed::deserialize(deserializer)?;
+        let defaults = Self::default();
+        Ok(Self {
+            auto_compact_threshold: seed
+                .auto_compact_threshold
+                .unwrap_or(defaults.auto_compact_threshold),
+            auto_compact_threshold_explicit: seed.auto_compact_threshold.is_some(),
+            recent_turn_budget: seed
+                .recent_turn_budget
+                .unwrap_or(defaults.recent_turn_budget),
+            max_summary_tokens: seed
+                .max_summary_tokens
+                .unwrap_or(defaults.max_summary_tokens),
+            min_turns_between_compactions: seed
+                .min_turns_between_compactions
+                .unwrap_or(defaults.min_turns_between_compactions),
+        })
     }
 }
 
@@ -2395,6 +2461,43 @@ initial_delay = "750ms"
 
         assert_eq!(config.retry.max_retries, 9);
         assert_eq!(config.retry.initial_delay, Duration::from_millis(750));
+    }
+
+    #[test]
+    fn test_compaction_threshold_presence_is_preserved_at_default_value() {
+        let config: Config = toml::from_str(
+            r"
+[compaction]
+auto_compact_threshold = 100000
+",
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.compaction.auto_compact_threshold, 100_000);
+        assert!(config.compaction.auto_compact_threshold_explicit);
+    }
+
+    #[test]
+    fn test_default_compaction_threshold_serializes_as_inherited() {
+        let toml = toml::to_string_pretty(&Config::default()).expect("config should serialize");
+
+        assert!(
+            !toml.contains("auto_compact_threshold"),
+            "default config should not persist an inherited compaction threshold: {toml}"
+        );
+    }
+
+    #[test]
+    fn test_explicit_default_compaction_threshold_serializes() {
+        let mut config = Config::default();
+        config.compaction.auto_compact_threshold_explicit = true;
+
+        let toml = toml::to_string_pretty(&config).expect("config should serialize");
+
+        assert!(
+            toml.contains("auto_compact_threshold = 100000"),
+            "explicit default threshold must survive persistence: {toml}"
+        );
     }
 
     #[test]

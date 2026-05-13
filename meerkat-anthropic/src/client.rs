@@ -29,6 +29,9 @@ const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// SSE buffer capacity to reduce reallocations
 const SSE_BUFFER_CAPACITY: usize = 4096;
+const CLAUDE_AI_OAUTH_SYSTEM_MARKER: &str =
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+const CLAUDE_AI_OAUTH_AUTHORIZER_LABEL: &str = "claude-ai-oauth";
 
 /// Client for Anthropic API
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -41,8 +44,8 @@ pub struct AnthropicClient {
     pool_idle_timeout: Duration,
     /// Dynamic authorizer — when set, replaces the `x-api-key` header
     /// path with `HttpAuthorizer::authorize` invocation (used for
-    /// Vertex and Foundry backends where the Bearer token is acquired
-    /// at request time from Google Auth / Azure AD).
+    /// OAuth and cloud backends where the Bearer token is acquired at
+    /// request time).
     authorizer: Option<std::sync::Arc<dyn meerkat_core::HttpAuthorizer>>,
 }
 
@@ -111,7 +114,6 @@ impl AnthropicClientBuilder {
         let pool_idle_timeout = self.pool_idle_timeout;
         #[cfg(not(target_arch = "wasm32"))]
         let builder = reqwest::Client::builder()
-            .user_agent("claude-cli/2.1.88 (cli)")
             .connect_timeout(connect_timeout)
             .timeout(request_timeout)
             .pool_idle_timeout(pool_idle_timeout)
@@ -782,6 +784,57 @@ impl AnthropicClient {
         Ok(body)
     }
 
+    fn ensure_claude_ai_oauth_system_marker(body: &mut Value) {
+        match body.get_mut("system") {
+            Some(Value::String(system)) => {
+                if system.contains(CLAUDE_AI_OAUTH_SYSTEM_MARKER) {
+                    return;
+                }
+                if system.is_empty() {
+                    *system = CLAUDE_AI_OAUTH_SYSTEM_MARKER.to_string();
+                } else {
+                    let existing = std::mem::take(system);
+                    body["system"] = Value::Array(vec![
+                        serde_json::json!({
+                            "type": "text",
+                            "text": CLAUDE_AI_OAUTH_SYSTEM_MARKER,
+                        }),
+                        serde_json::json!({
+                            "type": "text",
+                            "text": existing,
+                        }),
+                    ]);
+                }
+            }
+            Some(Value::Array(blocks)) => {
+                let already_present = blocks.iter().any(|block| {
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| text.contains(CLAUDE_AI_OAUTH_SYSTEM_MARKER))
+                });
+                if !already_present {
+                    blocks.insert(
+                        0,
+                        serde_json::json!({
+                            "type": "text",
+                            "text": CLAUDE_AI_OAUTH_SYSTEM_MARKER,
+                        }),
+                    );
+                }
+            }
+            _ => {
+                body["system"] = Value::String(CLAUDE_AI_OAUTH_SYSTEM_MARKER.to_string());
+            }
+        }
+    }
+
+    fn authorizer_needs_claude_ai_oauth_system_marker(&self) -> bool {
+        self.authorizer
+            .as_ref()
+            .is_some_and(|authorizer| authorizer.label() == CLAUDE_AI_OAUTH_AUTHORIZER_LABEL)
+    }
+
     /// Parse an SSE event from the response
     fn parse_sse_line(line: &str) -> Option<AnthropicEvent> {
         if let Some(data) = Self::strip_data_prefix(line) {
@@ -871,7 +924,10 @@ impl LlmClient for AnthropicClient {
             let mut projected_request = request.clone();
             projected_request.messages = self.project_replay_messages(&request.messages)?;
             let request = &projected_request;
-            let body = self.build_request_body(request)?;
+            let mut body = self.build_request_body(request)?;
+            if self.authorizer_needs_claude_ai_oauth_system_marker() {
+                Self::ensure_claude_ai_oauth_system_marker(&mut body);
+            }
 
             // Collect beta headers based on request features.
             // Uses String (not &str) because authorizer-injected betas
@@ -963,18 +1019,9 @@ impl LlmClient for AnthropicClient {
                 req = req.header("anthropic-dangerous-direct-browser-access", "true");
             }
 
-            let built = req.json(&body).build().map_err(|_| LlmError::NetworkTimeout {
-                    duration_ms: 30000,
-                })?;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/rkat-request-dump.log") {
-                use std::io::Write;
-                let _ = writeln!(f, "REQUEST {} {}", built.method(), built.url());
-                for (name, value) in built.headers() {
-                    let _ = writeln!(f, "  {}: {}", name, value.to_str().unwrap_or("<binary>"));
-                }
-                let _ = writeln!(f, "---");
-            }
-            let response = self.http.execute(built)
+            let response = req
+                .json(&body)
+                .send()
                 .await
                 .map_err(|_| LlmError::NetworkTimeout {
                     duration_ms: 30000,
@@ -986,11 +1033,6 @@ impl LlmClient for AnthropicClient {
             } else {
                 let headers = response.headers().clone();
                 let text = response.text().await.unwrap_or_default();
-                tracing::error!(
-                    status = status_code,
-                    body = %text,
-                    "Anthropic API error"
-                );
                 Err(LlmError::from_http_response(status_code, text, &headers))
             };
             let mut stream = stream_result?;
@@ -1270,7 +1312,6 @@ impl LlmClient for AnthropicClient {
                             tracing::error!(
                                 error_type,
                                 error_msg,
-                                error_json = ?$event.error,
                                 "Anthropic streaming error"
                             );
 
@@ -1449,7 +1490,7 @@ mod tests {
     use meerkat_core::{
         AssistantBlock, AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, ContentBlock,
         ImageData, MediaType, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
-        ToolResult, UserMessage,
+        SystemMessage, ToolResult, UserMessage,
     };
 
     fn assistant_image_block() -> AssistantBlock {
@@ -1465,6 +1506,42 @@ mod tests {
             revised_prompt: RevisedPromptDisposition::NotRequested,
             meta: ProviderImageMetadata::NotEmitted,
         }
+    }
+
+    #[test]
+    fn claude_ai_oauth_marker_is_prepended_to_existing_system() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![
+                Message::System(SystemMessage::new("Project system prompt.")),
+                Message::User(UserMessage::text("hello".to_string())),
+            ],
+        );
+        let mut body = client.build_request_body(&request).unwrap();
+
+        AnthropicClient::ensure_claude_ai_oauth_system_marker(&mut body);
+        AnthropicClient::ensure_claude_ai_oauth_system_marker(&mut body);
+
+        let system = body["system"].as_array().expect("system should be blocks");
+        assert_eq!(system.len(), 2);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], CLAUDE_AI_OAUTH_SYSTEM_MARKER);
+        assert_eq!(system[1]["type"], "text");
+        assert_eq!(system[1]["text"], "Project system prompt.");
+    }
+
+    #[test]
+    fn build_request_body_does_not_add_claude_ai_oauth_marker_for_api_key_path() {
+        let client = AnthropicClient::new("test-key".to_string()).unwrap();
+        let request = LlmRequest::new(
+            "claude-sonnet-4-6",
+            vec![Message::User(UserMessage::text("hello".to_string()))],
+        );
+
+        let body = client.build_request_body(&request).unwrap();
+
+        assert!(body.get("system").is_none());
     }
 
     // =========================================================================

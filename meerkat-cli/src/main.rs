@@ -4827,7 +4827,6 @@ async fn interactive_login(
     // --- Step 2: open browser --------------------------------------
     print_step(2, 4, "Opening your browser to the provider's sign-in page");
     let authorize_url = endpoints.authorize_url_with_pkce(&pkce.challenge, &state_token);
-    eprintln!("DEBUG authorize_url: {authorize_url}");
     let browser_ok = webbrowser::open(&authorize_url).is_ok();
     if browser_ok {
         print_ok("Browser launched. Complete the sign-in there.");

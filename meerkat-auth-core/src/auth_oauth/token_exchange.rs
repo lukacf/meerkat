@@ -91,17 +91,6 @@ async fn send_token_request(
     endpoints: &OAuthEndpoints,
     params: &[(&str, String)],
 ) -> Result<OAuthTokenResult, OAuthError> {
-    eprintln!(
-        "DEBUG token_exchange url={} format={:?}",
-        endpoints.token_url, endpoints.token_request_format
-    );
-    for (k, v) in params {
-        if *k == "code" || *k == "refresh_token" || *k == "code_verifier" {
-            eprintln!("DEBUG token_exchange {k}=<redacted>");
-        } else {
-            eprintln!("DEBUG token_exchange {k}={v}");
-        }
-    }
     let mut req = match endpoints.token_request_format {
         OAuthTokenRequestFormat::FormUrlEncoded => http.post(&endpoints.token_url).form(params),
         OAuthTokenRequestFormat::Json => {

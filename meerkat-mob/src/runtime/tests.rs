@@ -1134,6 +1134,9 @@ impl SessionService for MockSessionService {
                     memory: build
                         .map(|b| b.override_memory)
                         .unwrap_or(ToolCategoryOverride::from_effective(false)),
+                    workgraph: build
+                        .map(|b| b.override_workgraph)
+                        .unwrap_or(ToolCategoryOverride::Inherit),
                     image_generation: build
                         .map(|b| b.override_image_generation)
                         .unwrap_or(ToolCategoryOverride::from_effective(false)),
@@ -12554,6 +12557,7 @@ async fn test_build_resumed_agent_config_rejects_mismatched_session_identity() {
                 comms: ToolCategoryOverride::Enable,
                 mob: ToolCategoryOverride::Disable,
                 memory: ToolCategoryOverride::Disable,
+                workgraph: ToolCategoryOverride::Inherit,
                 image_generation: ToolCategoryOverride::Inherit,
                 web_search: ToolCategoryOverride::Inherit,
                 active_skills: Some(vec![meerkat_core::skills::SkillKey::builtin(

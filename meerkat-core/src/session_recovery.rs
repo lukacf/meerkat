@@ -41,6 +41,7 @@ pub struct SurfaceSessionRecoveryOverrides {
     pub override_builtins: Option<bool>,
     pub override_shell: Option<bool>,
     pub override_memory: Option<bool>,
+    pub override_workgraph: Option<bool>,
     pub override_mob: Option<bool>,
     pub override_image_generation: Option<bool>,
     pub override_web_search: Option<bool>,
@@ -319,7 +320,7 @@ pub fn resolve_effective_turn_config(
         override_builtins: overrides.override_builtins.is_some(),
         override_shell: overrides.override_shell.is_some(),
         override_memory: overrides.override_memory.is_some(),
-        override_workgraph: false,
+        override_workgraph: overrides.override_workgraph.is_some(),
         override_mob: overrides.override_mob.is_some(),
         override_image_generation: overrides.override_image_generation.is_some(),
         override_web_search: overrides.override_web_search.is_some(),
@@ -401,7 +402,10 @@ pub fn resolve_effective_turn_config(
             .map(ToolCategoryOverride::from_effective)
             .unwrap_or(metadata.tooling.memory),
         override_schedule: ToolCategoryOverride::Inherit,
-        override_workgraph: ToolCategoryOverride::Inherit,
+        override_workgraph: overrides
+            .override_workgraph
+            .map(ToolCategoryOverride::from_effective)
+            .unwrap_or(metadata.tooling.workgraph),
         override_mob: overrides
             .override_mob
             .map(ToolCategoryOverride::from_effective)
@@ -524,6 +528,7 @@ mod tests {
                     comms: ToolCategoryOverride::Inherit,
                     mob: ToolCategoryOverride::Inherit,
                     memory: ToolCategoryOverride::Enable,
+                    workgraph: ToolCategoryOverride::Inherit,
                     image_generation: ToolCategoryOverride::Inherit,
                     web_search: ToolCategoryOverride::Inherit,
                     active_skills: Some(vec![skill_key("persisted-skill")]),

@@ -4498,6 +4498,7 @@ impl AgentFactory {
             // (metadata.tooling.comms is left unchanged)
             metadata.tooling.mob = build_config.override_mob;
             metadata.tooling.memory = build_config.override_memory;
+            metadata.tooling.workgraph = build_config.override_workgraph;
             metadata.tooling.image_generation = build_config.override_image_generation;
             metadata.tooling.web_search = build_config.override_web_search;
             if build_config.resume_override_mask.preload_skills || active_skill_ids.is_some() {
@@ -4527,6 +4528,7 @@ impl AgentFactory {
                     comms: ToolCategoryOverride::Inherit,
                     mob: build_config.override_mob,
                     memory: build_config.override_memory,
+                    workgraph: build_config.override_workgraph,
                     image_generation: build_config.override_image_generation,
                     web_search: build_config.override_web_search,
                     active_skills: active_skill_ids.clone(),

@@ -601,6 +601,7 @@ struct ToolPresetResolution {
     builtins: bool,
     shell: bool,
     memory: bool,
+    workgraph: bool,
     mob: bool,
 }
 
@@ -611,24 +612,28 @@ fn resolve_tool_preset(preset: ToolPreset, yolo: bool) -> ToolPresetResolution {
             builtins: true,
             shell: false,
             memory: false,
+            workgraph: false,
             mob: false,
         },
         ToolPreset::Workspace => ToolPresetResolution {
             builtins: true,
             shell: true,
             memory: false,
+            workgraph: false,
             mob: false,
         },
         ToolPreset::Full => ToolPresetResolution {
             builtins: true,
             shell: true,
             memory: true,
+            workgraph: true,
             mob: cfg!(feature = "mob"),
         },
         ToolPreset::None => ToolPresetResolution {
             builtins: false,
             shell: false,
             memory: false,
+            workgraph: false,
             mob: false,
         },
     }
@@ -640,6 +645,7 @@ fn apply_yolo_tooling_override(tooling: &mut meerkat_core::SessionTooling) {
     tooling.builtins = meerkat_core::ToolCategoryOverride::from_effective(yolo.builtins);
     tooling.shell = meerkat_core::ToolCategoryOverride::from_effective(yolo.shell);
     tooling.memory = meerkat_core::ToolCategoryOverride::from_effective(yolo.memory);
+    tooling.workgraph = meerkat_core::ToolCategoryOverride::from_effective(yolo.workgraph);
     tooling.mob = meerkat_core::ToolCategoryOverride::from_effective(yolo.mob);
 }
 
@@ -2727,6 +2733,7 @@ async fn handle_run_command(
                 tooling.builtins,
                 tooling.shell,
                 tooling.memory,
+                tooling.workgraph,
                 tooling.mob,
                 wait_for_mcp,
                 verbose,
@@ -7371,6 +7378,7 @@ async fn run_agent(
     enable_builtins: bool,
     enable_shell: bool,
     enable_memory: bool,
+    enable_workgraph: bool,
     enable_mob: bool,
     wait_for_mcp: bool,
     verbose: bool,
@@ -7411,6 +7419,7 @@ async fn run_agent(
             enable_builtins,
             enable_shell,
             enable_memory,
+            enable_workgraph,
             enable_mob,
             wait_for_mcp,
             verbose,
@@ -7434,6 +7443,7 @@ async fn run_agent(
     #[cfg(feature = "session-store")]
     {
         let keep_alive = resolve_keep_alive(keep_alive)?;
+        let effective_workgraph = enable_workgraph || config.tools.workgraph_enabled;
         let effective_mob = cfg!(feature = "mob") && (enable_mob || config.tools.mob_enabled);
         let flow_tool_overlay = build_flow_tool_overlay(allow_tools, block_tools);
         // Wave-c C-12: the canonical runtime identity for a skill is
@@ -7494,7 +7504,7 @@ async fn run_agent(
             .project_root(project_root)
             .builtins(enable_builtins)
             .shell(enable_shell)
-            .workgraph(config.tools.workgraph_enabled)
+            .workgraph(effective_workgraph)
             .schedule(config.tools.schedule_enabled);
         if let Some(context_root) = scope.context_root.clone() {
             factory = factory.context_root(context_root);
@@ -7625,7 +7635,7 @@ async fn run_agent(
             override_memory: meerkat_core::ToolCategoryOverride::from_effective(enable_memory),
             override_schedule: meerkat_core::ToolCategoryOverride::Inherit,
             override_workgraph: meerkat_core::ToolCategoryOverride::from_effective(
-                config.tools.workgraph_enabled,
+                effective_workgraph,
             ),
             override_mob: meerkat_core::ToolCategoryOverride::Inherit,
             override_image_generation: meerkat_core::ToolCategoryOverride::Inherit,
@@ -8072,6 +8082,8 @@ async fn resume_session_with_llm_override(
                 meerkat_core::ToolCategoryOverride::from_effective(resolved.builtins);
             tooling.shell = meerkat_core::ToolCategoryOverride::from_effective(resolved.shell);
             tooling.memory = meerkat_core::ToolCategoryOverride::from_effective(resolved.memory);
+            tooling.workgraph =
+                meerkat_core::ToolCategoryOverride::from_effective(resolved.workgraph);
             tooling.mob = meerkat_core::ToolCategoryOverride::from_effective(resolved.mob);
         }
 
@@ -8141,7 +8153,7 @@ async fn resume_session_with_llm_override(
             .project_root(project_root)
             .builtins(tooling.builtins.resolve(config.tools.builtins_enabled))
             .shell(tooling.shell.resolve(config.tools.shell_enabled))
-            .workgraph(config.tools.workgraph_enabled)
+            .workgraph(tooling.workgraph.resolve(config.tools.workgraph_enabled))
             .schedule(config.tools.schedule_enabled);
         if let Some(context_root) = scope.context_root.clone() {
             factory = factory.context_root(context_root);
@@ -8257,6 +8269,7 @@ async fn resume_session_with_llm_override(
             override_builtins: explicit_tooling.map(|resolved| resolved.builtins),
             override_shell: explicit_tooling.map(|resolved| resolved.shell),
             override_memory: explicit_tooling.map(|resolved| resolved.memory),
+            override_workgraph: explicit_tooling.map(|resolved| resolved.workgraph),
             override_mob: explicit_tooling.map(|resolved| resolved.mob),
             preload_skills: resumed_preload_skills,
             app_context: parsed_app_context,
@@ -13666,6 +13679,7 @@ default_model = "gemma"
         assert!(full.builtins);
         assert!(full.shell);
         assert!(full.memory);
+        assert!(full.workgraph);
         #[cfg(feature = "mob")]
         assert!(full.mob);
         #[cfg(not(feature = "mob"))]
@@ -13688,6 +13702,7 @@ default_model = "gemma"
             comms: meerkat_core::ToolCategoryOverride::Enable,
             mob: meerkat_core::ToolCategoryOverride::Disable,
             memory: meerkat_core::ToolCategoryOverride::Disable,
+            workgraph: meerkat_core::ToolCategoryOverride::Disable,
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,
             active_skills: None,
@@ -13698,6 +13713,10 @@ default_model = "gemma"
         assert_eq!(tooling.builtins, meerkat_core::ToolCategoryOverride::Enable);
         assert_eq!(tooling.shell, meerkat_core::ToolCategoryOverride::Enable);
         assert_eq!(tooling.memory, meerkat_core::ToolCategoryOverride::Enable);
+        assert_eq!(
+            tooling.workgraph,
+            meerkat_core::ToolCategoryOverride::Enable
+        );
         #[cfg(feature = "mob")]
         assert_eq!(tooling.mob, meerkat_core::ToolCategoryOverride::Enable);
         #[cfg(not(feature = "mob"))]

@@ -95,6 +95,7 @@ fn test_resume_metadata_contract() -> Result<(), Box<dyn std::error::Error>> {
             comms: meerkat_core::ToolCategoryOverride::Disable,
             mob: meerkat_core::ToolCategoryOverride::Disable,
             memory: meerkat_core::ToolCategoryOverride::Disable,
+            workgraph: meerkat_core::ToolCategoryOverride::Inherit,
             image_generation: meerkat_core::ToolCategoryOverride::Disable,
             web_search: meerkat_core::ToolCategoryOverride::Disable,
             active_skills: None,

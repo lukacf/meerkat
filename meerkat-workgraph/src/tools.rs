@@ -333,6 +333,33 @@ fn base_properties() -> serde_json::Map<String, Value> {
     ])
 }
 
+fn external_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string" },
+            "id": { "type": "string" },
+            "url": { "type": "string" }
+        },
+        "required": ["kind", "id"],
+        "additionalProperties": false
+    })
+}
+
+fn evidence_ref_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string" },
+            "id": { "type": "string" },
+            "label": { "type": "string" },
+            "summary": { "type": "string" }
+        },
+        "required": ["kind", "id"],
+        "additionalProperties": false
+    })
+}
+
 fn object(properties: serde_json::Map<String, Value>, required: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -389,8 +416,14 @@ fn create_schema() -> Value {
             "status".to_string(),
             json!({ "type": "string", "enum": ["open", "blocked"] }),
         ),
-        ("external_refs".to_string(), json!({ "type": "array" })),
-        ("evidence_refs".to_string(), json!({ "type": "array" })),
+        (
+            "external_refs".to_string(),
+            json!({ "type": "array", "items": external_ref_schema() }),
+        ),
+        (
+            "evidence_refs".to_string(),
+            json!({ "type": "array", "items": evidence_ref_schema() }),
+        ),
     ]);
     object(properties, &["title"])
 }
@@ -524,7 +557,10 @@ fn update_schema() -> Value {
             "snoozed_until".to_string(),
             json!({ "type": "string", "format": "date-time" }),
         ),
-        ("external_refs".to_string(), json!({ "type": "array" })),
+        (
+            "external_refs".to_string(),
+            json!({ "type": "array", "items": external_ref_schema() }),
+        ),
     ]);
     object(properties, &["id", "expected_revision"])
 }
@@ -569,7 +605,7 @@ fn evidence_schema() -> Value {
             "expected_revision".to_string(),
             json!({ "type": "integer", "minimum": 0 }),
         ),
-        ("evidence".to_string(), json!({ "type": "object" })),
+        ("evidence".to_string(), evidence_ref_schema()),
     ]);
     object(properties, &["id", "expected_revision", "evidence"])
 }
@@ -630,6 +666,42 @@ mod tests {
             "workgraph_add_evidence",
         ] {
             assert!(names.contains(expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn workgraph_tool_schemas_do_not_expose_bare_arrays_or_objects() {
+        fn assert_schema_is_provider_safe(path: &str, schema: &Value) {
+            match schema {
+                Value::Object(map) => {
+                    let is_array = map.get("type").and_then(Value::as_str) == Some("array");
+                    assert!(
+                        !is_array || map.contains_key("items"),
+                        "{path} is an array schema without items"
+                    );
+
+                    let is_object = map.get("type").and_then(Value::as_str) == Some("object");
+                    assert!(
+                        !is_object || map.contains_key("properties"),
+                        "{path} is an object schema without properties"
+                    );
+
+                    for (key, value) in map {
+                        assert_schema_is_provider_safe(&format!("{path}.{key}"), value);
+                    }
+                }
+                Value::Array(items) => {
+                    for (index, value) in items.iter().enumerate() {
+                        assert_schema_is_provider_safe(&format!("{path}[{index}]"), value);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        for tool in workgraph_tools_list() {
+            let name = tool["name"].as_str().expect("tool name");
+            assert_schema_is_provider_safe(name, &tool["inputSchema"]);
         }
     }
 }

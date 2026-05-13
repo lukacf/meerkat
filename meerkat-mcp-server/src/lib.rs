@@ -484,6 +484,7 @@ fn realm_store_path(
 pub struct MeerkatMcpState {
     service: Arc<PersistentSessionService<FactoryAgentBuilder>>,
     schedule_service: ScheduleService,
+    workgraph_service: meerkat::WorkGraphService,
     realm_id: meerkat_core::connection::RealmId,
     backend: String,
     instance_id: Option<String>,
@@ -641,6 +642,11 @@ impl MeerkatMcpState {
         let session_store = persistence.session_store();
         let blob_store = persistence.blob_store();
         let schedule_service = ScheduleService::new(persistence.schedule_store());
+        let workgraph_service = meerkat::WorkGraphService::with_scope(
+            persistence.workgraph_store(),
+            realm_id.as_str().to_owned(),
+            meerkat::WorkNamespace::default(),
+        );
         let realm_paths = meerkat_store::realm_paths_in(&realms_root, realm_id.as_str());
         let conventions_context_root = bootstrap.context.context_root.clone();
         let project_root = conventions_context_root
@@ -672,6 +678,7 @@ impl MeerkatMcpState {
             .project_root(project_root)
             .builtins(true)
             .shell(true)
+            .workgraph(true)
             .schedule(true);
         if let Some(context_root) = conventions_context_root {
             factory = factory.context_root(context_root);
@@ -691,6 +698,12 @@ impl MeerkatMcpState {
             &builder,
             Some(Arc::new(ScheduleToolDispatcher::new(
                 schedule_service.clone(),
+            ))),
+        );
+        meerkat::surface::set_default_workgraph_tools(
+            &builder,
+            Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+                workgraph_service.clone(),
             ))),
         );
         let (service, runtime_adapter) = meerkat::surface::build_runtime_backed_service(
@@ -720,6 +733,7 @@ impl MeerkatMcpState {
         let state = Self {
             service,
             schedule_service,
+            workgraph_service,
             realm_id,
             backend: manifest.backend.as_str().to_string(),
             instance_id: bootstrap.realm.instance_id,
@@ -817,6 +831,7 @@ impl MeerkatMcpState {
             .project_root(project_root)
             .builtins(true)
             .shell(true)
+            .workgraph(true)
             .schedule(true);
         if let Some(user_root) = bootstrap.context.user_config_root.clone() {
             factory = factory.user_config_root(user_root);
@@ -829,6 +844,17 @@ impl MeerkatMcpState {
             Some(Arc::new(ScheduleToolDispatcher::new(ScheduleService::new(
                 Arc::new(meerkat::MemoryScheduleStore::default()),
             )))),
+        );
+        let workgraph_service = meerkat::WorkGraphService::with_scope(
+            Arc::new(meerkat::MemoryWorkGraphStore::new()),
+            realm_id.as_str().to_owned(),
+            meerkat::WorkNamespace::default(),
+        );
+        meerkat::surface::set_default_workgraph_tools(
+            &builder,
+            Some(Arc::new(meerkat::WorkGraphToolSurface::new(
+                workgraph_service.clone(),
+            ))),
         );
         let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(
             meerkat_store::FsBlobStore::new(realm_paths.root.join("blobs")),
@@ -845,6 +871,7 @@ impl MeerkatMcpState {
             schedule_service: ScheduleService::new(Arc::new(
                 meerkat::MemoryScheduleStore::default(),
             )),
+            workgraph_service,
             realm_id,
             backend: "sqlite".to_string(),
             instance_id: bootstrap.realm.instance_id,
@@ -1540,6 +1567,7 @@ fn comms_tools_list() -> Vec<Value> {
 pub fn tools_list() -> Vec<Value> {
     let mut tools = base_tools_list();
     tools.extend(meerkat::schedule_tools_list());
+    tools.extend(meerkat::workgraph_tools_list());
 
     #[cfg(feature = "mob")]
     tools.extend(mob_host_tools_list());
@@ -1729,6 +1757,12 @@ pub async fn handle_tools_call_with_notifier(
                 .await
                 .map(wrap_tool_payload)
                 .map_err(map_schedule_tool_error)
+        }
+        name if name.starts_with("workgraph_") => {
+            meerkat::handle_workgraph_tools_call(&state.workgraph_service, name, arguments)
+                .await
+                .map(wrap_tool_payload)
+                .map_err(map_workgraph_tool_error)
         }
         #[cfg(feature = "mob")]
         "meerkat_mob_event_stream_open" => {
@@ -2011,6 +2045,18 @@ fn merge_patch(base: &mut Value, patch: Value) {
 
 fn map_schedule_tool_error(error: meerkat::ScheduleToolError) -> ToolCallError {
     ToolCallError::new(error.code, error.message, error.data)
+}
+
+fn map_workgraph_tool_error(error: meerkat::WorkGraphToolError) -> ToolCallError {
+    let code = match error.code.as_str() {
+        meerkat::WORKGRAPH_TOOL_INVALID_ARGUMENTS => -32602,
+        meerkat::WORKGRAPH_TOOL_NOT_FOUND => -32601,
+        "capability_unavailable" => {
+            meerkat_contracts::ErrorCode::CapabilityUnavailable.jsonrpc_code()
+        }
+        _ => -32603,
+    };
+    ToolCallError::new(code, error.message, None)
 }
 
 fn apply_patch_preview(config: &Config, patch: Value) -> Result<Config, ToolCallError> {
@@ -4508,11 +4554,13 @@ mod tests {
     fn test_tools_list_schema() {
         let tools = tools_list();
         let schedule_tool_count = meerkat::schedule_tools_list().len();
+        let workgraph_tool_count = meerkat::workgraph_tools_list().len();
         #[cfg(all(feature = "comms", feature = "mob"))]
         assert_eq!(
             tools.len(),
             base_tools_list().len()
                 + schedule_tool_count
+                + workgraph_tool_count
                 + mob_host_tools_list().len()
                 + mob_event_stream_tools_list().len()
                 + comms_tools_list().len()
@@ -4522,16 +4570,23 @@ mod tests {
             tools.len(),
             base_tools_list().len()
                 + schedule_tool_count
+                + workgraph_tool_count
                 + mob_host_tools_list().len()
                 + mob_event_stream_tools_list().len()
         );
         #[cfg(all(feature = "comms", not(feature = "mob")))]
         assert_eq!(
             tools.len(),
-            base_tools_list().len() + schedule_tool_count + comms_tools_list().len()
+            base_tools_list().len()
+                + schedule_tool_count
+                + workgraph_tool_count
+                + comms_tools_list().len()
         );
         #[cfg(all(not(feature = "comms"), not(feature = "mob")))]
-        assert_eq!(tools.len(), base_tools_list().len() + schedule_tool_count);
+        assert_eq!(
+            tools.len(),
+            base_tools_list().len() + schedule_tool_count + workgraph_tool_count
+        );
 
         let tool_names: Vec<&str> = tools
             .iter()
@@ -4568,6 +4623,8 @@ mod tests {
             find_tool("meerkat_schedule_occurrences")["name"],
             "meerkat_schedule_occurrences"
         );
+        assert_eq!(find_tool("workgraph_create")["name"], "workgraph_create");
+        assert_eq!(find_tool("workgraph_ready")["name"], "workgraph_ready");
         assert!(
             run_tool["inputSchema"]["properties"]
                 .get("structured_output_retries")
@@ -6122,6 +6179,41 @@ mod tests {
         .expect_err("unknown tool must error");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("Unknown tool"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_tools_call_dispatches_workgraph_tools() {
+        let store: Arc<dyn SessionStore> = Arc::new(meerkat::MemoryStore::new());
+        let state = MeerkatMcpState::new_with_store(store).await;
+
+        let created = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_create",
+            &json!({
+                "title": "mcp visible work",
+                "labels": ["mcp-workgraph"]
+            }),
+        ))
+        .await
+        .expect("workgraph create should dispatch");
+        let text = created["content"][0]["text"]
+            .as_str()
+            .expect("tool payload text");
+        let payload: Value = serde_json::from_str(text).expect("json payload");
+        assert_eq!(payload["item"]["title"], "mcp visible work");
+
+        let ready = Box::pin(handle_tools_call(
+            &state,
+            "workgraph_ready",
+            &json!({ "labels": ["mcp-workgraph"] }),
+        ))
+        .await
+        .expect("workgraph ready should dispatch");
+        let text = ready["content"][0]["text"]
+            .as_str()
+            .expect("tool payload text");
+        let payload: Value = serde_json::from_str(text).expect("json payload");
+        assert_eq!(payload["items"].as_array().map(Vec::len), Some(1));
     }
 
     #[cfg(feature = "mob")]

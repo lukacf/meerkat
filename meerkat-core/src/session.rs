@@ -2684,6 +2684,9 @@ pub struct SessionTooling {
     /// Semantic memory.
     #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
     pub memory: ToolCategoryOverride,
+    /// WorkGraph durable work tools.
+    #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
+    pub workgraph: ToolCategoryOverride,
     /// Assistant image generation.
     #[serde(default, deserialize_with = "deserialize_tool_category_compat")]
     pub image_generation: ToolCategoryOverride,

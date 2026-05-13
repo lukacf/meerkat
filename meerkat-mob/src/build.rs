@@ -566,6 +566,7 @@ mod tests {
                     comms: meerkat_core::session::ToolCategoryOverride::Enable,
                     mob: meerkat_core::session::ToolCategoryOverride::Enable,
                     memory: meerkat_core::session::ToolCategoryOverride::Disable,
+                    workgraph: meerkat_core::session::ToolCategoryOverride::Inherit,
                     image_generation: meerkat_core::session::ToolCategoryOverride::Enable,
                     web_search: meerkat_core::session::ToolCategoryOverride::Inherit,
                     active_skills: None,

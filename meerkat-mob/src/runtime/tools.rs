@@ -214,11 +214,23 @@ pub(super) fn compose_external_tools_for_profile(
 
     // Mount mob operator tools iff the canonical resolver yields an authority.
     // The resolver is the single source of truth shared with build_agent_config.
+    let should_grant_default_spawn_profiles =
+        profile.tools.mob && persisted_mob_tool_authority_context.is_none();
     let (_, effective_authority) = crate::build::resolve_profile_mob_operator_access(
         profile,
         persisted_mob_tool_authority_context,
     );
-    if let Some(authority_context) = effective_authority {
+    if let Some(mut authority_context) = effective_authority {
+        if should_grant_default_spawn_profiles {
+            let mob_id = mob_handle.definition().id.to_string();
+            let profiles = mob_handle
+                .definition()
+                .profiles
+                .keys()
+                .map(|profile| profile.as_str().to_string())
+                .collect::<Vec<_>>();
+            authority_context = authority_context.grant_spawn_profiles_in_mob(mob_id, profiles);
+        }
         dispatchers.push(Arc::new(MobOperatorToolDispatcher::new(
             mob_handle,
             profile.tools.mob,
@@ -498,6 +510,45 @@ impl MobOperatorToolDispatcher {
         Err(ToolError::access_denied(tool_name))
     }
 
+    fn can_manage_current_mob(&self) -> bool {
+        let mob_id = self.handle.definition().id.as_str();
+        self.authority_context.can_manage_mob(mob_id)
+    }
+
+    fn ensure_spawn_member_scope(
+        &self,
+        tool_name: &str,
+        args: &SpawnMemberArgs,
+    ) -> Result<(), ToolError> {
+        if self.can_manage_current_mob() {
+            return Ok(());
+        }
+        if args.resume_bridge_session_id.is_some()
+            || args.resume_session_id.is_some()
+            || args.backend.is_some()
+            || args.runtime_mode.is_some()
+            || args.launch_mode.is_some()
+            || args.tool_access_policy.is_some()
+            || args.budget_split_policy.is_some()
+            || args.auto_wire_parent.is_some()
+        {
+            return Err(ToolError::access_denied(tool_name));
+        }
+        let mob_id = self.handle.definition().id.as_str();
+        if self
+            .authority_context
+            .can_spawn_profile_in_mob(mob_id, &args.profile)
+        {
+            return Ok(());
+        }
+        Err(ToolError::access_denied(tool_name))
+    }
+
+    fn can_spawn_any_profile_in_current_mob(&self) -> bool {
+        let mob_id = self.handle.definition().id.as_str();
+        self.authority_context.can_spawn_any_profile_in_mob(mob_id)
+    }
+
     fn map_mob_error(call: ToolCallView<'_>, error: MobError) -> ToolError {
         ToolError::execution_failed(format!("tool '{}' failed: {error}", call.name))
     }
@@ -728,14 +779,21 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
         &self,
         call: ToolCallView<'_>,
     ) -> Result<meerkat_core::ToolDispatchOutcome, ToolError> {
-        if self.tools.iter().any(|tool| tool.name == call.name) {
+        if self.tools.iter().any(|tool| tool.name == call.name)
+            && !matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
+        {
             self.ensure_current_mob_scope(call.name)?;
+        } else if matches!(call.name, TOOL_SPAWN_MEMBER | TOOL_SPAWN_MANY_MEMBERS)
+            && !self.can_spawn_any_profile_in_current_mob()
+        {
+            return Err(ToolError::access_denied(call.name));
         }
         match call.name {
             TOOL_SPAWN_MEMBER => {
                 let args: SpawnMemberArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                self.ensure_spawn_member_scope(call.name, &args)?;
                 let agent_identity = AgentIdentity::from(args.member_id.as_str());
                 let mut spec = SpawnMemberSpec::from_wire(
                     args.profile,
@@ -800,6 +858,9 @@ impl AgentToolDispatcher for MobOperatorToolDispatcher {
                 let args: SpawnManyMembersArgs = call
                     .parse_args()
                     .map_err(|error| ToolError::invalid_arguments(call.name, error.to_string()))?;
+                for spec in &args.specs {
+                    self.ensure_spawn_member_scope(call.name, spec)?;
+                }
                 let identities = args
                     .specs
                     .iter()

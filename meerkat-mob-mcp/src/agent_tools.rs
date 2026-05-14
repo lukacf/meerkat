@@ -4159,6 +4159,34 @@ mod tests {
         )
     }
 
+    struct UnprovenancedParentToolProvider;
+    impl VisibleToolSnapshotProvider for UnprovenancedParentToolProvider {
+        fn snapshot_visible_tools(&self) -> Vec<Arc<ToolDef>> {
+            vec![Arc::new(ToolDef {
+                name: "external_ob3_tool".into(),
+                description: "external Ob3 tool".to_string(),
+                input_schema: json!({"type": "object"}),
+                provenance: None,
+            })]
+        }
+    }
+
+    fn surface_with_unprovenanced_parent_tool() -> AgentMobToolSurface {
+        let provider: Arc<dyn VisibleToolSnapshotProvider> =
+            Arc::new(UnprovenancedParentToolProvider);
+        AgentMobToolSurface::new_with_effective_authority(
+            MobMcpState::new_in_memory(),
+            None,
+            Arc::new(std::sync::RwLock::new(create_only_authority())),
+            "claude-sonnet-4-5".to_string(),
+            SessionId::new(),
+            None,
+            None,
+            None,
+            MobToolSnapshotContext::ParentOwned(provider),
+        )
+    }
+
     fn surface_standalone() -> AgentMobToolSurface {
         AgentMobToolSurface::new(
             MobMcpState::new_in_memory(),
@@ -4205,6 +4233,33 @@ mod tests {
         assert!(names.contains("send"));
         assert!(names.contains("read_file"));
         assert!(names.contains("bash"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_spawn_tooling_inherit_parent_synthesizes_missing_witnesses() {
+        let surface = surface_with_unprovenanced_parent_tool();
+        let tooling = meerkat_mob::SpawnTooling::InheritParent {
+            allow_overlay: None,
+            deny_overlay: None,
+        };
+        let resolved = surface.resolve_spawn_tooling(&tooling).await.unwrap();
+        let authority = resolved
+            .inherited_tool_filter
+            .expect("expected inherited tool filter authority");
+        let witness = authority
+            .witnesses
+            .get("external_ob3_tool")
+            .expect("unprovenanced parent tool should still get a witness");
+
+        assert!(
+            witness.has_provenance_identity_witness(),
+            "delegate inheritance should be valid for visible external tools without provenance"
+        );
+        meerkat_core::tool_scope::validate_witnessed_filter_authority(
+            &authority.filter,
+            &authority.witnesses,
+        )
+        .expect("delegate inherited filter should validate with synthesized witness");
     }
 
     #[tokio::test]

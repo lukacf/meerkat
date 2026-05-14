@@ -9734,12 +9734,12 @@ async fn test_spawn_fails_when_tool_bundle_not_registered() {
 }
 
 #[tokio::test]
-async fn test_mob_management_tools_visible_with_default_authority_but_scope_restricted() {
+async fn test_mob_management_tools_visible_with_default_authority_but_management_restricted() {
     // profile.tools.mob = true is the policy declaration. The canonical
     // resolver synthesizes a generated create-only authority on spawn, so the
     // operator dispatcher mounts and the tools are visible in the catalog.
-    // Without `managed_mob_scope`, dispatch on the current mob is denied with
-    // AccessDenied — capability scope is the gate, not visibility.
+    // Without `managed_mob_scope`, management dispatch on the current mob is
+    // denied with AccessDenied — capability scope is the gate, not visibility.
     let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
     let sid_1 = handle
         .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
@@ -9764,24 +9764,63 @@ async fn test_mob_management_tools_visible_with_default_authority_but_scope_rest
         );
     }
 
-    let spawn_err = service
+    let list_err = service
+        .dispatch_external_tool_outcome(&sid_1, "list_members", serde_json::json!({}))
+        .await
+        .expect_err("list_members should be denied without managed_mob_scope");
+    assert!(
+        matches!(list_err, ToolError::AccessDenied { .. }),
+        "expected AccessDenied (scope gate), got: {list_err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_default_mob_authority_can_spawn_definition_profiles_only() {
+    let (handle, service) = create_test_mob(sample_definition_with_mob_tools()).await;
+    let sid_1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn w-1")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+
+    let spawn_result = service
         .dispatch_external_tool_outcome(
             &sid_1,
             "spawn_member",
             serde_json::json!({"profile": "worker", "member_id": "w-2"}),
         )
         .await
-        .expect_err("spawn_member should be denied without managed_mob_scope");
+        .expect("default mob authority should spawn profiles declared by this mob definition");
+    let spawn_payload: serde_json::Value =
+        serde_json::from_str(&spawn_result.result.text_content()).expect("spawn payload");
+    assert_eq!(spawn_payload["agent_identity"], "w-2");
     assert!(
-        matches!(spawn_err, ToolError::AccessDenied { .. }),
-        "expected AccessDenied (scope gate), got: {spawn_err:?}"
+        spawn_payload["member_ref"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()),
+        "definition-profile spawn should return a canonical member ref"
+    );
+
+    let unknown_profile_err = service
+        .dispatch_external_tool_outcome(
+            &sid_1,
+            "spawn_member",
+            serde_json::json!({"profile": "not-in-definition", "member_id": "blocked"}),
+        )
+        .await
+        .expect_err("default mob authority must not spawn profiles outside the mob definition");
+    assert!(
+        matches!(unknown_profile_err, ToolError::AccessDenied { .. }),
+        "expected AccessDenied for profile outside spawn scope, got: {unknown_profile_err:?}"
     );
     assert!(
         handle
-            .get_member(&AgentIdentity::from("w-2"))
+            .get_member(&AgentIdentity::from("blocked"))
             .await
             .is_none(),
-        "scope-denied operator tools must not mutate roster state"
+        "scope-denied profile spawn must not mutate roster state"
     );
 }
 
@@ -27260,17 +27299,13 @@ async fn test_external_tools_name_collision_profile_wins() {
         "non-colliding callback tool should be present"
     );
 
-    // Dispatch spawn_member — reaches the mob-owned dispatcher, denied on scope.
+    // Dispatch spawn_member — reaches the mob-owned dispatcher, not the
+    // colliding callback tool.
     let raw_args = serde_json::json!({"profile": "worker", "member_id": "w-test"});
-    let err = service
+    service
         .dispatch_external_tool_outcome(&session_id, "spawn_member", raw_args)
         .await
-        .expect_err("mob-owned spawn_member should win and deny on missing scope");
-    assert!(
-        matches!(err, ToolError::AccessDenied { .. }),
-        "expected scope-denied AccessDenied (profile-declared tool wins, callback shadowed); \
-         got: {err:?}"
-    );
+        .expect("mob-owned spawn_member should win and use generated definition-profile scope");
 }
 
 #[tokio::test]

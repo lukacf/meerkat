@@ -2304,12 +2304,22 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `TurnCheckCompaction`
 - To: `Running`
 
-### `PrimitiveAppliedImmediate`
+### `PrimitiveAppliedImmediateCompleted`
 - From: `Running`
 - On: `PrimitiveApplied`()
 - Guards:
   - `turn_applying_immediate`
+  - `cancel_after_boundary_not_requested`
 - Emits: `TurnBoundaryApplied`, `TurnRunCompleted`, `TurnCheckCompaction`
+- To: `Running`
+
+### `PrimitiveAppliedImmediateCancelled`
+- From: `Running`
+- On: `PrimitiveApplied`()
+- Guards:
+  - `turn_applying_immediate`
+  - `cancel_after_boundary_requested`
+- Emits: `TurnBoundaryApplied`, `TurnRunCancelled`, `TurnCheckCompaction`
 - To: `Running`
 
 ### `LlmReturnedToolCallsPositive`
@@ -2366,20 +2376,40 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `matching_barrier_ids`
 - To: `Running`
 
-### `BoundaryContinue`
+### `BoundaryContinueToCalling`
 - From: `Running`
 - On: `BoundaryContinue`()
 - Guards:
   - `turn_draining_boundary`
+  - `cancel_after_boundary_not_requested`
 - Emits: `TurnBoundaryApplied`, `TurnCheckCompaction`
 - To: `Running`
 
-### `BoundaryComplete`
+### `BoundaryContinueToCancelled`
+- From: `Running`
+- On: `BoundaryContinue`()
+- Guards:
+  - `turn_draining_boundary`
+  - `cancel_after_boundary_requested`
+- Emits: `TurnBoundaryApplied`, `TurnRunCancelled`, `TurnCheckCompaction`
+- To: `Running`
+
+### `BoundaryCompleteCompleted`
 - From: `Running`
 - On: `BoundaryComplete`()
 - Guards:
   - `turn_draining_boundary`
+  - `cancel_after_boundary_not_requested`
 - Emits: `TurnBoundaryApplied`, `TurnRunCompleted`, `TurnCheckCompaction`
+- To: `Running`
+
+### `BoundaryCompleteCancelled`
+- From: `Running`
+- On: `BoundaryComplete`()
+- Guards:
+  - `turn_draining_boundary`
+  - `cancel_after_boundary_requested`
+- Emits: `TurnBoundaryApplied`, `TurnRunCancelled`, `TurnCheckCompaction`
 - To: `Running`
 
 ### `EnterExtraction`

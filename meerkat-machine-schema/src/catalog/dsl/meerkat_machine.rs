@@ -5434,7 +5434,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnCheckCompaction
         }
 
-        transition PrimitiveAppliedImmediate {
+        transition PrimitiveAppliedImmediateCompleted {
             on input PrimitiveApplied
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_applying_immediate" {
@@ -5442,6 +5442,7 @@ macro_rules! meerkat_catalog_machine_dsl {
                 && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
                     || self.primitive_kind == Some(TurnPrimitiveKind::ImmediateContextAppend))
             }
+            guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
@@ -5450,6 +5451,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
+            emit TurnCheckCompaction
+        }
+
+        transition PrimitiveAppliedImmediateCancelled {
+            on input PrimitiveApplied
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_applying_immediate" {
+                self.turn_phase == TurnPhase::ApplyingPrimitive
+                && (self.primitive_kind == Some(TurnPrimitiveKind::ImmediateAppend)
+                    || self.primitive_kind == Some(TurnPrimitiveKind::ImmediateContextAppend))
+            }
+            guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.cancel_after_boundary = false;
+                self.turn_phase = TurnPhase::Cancelled;
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
             emit TurnCheckCompaction
         }
 
@@ -5538,10 +5560,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
         }
 
-        transition BoundaryContinue {
+        transition BoundaryContinueToCalling {
             on input BoundaryContinue
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
+            guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::CallingLlm;
@@ -5551,10 +5574,28 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit TurnCheckCompaction
         }
 
-        transition BoundaryComplete {
+        transition BoundaryContinueToCancelled {
+            on input BoundaryContinue
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
+            guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.cancel_after_boundary = false;
+                self.turn_phase = TurnPhase::Cancelled;
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
+            emit TurnCheckCompaction
+        }
+
+        transition BoundaryCompleteCompleted {
             on input BoundaryComplete
             guard { self.lifecycle_phase == Phase::Running }
             guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
+            guard "cancel_after_boundary_not_requested" { self.cancel_after_boundary == false }
             update {
                 self.boundary_count = self.boundary_count + 1;
                 self.turn_phase = TurnPhase::Completed;
@@ -5563,6 +5604,23 @@ macro_rules! meerkat_catalog_machine_dsl {
             to Running
             emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
             emit TurnRunCompleted { run_id: self.current_run_id.get("value"), outcome: TurnTerminalOutcome::Completed }
+            emit TurnCheckCompaction
+        }
+
+        transition BoundaryCompleteCancelled {
+            on input BoundaryComplete
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "turn_draining_boundary" { self.turn_phase == TurnPhase::DrainingBoundary }
+            guard "cancel_after_boundary_requested" { self.cancel_after_boundary == true }
+            update {
+                self.boundary_count = self.boundary_count + 1;
+                self.cancel_after_boundary = false;
+                self.turn_phase = TurnPhase::Cancelled;
+                self.terminal_outcome = Some(TurnTerminalOutcome::Cancelled);
+            }
+            to Running
+            emit TurnBoundaryApplied { run_id: self.current_run_id.get("value"), boundary_sequence: self.boundary_count }
+            emit TurnRunCancelled { run_id: self.current_run_id.get("value"), reason: TurnCancellationReason::Observed }
             emit TurnCheckCompaction
         }
 

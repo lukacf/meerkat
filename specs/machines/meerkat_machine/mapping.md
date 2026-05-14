@@ -736,7 +736,10 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `PrimitiveAppliedConversation`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
-- `PrimitiveAppliedImmediate`
+- `PrimitiveAppliedImmediateCompleted`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `PrimitiveAppliedImmediateCancelled`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
 - `LlmReturnedToolCallsPositive`
@@ -760,10 +763,16 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `OpsBarrierSatisfied`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
-- `BoundaryContinue`
+- `BoundaryContinueToCalling`
   - anchors: `meerkat_machine`
   - scenarios: `bind-run-boundary-terminal`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
-- `BoundaryComplete`
+- `BoundaryContinueToCancelled`
+  - anchors: `meerkat_machine`
+  - scenarios: `bind-run-boundary-terminal`, `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `ops_completion_and_waiters`
+- `BoundaryCompleteCompleted`
+  - anchors: `meerkat_machine`
+  - scenarios: `ops_completion_and_waiters`
+- `BoundaryCompleteCancelled`
   - anchors: `meerkat_machine`
   - scenarios: `ops_completion_and_waiters`
 - `EnterExtraction`

@@ -201,13 +201,13 @@ macro_rules! e2e_smoke_lane_entries {
             scenario(e2e_smoke_s83_comms_multimodal_mcp_roundtrip, 83);
             scenario(e2e_smoke_s84_mob_generated_image_comms_roundtrip, 84);
             scenario(e2e_smoke_s85_workgraph_homecore_agent_spine, 85);
+            scenario(e2e_smoke_s86_mob_provider_image_relay_readout, 86);
             suite(e2e_smoke_rpc_dynamic_tool_pickup, "rpc-dynamic-tool-pickup");
             suite(e2e_smoke_rpc_deferred_catalog_session, "rpc-deferred-catalog-session");
             suite(e2e_smoke_cli_background_job_active_turn, "cli-background-job-active-turn");
             suite(e2e_smoke_cli_background_job_idle_keepalive, "cli-background-job-idle-keepalive");
             suite(e2e_smoke_mob_live_smoke, "mob-live-smoke");
             suite(e2e_smoke_mob_flow_runtime_suite, "mob-flow-runtime");
-            suite(e2e_smoke_mob_pictionary, "mob-pictionary");
         }
     };
 }
@@ -513,10 +513,7 @@ enum SmokeRuntimeClass {
 
 fn smoke_runtime_class(spec: &Spec) -> SmokeRuntimeClass {
     let label = run_label(spec).to_ascii_lowercase();
-    if label.contains("mob flow runtime")
-        || label.contains("pictionary")
-        || label.contains("partial resume collaborative joke")
-    {
+    if label.contains("mob flow runtime") || label.contains("partial resume collaborative joke") {
         return SmokeRuntimeClass::MobSuite;
     }
     if label.contains("image") || label.contains("audio") {
@@ -557,9 +554,6 @@ fn smoke_runtime_priority(spec: &Spec) -> u16 {
     }
 
     let label = run_label(spec).to_ascii_lowercase();
-    if label.contains("pictionary") {
-        return 1_000;
-    }
     if label.contains("mob flow runtime") {
         return 760;
     }
@@ -3991,6 +3985,29 @@ fn scenario_spec(id: u16) -> Option<&'static Spec> {
                 all_features: false,
             },
         }),
+        86 => Some(&Spec {
+            id: Some(86),
+            lane: Lane::Smoke,
+            title: "Mob provider image relay readout",
+            timeout_secs: 900,
+            required_env: &[
+                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
+                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
+                &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            ],
+            required_bins: &["cargo"],
+            cwd: ".",
+            env: &[],
+            cargo_bin_env: &[],
+            pre_commands: &[],
+            command: CommandSpec::CargoTest {
+                package: "meerkat-mob",
+                test_target: "smoke_mob_generated_image_comms",
+                test_name: "e2e_smoke_s86_mob_provider_image_relay_readout",
+                features: &["integration-real-tests"],
+                all_features: false,
+            },
+        }),
         _ => None,
     }
 }
@@ -4853,29 +4870,6 @@ fn suite_spec(name: &str) -> Option<&'static Spec> {
                 output_policy: OutputPolicy::CargoTest,
             },
         }),
-        "mob-pictionary" => Some(&Spec {
-            id: None,
-            lane: Lane::Smoke,
-            title: "Mob pictionary multimodal smoke",
-            timeout_secs: 1800,
-            required_env: &[
-                &["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"],
-                &["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"],
-                &["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY"],
-            ],
-            required_bins: &["cargo"],
-            cwd: ".",
-            env: &[],
-            cargo_bin_env: &[],
-            pre_commands: &[],
-            command: CommandSpec::CargoTest {
-                package: "meerkat-mob",
-                test_target: "smoke_mob_pictionary",
-                test_name: "e2e_pictionary_multimodal_comms_stress",
-                features: &["integration-real-tests"],
-                all_features: false,
-            },
-        }),
         _ => None,
     }
 }
@@ -5086,8 +5080,8 @@ mod tests {
                 suite: None,
             },
             super::SelectedSpec {
-                spec: suite_spec("mob-pictionary").unwrap(),
-                suite: Some("mob-pictionary".to_string()),
+                spec: scenario_spec(86).unwrap(),
+                suite: None,
             },
             super::SelectedSpec {
                 spec: scenario_spec(73).unwrap(),
@@ -5095,8 +5089,8 @@ mod tests {
             },
         ];
         order_smoke_specs_for_runtime(&mut selected);
-        assert_eq!(selected[0].suite.as_deref(), Some("mob-pictionary"));
-        assert_eq!(selected[1].spec.id, Some(73));
+        assert_eq!(selected[0].spec.id, Some(73));
+        assert_eq!(selected[1].spec.id, Some(86));
         assert_eq!(selected[2].spec.id, Some(16));
     }
 

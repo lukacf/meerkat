@@ -1,7 +1,7 @@
 #![cfg(all(feature = "integration-real-tests", not(target_arch = "wasm32")))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //!
-//! AI Pictionary — multimodal cross-model comms stress test.
+//! AI Pictionary — standalone multimodal cross-model comms correctness stress test.
 //!
 //! A mob of 4 agents (3 different LLM providers) plays Pictionary:
 //!
@@ -17,6 +17,9 @@
 //! - **Artist** (Claude Sonnet 4.5) validates the guess
 //!
 //! Three rounds: easy (lighthouse), medium (loneliness), hard (déjà vu)
+//!
+//! This is intentionally not part of `make e2e-smoke`: it is slow, creative,
+//! and strict about actual guess correctness rather than just transport.
 //!
 //! ## Run
 //! ```bash
@@ -677,10 +680,6 @@ async fn ensure_artist_image_delivery(
         Ok(receipt) => format!("initial artist turn {receipt:?}"),
         Err(err) => format!("artist turn error: {err}"),
     };
-    if let Err(err) = send_artist_image_directly_via_comms(handle, service, recipient, &image).await
-    {
-        last_outcome = format!("{last_outcome}; direct comms seed failed: {err}");
-    }
 
     loop {
         let missing = missing_guessers_for_artist_image(handle, service, &recipients).await;
@@ -733,49 +732,6 @@ async fn ensure_artist_image_delivery(
     }
 }
 
-async fn send_artist_image_directly_via_comms(
-    handle: &MobHandle,
-    service: &dyn MobSessionService,
-    recipient: &str,
-    image: &ArtistForwardImage<'_>,
-) -> Result<(), String> {
-    let artist_identity = AgentIdentity::from("artist");
-    let artist_session_id = handle
-        .resolve_bridge_session_id(&artist_identity)
-        .await
-        .ok_or_else(|| "artist bridge session missing".to_string())?;
-    let comms = service
-        .comms_runtime(&artist_session_id)
-        .await
-        .ok_or_else(|| "artist comms runtime missing".to_string())?;
-    let peer_name = format!("pictionary/{recipient}/{recipient}");
-    let peer = comms
-        .peers()
-        .await
-        .into_iter()
-        .find(|peer| peer.name.as_str() == peer_name)
-        .ok_or_else(|| format!("recipient peer {peer_name} missing from artist directory"))?;
-    let route = meerkat_core::comms::PeerRoute::with_display_name(peer.peer_id, peer.name);
-    comms
-        .send(meerkat_core::comms::CommsCommand::PeerMessage {
-            to: route,
-            body: artist_forward_body(image.label),
-            blocks: Some(vec![
-                ContentBlock::Text {
-                    text: artist_forward_text_block(image.label),
-                },
-                ContentBlock::Image {
-                    media_type: image.media_type.to_string(),
-                    data: image.data.to_string().into(),
-                },
-            ]),
-            handling_mode: HandlingMode::Steer,
-        })
-        .await
-        .map(|_| ())
-        .map_err(|err| err.to_string())
-}
-
 fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) -> bool {
     page.messages.iter().any(|msg| {
         comms_content_from_peer(msg, "pictionary/guesser-a/guesser-a").is_some()
@@ -783,6 +739,49 @@ fn current_round_artist_received_guess(page: &meerkat_core::SessionHistoryPage) 
                 let text = text.to_lowercase();
                 text.contains("consensus guess") || text.contains("our consensus")
             })
+    })
+}
+
+fn normalized_words(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .replace('é', "e")
+        .replace('à', "a")
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn guess_mentions_secret(text: &str, secret_word: &str) -> bool {
+    let words = normalized_words(text);
+    let joined = words.join(" ");
+    match secret_word {
+        "lighthouse" => words.iter().any(|word| word == "lighthouse"),
+        "loneliness" => {
+            words
+                .iter()
+                .any(|word| word == "loneliness" || word == "lonely")
+                || joined.contains("being alone")
+        }
+        "the feeling of déjà vu" => {
+            joined.contains("deja vu")
+                || joined.contains("already seen")
+                || joined.contains("seen this before")
+        }
+        other => joined.contains(&normalized_words(other).join(" ")),
+    }
+}
+
+fn current_round_artist_received_correct_guess(
+    page: &meerkat_core::SessionHistoryPage,
+    secret_word: &str,
+) -> bool {
+    page.messages.iter().any(|msg| {
+        comms_content_from_peer(msg, "pictionary/guesser-a/guesser-a").is_some_and(|content| {
+            guess_mentions_secret(&meerkat_core::types::text_content(content), secret_word)
+        }) || comms_text(msg).is_some_and(|text| guess_mentions_secret(&text, secret_word))
     })
 }
 
@@ -909,10 +908,11 @@ fn pictionary_history_page(texts: Vec<(&str, &str)>) -> meerkat_core::SessionHis
 
 /// Wait for a full round-trip: guesser-a discusses with both peers, then a guess
 /// is sent to the artist for the current round.
-async fn wait_for_artist_guess_after_discussion(
+async fn wait_for_correct_artist_guess_after_discussion(
     handle: &MobHandle,
     service: &dyn MobSessionService,
     label: &str,
+    secret_word: &str,
     timeout: Duration,
 ) -> bool {
     let deadline = Instant::now() + timeout;
@@ -930,7 +930,7 @@ async fn wait_for_artist_guess_after_discussion(
                 )
                 .await
         {
-            current_round_artist_received_guess(&page)
+            current_round_artist_received_correct_guess(&page, secret_word)
         } else {
             false
         };
@@ -1141,8 +1141,8 @@ async fn print_conversation(
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "lane:e2e-smoke"]
-async fn e2e_pictionary_multimodal_comms_stress() {
+#[ignore = "standalone-live-pictionary"]
+async fn standalone_pictionary_multimodal_correctness_stress() {
     // Init tracing so RUST_LOG output is visible.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -1390,25 +1390,26 @@ async fn e2e_pictionary_multimodal_comms_stress() {
             }
         }
         // Success criteria: guesser-a hears from both peers and then sends a
-        // guess to the artist for the current round, regardless of correctness.
-        let guess_reached_artist = wait_for_artist_guess_after_discussion(
+        // correct guess to the artist for the current round.
+        let correct_guess_reached_artist = wait_for_correct_artist_guess_after_discussion(
             &handle,
             service.as_ref(),
             label,
+            secret_word,
             Duration::from_secs(300),
         )
         .await;
 
-        if guess_reached_artist {
+        if correct_guess_reached_artist {
             println!(
-                "  ✓ Discussion completed and a guess reached the artist [wait: {:.1}s, round: {:.1}s]",
+                "  ✓ Discussion completed and the correct guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),
                 round_start.elapsed().as_secs_f64()
             );
             passed += 1;
         } else {
             println!(
-                "  ✗ Timed out — no post-discussion guess reached the artist [wait: {:.1}s, round: {:.1}s]",
+                "  ✗ Timed out — no correct post-discussion guess reached the artist [wait: {:.1}s, round: {:.1}s]",
                 t.elapsed().as_secs_f64(),
                 round_start.elapsed().as_secs_f64()
             );
@@ -1424,16 +1425,21 @@ async fn e2e_pictionary_multimodal_comms_stress() {
 
         // Round 1 (easy) must pass to validate the pipeline works
         assert!(
-            round_idx != 0 || guess_reached_artist,
+            round_idx != 0 || correct_guess_reached_artist,
             "Round 1 (\"{secret_word}\") must pass — \
-             validates multimodal + comms pipeline"
+             validates multimodal + comms correctness"
         );
         println!();
     }
 
+    assert!(
+        passed >= 2,
+        "standalone pictionary should correctly solve at least 2/3 rounds"
+    );
+
     println!("============================================================");
     println!("  RESULTS: {passed}/3 rounds correct");
     println!("  Total time: {:.1}s", test_start.elapsed().as_secs_f64());
-    println!("  (Round 1 required; rounds 2-3 are stretch goals)");
+    println!("  (Round 1 required; at least 2/3 rounds must be correct)");
     println!("============================================================\n");
 }

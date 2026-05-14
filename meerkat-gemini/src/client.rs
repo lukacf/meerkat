@@ -9,7 +9,8 @@ use meerkat_core::schema::{CompiledSchema, SchemaCompat, SchemaError, SchemaWarn
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, GeminiImageMetadata, ImageData,
     ImageGenerationIntent, ImageOperationTerminalClass, Message, OutputSchema, Provider,
-    ProviderImageMetadata, ProviderTextDisposition, StopReason, ToolResult, Usage, UserMessage,
+    ProviderImageMetadata, ProviderTextDisposition, StopReason, SystemNoticeBlock,
+    SystemNoticeMessage, ToolResult, Usage, UserMessage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -327,6 +328,63 @@ impl GeminiClient {
         self
     }
 
+    fn content_block_to_gemini_part(block: &ContentBlock) -> Value {
+        match block {
+            ContentBlock::Text { text } => serde_json::json!({
+                "text": text
+            }),
+            ContentBlock::Image {
+                media_type,
+                data: ImageData::Inline { data },
+            } => serde_json::json!({
+                "inlineData": {
+                    "mimeType": media_type,
+                    "data": data
+                }
+            }),
+            ContentBlock::Video {
+                media_type,
+                duration_ms: _,
+                data: meerkat_core::VideoData::Inline { data },
+            } => serde_json::json!({
+                "inlineData": {
+                    "mimeType": media_type,
+                    "data": data
+                }
+            }),
+            _ => serde_json::json!({
+                "text": block.text_projection()
+            }),
+        }
+    }
+
+    fn system_notice_gemini_parts(notice: &SystemNoticeMessage) -> Vec<Value> {
+        let rendered = notice.model_projection_text();
+        let mut parts = Vec::new();
+        if !rendered.trim().is_empty() {
+            parts.push(serde_json::json!({ "text": rendered }));
+        }
+
+        for block in &notice.blocks {
+            match block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                    for content_block in content {
+                        if !matches!(content_block, ContentBlock::Text { .. }) {
+                            parts.push(Self::content_block_to_gemini_part(content_block));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if parts.is_empty() {
+            parts.push(serde_json::json!({ "text": "" }));
+        }
+        parts
+    }
+
     /// Build request body for Gemini API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut contents = Vec::new();
@@ -344,7 +402,7 @@ impl GeminiClient {
                 Message::SystemNotice(notice) => {
                     contents.push(serde_json::json!({
                         "role": "user",
-                        "parts": [{"text": notice.model_projection_text()}]
+                        "parts": Self::system_notice_gemini_parts(notice)
                     }));
                 }
                 Message::User(u) => {
@@ -352,33 +410,7 @@ impl GeminiClient {
                         let parts: Vec<Value> = u
                             .content
                             .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text { text } => serde_json::json!({
-                                    "text": text
-                                }),
-                                ContentBlock::Image {
-                                    media_type,
-                                    data: ImageData::Inline { data },
-                                } => serde_json::json!({
-                                    "inlineData": {
-                                        "mimeType": media_type,
-                                        "data": data
-                                    }
-                                }),
-                                ContentBlock::Video {
-                                    media_type,
-                                    duration_ms: _,
-                                    data: meerkat_core::VideoData::Inline { data },
-                                } => serde_json::json!({
-                                    "inlineData": {
-                                        "mimeType": media_type,
-                                        "data": data
-                                    }
-                                }),
-                                _ => serde_json::json!({
-                                    "text": block.text_projection()
-                                }),
-                            })
+                            .map(Self::content_block_to_gemini_part)
                             .collect();
                         contents.push(serde_json::json!({
                             "role": "user",
@@ -3876,6 +3908,47 @@ mod tests {
             !body_str.contains("/tmp/img.png"),
             "source_path value must never appear in provider payload"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn gemini_system_notice_with_image_emits_inline_data_part()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = GeminiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gemini-3.1-pro-preview",
+            vec![Message::SystemNotice(
+                meerkat_core::SystemNoticeMessage::with_block(
+                    meerkat_core::SystemNoticeKind::ExternalEvent,
+                    None,
+                    SystemNoticeBlock::ExternalEvent {
+                        source: "console".to_string(),
+                        event_type: "operator_message".to_string(),
+                        summary: None,
+                        body: Some("inspect this".to_string()),
+                        payload: None,
+                        content: vec![ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "iVBOR...".to_string(),
+                            },
+                        }],
+                    },
+                ),
+            )],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let contents = body["contents"].as_array().ok_or("missing contents")?;
+        let parts = contents[0]["parts"].as_array().ok_or("missing parts")?;
+
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("[image: image/png]"))
+        );
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/png");
+        assert_eq!(parts[1]["inlineData"]["data"], "iVBOR...");
         Ok(())
     }
 

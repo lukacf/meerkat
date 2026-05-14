@@ -2,7 +2,9 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use meerkat::{AgentFactory, Config, FactoryAgentBuilder};
-use meerkat_core::types::{AssistantBlock, ContentInput, HandlingMode, Message, text_content};
+use meerkat_core::types::{
+    AssistantBlock, ContentBlock, ContentInput, HandlingMode, Message, text_content,
+};
 use meerkat_core::{AssistantImageRef, BlobRef};
 use meerkat_mob::definition::{RoleWiringRule, WiringRules};
 use meerkat_mob::{
@@ -13,7 +15,7 @@ use meerkat_runtime::MeerkatMachine;
 use meerkat_session::PersistentSessionService;
 use meerkat_store::{JsonlStore, MemoryBlobStore, StoreAdapter};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::time::{Duration, Instant, sleep};
@@ -26,8 +28,30 @@ fn gemini_api_key() -> Option<String> {
     first_env(&["RKAT_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"])
 }
 
+fn openai_api_key() -> Option<String> {
+    first_env(&["RKAT_OPENAI_API_KEY", "OPENAI_API_KEY"])
+}
+
+fn anthropic_api_key() -> Option<String> {
+    first_env(&["RKAT_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"])
+}
+
 fn image_comms_model() -> String {
     std::env::var("RKAT_MOB_IMAGE_COMMS_MODEL").unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+}
+
+fn image_relay_maker_model() -> String {
+    std::env::var("RKAT_MOB_IMAGE_RELAY_MAKER_MODEL").unwrap_or_else(|_| "gpt-5.5".to_string())
+}
+
+fn image_relay_relay_model() -> String {
+    std::env::var("RKAT_MOB_IMAGE_RELAY_RELAY_MODEL")
+        .unwrap_or_else(|_| "claude-sonnet-4-5".to_string())
+}
+
+fn image_relay_reader_model() -> String {
+    std::env::var("RKAT_MOB_IMAGE_RELAY_READER_MODEL")
+        .unwrap_or_else(|_| "gemini-3.1-pro-preview".to_string())
 }
 
 fn generated_image_comms_profile(
@@ -85,6 +109,75 @@ fn generated_image_comms_definition(model: &str) -> MobDefinition {
     definition
 }
 
+fn image_relay_profile(model: &str, peer_description: &str, image_generation: bool) -> Profile {
+    Profile {
+        model: model.to_string(),
+        skills: vec![],
+        tools: ToolConfig {
+            builtins: image_generation,
+            comms: true,
+            image_generation,
+            ..Default::default()
+        },
+        peer_description: peer_description.to_string(),
+        external_addressable: true,
+        backend: None,
+        runtime_mode: MobRuntimeMode::TurnDriven,
+        max_inline_peer_notifications: None,
+        output_schema: None,
+        provider_params: None,
+    }
+}
+
+fn image_relay_definition(
+    maker_model: &str,
+    relay_model: &str,
+    reader_model: &str,
+) -> MobDefinition {
+    let mut profiles = BTreeMap::new();
+    profiles.insert(
+        ProfileName::from("maker"),
+        ProfileBinding::Inline(image_relay_profile(
+            maker_model,
+            "maker - generates a text-bearing image and sends it to relay",
+            true,
+        )),
+    );
+    profiles.insert(
+        ProfileName::from("relay"),
+        ProfileBinding::Inline(image_relay_profile(
+            relay_model,
+            "relay - forwards maker images to reader and returns the readout",
+            false,
+        )),
+    );
+    profiles.insert(
+        ProfileName::from("reader"),
+        ProfileBinding::Inline(image_relay_profile(
+            reader_model,
+            "reader - reads text from relayed images",
+            false,
+        )),
+    );
+
+    let mut definition = MobDefinition::explicit(MobId::from("image-relay"));
+    definition.profiles = profiles;
+    definition.wiring = WiringRules {
+        auto_wire_orchestrator: false,
+        role_wiring: vec![
+            RoleWiringRule {
+                a: ProfileName::from("maker"),
+                b: ProfileName::from("relay"),
+            },
+            RoleWiringRule {
+                a: ProfileName::from("relay"),
+                b: ProfileName::from("reader"),
+            },
+        ],
+    };
+    definition
+}
+
 async fn setup_generated_image_comms_mob(
     api_key: String,
     model: &str,
@@ -123,6 +216,56 @@ async fn setup_generated_image_comms_mob(
     let mob_service: Arc<dyn MobSessionService> = session_service.clone();
     let handle = MobBuilder::new(
         generated_image_comms_definition(model),
+        MobStorage::in_memory(),
+    )
+    .with_session_service(mob_service.clone())
+    .with_runtime_adapter(runtime_adapter)
+    .create()
+    .await?;
+
+    Ok((handle, mob_service, temp_dir))
+}
+
+async fn setup_image_relay_mob(
+    openai_key: String,
+    maker_model: &str,
+    relay_model: &str,
+    reader_model: &str,
+) -> Result<(MobHandle, Arc<dyn MobSessionService>, TempDir), Box<dyn std::error::Error>> {
+    let temp_dir = TempDir::new()?;
+    let root = temp_dir.path();
+    let runtime_store = Arc::new(meerkat_runtime::InMemoryRuntimeStore::default());
+    let blob_store: Arc<dyn meerkat_core::BlobStore> = Arc::new(MemoryBlobStore::default());
+    let runtime_adapter = Arc::new(MeerkatMachine::persistent(
+        runtime_store.clone(),
+        blob_store.clone(),
+    ));
+
+    let factory = AgentFactory::new(root.join("factory-store"))
+        .user_config_root(root.join("user-config"))
+        .runtime_root(root.join("runtime-root"))
+        .project_root(root.join("project-root"))
+        .context_root(root.join("context-root"))
+        .builtins(true)
+        .comms(true)
+        .with_image_generation_machine(runtime_adapter.clone());
+    let mut builder = FactoryAgentBuilder::new(factory, Config::default());
+    builder.default_image_generation_executor =
+        Some(Arc::new(meerkat_client::OpenAiClient::new(openai_key)));
+    let store = Arc::new(JsonlStore::new(root.join("sessions-jsonl")));
+    builder.default_session_store = Some(Arc::new(StoreAdapter::new(store.clone())));
+
+    let store_dyn: Arc<dyn meerkat::SessionStore> = store;
+    let session_service = Arc::new(PersistentSessionService::new(
+        builder,
+        8,
+        store_dyn,
+        Some(runtime_store),
+        blob_store,
+    ));
+    let mob_service: Arc<dyn MobSessionService> = session_service.clone();
+    let handle = MobBuilder::new(
+        image_relay_definition(maker_model, relay_model, reader_model),
         MobStorage::in_memory(),
     )
     .with_session_service(mob_service.clone())
@@ -173,6 +316,67 @@ async fn spawn_generated_image_comms_members(
                      Do not answer with prose only. Do not send any peer message until maker sends you a request."
                         .to_string(),
                     "For checksum_token requests about image_receipt_check, the only successful terminal action is send_response with a blob-backed image_ref block."
+                        .to_string(),
+                ]),
+        )
+        .await?;
+    handle.wait_for_ready(Some(Duration::from_secs(60))).await?;
+    Ok(())
+}
+
+async fn spawn_image_relay_members(handle: &MobHandle) -> Result<(), Box<dyn std::error::Error>> {
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("relay", AgentIdentity::from("relay"))
+                .with_initial_message(ContentInput::Text(
+                    "Stand by as relay for the image relay smoke. \
+                     For this spawn turn, do not call tools and do not contact peers. \
+                     Reply exactly RELAY-IMAGE-READOUT-READY."
+                        .to_string(),
+                ))
+                .with_additional_instructions(vec![
+                    "When maker sends an image relay task, do not read or describe the image yourself. \
+                     Extract the blob_id and media_type from maker's message. Then call send_message to \
+                     peer_id image-relay/reader/reader with handling_mode steer, a body asking reader to \
+                     read the visible text, and a blob-backed image_ref block using exactly that blob_id \
+                     and media_type. When reader replies, call send_message back to maker with body \
+                     READOUT: <reader's text>. Never invent the readout yourself."
+                        .to_string(),
+                ]),
+        )
+        .await?;
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("reader", AgentIdentity::from("reader"))
+                .with_initial_message(ContentInput::Text(
+                    "Stand by as reader for the image relay smoke. \
+                     For this spawn turn, do not call tools and do not contact peers. \
+                     Reply exactly READER-IMAGE-READOUT-READY."
+                        .to_string(),
+                ))
+                .with_additional_instructions(vec![
+                    "When relay sends you an image, inspect the image pixels and read the visible text. \
+                     Reply to relay using send_message with handling_mode steer and body exactly \
+                     READOUT: <the text you see>. If you cannot see text, reply READOUT: NO_TEXT. \
+                     Do not use prior context or relay body text as the readout."
+                        .to_string(),
+                ]),
+        )
+        .await?;
+    handle
+        .spawn_spec(
+            SpawnMemberSpec::new("maker", AgentIdentity::from("maker"))
+                .with_initial_message(ContentInput::Text(
+                    "Stand by as maker for the image relay smoke. \
+                     For this spawn turn, do not call tools and do not contact peers. \
+                     Reply exactly MAKER-IMAGE-READOUT-READY."
+                        .to_string(),
+                ))
+                .with_additional_instructions(vec![
+                    "When asked to run the relay smoke, use tools rather than prose. Generate the image first. \
+                     After generate_image returns, send the generated image to relay with a blob-backed image_ref. \
+                     The send_message body may include the blob_id and media_type, but it must not reveal the \
+                     text that the image generation prompt asked the image to contain."
                         .to_string(),
                 ]),
         )
@@ -459,6 +663,310 @@ fn image_ref_matches_blob(message: &Message, tool_name: &str, expected: &BlobRef
     })
 }
 
+fn image_ref_matches_blob_to_peer(
+    message: &Message,
+    tool_name: &str,
+    peer_id: &str,
+    expected: &BlobRef,
+) -> bool {
+    tool_uses(message).into_iter().any(|(name, args)| {
+        name == tool_name
+            && args.get("peer_id").and_then(Value::as_str) == Some(peer_id)
+            && args
+                .get("blocks")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("image_ref")
+                        && block.get("source").and_then(Value::as_str) == Some("blob")
+                        && block.get("blob_id").and_then(Value::as_str)
+                            == Some(expected.blob_id.as_str())
+                        && block.get("media_type").and_then(Value::as_str)
+                            == Some(expected.media_type.as_str())
+                })
+    })
+}
+
+fn image_ref_matches_blob_to_any_peer(
+    message: &Message,
+    tool_name: &str,
+    peer_ids: &[String],
+    expected: &BlobRef,
+) -> bool {
+    peer_ids
+        .iter()
+        .any(|peer_id| image_ref_matches_blob_to_peer(message, tool_name, peer_id, expected))
+}
+
+fn tool_use_leaks_readout_token(message: &Message, tool_name: &str) -> bool {
+    tool_uses(message).into_iter().any(|(name, args)| {
+        if name != tool_name {
+            return false;
+        }
+        let mut text = args
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        for block in args
+            .get("blocks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(block_text) = block.get("text").and_then(Value::as_str) {
+                text.push('\n');
+                text.push_str(block_text);
+            }
+        }
+        readout_mentions_target(&text)
+    })
+}
+
+fn tool_use_to_any_peer_leaks_readout_token(
+    message: &Message,
+    tool_name: &str,
+    peer_ids: &[String],
+) -> bool {
+    tool_uses(message).into_iter().any(|(name, args)| {
+        if name != tool_name {
+            return false;
+        }
+        let Some(peer_id) = args.get("peer_id").and_then(Value::as_str) else {
+            return false;
+        };
+        if !peer_ids.iter().any(|expected| expected == peer_id) {
+            return false;
+        }
+        let mut text = args
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        for block in args
+            .get("blocks")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(block_text) = block.get("text").and_then(Value::as_str) {
+                text.push('\n');
+                text.push_str(block_text);
+            }
+        }
+        readout_mentions_target(&text)
+    })
+}
+
+fn value_mentions_reader(value: &Value) -> bool {
+    match value {
+        Value::String(text) => {
+            text.eq_ignore_ascii_case("reader")
+                || text.contains("image-relay/reader/reader")
+                || text.to_ascii_lowercase().contains(" reader")
+        }
+        Value::Array(values) => values.iter().any(value_mentions_reader),
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().contains("reader") || value_mentions_reader(value)
+        }),
+        _ => false,
+    }
+}
+
+fn collect_reader_peer_ids_from_value(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_reader_peer_ids_from_value(value, ids);
+            }
+        }
+        Value::Object(map) => {
+            let object_mentions_reader = map.iter().any(|(key, value)| {
+                key.to_ascii_lowercase().contains("reader") || value_mentions_reader(value)
+            });
+            if object_mentions_reader {
+                for key in ["id", "peer_id", "peerId", "name", "address", "endpoint"] {
+                    if let Some(peer_id) = map.get(key).and_then(Value::as_str) {
+                        ids.insert(peer_id.to_string());
+                    }
+                }
+            }
+            for (key, value) in map {
+                if key.to_ascii_lowercase().contains("reader")
+                    && let Some(peer_id) = value.as_str()
+                {
+                    ids.insert(peer_id.to_string());
+                }
+                collect_reader_peer_ids_from_value(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn reader_peer_ids_from_history(messages: &[Message]) -> Vec<String> {
+    let mut ids = BTreeSet::from([
+        "image-relay/reader/reader".to_string(),
+        "reader".to_string(),
+    ]);
+    for message in messages {
+        let Message::ToolResults { results, .. } = message else {
+            continue;
+        };
+        for result in results {
+            let text = text_content(&result.content);
+            if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                collect_reader_peer_ids_from_value(&value, &mut ids);
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn comms_content_from_peer<'a>(
+    message: &'a Message,
+    expected_peer_id: &str,
+) -> Option<&'a [ContentBlock]> {
+    let Message::SystemNotice(notice) = message else {
+        return None;
+    };
+    notice.blocks.iter().find_map(|block| {
+        let meerkat_core::SystemNoticeBlock::Comms { peer, content, .. } = block else {
+            return None;
+        };
+        let matches_peer = peer.as_ref().is_some_and(|peer| {
+            peer.id.as_str() == expected_peer_id
+                || peer.display_name.as_deref() == Some(expected_peer_id)
+        });
+        matches_peer.then_some(content.as_slice())
+    })
+}
+
+fn comms_text_from_peer(message: &Message, expected_peer_id: &str) -> Option<String> {
+    comms_content_from_peer(message, expected_peer_id)
+        .map(text_content)
+        .filter(|text| !text.trim().is_empty())
+}
+
+fn member_received_image_from(messages: &[Message], expected_peer_id: &str) -> bool {
+    messages.iter().any(|message| {
+        comms_content_from_peer(message, expected_peer_id).is_some_and(meerkat_core::has_images)
+    })
+}
+
+fn content_has_blob_ref(content: &[ContentBlock], expected: &BlobRef) -> bool {
+    content.iter().any(|block| {
+        block.image_blob_ref().is_some_and(|(media_type, blob_id)| {
+            media_type == expected.media_type && blob_id == &expected.blob_id
+        })
+    })
+}
+
+fn member_received_blob_from(
+    messages: &[Message],
+    expected_peer_id: &str,
+    expected: &BlobRef,
+) -> bool {
+    messages.iter().any(|message| {
+        comms_content_from_peer(message, expected_peer_id)
+            .is_some_and(|content| content_has_blob_ref(content, expected))
+    })
+}
+
+fn member_received_readout_from(messages: &[Message], expected_peer_id: &str) -> bool {
+    messages.iter().any(|message| {
+        comms_text_from_peer(message, expected_peer_id).is_some_and(|text| {
+            text.to_ascii_uppercase().contains("READOUT") && readout_mentions_target(&text)
+        })
+    })
+}
+
+fn readout_mentions_target(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("rkat") && normalized.contains("7319")
+}
+
+fn relay_forwarded_blob_to_reader(
+    relay_messages: &[Message],
+    reader_messages: &[Message],
+    expected: &BlobRef,
+) -> bool {
+    let reader_peer_ids = reader_peer_ids_from_history(relay_messages);
+    let relay_targeted_reader = relay_messages.iter().any(|message| {
+        image_ref_matches_blob_to_any_peer(message, "send_message", &reader_peer_ids, expected)
+    });
+    let reader_received_same_blob =
+        member_received_blob_from(reader_messages, "image-relay/relay/relay", expected);
+    let relay_sent_same_blob = relay_messages
+        .iter()
+        .any(|message| image_ref_matches_blob(message, "send_message", expected));
+    relay_targeted_reader || (relay_sent_same_blob && reader_received_same_blob)
+}
+
+async fn wait_for_image_relay_readout_success(
+    handle: &MobHandle,
+    service: &dyn MobSessionService,
+    timeout: Duration,
+) -> Result<BlobRef, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let maker = member_messages(handle, service, "maker").await;
+        let relay = member_messages(handle, service, "relay").await;
+        let reader = member_messages(handle, service, "reader").await;
+
+        let maker_image = first_generated_image(&maker);
+        let maker_sent_blob_to_relay = maker_image.as_ref().is_some_and(|image| {
+            maker.iter().any(|message| {
+                image_ref_matches_blob_to_peer(
+                    message,
+                    "send_message",
+                    "image-relay/relay/relay",
+                    &image.blob_ref,
+                )
+            })
+        });
+        let relay_received_image = member_received_image_from(&relay, "image-relay/maker/maker");
+        let relay_sent_blob_to_reader = maker_image
+            .as_ref()
+            .is_some_and(|image| relay_forwarded_blob_to_reader(&relay, &reader, &image.blob_ref));
+        let reader_received_image = maker_image.as_ref().is_some_and(|image| {
+            member_received_blob_from(&reader, "image-relay/relay/relay", &image.blob_ref)
+        });
+        let relay_received_readout =
+            member_received_readout_from(&relay, "image-relay/reader/reader");
+        let maker_received_readout =
+            member_received_readout_from(&maker, "image-relay/relay/relay");
+
+        if let Some(image) = maker_image.as_ref()
+            && maker_sent_blob_to_relay
+            && relay_received_image
+            && relay_sent_blob_to_reader
+            && reader_received_image
+            && relay_received_readout
+            && maker_received_readout
+        {
+            return Ok(image.blob_ref.clone());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for image relay readout: maker_generated={}, \
+                 maker_sent_blob_to_relay={maker_sent_blob_to_relay}, relay_received_image={relay_received_image}, \
+                 relay_sent_blob_to_reader={relay_sent_blob_to_reader}, reader_received_image={reader_received_image}, \
+                 relay_received_readout={relay_received_readout}, maker_received_readout={maker_received_readout}; \
+                 maker={}; relay={}; reader={}",
+                maker_image.is_some(),
+                history_summary(&maker),
+                history_summary(&relay),
+                history_summary(&reader)
+            ));
+        }
+
+        sleep(Duration::from_secs(3)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "lane:e2e-smoke"]
 async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
@@ -547,5 +1055,103 @@ async fn e2e_smoke_mob_generated_image_comms_blob_request_response() {
             &maker_image.blob_ref
         )),
         "maker should send the image generated in the previous turn as a blob image_ref"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "lane:e2e-smoke"]
+async fn e2e_smoke_s86_mob_provider_image_relay_readout() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .try_init();
+
+    let Some(openai_key) = openai_api_key() else {
+        eprintln!("Skipping image relay smoke: missing OPENAI_API_KEY");
+        return;
+    };
+    if anthropic_api_key().is_none() {
+        eprintln!("Skipping image relay smoke: missing ANTHROPIC_API_KEY");
+        return;
+    }
+    if gemini_api_key().is_none() {
+        eprintln!("Skipping image relay smoke: missing GEMINI_API_KEY");
+        return;
+    }
+
+    let maker_model = image_relay_maker_model();
+    let relay_model = image_relay_relay_model();
+    let reader_model = image_relay_reader_model();
+    let (handle, service, _tmp) =
+        setup_image_relay_mob(openai_key, &maker_model, &relay_model, &reader_model)
+            .await
+            .expect("image relay mob setup");
+    spawn_image_relay_members(&handle)
+        .await
+        .expect("spawn image relay members");
+    wait_for_member_histories_to_settle(
+        &handle,
+        service.as_ref(),
+        &["maker", "relay", "reader"],
+        Duration::from_secs(120),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("spawn turns should settle before relay smoke");
+
+    let maker = handle
+        .member(&AgentIdentity::from("maker"))
+        .await
+        .expect("maker member");
+    maker
+        .send(
+            ContentInput::Text(
+                "Run the provider image relay smoke now. Use exactly this tool sequence, in this order:\n\
+                 1. Call generate_image exactly once. The request must use provider openai, model gpt-image-2, \
+                 prompt \"Create a simple white poster with only the exact large black text RKAT 7319 centered. \
+                 No other letters, numbers, watermarks, captions, or symbols.\", size 1024x1024, quality low, \
+                 format png, count 1.\n\
+                 2. After generate_image returns, call send_message to peer_id \"image-relay/relay/relay\" with \
+                 handling_mode \"steer\". Attach the generated image as a blob-backed image_ref using the exact \
+                 blob_id and media_type returned by generate_image. The body must tell relay to forward that same \
+                 blob-backed image to reader, ask reader to read visible text, and then return reader's READOUT to you. \
+                 The body and any text block you send to relay MUST NOT contain the target text from the image prompt. \
+                 It may contain only the blob_id, media_type, routing instructions, and the word READOUT.\n\
+                 Do not answer with prose until the tools are done."
+                    .to_string(),
+            ),
+            HandlingMode::Queue,
+        )
+        .await
+        .expect("kick off image relay smoke");
+
+    let relayed_blob =
+        wait_for_image_relay_readout_success(&handle, service.as_ref(), Duration::from_secs(420))
+            .await
+            .expect("image relay readout should complete");
+
+    let maker_messages = member_messages(&handle, service.as_ref(), "maker").await;
+    let relay_messages = member_messages(&handle, service.as_ref(), "relay").await;
+    let reader_messages = member_messages(&handle, service.as_ref(), "reader").await;
+    let reader_peer_ids = reader_peer_ids_from_history(&relay_messages);
+    assert!(
+        !maker_messages
+            .iter()
+            .any(|message| tool_use_leaks_readout_token(message, "send_message")),
+        "maker must not reveal the target text in its relay message"
+    );
+    assert!(
+        !relay_messages
+            .iter()
+            .any(|message| tool_use_to_any_peer_leaks_readout_token(
+                message,
+                "send_message",
+                &reader_peer_ids
+            )),
+        "relay must not reveal the target text when asking reader to OCR the image"
+    );
+    assert!(
+        relay_forwarded_blob_to_reader(&relay_messages, &reader_messages, &relayed_blob),
+        "relay should forward maker's generated image blob to reader"
     );
 }

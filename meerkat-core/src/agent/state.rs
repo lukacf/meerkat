@@ -2571,6 +2571,18 @@ where
                             continue;
                         }
 
+                        if self.turn_cancel_after_boundary()? {
+                            let t =
+                                self.apply_turn_input(TurnExecutionInput::BoundaryComplete {
+                                    run_id: run_id.clone(),
+                                })?;
+                            self.execute_turn_effects(&t, turn_count, &event_tx).await;
+                            if let Err(e) = self.store.save(&self.session).await {
+                                tracing::warn!("Failed to save session: {}", e);
+                            }
+                            return self.build_result(turn_count + 1, tool_call_count).await;
+                        }
+
                         let mut result = RunResult {
                             text: final_text,
                             session_id: self.session.id().clone(),
@@ -6602,6 +6614,67 @@ mod tests {
 
         assert!(matches!(error, AgentError::Cancelled));
         assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn post_llm_boundary_cancel_does_not_return_success() {
+        use crate::hooks::{
+            HookEngine, HookEngineError, HookExecutionReport, HookInvocation, HookPoint,
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct RequestBoundaryCancelHook {
+            flag: Arc<AtomicBool>,
+        }
+
+        #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+        #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+        impl HookEngine for RequestBoundaryCancelHook {
+            async fn execute(
+                &self,
+                invocation: HookInvocation,
+                _overrides: Option<&crate::config::HookRunOverrides>,
+            ) -> Result<HookExecutionReport, HookEngineError> {
+                if invocation.point == HookPoint::PostLlmResponse {
+                    self.flag.store(true, Ordering::SeqCst);
+                }
+                Ok(HookExecutionReport::empty())
+            }
+        }
+
+        let mut agent = build_agent(Arc::new(StaticLlmClient)).await;
+        agent.hook_engine = Some(Arc::new(RequestBoundaryCancelHook {
+            flag: agent.cancel_after_boundary_handle(),
+        }));
+
+        let (tx, mut rx) = mpsc::channel::<crate::event::AgentEvent>(32);
+        let error = agent
+            .run_with_events("prompt".to_string().into(), tx)
+            .await
+            .expect_err("boundary cancellation after a terminal LLM response must cancel the run");
+
+        assert!(matches!(error, AgentError::Cancelled));
+        assert_eq!(AgentErrorClass::from(&error), AgentErrorClass::Cancelled);
+
+        let snapshot = agent
+            .execution_snapshot()
+            .expect("test turn-state handle should expose a snapshot");
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Cancelled);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            crate::TurnTerminalOutcome::Cancelled
+        );
+
+        while let Ok(event) = rx.try_recv() {
+            assert!(
+                !matches!(event, crate::event::AgentEvent::TurnCompleted { .. }),
+                "cancelled boundary must not emit TurnCompleted"
+            );
+            assert!(
+                !matches!(event, crate::event::AgentEvent::RunCompleted { .. }),
+                "cancelled boundary must not emit RunCompleted"
+            );
+        }
     }
 
     #[tokio::test]

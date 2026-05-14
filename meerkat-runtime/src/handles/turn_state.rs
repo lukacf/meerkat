@@ -523,6 +523,70 @@ mod tests {
     }
 
     #[test]
+    fn cancel_after_boundary_cancels_continuation_boundary() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(18));
+
+        handle
+            .start_conversation_run(
+                run_id,
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied().unwrap();
+        handle.llm_returned_tool_calls(1).unwrap();
+        handle
+            .register_pending_ops(BTreeSet::new(), BTreeSet::new())
+            .unwrap();
+        handle.tool_calls_resolved().unwrap();
+        handle.request_cancel_after_boundary().unwrap();
+        handle.boundary_continue().unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        assert!(!snapshot.cancel_after_boundary);
+        assert_eq!(snapshot.active_run_id, None);
+    }
+
+    #[test]
+    fn cancel_after_boundary_cancels_terminal_boundary() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(19));
+
+        handle
+            .start_conversation_run(
+                run_id,
+                TurnPrimitiveKind::ConversationTurn,
+                meerkat_core::turn_execution_authority::ContentShape::Conversation,
+                false,
+                false,
+                0,
+            )
+            .unwrap();
+        handle.primitive_applied().unwrap();
+        handle.llm_returned_terminal().unwrap();
+        handle.request_cancel_after_boundary().unwrap();
+        handle.boundary_complete().unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        assert!(!snapshot.cancel_after_boundary);
+        assert_eq!(snapshot.active_run_id, None);
+    }
+
+    #[test]
     fn immediate_append_derives_content_shape() {
         let handle = RuntimeTurnStateHandle::ephemeral();
         let run_id = RunId(Uuid::from_u128(10));
@@ -533,6 +597,25 @@ mod tests {
             handle.snapshot().admitted_content_shape,
             Some(meerkat_core::turn_execution_authority::ContentShape::ImmediateAppend)
         );
+    }
+
+    #[test]
+    fn cancel_after_boundary_cancels_immediate_boundary() {
+        let handle = RuntimeTurnStateHandle::ephemeral();
+        let run_id = RunId(Uuid::from_u128(20));
+
+        handle.start_immediate_append(run_id).unwrap();
+        handle.request_cancel_after_boundary().unwrap();
+        handle.primitive_applied().unwrap();
+
+        let snapshot = handle.snapshot();
+        assert_eq!(snapshot.turn_phase, TurnPhase::Cancelled);
+        assert_eq!(
+            snapshot.terminal_outcome,
+            Some(TurnTerminalOutcome::Cancelled)
+        );
+        assert!(!snapshot.cancel_after_boundary);
+        assert_eq!(snapshot.active_run_id, None);
     }
 
     #[test]

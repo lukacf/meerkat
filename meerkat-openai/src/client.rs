@@ -2230,7 +2230,7 @@ mod tests {
         AssistantImageId, BlobId, BlobRef, BlockAssistantMessage, MediaType, ProviderImageMetadata,
         RevisedPromptDisposition, ToolResult, UserMessage, VideoData,
     };
-    use meerkat_llm_core::ImageGenerationExecutor;
+    use meerkat_llm_core::{ImageGenerationExecutor, LlmClientAdapter};
     use std::sync::{Arc, Mutex};
     use tokio::net::TcpListener;
 
@@ -5058,6 +5058,88 @@ mod tests {
 
         // Should only get one ReasoningComplete, not duplicated from response.completed
         assert_eq!(reasoning_completes, 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_adapter_accepts_reasoning_only_completed_response() {
+        let payload = [
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","id":"rs_silent","summary":[],"encrypted_content":"enc_silent"}],"usage":{"input_tokens":10,"output_tokens":409770}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = Arc::new(OpenAiClient::new_with_base_url(
+            "test-key".to_string(),
+            base_url,
+        ));
+        let adapter = LlmClientAdapter::new(client, "gpt-5.5".to_string());
+
+        let result = meerkat_core::AgentLlmClient::stream_response(
+            &adapter,
+            &[Message::User(UserMessage::text("ack silently".to_string()))],
+            &[],
+            1024,
+            None,
+            None,
+        )
+        .await
+        .expect("reasoning-only OpenAI response should assemble successfully");
+        server.abort();
+
+        assert_eq!(result.usage().output_tokens, 409770);
+        assert!(matches!(
+            result.blocks(),
+            [AssistantBlock::Reasoning { text, meta }]
+                if text.is_empty() && meta.is_some()
+        ));
+        assert!(
+            result
+                .blocks()
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Reasoning { .. })),
+            "adapter should preserve the reasoning item for the core commit boundary"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_adapter_preserves_reasoning_delta_when_completed_omits_reasoning_item() {
+        let payload = [
+            r#"data: {"type":"response.reasoning_summary_text.delta","delta":"thinking then silent"}"#,
+            r#"data: {"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":10,"output_tokens":409770}}}"#,
+            "data: [DONE]",
+            "",
+        ]
+        .join("\n");
+        let (base_url, server) = spawn_openai_stub_server(payload).await;
+        let client = Arc::new(OpenAiClient::new_with_base_url(
+            "test-key".to_string(),
+            base_url,
+        ));
+        let adapter = LlmClientAdapter::new(client, "gpt-5.5".to_string());
+
+        let result = meerkat_core::AgentLlmClient::stream_response(
+            &adapter,
+            &[Message::User(UserMessage::text("ack silently".to_string()))],
+            &[],
+            1024,
+            None,
+            None,
+        )
+        .await
+        .expect("terminal OpenAI stream should preserve pending reasoning deltas");
+        server.abort();
+
+        assert_eq!(result.usage().output_tokens, 409770);
+        assert!(matches!(
+            result.blocks(),
+            [AssistantBlock::Reasoning { text, meta }]
+                if text == "thinking then silent" && meta.is_none()
+        ));
+        assert!(
+            meerkat_core::assistant_blocks_have_visible_or_actionable_output(result.blocks()),
+            "pending reasoning summary text should satisfy the core commit predicate"
+        );
     }
 
     #[tokio::test]

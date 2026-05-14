@@ -872,6 +872,36 @@ mod ordered_transcript_types {
     }
 
     #[test]
+    fn reasoning_with_provider_metadata_counts_as_actionable_output() {
+        let blocks = vec![AssistantBlock::Reasoning {
+            text: String::new(),
+            meta: Some(Box::new(ProviderMeta::OpenAi {
+                id: "reasoning_123".to_string(),
+                encrypted_content: Some("encrypted".to_string()),
+                phase: None,
+            })),
+        }];
+
+        assert!(
+            crate::assistant_blocks_have_visible_or_actionable_output(&blocks),
+            "reasoning-only completions with provider continuity metadata are valid output"
+        );
+    }
+
+    #[test]
+    fn empty_reasoning_without_metadata_is_not_actionable_output() {
+        let blocks = vec![AssistantBlock::Reasoning {
+            text: String::new(),
+            meta: None,
+        }];
+
+        assert!(
+            !crate::assistant_blocks_have_visible_or_actionable_output(&blocks),
+            "empty reasoning without continuity metadata is still an empty completion"
+        );
+    }
+
+    #[test]
     fn test_assistant_block_tool_use_roundtrip() {
         let args = RawValue::from_string(r#"{"path":"/tmp/test.txt"}"#.to_string()).unwrap();
         let block = AssistantBlock::ToolUse {

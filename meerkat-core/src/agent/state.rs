@@ -6050,11 +6050,19 @@ mod tests {
         ) -> Result<super::LlmStreamResult, AgentError> {
             Ok(super::LlmStreamResult::new(
                 vec![AssistantBlock::Reasoning {
-                    text: "I should call a tool".to_string(),
-                    meta: None,
+                    text: String::new(),
+                    meta: Some(Box::new(crate::types::ProviderMeta::OpenAi {
+                        id: "rs_reasoning_only".to_string(),
+                        encrypted_content: Some("encrypted-reasoning".to_string()),
+                        phase: None,
+                    })),
                 }],
                 StopReason::EndTurn,
-                Usage::default(),
+                Usage {
+                    input_tokens: 11,
+                    output_tokens: 7,
+                    ..Usage::default()
+                },
             ))
         }
 
@@ -6068,46 +6076,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reasoning_only_llm_response_does_not_complete_turn() {
+    async fn reasoning_only_llm_response_completes_silent_turn() {
         let mut agent = build_agent(Arc::new(ReasoningOnlyLlmClient)).await;
         agent.config.max_turns = Some(1);
 
-        let err = agent
+        let result = agent
             .run("Use a tool".to_string().into())
             .await
-            .expect_err("reasoning-only LLM response should terminalize as a failure");
+            .expect("reasoning-only LLM response should commit as a silent completion");
 
-        match err {
-            AgentError::Llm {
-                reason, message, ..
-            } => {
-                assert!(
-                    message.contains("user-visible text"),
-                    "unexpected message: {message}"
-                );
-                assert!(matches!(
-                    reason,
-                    crate::error::LlmFailureReason::ProviderError(crate::error::LlmProviderError {
-                        kind: crate::error::LlmProviderErrorKind::IncompleteResponse,
-                        ..
-                    })
-                ));
-            }
-            other => panic!("expected LLM incomplete-response failure, got {other:?}"),
-        }
+        assert_eq!(
+            result.text, "",
+            "reasoning-only completions have no user-visible assistant text"
+        );
+        assert_eq!(result.usage.output_tokens, 7);
 
         let snapshot = agent
             .execution_snapshot()
             .expect("test turn-state handle should expose a snapshot");
-        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Failed);
+        assert_eq!(snapshot.turn_phase, crate::TurnPhase::Completed);
         assert_eq!(
             snapshot.terminal_outcome,
-            crate::TurnTerminalOutcome::Failed
+            crate::TurnTerminalOutcome::Completed
         );
-        assert_eq!(
-            snapshot.terminal_cause_kind,
-            Some(crate::TurnTerminalCauseKind::LlmFailure)
-        );
+        assert_eq!(snapshot.terminal_cause_kind, None);
     }
 
     #[tokio::test]

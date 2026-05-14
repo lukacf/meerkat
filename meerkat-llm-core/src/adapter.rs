@@ -355,6 +355,23 @@ impl AgentLlmClient for LlmClientAdapter {
                 }
             }
         }
+        if reasoning_started {
+            let reasoning_text = assembler.current_reasoning_text();
+            assembler.on_reasoning_complete(None);
+            meerkat_core::tap_try_send(
+                &self.event_tap,
+                &AgentEvent::ReasoningComplete {
+                    content: reasoning_text.clone(),
+                },
+            );
+            if let Some(ref tx) = self.event_tx {
+                let _ = tx
+                    .send(AgentEvent::ReasoningComplete {
+                        content: reasoning_text,
+                    })
+                    .await;
+            }
+        }
         Ok(LlmStreamResult::new(
             assembler.finalize(),
             stop_reason,
@@ -388,6 +405,10 @@ mod tests {
 
     struct ProjectionClient {
         seen: Arc<Mutex<Option<Vec<Message>>>>,
+    }
+
+    struct ScriptedClient {
+        events: Vec<Result<LlmEvent, LlmError>>,
     }
 
     #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
@@ -442,6 +463,26 @@ mod tests {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+    impl LlmClient for ScriptedClient {
+        fn project_replay_messages(&self, messages: &[Message]) -> Result<Vec<Message>, LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(&'a self, _request: &'a LlmRequest) -> LlmStream<'a> {
+            Box::pin(stream::iter(self.events.clone()))
+        }
+
+        fn provider(&self) -> &'static str {
+            "scripted-test"
+        }
+
+        async fn health_check(&self) -> Result<(), LlmError> {
+            Ok(())
+        }
+    }
+
     fn assistant_image_block() -> AssistantBlock {
         AssistantBlock::Image {
             image_id: AssistantImageId::new(meerkat_core::time_compat::new_uuid_v7()),
@@ -485,6 +526,58 @@ mod tests {
             .ok_or_else(|| "request was not captured".to_string())?;
         assert_eq!(projected.len(), 1);
         assert!(matches!(projected[0], Message::User(_)));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn adapter_commits_reasoning_delta_when_done_lacks_reasoning_complete()
+    -> Result<(), String> {
+        let adapter = LlmClientAdapter::new(
+            Arc::new(ScriptedClient {
+                events: vec![
+                    Ok(LlmEvent::ReasoningDelta {
+                        delta: "thinking before silence".to_string(),
+                    }),
+                    Ok(LlmEvent::UsageUpdate {
+                        usage: Usage {
+                            input_tokens: 3,
+                            output_tokens: 5,
+                            ..Usage::default()
+                        },
+                    }),
+                    Ok(LlmEvent::Done {
+                        outcome: LlmDoneOutcome::Success {
+                            stop_reason: StopReason::EndTurn,
+                        },
+                    }),
+                ],
+            }),
+            "scripted-model".to_string(),
+        );
+
+        let result = adapter
+            .stream_response(
+                &[Message::User(UserMessage::text("ack silently"))],
+                &[],
+                1024,
+                None,
+                None,
+            )
+            .await
+            .map_err(|err| {
+                format!("pending reasoning should be finalized on successful done: {err}")
+            })?;
+
+        assert_eq!(result.usage().output_tokens, 5);
+        assert!(matches!(
+            result.blocks(),
+            [AssistantBlock::Reasoning { text, meta }]
+                if text == "thinking before silence" && meta.is_none()
+        ));
+        assert!(
+            meerkat_core::assistant_blocks_have_visible_or_actionable_output(result.blocks()),
+            "non-empty reasoning delta should survive to the core commit predicate"
+        );
         Ok(())
     }
 }

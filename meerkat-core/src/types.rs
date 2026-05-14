@@ -566,7 +566,8 @@ pub fn assistant_blocks_have_visible_or_actionable_output(blocks: &[AssistantBlo
             !text.trim().is_empty()
         }
         AssistantBlock::ToolUse { .. } | AssistantBlock::Image { .. } => true,
-        AssistantBlock::Reasoning { .. } | AssistantBlock::ServerToolContent { .. } => false,
+        AssistantBlock::Reasoning { text, meta } => !text.trim().is_empty() || meta.is_some(),
+        AssistantBlock::ServerToolContent { .. } => false,
     })
 }
 

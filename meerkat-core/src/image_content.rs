@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use crate::blob::{BlobId, BlobStore, BlobStoreError};
 use crate::session::SessionDeferredTurnState;
-use crate::types::{ContentBlock, ContentInput, ImageData, Message};
+use crate::types::{ContentBlock, ContentInput, ImageData, Message, SystemNoticeBlock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingBlobBehavior {
@@ -77,6 +77,9 @@ pub async fn externalize_messages_from(
                     externalize_content_blocks(blob_store, &mut result.content).await?;
                 }
             }
+            Message::SystemNotice(notice) => {
+                externalize_system_notice_blocks(blob_store, &mut notice.blocks).await?;
+            }
             _ => {}
         }
     }
@@ -98,6 +101,43 @@ pub async fn hydrate_messages_for_execution(
                     hydrate_content_blocks(blob_store, &mut result.content, missing_behavior)
                         .await?;
                 }
+            }
+            Message::SystemNotice(notice) => {
+                hydrate_system_notice_blocks(blob_store, &mut notice.blocks, missing_behavior)
+                    .await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn externalize_system_notice_blocks(
+    blob_store: &dyn BlobStore,
+    blocks: &mut [SystemNoticeBlock],
+) -> Result<(), BlobStoreError> {
+    for block in blocks {
+        match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                externalize_content_blocks(blob_store, content).await?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn hydrate_system_notice_blocks(
+    blob_store: &dyn BlobStore,
+    blocks: &mut [SystemNoticeBlock],
+    missing_behavior: MissingBlobBehavior,
+) -> Result<(), BlobStoreError> {
+    for block in blocks {
+        match block {
+            SystemNoticeBlock::Comms { content, .. }
+            | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                hydrate_content_blocks(blob_store, content, missing_behavior).await?;
             }
             _ => {}
         }
@@ -180,8 +220,149 @@ pub fn collect_blob_ids_from_messages(messages: &[Message]) -> BTreeSet<BlobId> 
                     ids.extend(collect_blob_ids_from_blocks(&result.content));
                 }
             }
+            Message::SystemNotice(notice) => {
+                for block in &notice.blocks {
+                    match block {
+                        SystemNoticeBlock::Comms { content, .. }
+                        | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                            ids.extend(collect_blob_ids_from_blocks(content));
+                        }
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     }
     ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::blob::{BlobPayload, BlobRef};
+    use crate::types::{
+        SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer,
+    };
+    use async_trait::async_trait;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestBlobStore {
+        blobs: Mutex<HashMap<BlobId, BlobPayload>>,
+    }
+
+    impl TestBlobStore {
+        fn with_payload(payload: BlobPayload) -> Self {
+            Self {
+                blobs: Mutex::new(HashMap::from([(payload.blob_id.clone(), payload)])),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BlobStore for TestBlobStore {
+        async fn put_image(&self, media_type: &str, data: &str) -> Result<BlobRef, BlobStoreError> {
+            let blob_id = BlobId::new(format!("sha256:test-{}", data.len()));
+            let mut blobs = self.blobs.lock().map_err(|err| {
+                BlobStoreError::Internal(format!("test blob store mutex poisoned: {err}"))
+            })?;
+            blobs.insert(
+                blob_id.clone(),
+                BlobPayload {
+                    blob_id: blob_id.clone(),
+                    media_type: media_type.to_string(),
+                    data: data.to_string(),
+                },
+            );
+            Ok(BlobRef {
+                blob_id,
+                media_type: media_type.to_string(),
+            })
+        }
+
+        async fn get(&self, blob_id: &BlobId) -> Result<BlobPayload, BlobStoreError> {
+            self.blobs
+                .lock()
+                .map_err(|err| {
+                    BlobStoreError::Internal(format!("test blob store mutex poisoned: {err}"))
+                })?
+                .get(blob_id)
+                .cloned()
+                .ok_or_else(|| BlobStoreError::NotFound(blob_id.clone()))
+        }
+
+        async fn delete(&self, blob_id: &BlobId) -> Result<(), BlobStoreError> {
+            self.blobs
+                .lock()
+                .map_err(|err| {
+                    BlobStoreError::Internal(format!("test blob store mutex poisoned: {err}"))
+                })?
+                .remove(blob_id);
+            Ok(())
+        }
+
+        fn is_persistent(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn hydrates_blob_refs_inside_system_notice_comms_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let blob_id = BlobId::new("sha256:poster");
+        let store = TestBlobStore::with_payload(BlobPayload {
+            blob_id: blob_id.clone(),
+            media_type: "image/png".to_string(),
+            data: "iVBORw0KGgo=".to_string(),
+        });
+        let mut messages = vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+            SystemNoticeKind::Comms,
+            None,
+            SystemNoticeBlock::Comms {
+                kind: "message".to_string(),
+                direction: SystemNoticeDirection::Incoming,
+                peer: Some(SystemNoticePeer {
+                    id: "peer-1".to_string(),
+                    display_name: Some("operator".to_string()),
+                }),
+                request_id: None,
+                intent: None,
+                status: None,
+                summary: None,
+                payload: None,
+                content: vec![ContentBlock::Image {
+                    media_type: "image/png".to_string(),
+                    data: ImageData::Blob {
+                        blob_id: blob_id.clone(),
+                    },
+                }],
+            },
+        ))];
+
+        hydrate_messages_for_execution(
+            &store,
+            &mut messages,
+            MissingBlobBehavior::HistoricalPlaceholder,
+        )
+        .await?;
+
+        let Message::SystemNotice(notice) = &messages[0] else {
+            return Err(std::io::Error::other("expected system notice").into());
+        };
+        let SystemNoticeBlock::Comms { content, .. } = &notice.blocks[0] else {
+            return Err(std::io::Error::other("expected comms block").into());
+        };
+        assert_eq!(
+            content[0],
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: ImageData::Inline {
+                    data: "iVBORw0KGgo=".to_string(),
+                },
+            }
+        );
+        Ok(())
+    }
 }

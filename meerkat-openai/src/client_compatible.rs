@@ -4,7 +4,8 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
-    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, Usage,
+    AssistantBlock, ContentBlock, ImageData, Message, OutputSchema, StopReason, SystemNoticeBlock,
+    SystemNoticeMessage, Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{
@@ -104,6 +105,65 @@ impl OpenAiCompatibleClient {
         false
     }
 
+    fn content_block_to_chat_part(block: &ContentBlock) -> Value {
+        match block {
+            ContentBlock::Text { text } => serde_json::json!({
+                "type": "text",
+                "text": text
+            }),
+            ContentBlock::Image { media_type, data } => match data {
+                ImageData::Inline { data } => serde_json::json!({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{media_type};base64,{data}")
+                    }
+                }),
+                ImageData::Blob { .. } => serde_json::json!({
+                    "type": "text",
+                    "text": block.text_projection()
+                }),
+            },
+            _ => serde_json::json!({
+                "type": "text",
+                "text": block.text_projection()
+            }),
+        }
+    }
+
+    fn system_notice_chat_content(notice: &SystemNoticeMessage) -> Value {
+        let rendered = notice.model_projection_text();
+        let mut parts = Vec::new();
+        if !rendered.trim().is_empty() {
+            parts.push(serde_json::json!({
+                "type": "text",
+                "text": rendered
+            }));
+        }
+
+        for block in &notice.blocks {
+            match block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                    for content_block in content {
+                        if !matches!(content_block, ContentBlock::Text { .. }) {
+                            parts.push(Self::content_block_to_chat_part(content_block));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match parts.as_slice() {
+            [] => Value::String(String::new()),
+            [only] if only.get("type").and_then(Value::as_str) == Some("text") => only
+                .get("text")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new())),
+            _ => Value::Array(parts),
+        }
+    }
+
     fn build_chat_completions_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut body = serde_json::json!({
             "model": self.remote_model,
@@ -199,7 +259,7 @@ impl OpenAiCompatibleClient {
                 Message::SystemNotice(notice) => {
                     out.push(serde_json::json!({
                         "role": "user",
-                        "content": notice.model_projection_text()
+                        "content": Self::system_notice_chat_content(notice)
                     }));
                 }
                 Message::User(user) => {
@@ -207,28 +267,7 @@ impl OpenAiCompatibleClient {
                         let content: Vec<Value> = user
                             .content
                             .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text { text } => serde_json::json!({
-                                    "type": "text",
-                                    "text": text
-                                }),
-                                ContentBlock::Image { media_type, data } => match data {
-                                    ImageData::Inline { data } => serde_json::json!({
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": format!("data:{media_type};base64,{data}")
-                                        }
-                                    }),
-                                    ImageData::Blob { .. } => serde_json::json!({
-                                        "type": "text",
-                                        "text": block.text_projection()
-                                    }),
-                                },
-                                _ => serde_json::json!({
-                                    "type": "text",
-                                    "text": block.text_projection()
-                                }),
-                            })
+                            .map(Self::content_block_to_chat_part)
                             .collect();
                         out.push(serde_json::json!({
                             "role": "user",
@@ -765,6 +804,41 @@ mod tests {
             axum::serve(listener, app).await.expect("serve test server");
         });
         (format!("http://{addr}/v1"), auth_headers, handle)
+    }
+
+    #[test]
+    fn chat_completions_system_notice_with_image_emits_typed_image_part() {
+        use meerkat_core::{ContentBlock, ImageData, SystemNoticeKind, SystemNoticeMessage};
+
+        let messages = OpenAiCompatibleClient::convert_to_chat_messages(&[Message::SystemNotice(
+            SystemNoticeMessage::with_block(
+                SystemNoticeKind::ExternalEvent,
+                None,
+                SystemNoticeBlock::ExternalEvent {
+                    source: "console".to_string(),
+                    event_type: "operator_message".to_string(),
+                    summary: None,
+                    body: Some("inspect this".to_string()),
+                    payload: None,
+                    content: vec![ContentBlock::Image {
+                        media_type: "image/png".to_string(),
+                        data: ImageData::Inline {
+                            data: "iVBOR...".to_string(),
+                        },
+                    }],
+                },
+            ),
+        )])
+        .expect("convert chat messages");
+
+        assert_eq!(messages[0]["role"], "user");
+        let content = messages[0]["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/png;base64,iVBOR..."
+        );
     }
 
     #[tokio::test]

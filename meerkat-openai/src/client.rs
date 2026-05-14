@@ -11,7 +11,8 @@ use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, ImageGenerationIntent,
     ImageGenerationWarning, ImageOperationTerminalClass, Message, OpenAiImageMetadata,
     OutputSchema, ProviderImageMetadata, ProviderMeta, RevisedPromptDisposition,
-    RevisedPromptSource, StopReason, ToolResult, Usage, UserMessage,
+    RevisedPromptSource, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult, Usage,
+    UserMessage,
 };
 use meerkat_llm_core::BlockAssembler;
 use meerkat_llm_core::LlmError;
@@ -636,6 +637,63 @@ impl OpenAiClient {
         .map(|(input, _)| input)
     }
 
+    fn content_block_to_responses_part(block: &ContentBlock) -> Value {
+        match block {
+            ContentBlock::Text { text } => serde_json::json!({
+                "type": "input_text",
+                "text": text
+            }),
+            ContentBlock::Image { media_type, data } => match data {
+                ImageData::Inline { data } => serde_json::json!({
+                    "type": "input_image",
+                    "image_url": format!("data:{media_type};base64,{data}")
+                }),
+                ImageData::Blob { .. } => serde_json::json!({
+                    "type": "input_text",
+                    "text": block.text_projection()
+                }),
+            },
+            _ => serde_json::json!({
+                "type": "input_text",
+                "text": block.text_projection()
+            }),
+        }
+    }
+
+    fn system_notice_responses_content(notice: &SystemNoticeMessage) -> Value {
+        let rendered = notice.model_projection_text();
+        let mut parts = Vec::new();
+        if !rendered.trim().is_empty() {
+            parts.push(serde_json::json!({
+                "type": "input_text",
+                "text": rendered
+            }));
+        }
+
+        for block in &notice.blocks {
+            match block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                    for content_block in content {
+                        if !matches!(content_block, ContentBlock::Text { .. }) {
+                            parts.push(Self::content_block_to_responses_part(content_block));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match parts.as_slice() {
+            [] => Value::String(String::new()),
+            [only] if only.get("type").and_then(Value::as_str) == Some("input_text") => only
+                .get("text")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new())),
+            _ => Value::Array(parts),
+        }
+    }
+
     fn openai_reasoning_input_item(text: &str, meta: &ProviderMeta) -> Option<Value> {
         let ProviderMeta::OpenAi {
             id,
@@ -698,7 +756,7 @@ impl OpenAiClient {
                     items.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
-                        "content": notice.model_projection_text()
+                        "content": Self::system_notice_responses_content(notice)
                     }));
                 }
                 Message::User(u) => {
@@ -706,26 +764,7 @@ impl OpenAiClient {
                         let content_array: Vec<Value> = u
                             .content
                             .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text { text } => serde_json::json!({
-                                    "type": "input_text",
-                                    "text": text
-                                }),
-                                ContentBlock::Image { media_type, data } => match data {
-                                    ImageData::Inline { data } => serde_json::json!({
-                                        "type": "input_image",
-                                        "image_url": format!("data:{media_type};base64,{data}")
-                                    }),
-                                    ImageData::Blob { .. } => serde_json::json!({
-                                        "type": "input_text",
-                                        "text": block.text_projection()
-                                    }),
-                                },
-                                _ => serde_json::json!({
-                                    "type": "input_text",
-                                    "text": block.text_projection()
-                                }),
-                            })
+                            .map(Self::content_block_to_responses_part)
                             .collect();
                         items.push(serde_json::json!({
                             "type": "message",
@@ -5155,6 +5194,57 @@ mod tests {
             !body_str.contains("/tmp/img.png"),
             "source_path value must never appear in provider payload"
         );
+    }
+
+    #[test]
+    fn openai_system_notice_with_image_emits_typed_image_part() {
+        use meerkat_core::{
+            SystemNoticeDirection, SystemNoticeKind, SystemNoticeMessage, SystemNoticePeer,
+        };
+
+        let client = OpenAiClient::new("test-key".to_string());
+        let request = LlmRequest::new(
+            "gpt-5.4",
+            vec![Message::SystemNotice(SystemNoticeMessage::with_block(
+                SystemNoticeKind::Comms,
+                None,
+                SystemNoticeBlock::Comms {
+                    kind: "message".to_string(),
+                    direction: SystemNoticeDirection::Incoming,
+                    peer: Some(SystemNoticePeer {
+                        id: "peer-1".to_string(),
+                        display_name: Some("operator".to_string()),
+                    }),
+                    request_id: None,
+                    intent: None,
+                    status: None,
+                    summary: None,
+                    payload: None,
+                    content: vec![
+                        ContentBlock::Text {
+                            text: "describe this poster".to_string(),
+                        },
+                        ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "iVBOR...".to_string(),
+                            },
+                        },
+                    ],
+                },
+            ))],
+        );
+
+        let body = client.build_request_body(&request).expect("build request");
+        let input = body["input"].as_array().expect("input array");
+        let notice_item = &input[0];
+
+        assert_eq!(notice_item["type"], "message");
+        assert_eq!(notice_item["role"], "user");
+        let content = notice_item["content"].as_array().expect("content array");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(content[1]["image_url"], "data:image/png;base64,iVBOR...");
     }
 
     #[test]

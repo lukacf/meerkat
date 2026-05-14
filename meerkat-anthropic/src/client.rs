@@ -11,7 +11,7 @@ use meerkat_core::lifecycle::run_primitive::{
 use meerkat_core::schema::{CompiledSchema, SchemaError};
 use meerkat_core::{
     AssistantBlock, BlockAssistantMessage, ContentBlock, ImageData, Message, OutputSchema,
-    Provider, StopReason, ToolResult, Usage,
+    Provider, StopReason, SystemNoticeBlock, SystemNoticeMessage, ToolResult, Usage,
 };
 use meerkat_llm_core::LlmError;
 use meerkat_llm_core::{LlmClient, LlmDoneOutcome, LlmEvent, LlmRequest, LlmStream};
@@ -402,6 +402,67 @@ impl AnthropicClient {
         self
     }
 
+    fn content_block_to_anthropic_part(block: &ContentBlock) -> Value {
+        match block {
+            ContentBlock::Text { text } => serde_json::json!({
+                "type": "text",
+                "text": text
+            }),
+            ContentBlock::Image { media_type, data } => match data {
+                ImageData::Inline { data } => serde_json::json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": data
+                    }
+                }),
+                ImageData::Blob { .. } => serde_json::json!({
+                    "type": "text",
+                    "text": block.text_projection()
+                }),
+            },
+            _ => serde_json::json!({
+                "type": "text",
+                "text": block.text_projection()
+            }),
+        }
+    }
+
+    fn system_notice_anthropic_content(notice: &SystemNoticeMessage) -> Value {
+        let rendered = notice.model_projection_text();
+        let mut parts = Vec::new();
+        if !rendered.trim().is_empty() {
+            parts.push(serde_json::json!({
+                "type": "text",
+                "text": rendered
+            }));
+        }
+
+        for block in &notice.blocks {
+            match block {
+                SystemNoticeBlock::Comms { content, .. }
+                | SystemNoticeBlock::ExternalEvent { content, .. } => {
+                    for content_block in content {
+                        if !matches!(content_block, ContentBlock::Text { .. }) {
+                            parts.push(Self::content_block_to_anthropic_part(content_block));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        match parts.as_slice() {
+            [] => Value::String(String::new()),
+            [only] if only.get("type").and_then(Value::as_str) == Some("text") => only
+                .get("text")
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new())),
+            _ => Value::Array(parts),
+        }
+    }
+
     /// Build request body for Anthropic API
     fn build_request_body(&self, request: &LlmRequest) -> Result<Value, LlmError> {
         let mut messages = Vec::new();
@@ -415,7 +476,7 @@ impl AnthropicClient {
                 Message::SystemNotice(notice) => {
                     messages.push(serde_json::json!({
                         "role": "user",
-                        "content": notice.model_projection_text()
+                        "content": Self::system_notice_anthropic_content(notice)
                     }));
                 }
                 Message::User(u) => {
@@ -423,30 +484,7 @@ impl AnthropicClient {
                         let content_array: Vec<Value> = u
                             .content
                             .iter()
-                            .map(|block| match block {
-                                ContentBlock::Text { text } => serde_json::json!({
-                                    "type": "text",
-                                    "text": text
-                                }),
-                                ContentBlock::Image { media_type, data } => match data {
-                                    ImageData::Inline { data } => serde_json::json!({
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": media_type,
-                                            "data": data
-                                        }
-                                    }),
-                                    ImageData::Blob { .. } => serde_json::json!({
-                                        "type": "text",
-                                        "text": block.text_projection()
-                                    }),
-                                },
-                                _ => serde_json::json!({
-                                    "type": "text",
-                                    "text": block.text_projection()
-                                }),
-                            })
+                            .map(Self::content_block_to_anthropic_part)
                             .collect();
                         messages.push(serde_json::json!({
                             "role": "user",
@@ -3129,6 +3167,50 @@ mod tests {
                 .contains("source_path"),
             "source_path must never appear in provider payload"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn anthropic_system_notice_with_image_emits_typed_image_part()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let client = AnthropicClient::new("test-key".to_string())?;
+        let request = LlmRequest::new(
+            "claude-sonnet-4-5",
+            vec![Message::SystemNotice(
+                meerkat_core::SystemNoticeMessage::with_block(
+                    meerkat_core::SystemNoticeKind::Comms,
+                    None,
+                    SystemNoticeBlock::Comms {
+                        kind: "message".to_string(),
+                        direction: meerkat_core::SystemNoticeDirection::Incoming,
+                        peer: Some(meerkat_core::SystemNoticePeer {
+                            id: "peer-1".to_string(),
+                            display_name: Some("operator".to_string()),
+                        }),
+                        request_id: None,
+                        intent: None,
+                        status: None,
+                        summary: None,
+                        payload: None,
+                        content: vec![ContentBlock::Image {
+                            media_type: "image/png".to_string(),
+                            data: ImageData::Inline {
+                                data: "iVBOR...".to_string(),
+                            },
+                        }],
+                    },
+                ),
+            )],
+        );
+
+        let body = client.build_request_body(&request)?;
+        let messages = body["messages"].as_array().unwrap();
+        let content = messages[0]["content"].as_array().unwrap();
+
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR...");
         Ok(())
     }
 

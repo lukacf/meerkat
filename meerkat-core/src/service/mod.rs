@@ -431,6 +431,8 @@ pub struct MobToolAuthorityContext {
     can_mutate_profiles: bool,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     managed_mob_scope: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spawn_profile_scope: BTreeMap<String, BTreeSet<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     caller_provenance: Option<MobToolCallerProvenance>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +446,7 @@ impl MobToolAuthorityContext {
             can_create_mobs,
             can_mutate_profiles: can_create_mobs,
             managed_mob_scope: BTreeSet::new(),
+            spawn_profile_scope: BTreeMap::new(),
             caller_provenance: None,
             audit_invocation_id: None,
         }
@@ -486,8 +489,52 @@ impl MobToolAuthorityContext {
         self.managed_mob_scope.contains(mob_id)
     }
 
+    pub fn can_spawn_profile_in_mob(&self, mob_id: &str, profile: &str) -> bool {
+        self.can_manage_mob(mob_id)
+            || self
+                .spawn_profile_scope
+                .get(mob_id)
+                .is_some_and(|profiles| profiles.contains(profile))
+    }
+
+    pub fn can_spawn_any_profile_in_mob(&self, mob_id: &str) -> bool {
+        self.can_manage_mob(mob_id)
+            || self
+                .spawn_profile_scope
+                .get(mob_id)
+                .is_some_and(|profiles| !profiles.is_empty())
+    }
+
     pub fn grant_manage_mob(mut self, mob_id: impl Into<String>) -> Self {
         self.managed_mob_scope.insert(mob_id.into());
+        self
+    }
+
+    pub fn grant_spawn_profile_in_mob(
+        mut self,
+        mob_id: impl Into<String>,
+        profile: impl Into<String>,
+    ) -> Self {
+        self.spawn_profile_scope
+            .entry(mob_id.into())
+            .or_default()
+            .insert(profile.into());
+        self
+    }
+
+    pub fn grant_spawn_profiles_in_mob<I, S>(
+        mut self,
+        mob_id: impl Into<String>,
+        profiles: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.spawn_profile_scope
+            .entry(mob_id.into())
+            .or_default()
+            .extend(profiles.into_iter().map(Into::into));
         self
     }
 
@@ -1455,6 +1502,17 @@ mod tests {
         assert!(ctx.managed_mob_scope.contains("mob-1"));
         assert!(ctx.managed_mob_scope.contains("mob-2"));
         assert_eq!(ctx.managed_mob_scope.len(), 2);
+    }
+
+    #[test]
+    fn spawn_profile_scope_allows_only_granted_profile_without_manage_scope() {
+        let ctx = MobToolAuthorityContext::create_only_generated()
+            .grant_spawn_profile_in_mob("mob-1", "investigator");
+
+        assert!(ctx.can_spawn_any_profile_in_mob("mob-1"));
+        assert!(ctx.can_spawn_profile_in_mob("mob-1", "investigator"));
+        assert!(!ctx.can_spawn_profile_in_mob("mob-1", "writer"));
+        assert!(!ctx.can_manage_mob("mob-1"));
     }
 
     struct MockSnapshotProvider {

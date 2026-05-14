@@ -2,9 +2,9 @@
 
 use meerkat_core::WitnessedToolFilter;
 use meerkat_core::tool_scope::ToolFilter;
-use meerkat_core::types::ToolDef;
+use meerkat_core::types::{ToolDef, ToolProvenance, ToolSourceId, ToolSourceKind};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 /// Snapshot of a parent agent's visible tools at child spawn time.
@@ -67,7 +67,8 @@ impl ParentToolScopeSnapshot {
     }
 
     fn witnessed_filter_for(&self, filter: ToolFilter) -> WitnessedToolFilter {
-        meerkat_core::tool_scope::witnessed_tool_filter_for_defs(filter, &self.visible_tool_defs)
+        let witnesses = inherited_filter_witnesses_for_defs(&filter, &self.visible_tool_defs);
+        WitnessedToolFilter::new(filter, witnesses)
     }
 
     /// Create a snapshot from a set of visible tool definitions.
@@ -77,6 +78,43 @@ impl ParentToolScopeSnapshot {
             visible_tool_defs: tools.iter().map(|t| (**t).clone()).collect(),
             captured_at: chrono::Utc::now(),
         }
+    }
+}
+
+fn inherited_filter_witnesses_for_defs(
+    filter: &ToolFilter,
+    tool_defs: &[ToolDef],
+) -> BTreeMap<String, meerkat_core::ToolVisibilityWitness> {
+    let filter_names = match filter {
+        ToolFilter::All => return BTreeMap::new(),
+        ToolFilter::Allow(names) | ToolFilter::Deny(names) => names,
+    };
+
+    filter_names
+        .iter()
+        .filter_map(|name| {
+            let tool = tool_defs.iter().find(|tool| tool.name == name.as_str())?;
+            let provenance = tool
+                .provenance
+                .clone()
+                .unwrap_or_else(|| synthetic_parent_tool_provenance(name));
+            Some((
+                name.as_str().to_string(),
+                meerkat_core::ToolVisibilityWitness {
+                    stable_owner_key: Some(
+                        meerkat_core::tool_catalog::stable_owner_key_from_provenance(&provenance),
+                    ),
+                    last_seen_provenance: Some(provenance),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn synthetic_parent_tool_provenance(tool_name: &str) -> ToolProvenance {
+    ToolProvenance {
+        kind: ToolSourceKind::Callback,
+        source_id: ToolSourceId::new(format!("parent_snapshot:{tool_name}")),
     }
 }
 
@@ -190,5 +228,33 @@ mod tests {
         assert_eq!(snapshot.visible_tool_defs.len(), 2);
         assert!(snapshot.visible_tool_names.contains("x"));
         assert!(snapshot.visible_tool_names.contains("y"));
+    }
+
+    #[test]
+    fn unprovenanced_parent_tools_get_inherited_filter_witnesses() {
+        let tools = vec![make_tool("external_tool")];
+        let snapshot = ParentToolScopeSnapshot::from_tools(&tools);
+        let authority = snapshot.to_witnessed_tool_filter();
+        let witness = authority
+            .witnesses
+            .get("external_tool")
+            .expect("external tool should have synthesized witness");
+
+        assert!(
+            witness.has_provenance_identity_witness(),
+            "inherited filters need provenance-backed witnesses"
+        );
+        assert_eq!(
+            witness
+                .last_seen_provenance
+                .as_ref()
+                .map(|provenance| provenance.source_id.as_str()),
+            Some("parent_snapshot:external_tool")
+        );
+        meerkat_core::tool_scope::validate_witnessed_filter_authority(
+            &authority.filter,
+            &authority.witnesses,
+        )
+        .expect("synthesized witness should satisfy inherited visibility validation");
     }
 }

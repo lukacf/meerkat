@@ -273,6 +273,7 @@ pub(super) struct PendingSpawn {
     pub(super) agent_identity: MeerkatId,
     pub(super) admitted_bridge_session_id: SessionId,
     pub(super) prompt: ContentInput,
+    pub(super) initial_turn_prompt: Option<ContentInput>,
     pub(super) runtime_mode: crate::MobRuntimeMode,
     pub(super) labels: std::collections::BTreeMap<String, String>,
     pub(super) owner_bridge_session_id: Option<SessionId>,
@@ -4159,12 +4160,14 @@ impl MobActor {
                     let prompt = initial_message.clone().unwrap_or_else(|| {
                         ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
                     });
+                    let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let resolved_labels = labels.unwrap_or_default();
 
                     return Ok((
                         profile_name,
                         agent_identity,
                         prompt,
+                        initial_turn_prompt,
                         selected_runtime_mode,
                         profile_external_addressable,
                         resolved_labels,
@@ -4219,6 +4222,7 @@ impl MobActor {
                     let prompt = initial_message.clone().unwrap_or_else(|| {
                         ContentInput::from(self.fallback_spawn_prompt(&profile_name, &agent_identity))
                     });
+                    let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
                     let req = build::to_create_session_request(&config, prompt.clone());
                     let selected_binding = resolve_binding(
                         binding.clone(),
@@ -4242,6 +4246,7 @@ impl MobActor {
                         profile_name,
                         agent_identity,
                         prompt,
+                        initial_turn_prompt,
                         selected_runtime_mode,
                         profile_external_addressable,
                         resolved_labels,
@@ -4359,6 +4364,7 @@ impl MobActor {
             } else {
                 base_prompt
             };
+            let initial_turn_prompt = initial_message.as_ref().map(|_| prompt.clone());
             let req = build::to_create_session_request(&config, prompt.clone());
             let selected_binding = resolve_binding(
                 binding,
@@ -4382,6 +4388,7 @@ impl MobActor {
                 profile_name,
                 agent_identity,
                 prompt,
+                initial_turn_prompt,
                 selected_runtime_mode,
                 profile_external_addressable,
                 resolved_labels,
@@ -4398,6 +4405,7 @@ impl MobActor {
             profile_name,
             agent_identity,
             prompt,
+            initial_turn_prompt,
             selected_runtime_mode,
             external_addressable,
             resolved_labels,
@@ -4468,6 +4476,7 @@ impl MobActor {
                     fence,
                     selected_runtime_mode,
                     prompt,
+                    initial_turn_prompt,
                     resolved_labels,
                     provision,
                     operation_id,
@@ -4520,6 +4529,7 @@ impl MobActor {
             agent_identity,
             admitted_bridge_session_id,
             prompt,
+            initial_turn_prompt,
             runtime_mode: selected_runtime_mode,
             labels: resolved_labels,
             owner_bridge_session_id: spawn_owner_bridge_session_id,
@@ -4669,6 +4679,7 @@ impl MobActor {
                 agent_identity,
                 admitted_bridge_session_id: _,
                 prompt,
+                initial_turn_prompt,
                 runtime_mode,
                 labels,
                 owner_bridge_session_id,
@@ -4702,6 +4713,7 @@ impl MobActor {
                             fence,
                             runtime_mode,
                             prompt,
+                            initial_turn_prompt,
                             labels,
                             provision,
                             spawn_receipt.operation_id,
@@ -4819,6 +4831,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
+            initial_turn_prompt: None,
             runtime_mode,
             labels: labels.clone(),
             owner_bridge_session_id: None,
@@ -4890,6 +4903,7 @@ impl MobActor {
                 fence,
                 runtime_mode,
                 prompt,
+                None,
                 labels,
                 provision,
                 spawn_receipt.operation_id,
@@ -4935,6 +4949,7 @@ impl MobActor {
         fence_token: crate::ids::FenceToken,
         runtime_mode: crate::MobRuntimeMode,
         prompt: ContentInput,
+        initial_turn_prompt: Option<ContentInput>,
         labels: std::collections::BTreeMap<String, String>,
         provision: PendingProvision,
         operation_id: meerkat_core::ops::OperationId,
@@ -5321,7 +5336,9 @@ impl MobActor {
                 }
                 return Err(start_error);
             }
-        } else {
+        }
+
+        if runtime_mode == crate::MobRuntimeMode::TurnDriven {
             // Turn-driven mob members still need a persistent comms drain:
             // async peer requests/responses arrive between user turns (think
             // realtime audio operators calling `send_request` and waiting for
@@ -5356,6 +5373,34 @@ impl MobActor {
                     let _ = adapter
                         .maybe_spawn_mob_comms_drain(bridge_session_id, comms_runtime, mob_id)
                         .await;
+                }
+            }
+
+            if let Some(initial_turn_prompt) = initial_turn_prompt {
+                if let Err(start_error) = self
+                    .dispatch_turn_driven_spawn_initial_turn(
+                        agent_identity,
+                        &agent_runtime_id,
+                        fence_token,
+                        initial_turn_prompt,
+                    )
+                    .await
+                {
+                    if let Err(rollback_error) = self
+                        .rollback_failed_spawn(
+                            agent_identity,
+                            profile_name,
+                            &member_ref,
+                            &wired_spawn_targets,
+                            &planned_wiring_targets,
+                        )
+                        .await
+                    {
+                        return Err(MobError::Internal(format!(
+                            "turn-driven spawn initial turn failed for '{agent_identity}': {start_error}; rollback failed: {rollback_error}"
+                        )));
+                    }
+                    return Err(start_error);
                 }
             }
         }
@@ -7605,9 +7650,18 @@ impl MobActor {
         }
 
         // 3. Rebuild the replacement spawn preserving identity, profile, labels, mode, and peer intent.
-        let prompt = initial_message.unwrap_or_else(|| {
-            ContentInput::from(self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity))
-        });
+        let (prompt, initial_turn_prompt) = match initial_message {
+            Some(message) => {
+                let prompt = message;
+                (prompt.clone(), Some(prompt))
+            }
+            None => (
+                ContentInput::from(
+                    self.fallback_spawn_prompt(&snapshot.profile_name, &agent_identity),
+                ),
+                None,
+            ),
+        };
         // Prefer roster's effective_profile_override on respawn for lifecycle safety.
         let profile = if let Some(p) = snapshot.effective_profile_override.clone() {
             p
@@ -7664,6 +7718,7 @@ impl MobActor {
             agent_identity: agent_identity.clone(),
             admitted_bridge_session_id,
             prompt: prompt.clone(),
+            initial_turn_prompt: initial_turn_prompt.clone(),
             runtime_mode: snapshot.runtime_mode,
             labels: snapshot.labels.clone(),
             owner_bridge_session_id: None,
@@ -7768,24 +7823,25 @@ impl MobActor {
             let respawn_fence = self.issue_fence_token();
             let finalized = self
                 .finalize_spawn_from_pending(
-                &snapshot.profile_name,
-                &agent_identity,
-                replacement_generation,
-                respawn_fence,
-                snapshot.runtime_mode,
-                prompt,
-                snapshot.labels.clone(),
-                provision,
-                spawn_receipt.operation_id,
-                None,
-                false,
-                (!snapshot.restore_wiring.local_peers.is_empty()
-                    || !snapshot.restore_wiring.external_peers.is_empty())
-                .then_some(snapshot.restore_wiring.clone()),
-                snapshot.effective_profile_override.clone(),
-            )
-            .await
-            .map_err(|error| MobRespawnError::SpawnAfterRetire {
+                    &snapshot.profile_name,
+                    &agent_identity,
+                    replacement_generation,
+                    respawn_fence,
+                    snapshot.runtime_mode,
+                    prompt,
+                    initial_turn_prompt,
+                    snapshot.labels.clone(),
+                    provision,
+                    spawn_receipt.operation_id,
+                    None,
+                    false,
+                    (!snapshot.restore_wiring.local_peers.is_empty()
+                        || !snapshot.restore_wiring.external_peers.is_empty())
+                    .then_some(snapshot.restore_wiring.clone()),
+                    snapshot.effective_profile_override.clone(),
+                )
+                .await
+                .map_err(|error| MobRespawnError::SpawnAfterRetire {
                 identity: AgentIdentity::from(agent_identity.as_str()),
                 reason: error.to_string(),
             })?;
@@ -10117,8 +10173,88 @@ impl MobActor {
             ));
         }
 
-        self.dispatch_member_turn(&entry, content, handling_mode, render_metadata, ack_mode)
-            .await
+        self.dispatch_member_turn_after_machine_admission(
+            &entry,
+            content,
+            handling_mode,
+            render_metadata,
+            ack_mode,
+        )
+        .await
+    }
+
+    async fn dispatch_turn_driven_spawn_initial_turn(
+        &mut self,
+        agent_identity: &MeerkatId,
+        agent_runtime_id: &AgentRuntimeId,
+        fence_token: FenceToken,
+        content: ContentInput,
+    ) -> Result<(), MobError> {
+        let entry = {
+            let roster = self.roster.read().await;
+            roster.get(agent_identity).cloned()
+        }
+        .ok_or_else(|| MobError::MemberNotFound(agent_identity.clone()))?;
+        if entry.fence_token != fence_token {
+            return Err(MobError::StaleFenceToken {
+                runtime_id: agent_runtime_id.clone(),
+                expected: entry.fence_token,
+                actual: fence_token,
+            });
+        }
+
+        let work_ref = WorkRef::new();
+        let origin = WorkOrigin::Internal;
+        let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(agent_runtime_id);
+        let dsl_fence_token = mob_dsl::FenceToken::from_domain(fence_token);
+        let dsl_work_id = mob_dsl::WorkId::from_work_ref(&work_ref);
+        let dsl_origin = mob_dsl::WorkOrigin::from(origin);
+        let transition = match mob_dsl::MobMachineMutator::apply(
+            &mut self.dsl_authority,
+            mob_dsl::MobMachineInput::SubmitWork {
+                agent_runtime_id: dsl_runtime_id.clone(),
+                fence_token: dsl_fence_token,
+                work_id: dsl_work_id,
+                origin: dsl_origin,
+            },
+        ) {
+            Ok(transition) => transition,
+            Err(_) => {
+                return Err(self.submit_work_rejection_for_machine_state(
+                    &self.dsl_authority.state,
+                    &dsl_runtime_id,
+                    origin,
+                    agent_identity,
+                ));
+            }
+        };
+        if transition.from_phase != transition.to_phase {
+            self.dsl_authority.state.lifecycle_phase = transition.to_phase;
+            let _ = self.phase_watch_tx.send(self.state());
+        }
+        self.publish_machine_state_projection();
+        let ingress_admitted = transition.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                mob_dsl::MobMachineEffect::RequestRuntimeIngress { .. }
+            )
+        });
+        drop(transition);
+        if !ingress_admitted {
+            return Err(MobError::Internal(
+                "MobMachine accepted spawn initial SubmitWork but emitted no RequestRuntimeIngress effect"
+                    .into(),
+            ));
+        }
+
+        self.dispatch_member_turn_after_machine_admission(
+            &entry,
+            content,
+            meerkat_core::types::HandlingMode::Queue,
+            None,
+            crate::mob_machine::SubmitWorkAckMode::IngressAccepted,
+        )
+        .await
     }
 
     /// Unified work-lane cancel entry.
@@ -10199,6 +10335,24 @@ impl MobActor {
         ack_mode: crate::mob_machine::SubmitWorkAckMode,
     ) -> Result<(), MobError> {
         self.ensure_pending_spawn_alignment("dispatch_member_turn preflight")?;
+        self.dispatch_member_turn_after_machine_admission(
+            entry,
+            content,
+            handling_mode,
+            render_metadata,
+            ack_mode,
+        )
+        .await
+    }
+
+    async fn dispatch_member_turn_after_machine_admission(
+        &self,
+        entry: &RosterEntry,
+        content: ContentInput,
+        handling_mode: meerkat_core::types::HandlingMode,
+        render_metadata: Option<meerkat_core::types::RenderMetadata>,
+        ack_mode: crate::mob_machine::SubmitWorkAckMode,
+    ) -> Result<(), MobError> {
         match entry.runtime_mode {
             crate::MobRuntimeMode::AutonomousHost => {
                 let bridge_session_id = entry.member_ref.bridge_session_id().ok_or_else(|| {

@@ -603,6 +603,7 @@ struct MockSessionService {
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
+    start_turn_prompts: RwLock<Vec<(SessionId, String)>>,
     keep_alive_prompts: RwLock<Vec<(SessionId, String)>>,
     interrupt_calls: AtomicU64,
     cancel_after_boundary_supported: AtomicBool,
@@ -658,6 +659,7 @@ impl MockSessionService {
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
+            start_turn_prompts: RwLock::new(Vec::new()),
             keep_alive_prompts: RwLock::new(Vec::new()),
             interrupt_calls: AtomicU64::new(0),
             cancel_after_boundary_supported: AtomicBool::new(true),
@@ -739,6 +741,10 @@ impl MockSessionService {
 
     async fn recorded_create_requests(&self) -> Vec<CreateSessionRecord> {
         self.create_requests.read().await.clone()
+    }
+
+    async fn recorded_start_turn_prompts(&self) -> Vec<(SessionId, String)> {
+        self.start_turn_prompts.read().await.clone()
     }
 
     async fn recorded_external_tools_flags(&self) -> Vec<bool> {
@@ -1243,6 +1249,10 @@ impl SessionService for MockSessionService {
             .await
             .push((id.clone(), req.runtime.flow_tool_overlay.clone()));
         self.start_turn_calls.fetch_add(1, Ordering::Relaxed);
+        self.start_turn_prompts
+            .write()
+            .await
+            .push((id.clone(), req.prompt.text_content()));
         // Determine keep-alive by checking if a notifier was registered for this session
         // (created in create_session when build.keep_alive is true).
         let is_keep_alive = self.keep_alive_notifiers.read().await.contains_key(id);
@@ -22573,6 +22583,165 @@ async fn test_turn_driven_without_adapter_accepted_at_build_time() {
     }
     let result = try_create_test_mob_without_adapter(def).await;
     assert!(result.is_ok(), "TurnDriven without adapter must succeed");
+}
+
+async fn wait_for_start_turn_call_count(
+    service: &MockSessionService,
+    expected: u64,
+    context: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.start_turn_call_count() < expected {
+        assert!(Instant::now() < deadline, "{context}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn test_turn_driven_spawn_with_initial_message_starts_initial_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let initial_message = "Run the requested review task exactly once.";
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-turn-initial"),
+            Some(initial_message.to_string().into()),
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker with initial message");
+
+    assert_eq!(
+        service.keep_alive_start_turn_call_count(),
+        0,
+        "turn-driven initial prompt must not start an autonomous host loop"
+    );
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven initial prompt should reach the runtime executor",
+    )
+    .await;
+    assert_eq!(
+        service.start_turn_call_count(),
+        1,
+        "turn-driven spawn with initial_message must execute exactly one initial turn"
+    );
+    let prompts = service.recorded_start_turn_prompts().await;
+    assert_eq!(
+        prompts,
+        vec![(
+            service.recorded_prompts().await[0].0.clone(),
+            initial_message.to_string()
+        )],
+        "turn-driven spawn must deliver the caller's initial_message to start_turn"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_driven_spawn_without_initial_message_does_not_synthesize_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            MeerkatId::from("w-turn-idle"),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn turn-driven worker without initial message");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "turn-driven spawn without initial_message should remain idle until an explicit turn"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_driven_respawn_with_initial_message_starts_initial_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("w-turn-respawn");
+    let initial_message = "Resume the queued review after replacement.";
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original turn-driven worker");
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "test setup should begin with an idle turn-driven member"
+    );
+
+    let receipt = handle
+        .respawn(
+            AgentIdentity::from(member_id.as_str()),
+            Some(initial_message.into()),
+        )
+        .await
+        .expect("respawn turn-driven worker with initial message");
+
+    wait_for_start_turn_call_count(
+        &service,
+        1,
+        "turn-driven respawn initial prompt should reach the runtime executor",
+    )
+    .await;
+    assert_eq!(
+        service.start_turn_call_count(),
+        1,
+        "turn-driven respawn with initial_message must execute exactly one initial turn"
+    );
+    let snapshot = handle
+        .member_status(&receipt.identity)
+        .await
+        .expect("respawned member snapshot");
+    let bridge_session_id = snapshot
+        .current_bridge_session_id
+        .expect("respawned turn-driven member should have a bridge session");
+    assert_eq!(
+        service.recorded_start_turn_prompts().await,
+        vec![(bridge_session_id, initial_message.to_string())],
+        "turn-driven respawn must deliver the caller's initial_message to the replacement session"
+    );
+}
+
+#[tokio::test]
+async fn test_turn_driven_respawn_without_initial_message_does_not_synthesize_turn() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let member_id = MeerkatId::from("w-turn-respawn-idle");
+
+    handle
+        .spawn_with_options(
+            ProfileName::from("worker"),
+            member_id.clone(),
+            None,
+            Some(crate::MobRuntimeMode::TurnDriven),
+            None,
+        )
+        .await
+        .expect("spawn original turn-driven worker");
+    handle
+        .respawn(AgentIdentity::from(member_id.as_str()), None)
+        .await
+        .expect("respawn turn-driven worker without initial message");
+
+    assert_eq!(
+        service.start_turn_call_count(),
+        0,
+        "turn-driven respawn without initial_message should remain idle until an explicit turn"
+    );
 }
 
 #[tokio::test]

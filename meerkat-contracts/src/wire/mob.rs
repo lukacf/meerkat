@@ -713,6 +713,7 @@ pub enum MobSpawnManyFailureCause {
     BridgeDeliveryRejected,
     SupervisorEscalation,
     UnsupportedForMode,
+    MissingMemberCapability,
     ResetBarrier,
     StorageError,
     SessionError,

@@ -8,6 +8,21 @@ use crate::{MobId, RunId, StepId};
 use meerkat_contracts::MobSpawnManyFailureCause;
 use meerkat_contracts::wire::supervisor_bridge::{BridgeRejectionCause, BridgeRejectionReply};
 
+/// Runtime capability required from a seated mob member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MobMemberCapability {
+    /// Interaction-scoped injection used for autonomous console/RPC/flow turns.
+    InteractionEventInjector,
+}
+
+impl std::fmt::Display for MobMemberCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InteractionEventInjector => f.write_str("interaction_event_injector"),
+        }
+    }
+}
+
 /// Errors returned by mob operations.
 #[derive(Debug, thiserror::Error)]
 pub enum MobError {
@@ -170,6 +185,14 @@ pub enum MobError {
         reason: String,
     },
 
+    /// A member is missing a required runtime capability for the requested operation.
+    #[error("mob member {member_id} missing required capability {capability}: {context}")]
+    MissingMemberCapability {
+        member_id: MeerkatId,
+        capability: MobMemberCapability,
+        context: &'static str,
+    },
+
     /// Operation blocked by reset barrier.
     #[error("reset barrier active")]
     ResetBarrier,
@@ -315,6 +338,9 @@ impl MobError {
             Self::BridgeDeliveryRejected { .. } => MobSpawnManyFailureCause::BridgeDeliveryRejected,
             Self::SupervisorEscalation(_) => MobSpawnManyFailureCause::SupervisorEscalation,
             Self::UnsupportedForMode { .. } => MobSpawnManyFailureCause::UnsupportedForMode,
+            Self::MissingMemberCapability { .. } => {
+                MobSpawnManyFailureCause::MissingMemberCapability
+            }
             Self::ResetBarrier => MobSpawnManyFailureCause::ResetBarrier,
             Self::StorageError(_) => MobSpawnManyFailureCause::StorageError,
             Self::SessionError(_) => MobSpawnManyFailureCause::SessionError,

@@ -2764,15 +2764,6 @@ impl MobActor {
         Ok(())
     }
 
-    async fn teardown_autonomous_runtime(&self, member_ref: &MemberRef) {
-        #[cfg(feature = "runtime-adapter")]
-        if let (Some(adapter), Some(bridge_session_id)) =
-            (&self.runtime_adapter, member_ref.bridge_session_id())
-        {
-            adapter.unregister_session(bridge_session_id).await;
-        }
-    }
-
     async fn teardown_session_runtime_bindings_from_roster(&self) {
         #[cfg(feature = "runtime-adapter")]
         if let Some(adapter) = &self.runtime_adapter {
@@ -8011,16 +8002,12 @@ impl MobActor {
         }
     }
 
-    /// Stop the autonomous member and unregister session (disposal only).
+    /// Stop the autonomous member host loop. Session unregister is owned by
+    /// the archive step after runtime retire/drain quiesces.
     async fn dispose_stop_host_loop(&mut self, ctx: &DisposalContext) -> Result<(), MobError> {
         if ctx.entry.runtime_mode == crate::MobRuntimeMode::AutonomousHost {
             self.stop_autonomous_member(&ctx.agent_identity, &ctx.entry.member_ref)
                 .await?;
-            // Full teardown: unregister from MeerkatMachine.
-            // stop_autonomous_member only aborts the drain; disposal also
-            // needs to release the session registration.
-            self.teardown_autonomous_runtime(&ctx.entry.member_ref)
-                .await;
         }
         Ok(())
     }

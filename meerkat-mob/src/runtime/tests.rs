@@ -17891,6 +17891,155 @@ async fn test_abort_member_provision_archive_failure_keeps_runtime_binding_for_r
     );
 }
 
+#[cfg(feature = "runtime-adapter")]
+#[tokio::test]
+async fn test_retire_member_waits_for_active_runtime_turn_before_unregister() {
+    struct BlockingExecutor {
+        apply_started: Arc<tokio::sync::Notify>,
+        allow_finish: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat_core::lifecycle::core_executor::CoreExecutor for BlockingExecutor {
+        async fn apply(
+            &mut self,
+            run_id: meerkat_core::RunId,
+            primitive: meerkat_core::lifecycle::run_primitive::RunPrimitive,
+        ) -> Result<
+            meerkat_core::lifecycle::core_executor::CoreApplyOutput,
+            meerkat_core::lifecycle::core_executor::CoreExecutorError,
+        > {
+            self.apply_started.notify_waiters();
+            self.allow_finish.notified().await;
+
+            Ok(meerkat_core::lifecycle::core_executor::CoreApplyOutput {
+                receipt: meerkat_core::lifecycle::run_receipt::RunBoundaryReceipt {
+                    run_id,
+                    boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
+                    contributing_input_ids: primitive.contributing_input_ids().to_vec(),
+                    conversation_digest: None,
+                    message_count: 0,
+                    sequence: 0,
+                },
+                session_snapshot: None,
+                terminal: None,
+            })
+        }
+
+        async fn cancel_after_boundary(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+
+        async fn stop_runtime_executor(
+            &mut self,
+            _reason: String,
+        ) -> Result<(), meerkat_core::lifecycle::core_executor::CoreExecutorError> {
+            Ok(())
+        }
+    }
+
+    let service = Arc::new(MockSessionService::new());
+    let adapter = Arc::new(meerkat_runtime::MeerkatMachine::ephemeral());
+    service.set_runtime_adapter(adapter.clone());
+    let provisioner =
+        super::provisioner::SessionBackend::new(service.clone(), Some(adapter.clone()));
+    let session = Session::new();
+    let session_id = session.id().clone();
+    let apply_started = Arc::new(tokio::sync::Notify::new());
+    let allow_finish = Arc::new(tokio::sync::Notify::new());
+
+    service
+        .create_session(CreateSessionRequest {
+            model: "claude-sonnet-4-5".to_string(),
+            prompt: "retire active runtime turn".to_string().into(),
+            render_metadata: None,
+            system_prompt: None,
+            max_tokens: None,
+            event_tx: None,
+            build: Some(meerkat_core::service::SessionBuildOptions {
+                resume_session: Some(session),
+                comms_name: Some("test-mob/worker/retire-active-turn".to_string()),
+                keep_alive: true,
+                ..Default::default()
+            }),
+            skill_references: None,
+            initial_turn: meerkat_core::service::InitialTurnPolicy::Defer,
+            deferred_prompt_policy: meerkat_core::service::DeferredPromptPolicy::Discard,
+            labels: None,
+        })
+        .await
+        .expect("create runtime-backed active-turn session");
+    adapter
+        .ensure_session_with_executor(
+            session_id.clone(),
+            Box::new(BlockingExecutor {
+                apply_started: Arc::clone(&apply_started),
+                allow_finish: Arc::clone(&allow_finish),
+            }),
+        )
+        .await;
+
+    let input = meerkat_runtime::Input::Prompt(meerkat_runtime::PromptInput::new(
+        "active turn before retire",
+        Some(
+            meerkat_core::lifecycle::run_primitive::RuntimeTurnMetadata {
+                handling_mode: Some(HandlingMode::Steer),
+                ..Default::default()
+            },
+        ),
+    ));
+    let (outcome, completion) = adapter
+        .accept_input_with_completion(&session_id, input)
+        .await
+        .expect("active steered prompt should be accepted");
+    assert!(outcome.is_accepted());
+    let completion = completion.expect("active prompt should register a completion waiter");
+
+    tokio::time::timeout(Duration::from_secs(1), apply_started.notified())
+        .await
+        .expect("runtime executor should enter active apply before retire");
+
+    let member_ref = MemberRef::from_bridge_session_id(session_id.clone());
+    let retire_task = tokio::spawn(async move { provisioner.retire_member(&member_ref).await });
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !retire_task.is_finished(),
+        "retire_member must not archive/unregister while the runtime authority still has an active turn"
+    );
+    assert!(
+        adapter.contains_session(&session_id).await,
+        "runtime session must remain registered while the active turn can still emit turn-state transitions"
+    );
+
+    allow_finish.notify_waiters();
+    match completion.wait().await {
+        meerkat_runtime::CompletionOutcome::CompletedWithoutResult => {}
+        other => {
+            panic!("expected active runtime turn to complete before retire cleanup: {other:?}")
+        }
+    }
+    retire_task
+        .await
+        .expect("retire task should not panic")
+        .expect("retire_member should finish after active turn drains");
+
+    assert!(
+        !adapter.contains_session(&session_id).await,
+        "retire_member should unregister after the active turn drains and archive succeeds"
+    );
+    assert!(
+        !service
+            .has_live_session(&session_id)
+            .await
+            .expect("read live service state"),
+        "retire_member should archive the session after runtime drain"
+    );
+}
+
 #[tokio::test]
 async fn test_builder_rejects_runtime_adapter_with_mismatched_persistence_authority() {
     let service = Arc::new(MockSessionService::new());

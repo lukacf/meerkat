@@ -40,7 +40,7 @@ use serde::de::DeserializeOwned;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(feature = "runtime-adapter")]
 use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
@@ -340,10 +340,165 @@ impl SessionBackend {
         }
     }
 
+    #[cfg(feature = "runtime-adapter")]
+    fn runtime_archive_error(message: impl Into<String>) -> SessionError {
+        SessionError::Agent(meerkat_core::error::AgentError::InternalError(
+            message.into(),
+        ))
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn retire_runtime_before_archive(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        if !adapter.contains_session(session_id).await {
+            return Ok(());
+        }
+
+        self.cancel_active_runtime_turn_before_retire(session_id)
+            .await?;
+
+        let runtime_id = meerkat_runtime::LogicalRuntimeId::for_session(session_id);
+        match meerkat_runtime::RuntimeControlPlane::retire(adapter.as_ref(), &runtime_id).await {
+            Ok(_) => {}
+            Err(meerkat_runtime::RuntimeControlPlaneError::NotFound(_)) => return Ok(()),
+            Err(error) => {
+                return Err(Self::runtime_archive_error(format!(
+                    "runtime retire before mob archive failed for {session_id}: {error}"
+                )));
+            }
+        }
+
+        self.wait_for_runtime_retire_drain(session_id).await
+    }
+
+    #[cfg(not(feature = "runtime-adapter"))]
+    async fn retire_runtime_before_archive(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn runtime_run_bound(snapshot: &meerkat_runtime::MeerkatMachineSpineSnapshot) -> bool {
+        snapshot.control.current_run_id.is_some() || snapshot.inputs.current_run_id.is_some()
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    fn runtime_turn_cancellable(snapshot: &meerkat_runtime::MeerkatMachineSpineSnapshot) -> bool {
+        snapshot.control.phase == meerkat_runtime::RuntimeState::Running
+            && Self::runtime_run_bound(snapshot)
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn cancel_active_runtime_turn_before_retire(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut cancel_requested = false;
+
+        loop {
+            if !adapter.contains_session(session_id).await {
+                return Ok(());
+            }
+            let Some(snapshot) = adapter.meerkat_machine_spine_snapshot(session_id).await else {
+                return Ok(());
+            };
+            if snapshot.control.phase != meerkat_runtime::RuntimeState::Running
+                || !Self::runtime_run_bound(&snapshot)
+            {
+                return Ok(());
+            }
+
+            if !cancel_requested {
+                if let Err(error) = adapter.cancel_after_boundary(session_id).await {
+                    let still_active = adapter
+                        .meerkat_machine_spine_snapshot(session_id)
+                        .await
+                        .is_some_and(|snapshot| Self::runtime_turn_cancellable(&snapshot));
+                    if still_active {
+                        return Err(Self::runtime_archive_error(format!(
+                            "runtime cancel-before-retire failed for {session_id}: {error}"
+                        )));
+                    }
+                    continue;
+                }
+                cancel_requested = true;
+            }
+
+            if Instant::now() >= deadline {
+                return Err(Self::runtime_archive_error(format!(
+                    "timed out waiting for active runtime turn before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
+                    snapshot.control.phase,
+                    snapshot.control.current_run_id,
+                    snapshot.inputs.current_run_id,
+                    snapshot.inputs.queue.len(),
+                    snapshot.inputs.steer_queue.len(),
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    async fn wait_for_runtime_retire_drain(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionError> {
+        let Some(adapter) = &self.runtime_adapter else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+
+        loop {
+            if !adapter.contains_session(session_id).await {
+                return Ok(());
+            }
+            let Some(snapshot) = adapter.meerkat_machine_spine_snapshot(session_id).await else {
+                return Ok(());
+            };
+            let ingress_quiescent =
+                snapshot.inputs.queue.is_empty() && snapshot.inputs.steer_queue.is_empty();
+            // Retired is machine-owned terminal lifecycle truth for archive
+            // purposes. The spine may preserve diagnostic run ids after retire,
+            // so unregister must not wait on those ids once ingress is empty.
+            let lifecycle_retired = matches!(
+                snapshot.control.phase,
+                meerkat_runtime::RuntimeState::Retired | meerkat_runtime::RuntimeState::Stopped
+            );
+            let no_run_bound = snapshot.control.current_run_id.is_none()
+                && snapshot.inputs.current_run_id.is_none();
+            if ingress_quiescent && (lifecycle_retired || no_run_bound) {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(Self::runtime_archive_error(format!(
+                    "timed out waiting for runtime retire drain before mob archive for {session_id}: phase={:?}, control_run={:?}, ingress_run={:?}, queue_len={}, steer_queue_len={}",
+                    snapshot.control.phase,
+                    snapshot.control.current_run_id,
+                    snapshot.inputs.current_run_id,
+                    snapshot.inputs.queue.len(),
+                    snapshot.inputs.steer_queue.len(),
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn archive_with_authority_then_unregister(
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionError> {
+        self.retire_runtime_before_archive(session_id).await?;
         match self
             .session_service
             .archive_with_mob_lifecycle_authority(session_id)
@@ -1408,15 +1563,6 @@ impl MobProvisioner for SessionBackend {
 
     async fn retire_member(&self, member_ref: &MemberRef) -> Result<(), MobError> {
         let session_id = Self::require_session(member_ref, "retire")?;
-        if let Some(adapter) = &self.runtime_adapter {
-            if adapter.contains_session(&session_id).await {
-                LocalMobRuntimeBridge::new(adapter.clone(), session_id.clone())
-                    .retire_member()
-                    .await
-                    .map(|_| ())
-                    .map_err(|err| MobError::Internal(err.to_string()))?;
-            }
-        }
         self.archive_with_authority_then_unregister(&session_id)
             .await?;
         self.ops_adapter.mark_member_retired(member_ref).await?;

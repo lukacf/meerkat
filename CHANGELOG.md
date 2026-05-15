@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.12] - 2026-05-15
+
+Meerkat 0.6.12 is a hotfix release for autonomous mob member capability
+validation and active-turn retirement safety.
+
+### Fixed
+
+- **Autonomous member injector capability** (#712) — autonomous mob members
+  must now expose `interaction_event_injector` before spawn/resume dispatch
+  treats them as seated and active, surfacing missing injector support as typed
+  `MissingMemberCapability` / `missing_member_capability` errors.
+- **Mob retire active-turn teardown** (#711) — runtime retirement now waits for
+  archive/unregister coordination and machine-observed quiescence before
+  unregistering, avoiding races where an active turn could emit state
+  transitions after the runtime was marked retired.
+
 ## [0.6.11] - 2026-05-15
 
 Meerkat 0.6.11 is a hotfix release for turn-driven mob spawn prompt delivery.

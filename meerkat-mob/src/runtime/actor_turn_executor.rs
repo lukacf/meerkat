@@ -408,10 +408,10 @@ impl FlowTurnExecutor for ActorFlowTurnExecutor {
                     .provisioner
                     .interaction_event_injector(bridge_session_id)
                     .await
-                    .ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "missing event injector for autonomous flow target '{target}'"
-                        ))
+                    .ok_or_else(|| MobError::MissingMemberCapability {
+                        member_id: target.clone(),
+                        capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                        context: "autonomous flow turn delivery",
                     })?;
                 let subscription = injector
                     .inject_with_subscription(

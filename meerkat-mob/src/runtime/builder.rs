@@ -1546,13 +1546,12 @@ impl MobBuilder {
             match orchestrator_entry.runtime_mode {
                 crate::MobRuntimeMode::AutonomousHost => {
                     let injector = session_service
-                        .event_injector(bridge_session_id)
+                        .interaction_event_injector(bridge_session_id)
                         .await
-                        .ok_or_else(|| {
-                            MobError::Internal(format!(
-                                "orchestrator '{}' missing event injector during resume notification",
-                                orchestrator_entry.agent_identity
-                            ))
+                        .ok_or_else(|| MobError::MissingMemberCapability {
+                            member_id: orchestrator_entry.agent_identity.clone(),
+                            capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                            context: "orchestrator resume notification",
                         })?;
                     injector
                         .inject(

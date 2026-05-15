@@ -2805,9 +2805,11 @@ impl MobActor {
             .await
             .is_none()
         {
-            return Err(MobError::Internal(format!(
-                "autonomous member '{agent_identity}' is missing event injector capability"
-            )));
+            return Err(MobError::MissingMemberCapability {
+                member_id: agent_identity.clone(),
+                capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                context: "autonomous member dispatch",
+            });
         }
         Ok(())
     }
@@ -4133,13 +4135,15 @@ impl MobActor {
                         ))
                     })?;
                 if is_active.unwrap_or(false) {
-                    // Validate event injector for autonomous mode.
+                    // Validate interaction-scoped injection for autonomous mode.
                     if selected_runtime_mode == crate::MobRuntimeMode::AutonomousHost
                         && self.provisioner.interaction_event_injector(&resume_id).await.is_none()
                     {
-                        return Err(MobError::Internal(format!(
-                            "resumed session '{resume_id}' has no event injector for autonomous '{agent_identity}'"
-                        )));
+                        return Err(MobError::MissingMemberCapability {
+                            member_id: agent_identity.clone(),
+                            capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                            context: "autonomous member resume",
+                        });
                     }
 
                     // Validate comms if wiring rules exist.
@@ -10366,11 +10370,10 @@ impl MobActor {
                     .provisioner
                     .interaction_event_injector(bridge_session_id)
                     .await
-                    .ok_or_else(|| {
-                        MobError::Internal(format!(
-                            "missing event injector for autonomous member '{}'",
-                            entry.agent_identity
-                        ))
+                    .ok_or_else(|| MobError::MissingMemberCapability {
+                        member_id: crate::ids::MeerkatId::from(entry.agent_identity.as_str()),
+                        capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                        context: "autonomous direct turn delivery",
                     })?;
                 injector
                     .inject(

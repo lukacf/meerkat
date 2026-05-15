@@ -600,6 +600,7 @@ struct MockSessionService {
     archived_sent_intents: RwLock<HashMap<SessionId, Vec<String>>>,
     fail_start_turn: std::sync::atomic::AtomicBool,
     fail_inject: std::sync::atomic::AtomicBool,
+    disable_interaction_event_injector: std::sync::atomic::AtomicBool,
     start_turn_calls: AtomicU64,
     keep_alive_start_turn_calls: AtomicU64,
     keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool,
@@ -656,6 +657,7 @@ impl MockSessionService {
             archived_sent_intents: RwLock::new(HashMap::new()),
             fail_start_turn: std::sync::atomic::AtomicBool::new(false),
             fail_inject: std::sync::atomic::AtomicBool::new(false),
+            disable_interaction_event_injector: std::sync::atomic::AtomicBool::new(false),
             start_turn_calls: AtomicU64::new(0),
             keep_alive_start_turn_calls: AtomicU64::new(0),
             keep_alive_turns_complete_immediately: std::sync::atomic::AtomicBool::new(false),
@@ -732,6 +734,11 @@ impl MockSessionService {
 
     fn set_runtime_adapter(&self, adapter: Arc<meerkat_runtime::MeerkatMachine>) {
         *self.runtime_adapter.lock().expect("runtime_adapter mutex") = Some(adapter);
+    }
+
+    fn disable_interaction_event_injector(&self) {
+        self.disable_interaction_event_injector
+            .store(true, Ordering::Relaxed);
     }
 
     /// Get recorded prompts for inspection in tests.
@@ -1637,6 +1644,12 @@ impl SessionServiceCommsExt for MockSessionService {
         &self,
         session_id: &SessionId,
     ) -> Option<Arc<dyn SubscribableInjector>> {
+        if self
+            .disable_interaction_event_injector
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return None;
+        }
         if !self.sessions.read().await.contains_key(session_id) {
             return None;
         }
@@ -25313,6 +25326,50 @@ async fn test_mob_session_service_exposes_event_injector_for_session() {
 }
 
 #[tokio::test]
+async fn test_autonomous_spawn_requires_interaction_event_injector() {
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    service.disable_interaction_event_injector();
+    let handle = MobBuilder::new(sample_definition(), MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+
+    let result = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await;
+    let error = result.expect_err("autonomous spawn must fail before seating");
+    assert!(
+        matches!(
+            error,
+            MobError::MissingMemberCapability {
+                ref member_id,
+                capability: crate::error::MobMemberCapability::InteractionEventInjector,
+                context: "autonomous member dispatch",
+            } if member_id.as_str() == "l-1"
+        ),
+        "unexpected error: {error}"
+    );
+    assert!(
+        handle.list_members().await.is_empty(),
+        "member must not be finalized/listed when console/RPC injection cannot work"
+    );
+    let events = handle.events().replay_all().await.expect("replay events");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind, MobEventKind::MemberSpawned(_))),
+        "failed autonomous spawn must not emit MemberSpawned"
+    );
+    assert_eq!(
+        service.inject_calls.load(Ordering::Relaxed),
+        0,
+        "failure should happen during capability validation, not at delivery time"
+    );
+}
+
+#[tokio::test]
 async fn test_mob_session_service_subscribe_session_events_available() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let sid = handle
@@ -30482,6 +30539,9 @@ fn summarize_mob_runtime_error(error: &MobError) -> String {
         }
         MobError::SupervisorEscalation(_) => "supervisor_escalation".to_string(),
         MobError::UnsupportedForMode { .. } => "unsupported_for_mode".to_string(),
+        MobError::MissingMemberCapability { capability, .. } => {
+            format!("missing_member_capability:{capability}")
+        }
         MobError::ResetBarrier => "reset_barrier".to_string(),
         MobError::StorageError(_) => "storage_error".to_string(),
         MobError::SessionError(_) => "session_error".to_string(),

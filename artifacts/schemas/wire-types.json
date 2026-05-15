@@ -13470,6 +13470,7 @@
           "bridge_delivery_rejected",
           "supervisor_escalation",
           "unsupported_for_mode",
+          "missing_member_capability",
           "reset_barrier",
           "storage_error",
           "session_error",

@@ -753,12 +753,9 @@ impl MeerkatMachine {
                 })?;
         }
 
-        match effect_tx.try_send(projected_effect.into_effect()) {
+        match effect_tx.send(projected_effect.into_effect()).await {
             Ok(()) => Ok(()),
-            Err(mpsc::error::TrySendError::Full(_)) => Err(RuntimeDriverError::Internal(format!(
-                "{context}: runtime effect channel full after accepted boundary cancel"
-            ))),
-            Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err(_) => {
                 self.clear_dead_runtime_attachment(session_id).await;
                 Err(RuntimeDriverError::NotReady {
                     state: RuntimeState::Idle,

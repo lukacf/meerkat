@@ -53,6 +53,15 @@ impl<'a> LifecycleRollback<'a> {
         let mut rollback_errors = Vec::new();
         while let Some((label, action)) = self.actions.pop() {
             if let Err(error) = action().await {
+                if Self::is_benign_compensation_absence(&error) {
+                    tracing::debug!(
+                        context = self.context,
+                        compensation = %label,
+                        %error,
+                        "rollback compensation target was already absent"
+                    );
+                    continue;
+                }
                 rollback_errors.push(format!("{label}: {error}"));
             }
         }
@@ -66,5 +75,55 @@ impl<'a> LifecycleRollback<'a> {
             self.context,
             rollback_errors.join("; ")
         ))
+    }
+
+    fn is_benign_compensation_absence(error: &MobError) -> bool {
+        matches!(
+            error,
+            MobError::CommsError(meerkat_core::comms::SendError::PeerNotFound(_))
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fail_suppresses_already_absent_peer_compensation() {
+        let mut rollback = LifecycleRollback::new("test rollback");
+        rollback.defer("compensating peer notice", || async {
+            Err(MobError::CommsError(
+                meerkat_core::comms::SendError::PeerNotFound("peer-1".to_string()),
+            ))
+        });
+
+        let error = rollback
+            .fail(MobError::Internal("primary failure".to_string()))
+            .await;
+
+        assert!(
+            matches!(error, MobError::Internal(message) if message == "primary failure"),
+            "already-absent peer compensation should not obscure the primary failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn fail_preserves_non_absence_compensation_failure() {
+        let mut rollback = LifecycleRollback::new("test rollback");
+        rollback.defer("compensating peer notice", || async {
+            Err(MobError::CommsError(
+                meerkat_core::comms::SendError::PeerOffline,
+            ))
+        });
+
+        let error = rollback
+            .fail(MobError::Internal("primary failure".to_string()))
+            .await;
+
+        assert!(
+            matches!(error, MobError::Internal(message) if message.contains("rollback failures") && message.contains("peer offline")),
+            "non-benign compensation failures should still be reported"
+        );
     }
 }

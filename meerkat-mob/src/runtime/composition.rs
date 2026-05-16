@@ -379,8 +379,9 @@ impl SignalConsumerSurface for MobSignalConsumerSurface {
     ) -> Result<(), String> {
         let signal = build_mob_signal(&variant, &projected_fields)?;
         self.command_tx
-            .try_send(super::state::MobCommand::ProjectMachineSignal { signal })
-            .map_err(|error| format!("mob actor refused signal enqueue: {error}"))
+            .send(super::state::MobCommand::ProjectMachineSignal { signal })
+            .await
+            .map_err(|error| format!("mob actor signal queue closed: {error}"))
     }
 }
 
@@ -657,5 +658,76 @@ mod tests {
             outcome.is_none(),
             "standalone dispatcher performs no routing"
         );
+    }
+
+    #[cfg(feature = "runtime-adapter")]
+    #[tokio::test]
+    async fn mob_signal_consumer_backpressures_when_actor_queue_is_full() {
+        use super::super::state::MobCommand;
+        use std::time::Duration;
+
+        let (command_tx, mut command_rx) = mpsc::channel(1);
+        let first_signal = mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+            agent_runtime_id: mob_dsl::AgentRuntimeId::from("rt-first"),
+            fence_token: mob_dsl::FenceToken(1),
+        };
+        command_tx
+            .try_send(MobCommand::ProjectMachineSignal {
+                signal: first_signal,
+            })
+            .expect("test precondition: bounded actor queue is full");
+
+        let consumer = MobSignalConsumerSurface::new(command_tx);
+        let mut receive = tokio::spawn(async move {
+            consumer
+                .receive_signal(
+                    seam_facts::signals::observe_runtime_ready(),
+                    vec![
+                        (
+                            seam_facts::fields::agent_runtime_id(),
+                            OwnedFieldValue::Str("rt-backpressured".to_string()),
+                        ),
+                        (seam_facts::fields::fence_token(), OwnedFieldValue::U64(7)),
+                    ],
+                )
+                .await
+        });
+
+        let premature = tokio::time::timeout(Duration::from_millis(50), &mut receive).await;
+        assert!(
+            premature.is_err(),
+            "full actor queue must backpressure routed lifecycle signals instead of failing fast"
+        );
+
+        match command_rx.recv().await.expect("first queued command") {
+            MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
+                signal,
+                mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                    agent_runtime_id,
+                    fence_token: mob_dsl::FenceToken(1),
+                } if agent_runtime_id.0 == "rt-first"
+            )),
+            _ => panic!("unexpected command in test queue"),
+        }
+
+        receive
+            .await
+            .expect("signal receive task should not panic")
+            .expect("backpressured signal enqueue should complete once capacity opens");
+
+        match command_rx
+            .recv()
+            .await
+            .expect("backpressured signal command")
+        {
+            MobCommand::ProjectMachineSignal { signal } => assert!(matches!(
+                signal,
+                mob_dsl::MobMachineSignal::ObserveRuntimeReady {
+                    agent_runtime_id,
+                    fence_token: mob_dsl::FenceToken(7),
+                } if agent_runtime_id.0 == "rt-backpressured"
+            )),
+            _ => panic!("unexpected command in test queue"),
+        }
     }
 }

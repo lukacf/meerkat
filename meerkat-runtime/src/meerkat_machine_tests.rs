@@ -5136,7 +5136,7 @@ async fn cancel_after_boundary_on_attached_runtime_calls_live_handle_and_queues_
 }
 
 #[tokio::test]
-async fn cancel_after_boundary_full_effect_channel_fails_closed_after_live_wake() {
+async fn cancel_after_boundary_full_effect_channel_backpressures_after_live_wake() {
     struct BlockingExecutor {
         live_boundary_cancel_calls: Arc<AtomicUsize>,
         queued_boundary_cancel_calls: Arc<AtomicUsize>,
@@ -5261,24 +5261,37 @@ async fn cancel_after_boundary_full_effect_channel_fails_closed_after_live_wake(
         "runtime loop is still blocked inside apply, so queued effects have not drained"
     );
 
-    let err = tokio::time::timeout(
-        Duration::from_millis(500),
-        adapter.cancel_after_boundary(&session_id),
-    )
+    let mut saturated_cancel = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let session_id = session_id.clone();
+        async move { adapter.cancel_after_boundary(&session_id).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if live_boundary_cancel_calls.load(Ordering::SeqCst) == 17 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
     .await
-    .expect("live boundary cancel must not wait for capacity in the bounded effect channel")
-    .expect_err("full effect channel must fail closed instead of dropping the queued effect");
+    .expect("saturated boundary cancel should still apply the live cooperative wake");
+    let premature = tokio::time::timeout(Duration::from_millis(100), &mut saturated_cancel).await;
     assert!(
-        err.to_string().contains("runtime effect channel full"),
-        "unexpected cancel error: {err}"
+        premature.is_err(),
+        "full effect channel must backpressure committed runtime effects instead of failing fast"
     );
     assert_eq!(
         live_boundary_cancel_calls.load(Ordering::SeqCst),
         17,
-        "saturated effect channel reports failure after attempting the live cooperative wake"
+        "saturated effect channel backpressures after attempting the live cooperative wake"
     );
 
     allow_finish.notify_waiters();
+    saturated_cancel
+        .await
+        .expect("saturated cancel task should not panic")
+        .expect("saturated cancel should complete once runtime effect capacity opens");
     match completion_handle.wait().await {
         CompletionOutcome::CompletedWithoutResult => {}
         other => panic!("expected attached queued prompt to complete normally, got {other:?}"),

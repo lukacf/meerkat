@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.13] - 2026-05-16
+
+Meerkat 0.6.13 is a hotfix release for committed lifecycle and runtime effect
+delivery under burst mob load.
+
+### Fixed
+
+- **Committed lifecycle backpressure** (#713) — mob lifecycle signal projection
+  and committed runtime effect delivery now use backpressured sends instead of
+  fail-fast bounded queue sends, preserving semantic lifecycle/effect facts
+  when large mob fan-outs temporarily fill actor queues.
+- **Rollback cleanup peer absence** (#713) — rollback compensation now treats
+  typed `PeerNotFound` send errors as benign already-absent cleanup fallout
+  while preserving other rollback failures.
+
 ## [0.6.12] - 2026-05-15
 
 Meerkat 0.6.12 is a hotfix release for autonomous mob member capability

@@ -19,9 +19,9 @@ use meerkat_core::types::HandlingMode;
 
 use crate::accept::{
     AcceptOutcome, AdmissionPlan, AdmissionQueueAction, CoarseAdmissionFlags,
-    ExistingQueuedAdmissionAction, MachineAdmissionAuthority, ResolvedAdmission,
+    ExistingQueuedAdmissionAction, MachineAdmissionAuthority, RejectReason, ResolvedAdmission,
 };
-use crate::durability::{DurabilityError, validate_durability};
+use crate::durability::validate_durability;
 use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
@@ -2038,6 +2038,100 @@ impl EphemeralRuntimeDriver {
         }
     }
 
+    fn admission_validation_from_machine_effects(
+        input_id: &InputId,
+        effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    ) -> Result<Option<mm_dsl::AdmissionRejectReasonKind>, RuntimeDriverError> {
+        let Some((effect_input_id, result, reject_reason)) =
+            effects.into_iter().find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::AdmissionValidationResolved {
+                    input_id,
+                    result,
+                    reject_reason,
+                } => Some((input_id, result, reject_reason)),
+                _ => None,
+            })
+        else {
+            return Err(RuntimeDriverError::Internal(
+                "ResolveAdmissionValidation emitted no AdmissionValidationResolved effect".into(),
+            ));
+        };
+
+        if effect_input_id != input_id.to_string() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "ResolveAdmissionValidation returned input id '{effect_input_id}' for '{input_id}'"
+            )));
+        }
+
+        match (result, reject_reason) {
+            (mm_dsl::AdmissionValidationResultKind::Accept, None) => Ok(None),
+            (mm_dsl::AdmissionValidationResultKind::Accept, Some(reason)) => {
+                Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionValidation accepted '{input_id}' but emitted rejection reason {reason:?}"
+                )))
+            }
+            (mm_dsl::AdmissionValidationResultKind::Reject, Some(reason)) => Ok(Some(reason)),
+            (mm_dsl::AdmissionValidationResultKind::Reject, None) => {
+                Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionValidation rejected '{input_id}' without a typed reason"
+                )))
+            }
+        }
+    }
+
+    fn resolve_admission_validation(
+        &self,
+        input_id: &InputId,
+        durability_valid: bool,
+        peer_handling_mode_valid: bool,
+        peer_response_terminal_valid: bool,
+    ) -> Result<Option<mm_dsl::AdmissionRejectReasonKind>, RuntimeDriverError> {
+        let effects = self.dsl_preview(
+            mm_dsl::MeerkatMachineInput::ResolveAdmissionValidation {
+                input_id: Self::dsl_key(input_id),
+                durability_valid,
+                peer_handling_mode_valid,
+                peer_response_terminal_valid,
+            },
+            "ResolveAdmissionValidation",
+        )?;
+        Self::admission_validation_from_machine_effects(input_id, effects)
+    }
+
+    fn reject_reason_from_machine_validation(
+        reason: mm_dsl::AdmissionRejectReasonKind,
+        durability_detail: Option<&str>,
+        peer_handling_mode_detail: Option<&str>,
+        peer_response_terminal_detail: Option<&str>,
+    ) -> Result<RejectReason, RuntimeDriverError> {
+        let missing_detail = || {
+            RuntimeDriverError::Internal(format!(
+                "ResolveAdmissionValidation emitted {reason:?} without matching validation detail"
+            ))
+        };
+        match reason {
+            mm_dsl::AdmissionRejectReasonKind::DurabilityViolation => {
+                Ok(RejectReason::DurabilityViolation {
+                    detail: durability_detail.ok_or_else(missing_detail)?.to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::PeerHandlingModeInvalid => {
+                Ok(RejectReason::PeerHandlingModeInvalid {
+                    detail: peer_handling_mode_detail
+                        .ok_or_else(missing_detail)?
+                        .to_owned(),
+                })
+            }
+            mm_dsl::AdmissionRejectReasonKind::PeerResponseTerminalInvalid => {
+                Ok(RejectReason::PeerResponseTerminalInvalid {
+                    detail: peer_response_terminal_detail
+                        .ok_or_else(missing_detail)?
+                        .to_owned(),
+                })
+            }
+        }
+    }
+
     fn resolve_idempotency(
         &mut self,
         input_id: &InputId,
@@ -2257,34 +2351,33 @@ impl EphemeralRuntimeDriver {
             | RuntimeState::Running => {}
         }
 
-        if let Err(e) = validate_durability(&input) {
-            match e {
-                DurabilityError::DerivedForbidden { .. }
-                | DurabilityError::ExternalDerivedForbidden => {
-                    return Ok(AcceptOutcome::Rejected {
-                        reason: crate::accept::RejectReason::DurabilityViolation {
-                            detail: e.to_string(),
-                        },
-                    });
-                }
-            }
-        }
-        if let Err(e) = crate::peer_handling_mode::validate_peer_handling_mode(&input) {
-            return Ok(AcceptOutcome::Rejected {
-                reason: crate::accept::RejectReason::PeerHandlingModeInvalid {
-                    detail: e.to_string(),
-                },
-            });
-        }
-        if let Err(e) = crate::input::validate_peer_response_terminal_fact(&input) {
-            return Ok(AcceptOutcome::Rejected {
-                reason: crate::accept::RejectReason::PeerResponseTerminalInvalid {
-                    detail: e.to_string(),
-                },
-            });
+        let input_id = input.id().clone();
+        let durability_error = validate_durability(&input)
+            .err()
+            .map(|error| error.to_string());
+        let peer_handling_mode_error =
+            crate::peer_handling_mode::validate_peer_handling_mode(&input)
+                .err()
+                .map(|error| error.to_string());
+        let peer_response_terminal_error =
+            crate::input::validate_peer_response_terminal_fact(&input)
+                .err()
+                .map(|error| error.to_string());
+        if let Some(reason) = self.resolve_admission_validation(
+            &input_id,
+            durability_error.is_none(),
+            peer_handling_mode_error.is_none(),
+            peer_response_terminal_error.is_none(),
+        )? {
+            let reason = Self::reject_reason_from_machine_validation(
+                reason,
+                durability_error.as_deref(),
+                peer_handling_mode_error.as_deref(),
+                peer_response_terminal_error.as_deref(),
+            )?;
+            return Ok(AcceptOutcome::Rejected { reason });
         }
 
-        let input_id = input.id().clone();
         if resolved.authority().input_id() != input_id.to_string() {
             return Err(RuntimeDriverError::Internal(format!(
                 "resolved admission authority id '{}' did not match accepted input '{input_id}'",
@@ -3038,6 +3131,48 @@ mod tests {
                 state.admission_idempotency_inputs.get(&key.to_string()),
                 Some(&first_id.to_string()),
                 "duplicate resolution must not rewrite the generated key owner"
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn admission_validation_rejection_class_is_generated() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("validation-authority"));
+
+        let mut input = prompt_input("derived prompt");
+        let input_id = input.id().clone();
+        if let Input::Prompt(prompt) = &mut input {
+            prompt.header.durability = InputDurability::Derived;
+        }
+
+        let generated_reason = driver
+            .resolve_admission_validation(&input_id, false, true, true)
+            .expect("generated validation feedback should resolve");
+        assert_eq!(
+            generated_reason,
+            Some(mm_dsl::AdmissionRejectReasonKind::DurabilityViolation)
+        );
+
+        let outcome = driver.accept_input(input).await.unwrap();
+        match outcome {
+            crate::accept::AcceptOutcome::Rejected {
+                reason: crate::accept::RejectReason::DurabilityViolation { detail },
+            } => {
+                assert!(
+                    !detail.is_empty(),
+                    "shell detail should describe the raw validation error"
+                );
+            }
+            other => panic!("expected generated rejection class, got {other:?}"),
+        }
+        assert!(
+            driver.input_state(&input_id).is_none(),
+            "rejected inputs must not enter the shell ledger"
+        );
+        driver.with_dsl_state(|state| {
+            assert!(
+                !state.input_phases.contains_key(&input_id.to_string()),
+                "rejected inputs must not create lifecycle machine facts"
             );
         });
     }

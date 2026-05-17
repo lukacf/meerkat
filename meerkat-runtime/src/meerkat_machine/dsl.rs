@@ -2189,6 +2189,21 @@ pub enum AdmissionIdempotencyResultKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    DurabilityViolation,
+    PeerHandlingModeInvalid,
+    PeerResponseTerminalInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputNormalizationReasonKind {
     #[default]
     ConsumeOnAccept,

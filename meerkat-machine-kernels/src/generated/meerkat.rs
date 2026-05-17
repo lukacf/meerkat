@@ -662,6 +662,60 @@ impl std::fmt::Display for AdmissionQueueActionKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    #[serde(rename = "DurabilityViolation")]
+    DurabilityViolation,
+    #[serde(rename = "PeerHandlingModeInvalid")]
+    PeerHandlingModeInvalid,
+    #[serde(rename = "PeerResponseTerminalInvalid")]
+    PeerResponseTerminalInvalid,
+}
+impl AdmissionRejectReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::DurabilityViolation => "DurabilityViolation",
+            Self::PeerHandlingModeInvalid => "PeerHandlingModeInvalid",
+            Self::PeerResponseTerminalInvalid => "PeerResponseTerminalInvalid",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "DurabilityViolation" => Ok(Self::DurabilityViolation),
+            "PeerHandlingModeInvalid" => Ok(Self::PeerHandlingModeInvalid),
+            "PeerResponseTerminalInvalid" => Ok(Self::PeerResponseTerminalInvalid),
+            other => Err(format!("invalid AdmissionRejectReasonKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRejectReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRejectReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdmissionRoutingDisposition {
     #[default]
     #[serde(rename = "Queue")]
@@ -810,6 +864,58 @@ impl std::convert::TryFrom<String> for AdmissionRuntimeExecutionKind {
     }
 }
 impl std::fmt::Display for AdmissionRuntimeExecutionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Reject")]
+    Reject,
+}
+impl AdmissionValidationResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Reject => "Reject",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionValidationResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Reject" => Ok(Self::Reject),
+            other => Err(format!(
+                "invalid AdmissionValidationResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionValidationResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionValidationResultKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -5398,6 +5504,13 @@ pub mod inputs {
         pub without_wake: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionValidation {
+        pub input_id: String,
+        pub durability_valid: bool,
+        pub peer_handling_mode_valid: bool,
+        pub peer_response_terminal_valid: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct ResolveAdmissionIdempotency {
         pub input_id: String,
         pub idempotency_key: Option<String>,
@@ -6030,6 +6143,7 @@ pub enum Input {
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
+    ResolveAdmissionValidation(inputs::ResolveAdmissionValidation),
     ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
     RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
     NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
@@ -6211,6 +6325,7 @@ impl Input {
             Self::AcceptWithCompletion(_) => InputKind::AcceptWithCompletion,
             Self::AcceptWithoutWake(_) => InputKind::AcceptWithoutWake,
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
+            Self::ResolveAdmissionValidation(_) => InputKind::ResolveAdmissionValidation,
             Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
             Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
             Self::NormalizeRecoveredInputLifecycle(_) => {
@@ -6395,6 +6510,7 @@ pub enum InputKind {
     AcceptWithCompletion,
     AcceptWithoutWake,
     ResolveAdmissionPlan,
+    ResolveAdmissionValidation,
     ResolveAdmissionIdempotency,
     RegisterAcceptedIdempotency,
     NormalizeRecoveredInputLifecycle,
@@ -6732,6 +6848,12 @@ pub mod effects {
         pub wake_if_idle: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionValidationResolved {
+        pub input_id: String,
+        pub result: AdmissionValidationResultKind,
+        pub reject_reason: Option<AdmissionRejectReasonKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AdmissionIdempotencyResolved {
         pub input_id: String,
         pub result: AdmissionIdempotencyResultKind,
@@ -6939,6 +7061,7 @@ pub enum Effect {
     InitiateRecycle(effects::InitiateRecycle),
     IngressAccepted(effects::IngressAccepted),
     AdmissionResolved(effects::AdmissionResolved),
+    AdmissionValidationResolved(effects::AdmissionValidationResolved),
     AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
     RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
     PostAdmissionSignal(effects::PostAdmissionSignal),
@@ -7013,6 +7136,7 @@ pub enum EffectKind {
     InitiateRecycle,
     IngressAccepted,
     AdmissionResolved,
+    AdmissionValidationResolved,
     AdmissionIdempotencyResolved,
     RecoveredInputLifecycleNormalized,
     PostAdmissionSignal,
@@ -7236,6 +7360,18 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
+    ResolveAdmissionValidationDurabilityRejectedIdle,
+    ResolveAdmissionValidationDurabilityRejectedAttached,
+    ResolveAdmissionValidationDurabilityRejectedRunning,
+    ResolveAdmissionValidationPeerHandlingRejectedIdle,
+    ResolveAdmissionValidationPeerHandlingRejectedAttached,
+    ResolveAdmissionValidationPeerHandlingRejectedRunning,
+    ResolveAdmissionValidationPeerTerminalRejectedIdle,
+    ResolveAdmissionValidationPeerTerminalRejectedAttached,
+    ResolveAdmissionValidationPeerTerminalRejectedRunning,
+    ResolveAdmissionValidationAcceptedIdle,
+    ResolveAdmissionValidationAcceptedAttached,
+    ResolveAdmissionValidationAcceptedRunning,
     NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing,
     NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle,
     NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached,

@@ -1047,6 +1047,21 @@ pub enum AdmissionIdempotencyResultKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionValidationResultKind {
+    #[default]
+    Accept,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRejectReasonKind {
+    #[default]
+    DurabilityViolation,
+    PeerHandlingModeInvalid,
+    PeerResponseTerminalInvalid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputObservedPhase {
     Accepted,
     #[default]
@@ -1928,6 +1943,12 @@ macro_rules! meerkat_catalog_machine_dsl {
                 runtime_running: bool,
                 without_wake: bool,
             },
+            ResolveAdmissionValidation {
+                input_id: String,
+                durability_valid: bool,
+                peer_handling_mode_valid: bool,
+                peer_response_terminal_valid: bool,
+            },
             ResolveAdmissionIdempotency { input_id: String, idempotency_key: Option<String> },
             RegisterAcceptedIdempotency { input_id: String, idempotency_key: String },
             NormalizeRecoveredInputLifecycle {
@@ -2351,6 +2372,11 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: bool,
                 wake_if_idle: bool,
             },
+            AdmissionValidationResolved {
+                input_id: String,
+                result: Enum<AdmissionValidationResultKind>,
+                reject_reason: Option<Enum<AdmissionRejectReasonKind>>,
+            },
             AdmissionIdempotencyResolved {
                 input_id: String,
                 result: Enum<AdmissionIdempotencyResultKind>,
@@ -2491,6 +2517,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InitiateRecycle => local,
         disposition IngressAccepted => external,
         disposition AdmissionResolved => local,
+        disposition AdmissionValidationResolved => local,
         disposition AdmissionIdempotencyResolved => local,
         disposition RecoveredInputLifecycleNormalized => local,
         disposition PostAdmissionSignal => local,
@@ -4079,7 +4106,69 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit IngressAccepted
         }
 
-        // 26a. NormalizeRecoveredInputLifecycle: generated recovery
+        // 26a. ResolveAdmissionValidation: generated public admission-result
+        // class authority. The shell may parse raw input observations, but the
+        // accepted/rejected result class and typed rejection reason are emitted
+        // here before idempotency, lifecycle, ledger, or surface projections
+        // can change.
+        transition ResolveAdmissionValidationDurabilityRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            guard "durability_invalid" { durability_valid == false }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::DurabilityViolation)
+            }
+        }
+
+        transition ResolveAdmissionValidationPeerHandlingRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            guard "durability_valid" { durability_valid == true }
+            guard "peer_handling_mode_invalid" { peer_handling_mode_valid == false }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::PeerHandlingModeInvalid)
+            }
+        }
+
+        transition ResolveAdmissionValidationPeerTerminalRejected {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            guard "durability_valid" { durability_valid == true }
+            guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
+            guard "peer_response_terminal_invalid" { peer_response_terminal_valid == false }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Reject,
+                reject_reason: Some(AdmissionRejectReasonKind::PeerResponseTerminalInvalid)
+            }
+        }
+
+        transition ResolveAdmissionValidationAccepted {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionValidation { input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid }
+            guard "durability_valid" { durability_valid == true }
+            guard "peer_handling_mode_valid" { peer_handling_mode_valid == true }
+            guard "peer_response_terminal_valid" { peer_response_terminal_valid == true }
+            update {}
+            to Idle
+            emit AdmissionValidationResolved {
+                input_id: input_id,
+                result: AdmissionValidationResultKind::Accept,
+                reject_reason: None
+            }
+        }
+
+        // 26b. NormalizeRecoveredInputLifecycle: generated recovery
         // lifecycle-normalization authority. The shell supplies typed
         // observations from durable storage (observed phase, consume-on-
         // accept policy predicate, boundary receipt presence); the machine
@@ -4224,7 +4313,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             }
         }
 
-        // 26b. ResolveAdmissionIdempotency: generated idempotency admission
+        // 26c. ResolveAdmissionIdempotency: generated idempotency admission
         // authority. The shell provides only the parsed key, if any; the
         // machine owns the key-to-input map and therefore owns whether an
         // input is newly admitted or publicly classified as deduplicated.
@@ -4288,7 +4377,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit InputLifecycleNotice
         }
 
-        // 26c. ResolveAdmissionPlan: generated live-admission policy/default
+        // 26d. ResolveAdmissionPlan: generated live-admission policy/default
         // authority. The shell presents parsed input observations only
         // (kind, optional requested lane, silent-intent match, and whether a
         // coalescing candidate exists). This transition emits the full typed

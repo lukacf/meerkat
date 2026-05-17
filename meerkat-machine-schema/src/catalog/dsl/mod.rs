@@ -303,6 +303,15 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "AdmissionExistingQueuedActionKind",
                 &["None", "Coalesce", "Supersede"],
             ),
+            NamedTypeBinding::string_enum("AdmissionValidationResultKind", &["Accept", "Reject"]),
+            NamedTypeBinding::string_enum(
+                "AdmissionRejectReasonKind",
+                &[
+                    "DurabilityViolation",
+                    "PeerHandlingModeInvalid",
+                    "PeerResponseTerminalInvalid",
+                ],
+            ),
             NamedTypeBinding::string_enum(
                 "AdmissionIdempotencyResultKind",
                 &["Accept", "Deduplicated"],

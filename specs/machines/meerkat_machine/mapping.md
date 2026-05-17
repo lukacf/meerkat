@@ -559,6 +559,42 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithoutWakeRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+- `ResolveAdmissionValidationDurabilityRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationDurabilityRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationDurabilityRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerHandlingRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerHandlingRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerHandlingRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerTerminalRejectedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerTerminalRejectedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationPeerTerminalRejectedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationAcceptedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationAcceptedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionValidationAcceptedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2490,6 +2526,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `AdmissionValidationResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `AdmissionIdempotencyResolved`
   - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`

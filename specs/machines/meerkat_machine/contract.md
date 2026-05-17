@@ -195,6 +195,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, without_wake: Bool)
+- `ResolveAdmissionValidation`(input_id: String, durability_valid: Bool, peer_handling_mode_valid: Bool, peer_response_terminal_valid: Bool)
 - `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
 - `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
 - `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
@@ -376,6 +377,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InitiateRecycle`
 - `IngressAccepted`
 - `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AdmissionValidationResolved`(input_id: String, result: AdmissionValidationResultKind, reject_reason: Option<AdmissionRejectReasonKind>)
 - `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
 - `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
@@ -1807,6 +1809,117 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `session_registered`
 - Emits: `IngressAccepted`
+- To: `Running`
+
+### `ResolveAdmissionValidationDurabilityRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationDurabilityRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationDurabilityRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationPeerHandlingRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationPeerHandlingRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationPeerHandlingRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationPeerTerminalRejectedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationPeerTerminalRejectedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationPeerTerminalRejectedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_invalid`
+- Emits: `AdmissionValidationResolved`
+- To: `Running`
+
+### `ResolveAdmissionValidationAcceptedIdle`
+- From: `Idle`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_valid`
+- Emits: `AdmissionValidationResolved`
+- To: `Idle`
+
+### `ResolveAdmissionValidationAcceptedAttached`
+- From: `Attached`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_valid`
+- Emits: `AdmissionValidationResolved`
+- To: `Attached`
+
+### `ResolveAdmissionValidationAcceptedRunning`
+- From: `Running`
+- On: `ResolveAdmissionValidation`(input_id, durability_valid, peer_handling_mode_valid, peer_response_terminal_valid)
+- Guards:
+  - `durability_valid`
+  - `peer_handling_mode_valid`
+  - `peer_response_terminal_valid`
+- Emits: `AdmissionValidationResolved`
 - To: `Running`
 
 ### `NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing`

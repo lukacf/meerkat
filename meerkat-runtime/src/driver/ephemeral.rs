@@ -2316,11 +2316,16 @@ impl EphemeralRuntimeDriver {
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
 
-        let final_state = self.ledger.get(&input_id).cloned().unwrap_or(state);
+        let final_bundle = self.stored_input_state(&input_id).ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "accepted input {input_id} missing generated lifecycle seed"
+            ))
+        })?;
         Ok(AcceptOutcome::Accepted {
             input_id,
             policy,
-            state: final_state,
+            state: final_bundle.state,
+            seed: final_bundle.seed,
         })
     }
 

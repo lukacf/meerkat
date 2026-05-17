@@ -281,6 +281,7 @@ impl PersistentRuntimeDriver {
         if let AcceptOutcome::Accepted {
             ref input_id,
             ref mut state,
+            ref mut seed,
             ..
         } = outcome
             && let Some(mut bundle) = self.inner.stored_input_state(input_id)
@@ -301,6 +302,7 @@ impl PersistentRuntimeDriver {
                 return Err(err);
             }
             *state = bundle.state;
+            *seed = bundle.seed;
         }
 
         Ok(outcome)

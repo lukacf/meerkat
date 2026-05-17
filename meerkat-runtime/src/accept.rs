@@ -5,7 +5,7 @@ use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::input_state::InputState;
+use crate::input_state::{InputState, InputStateSeed};
 use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
 use crate::runtime_state::RuntimeState;
@@ -233,6 +233,8 @@ pub enum AcceptOutcome {
         policy: PolicyDecision,
         /// Current input state.
         state: InputState,
+        /// Machine-owned lifecycle seed paired with `state`.
+        seed: InputStateSeed,
     },
     /// Input was deduplicated (idempotency key matched an existing input).
     Deduplicated {
@@ -306,6 +308,7 @@ mod tests {
                 policy_version: PolicyVersion(1),
             },
             state: InputState::new_accepted(InputId::new()),
+            seed: InputStateSeed::new_accepted(),
         };
         assert!(outcome.is_accepted());
         assert!(!outcome.is_deduplicated());

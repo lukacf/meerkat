@@ -254,17 +254,18 @@ impl PersistentRuntimeDriver {
         self.inner.absorb_post_admission_effects(effects);
     }
 
-    pub(crate) fn resolve_admission_for_runtime_idle(
+    pub(crate) fn resolve_admission(
         &self,
         input: &Input,
-        runtime_idle: bool,
-    ) -> crate::accept::ResolvedAdmission {
-        self.inner
-            .resolve_admission_for_runtime_idle(input, runtime_idle)
+    ) -> Result<crate::accept::ResolvedAdmission, RuntimeDriverError> {
+        self.inner.resolve_admission(input)
     }
 
-    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
-        self.inner.resolve_admission(input)
+    pub(crate) fn resolve_admission_without_wake(
+        &self,
+        input: &Input,
+    ) -> Result<crate::accept::ResolvedAdmission, RuntimeDriverError> {
+        self.inner.resolve_admission_without_wake(input)
     }
 
     pub(crate) async fn accept_resolved_input(
@@ -605,7 +606,7 @@ impl PersistentRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl RuntimeDriver for PersistentRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let resolved = self.resolve_admission(&input);
+        let resolved = self.resolve_admission(&input)?;
         self.accept_resolved_input(input, resolved).await
     }
 

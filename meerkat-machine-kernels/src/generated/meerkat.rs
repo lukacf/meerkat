@@ -12,6 +12,756 @@ pub fn schema() -> meerkat_machine_schema::MachineSchema {
     meerkat_machine_schema::catalog::dsl::dsl_meerkat_machine()
 }
 
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Coalesce")]
+    Coalesce,
+    #[serde(rename = "Supersede")]
+    Supersede,
+}
+impl AdmissionExistingQueuedActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Coalesce => "Coalesce",
+            Self::Supersede => "Supersede",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionExistingQueuedActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Coalesce" => Ok(Self::Coalesce),
+            "Supersede" => Ok(Self::Supersede),
+            other => Err(format!(
+                "invalid AdmissionExistingQueuedActionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionExistingQueuedActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionExistingQueuedActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionInputKind {
+    #[default]
+    #[serde(rename = "Prompt")]
+    Prompt,
+    #[serde(rename = "PeerMessage")]
+    PeerMessage,
+    #[serde(rename = "PeerRequest")]
+    PeerRequest,
+    #[serde(rename = "PeerResponseProgress")]
+    PeerResponseProgress,
+    #[serde(rename = "PeerResponseTerminal")]
+    PeerResponseTerminal,
+    #[serde(rename = "FlowStep")]
+    FlowStep,
+    #[serde(rename = "ExternalEvent")]
+    ExternalEvent,
+    #[serde(rename = "Continuation")]
+    Continuation,
+    #[serde(rename = "Operation")]
+    Operation,
+}
+impl AdmissionInputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "Prompt",
+            Self::PeerMessage => "PeerMessage",
+            Self::PeerRequest => "PeerRequest",
+            Self::PeerResponseProgress => "PeerResponseProgress",
+            Self::PeerResponseTerminal => "PeerResponseTerminal",
+            Self::FlowStep => "FlowStep",
+            Self::ExternalEvent => "ExternalEvent",
+            Self::Continuation => "Continuation",
+            Self::Operation => "Operation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionInputKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Prompt" => Ok(Self::Prompt),
+            "PeerMessage" => Ok(Self::PeerMessage),
+            "PeerRequest" => Ok(Self::PeerRequest),
+            "PeerResponseProgress" => Ok(Self::PeerResponseProgress),
+            "PeerResponseTerminal" => Ok(Self::PeerResponseTerminal),
+            "FlowStep" => Ok(Self::FlowStep),
+            "ExternalEvent" => Ok(Self::ExternalEvent),
+            "Continuation" => Ok(Self::Continuation),
+            "Operation" => Ok(Self::Operation),
+            other => Err(format!("invalid AdmissionInputKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionInputKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionInputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    #[serde(rename = "AppendContextAndRun")]
+    AppendContextAndRun,
+}
+impl AdmissionPeerResponseTerminalApplyIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppendContextAndRun => "AppendContextAndRun",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            other => Err(format!(
+                "invalid AdmissionPeerResponseTerminalApplyIntent value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPeerResponseTerminalApplyIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPlanKind {
+    #[default]
+    #[serde(rename = "ConsumedOnAccept")]
+    ConsumedOnAccept,
+    #[serde(rename = "Queued")]
+    Queued,
+}
+impl AdmissionPlanKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConsumedOnAccept => "ConsumedOnAccept",
+            Self::Queued => "Queued",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPlanKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ConsumedOnAccept" => Ok(Self::ConsumedOnAccept),
+            "Queued" => Ok(Self::Queued),
+            other => Err(format!("invalid AdmissionPlanKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPlanKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPlanKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    #[serde(rename = "StageRunStart")]
+    StageRunStart,
+    #[serde(rename = "StageRunBoundary")]
+    StageRunBoundary,
+    #[serde(rename = "InjectNow")]
+    InjectNow,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl AdmissionPolicyApplyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StageRunStart => "StageRunStart",
+            Self::StageRunBoundary => "StageRunBoundary",
+            Self::InjectNow => "InjectNow",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StageRunStart" => Ok(Self::StageRunStart),
+            "StageRunBoundary" => Ok(Self::StageRunBoundary),
+            "InjectNow" => Ok(Self::InjectNow),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!("invalid AdmissionPolicyApplyMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyApplyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyConsumePoint {
+    #[default]
+    #[serde(rename = "OnAccept")]
+    OnAccept,
+    #[serde(rename = "OnApply")]
+    OnApply,
+    #[serde(rename = "OnRunStart")]
+    OnRunStart,
+    #[serde(rename = "OnRunComplete")]
+    OnRunComplete,
+    #[serde(rename = "ExplicitAck")]
+    ExplicitAck,
+}
+impl AdmissionPolicyConsumePoint {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::OnAccept => "OnAccept",
+            Self::OnApply => "OnApply",
+            Self::OnRunStart => "OnRunStart",
+            Self::OnRunComplete => "OnRunComplete",
+            Self::ExplicitAck => "ExplicitAck",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyConsumePoint {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "OnAccept" => Ok(Self::OnAccept),
+            "OnApply" => Ok(Self::OnApply),
+            "OnRunStart" => Ok(Self::OnRunStart),
+            "OnRunComplete" => Ok(Self::OnRunComplete),
+            "ExplicitAck" => Ok(Self::ExplicitAck),
+            other => Err(format!(
+                "invalid AdmissionPolicyConsumePoint value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyConsumePoint {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyConsumePoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    #[serde(rename = "QueueNextTurn")]
+    QueueNextTurn,
+    #[serde(rename = "SteerBatch")]
+    SteerBatch,
+    #[serde(rename = "Immediate")]
+    Immediate,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl AdmissionPolicyDrainPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::QueueNextTurn => "QueueNextTurn",
+            Self::SteerBatch => "SteerBatch",
+            Self::Immediate => "Immediate",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyDrainPolicy {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "QueueNextTurn" => Ok(Self::QueueNextTurn),
+            "SteerBatch" => Ok(Self::SteerBatch),
+            "Immediate" => Ok(Self::Immediate),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!(
+                "invalid AdmissionPolicyDrainPolicy value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyDrainPolicy {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyDrainPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyQueueMode {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "Fifo")]
+    Fifo,
+    #[serde(rename = "Coalesce")]
+    Coalesce,
+    #[serde(rename = "Supersede")]
+    Supersede,
+    #[serde(rename = "Priority")]
+    Priority,
+}
+impl AdmissionPolicyQueueMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Fifo => "Fifo",
+            Self::Coalesce => "Coalesce",
+            Self::Supersede => "Supersede",
+            Self::Priority => "Priority",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyQueueMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "Fifo" => Ok(Self::Fifo),
+            "Coalesce" => Ok(Self::Coalesce),
+            "Supersede" => Ok(Self::Supersede),
+            "Priority" => Ok(Self::Priority),
+            other => Err(format!("invalid AdmissionPolicyQueueMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyQueueMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyQueueMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    #[serde(rename = "WakeIfIdle")]
+    WakeIfIdle,
+    #[serde(rename = "InterruptYielding")]
+    InterruptYielding,
+    #[serde(rename = "None")]
+    None,
+}
+impl AdmissionPolicyWakeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WakeIfIdle => "WakeIfIdle",
+            Self::InterruptYielding => "InterruptYielding",
+            Self::None => "None",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionPolicyWakeMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "WakeIfIdle" => Ok(Self::WakeIfIdle),
+            "InterruptYielding" => Ok(Self::InterruptYielding),
+            "None" => Ok(Self::None),
+            other => Err(format!("invalid AdmissionPolicyWakeMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionPolicyWakeMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionPolicyWakeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    #[serde(rename = "None")]
+    None,
+    #[serde(rename = "EnqueueTo")]
+    EnqueueTo,
+    #[serde(rename = "EnqueueFront")]
+    EnqueueFront,
+}
+impl AdmissionQueueActionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::EnqueueTo => "EnqueueTo",
+            Self::EnqueueFront => "EnqueueFront",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionQueueActionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "None" => Ok(Self::None),
+            "EnqueueTo" => Ok(Self::EnqueueTo),
+            "EnqueueFront" => Ok(Self::EnqueueFront),
+            other => Err(format!("invalid AdmissionQueueActionKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionQueueActionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionQueueActionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    #[serde(rename = "Queue")]
+    Queue,
+    #[serde(rename = "Steer")]
+    Steer,
+    #[serde(rename = "Immediate")]
+    Immediate,
+    #[serde(rename = "Drop")]
+    Drop,
+}
+impl AdmissionRoutingDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Steer => "Steer",
+            Self::Immediate => "Immediate",
+            Self::Drop => "Drop",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRoutingDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "Steer" => Ok(Self::Steer),
+            "Immediate" => Ok(Self::Immediate),
+            "Drop" => Ok(Self::Drop),
+            other => Err(format!(
+                "invalid AdmissionRoutingDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRoutingDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRoutingDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    #[serde(rename = "RunStart")]
+    RunStart,
+    #[serde(rename = "RunCheckpoint")]
+    RunCheckpoint,
+    #[serde(rename = "Immediate")]
+    Immediate,
+}
+impl AdmissionRunApplyBoundary {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunStart => "RunStart",
+            Self::RunCheckpoint => "RunCheckpoint",
+            Self::Immediate => "Immediate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunStart" => Ok(Self::RunStart),
+            "RunCheckpoint" => Ok(Self::RunCheckpoint),
+            "Immediate" => Ok(Self::Immediate),
+            other => Err(format!("invalid AdmissionRunApplyBoundary value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRunApplyBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    #[serde(rename = "ContentTurn")]
+    ContentTurn,
+    #[serde(rename = "ResumePending")]
+    ResumePending,
+}
+impl AdmissionRuntimeExecutionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContentTurn => "ContentTurn",
+            Self::ResumePending => "ResumePending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ContentTurn" => Ok(Self::ContentTurn),
+            "ResumePending" => Ok(Self::ResumePending),
+            other => Err(format!(
+                "invalid AdmissionRuntimeExecutionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionRuntimeExecutionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 #[derive(
     Debug,
     Clone,
@@ -4149,6 +4899,8 @@ pub struct State {
     pub next_priority_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
+    pub admission_authorized_lanes: std::collections::BTreeMap<String, InputLane>,
+    pub admission_authorized_plans: std::collections::BTreeMap<String, AdmissionPlanKind>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -4434,6 +5186,16 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct AcceptWithoutWake {
         pub input_id: InputId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionPlan {
+        pub input_id: String,
+        pub input_kind: AdmissionInputKind,
+        pub requested_lane: Option<InputLane>,
+        pub silent_intent_match: bool,
+        pub existing_superseded: bool,
+        pub runtime_running: bool,
+        pub without_wake: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
@@ -5050,6 +5812,7 @@ pub enum Input {
     LoadBoundaryReceipt(inputs::LoadBoundaryReceipt),
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
+    ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -5227,6 +5990,7 @@ impl Input {
             Self::LoadBoundaryReceipt(_) => InputKind::LoadBoundaryReceipt,
             Self::AcceptWithCompletion(_) => InputKind::AcceptWithCompletion,
             Self::AcceptWithoutWake(_) => InputKind::AcceptWithoutWake,
+            Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -5405,6 +6169,7 @@ pub enum InputKind {
     LoadBoundaryReceipt,
     AcceptWithCompletion,
     AcceptWithoutWake,
+    ResolveAdmissionPlan,
     Prepare,
     Commit,
     Fail,
@@ -5714,6 +6479,29 @@ pub mod effects {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct IngressAccepted {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionResolved {
+        pub input_id: String,
+        pub policy_version: u64,
+        pub policy_apply_mode: AdmissionPolicyApplyMode,
+        pub policy_wake_mode: AdmissionPolicyWakeMode,
+        pub policy_queue_mode: AdmissionPolicyQueueMode,
+        pub policy_consume_point: AdmissionPolicyConsumePoint,
+        pub policy_drain_policy: AdmissionPolicyDrainPolicy,
+        pub policy_routing_disposition: AdmissionRoutingDisposition,
+        pub lane: InputLane,
+        pub plan: AdmissionPlanKind,
+        pub queue_action: AdmissionQueueActionKind,
+        pub existing_action: AdmissionExistingQueuedActionKind,
+        pub runtime_boundary: AdmissionRunApplyBoundary,
+        pub runtime_execution_kind: AdmissionRuntimeExecutionKind,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<AdmissionPeerResponseTerminalApplyIntent>,
+        pub record_transcript: bool,
+        pub request_immediate_processing: bool,
+        pub interrupt_yielding: bool,
+        pub wake_if_idle: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -5904,6 +6692,7 @@ pub enum Effect {
     ApplyControlPlaneCommand(effects::ApplyControlPlaneCommand),
     InitiateRecycle(effects::InitiateRecycle),
     IngressAccepted(effects::IngressAccepted),
+    AdmissionResolved(effects::AdmissionResolved),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -5975,6 +6764,7 @@ pub enum EffectKind {
     ApplyControlPlaneCommand,
     InitiateRecycle,
     IngressAccepted,
+    AdmissionResolved,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -6196,6 +6986,36 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
+    ResolveAdmissionPlanRequestedTerminalQueueIdle,
+    ResolveAdmissionPlanRequestedTerminalQueueAttached,
+    ResolveAdmissionPlanRequestedTerminalQueueRunning,
+    ResolveAdmissionPlanRequestedTerminalSteerIdle,
+    ResolveAdmissionPlanRequestedTerminalSteerAttached,
+    ResolveAdmissionPlanRequestedTerminalSteerRunning,
+    ResolveAdmissionPlanRequestedQueueIdle,
+    ResolveAdmissionPlanRequestedQueueAttached,
+    ResolveAdmissionPlanRequestedQueueRunning,
+    ResolveAdmissionPlanRequestedSteerIdle,
+    ResolveAdmissionPlanRequestedSteerAttached,
+    ResolveAdmissionPlanRequestedSteerRunning,
+    ResolveAdmissionPlanDefaultQueueKindIdle,
+    ResolveAdmissionPlanDefaultQueueKindAttached,
+    ResolveAdmissionPlanDefaultQueueKindRunning,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached,
+    ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning,
+    ResolveAdmissionPlanPeerResponseProgressIdle,
+    ResolveAdmissionPlanPeerResponseProgressAttached,
+    ResolveAdmissionPlanPeerResponseProgressRunning,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalIdle,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalAttached,
+    ResolveAdmissionPlanDefaultPeerResponseTerminalRunning,
+    ResolveAdmissionPlanDefaultContinuationIdle,
+    ResolveAdmissionPlanDefaultContinuationAttached,
+    ResolveAdmissionPlanDefaultContinuationRunning,
+    ResolveAdmissionPlanOperationIdle,
+    ResolveAdmissionPlanOperationAttached,
+    ResolveAdmissionPlanOperationRunning,
     ClassifyExternalEnvelopeMessageAttached,
     ClassifyExternalEnvelopeMessageRunning,
     ClassifyExternalEnvelopeRequestPeerAddedAttached,
@@ -6876,6 +7696,8 @@ pub fn initial_state() -> State {
         next_priority_admission_seq: 999999999999,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
+        admission_authorized_lanes: Default::default(),
+        admission_authorized_plans: Default::default(),
         recovered_admitted_inputs: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),

@@ -921,6 +921,124 @@ pub enum InputLane {
     Steer,
 }
 
+/// Typed live-admission input kind carried by `ResolveAdmissionPlan`.
+///
+/// The runtime shell presents the parsed input discriminant; the generated
+/// machine owns the policy/default/result tuple derived from it before any
+/// admission lifecycle facts may change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    WakeIfIdle,
+    InterruptYielding,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyQueueMode {
+    None,
+    #[default]
+    Fifo,
+    Coalesce,
+    Supersede,
+    Priority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyConsumePoint {
+    OnAccept,
+    OnApply,
+    OnRunStart,
+    #[default]
+    OnRunComplete,
+    ExplicitAck,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    QueueNextTurn,
+    SteerBatch,
+    Immediate,
+    Ignore,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPlanKind {
+    ConsumedOnAccept,
+    #[default]
+    Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    None,
+    EnqueueTo,
+    EnqueueFront,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    None,
+    Coalesce,
+    Supersede,
+}
+
 /// Typed persisted input kind carried by recovered-admission witnesses.
 ///
 /// Recovery observes this from the durable input payload, then MeerkatMachine
@@ -1336,6 +1454,13 @@ macro_rules! meerkat_catalog_machine_dsl {
             // maps to exactly one `InputLane` value by construction.
             // Replaces the former `queue_lane`/`steer_lane` parallel sets.
             input_lane: Map<String, Enum<InputLane>>,
+            // Live admission authority witnesses minted by
+            // `ResolveAdmissionPlan`. Queue/steer/consume lifecycle
+            // transitions are guarded by these maps so shell projections
+            // cannot choose admission lane or terminal-on-accept behavior
+            // without generated approval.
+            admission_authorized_lanes: Map<String, Enum<InputLane>>,
+            admission_authorized_plans: Map<String, Enum<AdmissionPlanKind>>,
             // Recovered admission witnesses accepted by MeerkatMachine before
             // shell recovery may re-materialize admission metadata. The lane
             // map records the machine-validated queue/steer witness so
@@ -1590,6 +1715,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_priority_admission_seq = 999999999999,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
+            admission_authorized_lanes = EmptyMap,
+            admission_authorized_plans = EmptyMap,
             recovered_admitted_inputs = EmptySet,
             recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
@@ -1755,6 +1882,15 @@ macro_rules! meerkat_catalog_machine_dsl {
             LoadBoundaryReceipt { runtime_id: String, sequence: u64 },
             AcceptWithCompletion { input_id: InputId, request_immediate_processing: bool, interrupt_yielding: bool, wake_if_idle: bool },
             AcceptWithoutWake { input_id: InputId },
+            ResolveAdmissionPlan {
+                input_id: String,
+                input_kind: Enum<AdmissionInputKind>,
+                requested_lane: Option<Enum<InputLane>>,
+                silent_intent_match: bool,
+                existing_superseded: bool,
+                runtime_running: bool,
+                without_wake: bool,
+            },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
             Fail { run_id: RunId },
@@ -2147,6 +2283,27 @@ macro_rules! meerkat_catalog_machine_dsl {
             ApplyControlPlaneCommand,
             InitiateRecycle,
             IngressAccepted,
+            AdmissionResolved {
+                input_id: String,
+                policy_version: u64,
+                policy_apply_mode: Enum<AdmissionPolicyApplyMode>,
+                policy_wake_mode: Enum<AdmissionPolicyWakeMode>,
+                policy_queue_mode: Enum<AdmissionPolicyQueueMode>,
+                policy_consume_point: Enum<AdmissionPolicyConsumePoint>,
+                policy_drain_policy: Enum<AdmissionPolicyDrainPolicy>,
+                policy_routing_disposition: Enum<AdmissionRoutingDisposition>,
+                lane: Enum<InputLane>,
+                plan: Enum<AdmissionPlanKind>,
+                queue_action: Enum<AdmissionQueueActionKind>,
+                existing_action: Enum<AdmissionExistingQueuedActionKind>,
+                runtime_boundary: Enum<AdmissionRunApplyBoundary>,
+                runtime_execution_kind: Enum<AdmissionRuntimeExecutionKind>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<AdmissionPeerResponseTerminalApplyIntent>>,
+                record_transcript: bool,
+                request_immediate_processing: bool,
+                interrupt_yielding: bool,
+                wake_if_idle: bool,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2272,6 +2429,7 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition ApplyControlPlaneCommand => local,
         disposition InitiateRecycle => local,
         disposition IngressAccepted => external,
+        disposition AdmissionResolved => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -3856,6 +4014,478 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {}
             to Idle
             emit IngressAccepted
+        }
+
+        // 26b. ResolveAdmissionPlan: generated live-admission policy/default
+        // authority. The shell presents parsed input observations only
+        // (kind, optional requested lane, silent-intent match, and whether a
+        // coalescing candidate exists). This transition emits the full typed
+        // admission result and records the lane/plan witness that later
+        // lifecycle transitions require.
+        transition ResolveAdmissionPlanRequestedTerminalQueue {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "terminal_queue_override" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == Some(InputLane::Queue)
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake { AdmissionPolicyWakeMode::None } else { AdmissionPolicyWakeMode::WakeIfIdle },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedTerminalSteer {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "terminal_steer_override" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == Some(InputLane::Steer)
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: true,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedQueue {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "queue_override" {
+                requested_lane == Some(InputLane::Queue)
+                && input_kind != AdmissionInputKind::PeerResponseProgress
+                && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
+                    AdmissionRuntimeExecutionKind::ResumePending
+                } else {
+                    AdmissionRuntimeExecutionKind::ContentTurn
+                },
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false
+            }
+        }
+
+        transition ResolveAdmissionPlanRequestedSteer {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "steer_override" {
+                requested_lane == Some(InputLane::Steer)
+                && input_kind != AdmissionInputKind::PeerResponseProgress
+                && input_kind != AdmissionInputKind::PeerResponseTerminal
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: if silent_intent_match { AdmissionPolicyApplyMode::StageRunStart } else { AdmissionPolicyApplyMode::StageRunBoundary },
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: if silent_intent_match { AdmissionRunApplyBoundary::RunStart } else { AdmissionRunApplyBoundary::RunCheckpoint },
+                runtime_execution_kind: if input_kind == AdmissionInputKind::Continuation {
+                    AdmissionRuntimeExecutionKind::ResumePending
+                } else {
+                    AdmissionRuntimeExecutionKind::ContentTurn
+                },
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: input_kind != AdmissionInputKind::Continuation && input_kind != AdmissionInputKind::Operation,
+                request_immediate_processing: true,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultQueueKind {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_queue_kind" {
+                requested_lane == None
+                && silent_intent_match == false
+                && (input_kind == AdmissionInputKind::Prompt
+                    || input_kind == AdmissionInputKind::FlowStep
+                    || input_kind == AdmissionInputKind::ExternalEvent)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::None
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false && runtime_running == false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultPeerMessageOrRequest {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_peer_message_or_request" {
+                requested_lane == None
+                && (input_kind == AdmissionInputKind::PeerMessage
+                    || input_kind == AdmissionInputKind::PeerRequest)
+                && (silent_intent_match == false || input_kind == AdmissionInputKind::PeerRequest)
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake || silent_intent_match {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == true,
+                wake_if_idle: without_wake == false
+                    && silent_intent_match == false
+                    && runtime_running == false
+            }
+        }
+
+        transition ResolveAdmissionPlanPeerResponseProgress {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "peer_response_progress" {
+                input_kind == AdmissionInputKind::PeerResponseProgress
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunBoundary,
+                policy_wake_mode: AdmissionPolicyWakeMode::None,
+                policy_queue_mode: AdmissionPolicyQueueMode::Coalesce,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: if existing_superseded { AdmissionExistingQueuedActionKind::Coalesce } else { AdmissionExistingQueuedActionKind::None },
+                runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultPeerResponseTerminal {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_peer_response_terminal" {
+                input_kind == AdmissionInputKind::PeerResponseTerminal
+                && requested_lane == None
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunStart,
+                policy_wake_mode: if without_wake { AdmissionPolicyWakeMode::None } else { AdmissionPolicyWakeMode::WakeIfIdle },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::QueueNextTurn,
+                policy_routing_disposition: AdmissionRoutingDisposition::Queue,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: Some(AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun),
+                record_transcript: true,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: without_wake == false
+            }
+        }
+
+        transition ResolveAdmissionPlanDefaultContinuation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "default_continuation" {
+                input_kind == AdmissionInputKind::Continuation
+                && requested_lane == None
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Steer);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::Queued);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::StageRunBoundary,
+                policy_wake_mode: if without_wake {
+                    AdmissionPolicyWakeMode::None
+                } else {
+                    if runtime_running {
+                        AdmissionPolicyWakeMode::InterruptYielding
+                    } else {
+                        AdmissionPolicyWakeMode::WakeIfIdle
+                    }
+                },
+                policy_queue_mode: AdmissionPolicyQueueMode::Fifo,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnRunComplete,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::SteerBatch,
+                policy_routing_disposition: AdmissionRoutingDisposition::Steer,
+                lane: InputLane::Steer,
+                plan: AdmissionPlanKind::Queued,
+                queue_action: AdmissionQueueActionKind::EnqueueTo,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunCheckpoint,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ResumePending,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: without_wake == false && runtime_running == true,
+                wake_if_idle: without_wake == false && runtime_running == false
+            }
+        }
+
+        transition ResolveAdmissionPlanOperation {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionPlan { input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake }
+            guard "runtime_running_matches_phase" {
+                (runtime_running == true && self.lifecycle_phase == Phase::Running)
+                || (runtime_running == false && self.lifecycle_phase != Phase::Running)
+            }
+            guard "operation" {
+                input_kind == AdmissionInputKind::Operation
+                && requested_lane == None
+                && silent_intent_match == false
+            }
+            update {
+                self.admission_authorized_lanes.insert(input_id, InputLane::Queue);
+                self.admission_authorized_plans.insert(input_id, AdmissionPlanKind::ConsumedOnAccept);
+            }
+            to Idle
+            emit AdmissionResolved {
+                input_id: input_id,
+                policy_version: 1,
+                policy_apply_mode: AdmissionPolicyApplyMode::Ignore,
+                policy_wake_mode: AdmissionPolicyWakeMode::None,
+                policy_queue_mode: AdmissionPolicyQueueMode::Priority,
+                policy_consume_point: AdmissionPolicyConsumePoint::OnAccept,
+                policy_drain_policy: AdmissionPolicyDrainPolicy::Ignore,
+                policy_routing_disposition: AdmissionRoutingDisposition::Drop,
+                lane: InputLane::Queue,
+                plan: AdmissionPlanKind::ConsumedOnAccept,
+                queue_action: AdmissionQueueActionKind::None,
+                existing_action: AdmissionExistingQueuedActionKind::None,
+                runtime_boundary: AdmissionRunApplyBoundary::RunStart,
+                runtime_execution_kind: AdmissionRuntimeExecutionKind::ContentTurn,
+                runtime_peer_response_terminal_apply_intent: None,
+                record_transcript: false,
+                request_immediate_processing: false,
+                interrupt_yielding: false,
+                wake_if_idle: false
+            }
         }
 
         // 27. Peer-ingress classification.
@@ -7256,6 +7886,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input QueueAccepted { input_id }
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_queue_lane" {
+                self.admission_authorized_lanes.contains_key(input_id)
+                && self.admission_authorized_lanes.get_cloned(input_id).get("value") == InputLane::Queue
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Queue);
@@ -7274,6 +7908,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input SteerAccepted { input_id }
             guard "not_already_tracked" { !self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_steer_lane" {
+                self.admission_authorized_lanes.contains_key(input_id)
+                && self.admission_authorized_lanes.get_cloned(input_id).get("value") == InputLane::Steer
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Queued);
                 self.input_lane.insert(input_id, InputLane::Steer);
@@ -7402,6 +8040,10 @@ macro_rules! meerkat_catalog_machine_dsl {
             per_phase [Idle, Attached, Running, Retired, Stopped]
             on input ConsumeOnAccept { input_id }
             guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "live_admission_authorized_consume_on_accept" {
+                self.admission_authorized_plans.contains_key(input_id)
+                && self.admission_authorized_plans.get_cloned(input_id).get("value") == AdmissionPlanKind::ConsumedOnAccept
+            }
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);

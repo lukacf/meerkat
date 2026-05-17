@@ -87,6 +87,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_priority_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
 - `input_lane`: `Map<String, InputLane>`
+- `admission_authorized_lanes`: `Map<String, InputLane>`
+- `admission_authorized_plans`: `Map<String, AdmissionPlanKind>`
 - `recovered_admitted_inputs`: `Set<String>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -189,6 +191,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `LoadBoundaryReceipt`(runtime_id: String, sequence: u64)
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
+- `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded: Bool, runtime_running: Bool, without_wake: Bool)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -366,6 +369,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ApplyControlPlaneCommand`
 - `InitiateRecycle`
 - `IngressAccepted`
+- `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -1797,6 +1801,276 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `IngressAccepted`
 - To: `Running`
 
+### `ResolveAdmissionPlanRequestedTerminalQueueIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_queue_override`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanRequestedTerminalQueueAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_queue_override`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanRequestedTerminalQueueRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_queue_override`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanRequestedTerminalSteerIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_steer_override`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanRequestedTerminalSteerAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_steer_override`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanRequestedTerminalSteerRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `terminal_steer_override`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanRequestedQueueIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `queue_override`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanRequestedQueueAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `queue_override`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanRequestedQueueRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `queue_override`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanRequestedSteerIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `steer_override`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanRequestedSteerAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `steer_override`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanRequestedSteerRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `steer_override`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanDefaultQueueKindIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_queue_kind`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanDefaultQueueKindAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_queue_kind`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanDefaultQueueKindRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_queue_kind`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_message_or_request`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_message_or_request`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_message_or_request`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanPeerResponseProgressIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `peer_response_progress`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanPeerResponseProgressAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `peer_response_progress`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanPeerResponseProgressRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `peer_response_progress`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_response_terminal`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_response_terminal`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_peer_response_terminal`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanDefaultContinuationIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_continuation`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanDefaultContinuationAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_continuation`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanDefaultContinuationRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `default_continuation`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
+### `ResolveAdmissionPlanOperationIdle`
+- From: `Idle`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `operation`
+- Emits: `AdmissionResolved`
+- To: `Idle`
+
+### `ResolveAdmissionPlanOperationAttached`
+- From: `Attached`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `operation`
+- Emits: `AdmissionResolved`
+- To: `Attached`
+
+### `ResolveAdmissionPlanOperationRunning`
+- From: `Running`
+- On: `ResolveAdmissionPlan`(input_id, input_kind, requested_lane, silent_intent_match, existing_superseded, runtime_running, without_wake)
+- Guards:
+  - `runtime_running_matches_phase`
+  - `operation`
+- Emits: `AdmissionResolved`
+- To: `Running`
+
 ### `ClassifyExternalEnvelopeMessageAttached`
 - From: `Attached`
 - On: `ClassifyExternalEnvelope`(item_id, from_peer, envelope_kind, request_intent, lifecycle_kind, lifecycle_peer_param, response_status, in_reply_to)
@@ -3159,6 +3433,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `QueueAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_queue_lane`
 - Emits: `IngressAccepted`
 - To: `Idle`
 
@@ -3167,6 +3442,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `QueueAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_queue_lane`
 - Emits: `IngressAccepted`
 - To: `Attached`
 
@@ -3175,6 +3451,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `QueueAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_queue_lane`
 - Emits: `IngressAccepted`
 - To: `Running`
 
@@ -3183,6 +3460,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `QueueAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_queue_lane`
 - Emits: `IngressAccepted`
 - To: `Retired`
 
@@ -3191,6 +3469,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `QueueAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_queue_lane`
 - Emits: `IngressAccepted`
 - To: `Stopped`
 
@@ -3199,6 +3478,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SteerAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_steer_lane`
 - Emits: `IngressAccepted`
 - To: `Idle`
 
@@ -3207,6 +3487,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SteerAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_steer_lane`
 - Emits: `IngressAccepted`
 - To: `Attached`
 
@@ -3215,6 +3496,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SteerAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_steer_lane`
 - Emits: `IngressAccepted`
 - To: `Running`
 
@@ -3223,6 +3505,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SteerAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_steer_lane`
 - Emits: `IngressAccepted`
 - To: `Retired`
 
@@ -3231,6 +3514,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `SteerAccepted`(input_id)
 - Guards:
   - `not_already_tracked`
+  - `live_admission_authorized_steer_lane`
 - Emits: `IngressAccepted`
 - To: `Stopped`
 
@@ -3544,6 +3828,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ConsumeOnAccept`(input_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_consume_on_accept`
 - Emits: `RecordTerminalOutcome`
 - To: `Idle`
 
@@ -3552,6 +3837,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ConsumeOnAccept`(input_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_consume_on_accept`
 - Emits: `RecordTerminalOutcome`
 - To: `Attached`
 
@@ -3560,6 +3846,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ConsumeOnAccept`(input_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_consume_on_accept`
 - Emits: `RecordTerminalOutcome`
 - To: `Running`
 
@@ -3568,6 +3855,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ConsumeOnAccept`(input_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_consume_on_accept`
 - Emits: `RecordTerminalOutcome`
 - To: `Retired`
 
@@ -3576,6 +3864,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - On: `ConsumeOnAccept`(input_id)
 - Guards:
   - `input_tracked`
+  - `live_admission_authorized_consume_on_accept`
 - Emits: `RecordTerminalOutcome`
 - To: `Stopped`
 

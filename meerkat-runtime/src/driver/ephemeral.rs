@@ -18,10 +18,11 @@ use meerkat_core::lifecycle::{InputId, RunBoundaryReceipt, RunId};
 use meerkat_core::types::HandlingMode;
 
 use crate::accept::{
-    AcceptOutcome, AdmissionPlan, AdmissionQueueAction, ExistingQueuedAdmissionAction,
+    AcceptOutcome, AdmissionPlan, AdmissionQueueAction, CoarseAdmissionFlags,
+    ExistingQueuedAdmissionAction, MachineAdmissionAuthority, ResolvedAdmission,
 };
 use crate::durability::{DurabilityError, validate_durability};
-use crate::identifiers::LogicalRuntimeId;
+use crate::identifiers::{LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
 };
@@ -340,6 +341,21 @@ impl EphemeralRuntimeDriver {
         };
         self.absorb_dsl_effects(&transition.effects);
         Ok(())
+    }
+
+    fn dsl_preview(
+        &self,
+        input: mm_dsl::MeerkatMachineInput,
+        context: &str,
+    ) -> Result<Vec<mm_dsl::MeerkatMachineEffect>, RuntimeDriverError> {
+        let state = {
+            let authority = self.dsl.lock();
+            authority.state.clone()
+        };
+        let mut preview = mm_dsl::MeerkatMachineAuthority::from_state(state);
+        mm_dsl::MeerkatMachineMutator::apply(&mut preview, input)
+            .map(|transition| transition.effects)
+            .map_err(|err| RuntimeDriverError::Internal(format!("DSL rejected {context}: {err:?}")))
     }
 
     /// Walk the effects emitted by a DSL transition and project any machine-
@@ -1812,23 +1828,233 @@ impl EphemeralRuntimeDriver {
         }
     }
 
-    pub(crate) fn resolve_admission_for_runtime_idle(
+    fn resolve_admission_plan_input(
+        authority: &MachineAdmissionAuthority,
+    ) -> mm_dsl::MeerkatMachineInput {
+        mm_dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            input_id: authority.input_id.clone(),
+            input_kind: authority.input_kind,
+            requested_lane: authority.requested_lane,
+            silent_intent_match: authority.silent_intent_match,
+            existing_superseded: authority.existing_superseded,
+            runtime_running: authority.runtime_running,
+            without_wake: authority.without_wake,
+        }
+    }
+
+    fn handling_mode_from_admission_lane(lane: mm_dsl::InputLane) -> HandlingMode {
+        match lane {
+            mm_dsl::InputLane::Queue => HandlingMode::Queue,
+            mm_dsl::InputLane::Steer => HandlingMode::Steer,
+        }
+    }
+
+    fn admission_plan_from_machine_effect(
+        plan: mm_dsl::AdmissionPlanKind,
+        queue_action: mm_dsl::AdmissionQueueActionKind,
+        lane: mm_dsl::InputLane,
+        existing_action: mm_dsl::AdmissionExistingQueuedActionKind,
+        existing_superseded_id: Option<InputId>,
+    ) -> AdmissionPlan {
+        if matches!(plan, mm_dsl::AdmissionPlanKind::ConsumedOnAccept) {
+            return AdmissionPlan::ConsumedOnAccept;
+        }
+
+        let target = Self::handling_mode_from_admission_lane(lane);
+        let queue_action = match queue_action {
+            mm_dsl::AdmissionQueueActionKind::None => AdmissionQueueAction::None,
+            mm_dsl::AdmissionQueueActionKind::EnqueueTo => {
+                AdmissionQueueAction::EnqueueTo { target }
+            }
+            mm_dsl::AdmissionQueueActionKind::EnqueueFront => {
+                AdmissionQueueAction::EnqueueFront { target }
+            }
+        };
+        let existing_action = match (existing_action, existing_superseded_id) {
+            (mm_dsl::AdmissionExistingQueuedActionKind::Coalesce, Some(existing_id)) => {
+                Some(ExistingQueuedAdmissionAction::Coalesce { existing_id })
+            }
+            (mm_dsl::AdmissionExistingQueuedActionKind::Supersede, Some(existing_id)) => {
+                Some(ExistingQueuedAdmissionAction::Supersede { existing_id })
+            }
+            _ => None,
+        };
+
+        AdmissionPlan::Queued {
+            persist_and_queue: true,
+            queue_action,
+            existing_action,
+        }
+    }
+
+    fn resolved_admission_from_machine_effects(
         &self,
         input: &Input,
-        runtime_idle: bool,
-    ) -> crate::accept::ResolvedAdmission {
-        let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
-        crate::accept::resolve_admission(
-            input,
-            runtime_idle,
-            &self.silent_comms_intents,
+        authority: MachineAdmissionAuthority,
+        existing_superseded_id: Option<InputId>,
+        effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        let Some(effect) = effects.into_iter().find_map(|effect| match effect {
+            mm_dsl::MeerkatMachineEffect::AdmissionResolved {
+                input_id,
+                policy_version,
+                policy_apply_mode,
+                policy_wake_mode,
+                policy_queue_mode,
+                policy_consume_point,
+                policy_drain_policy,
+                policy_routing_disposition,
+                lane,
+                plan,
+                queue_action,
+                existing_action,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                record_transcript,
+                request_immediate_processing,
+                interrupt_yielding,
+                wake_if_idle,
+            } => Some((
+                input_id,
+                policy_version,
+                policy_apply_mode,
+                policy_wake_mode,
+                policy_queue_mode,
+                policy_consume_point,
+                policy_drain_policy,
+                policy_routing_disposition,
+                lane,
+                plan,
+                queue_action,
+                existing_action,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                record_transcript,
+                request_immediate_processing,
+                interrupt_yielding,
+                wake_if_idle,
+            )),
+            _ => None,
+        }) else {
+            return Err(RuntimeDriverError::Internal(
+                "ResolveAdmissionPlan emitted no AdmissionResolved effect".into(),
+            ));
+        };
+
+        let (
+            input_id,
+            policy_version,
+            policy_apply_mode,
+            policy_wake_mode,
+            policy_queue_mode,
+            policy_consume_point,
+            policy_drain_policy,
+            policy_routing_disposition,
+            lane,
+            plan,
+            queue_action,
+            existing_action,
+            runtime_boundary,
+            runtime_execution_kind,
+            runtime_peer_response_terminal_apply_intent,
+            record_transcript,
+            request_immediate_processing,
+            interrupt_yielding,
+            wake_if_idle,
+        ) = effect;
+
+        if input_id != authority.input_id {
+            return Err(RuntimeDriverError::Internal(format!(
+                "ResolveAdmissionPlan returned input id '{input_id}' for '{}'",
+                authority.input_id
+            )));
+        }
+
+        let policy = PolicyDecision {
+            apply_mode: policy_apply_mode.into(),
+            wake_mode: policy_wake_mode.into(),
+            queue_mode: policy_queue_mode.into(),
+            consume_point: policy_consume_point.into(),
+            drain_policy: policy_drain_policy.into(),
+            routing_disposition: policy_routing_disposition.into(),
+            record_transcript,
+            emit_operator_content: record_transcript,
+            policy_version: PolicyVersion(policy_version),
+        };
+        let runtime_semantics = RuntimeInputSemantics {
+            boundary: runtime_boundary.into(),
+            execution_kind: runtime_execution_kind.into(),
+            peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
+                .map(Into::into),
+        };
+        let handling_mode = Self::handling_mode_from_admission_lane(lane);
+        let admission_plan = Self::admission_plan_from_machine_effect(
+            plan,
+            queue_action,
+            lane,
+            existing_action,
             existing_superseded_id,
+        );
+
+        Ok(ResolvedAdmission {
+            policy,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection: crate::input::runtime_input_projection(input),
+            admission_plan,
+            coarse_flags: CoarseAdmissionFlags {
+                request_immediate_processing,
+                interrupt_yielding,
+                wake_if_idle,
+            },
+            authority,
+        })
+    }
+
+    fn resolve_admission_with_wake_policy(
+        &self,
+        input: &Input,
+        without_wake: bool,
+    ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        let existing_superseded_id = self.existing_superseded_input(input).map(|(id, _)| id);
+        let authority = MachineAdmissionAuthority {
+            input_id: input.id().to_string(),
+            input_kind: mm_dsl::AdmissionInputKind::from(input.kind()),
+            requested_lane: input.handling_mode().map(mm_dsl::InputLane::from),
+            silent_intent_match: crate::silent_intent::matches_silent_intent(
+                input,
+                &self.silent_comms_intents,
+            ),
+            existing_superseded: existing_superseded_id.is_some(),
+            runtime_running: self.runtime_phase_snapshot() == RuntimeState::Running,
+            without_wake,
+        };
+        let effects = self.dsl_preview(
+            Self::resolve_admission_plan_input(&authority),
+            "ResolveAdmissionPlan",
+        )?;
+        self.resolved_admission_from_machine_effects(
+            input,
+            authority,
+            existing_superseded_id,
+            effects,
         )
     }
 
-    pub(crate) fn resolve_admission(&self, input: &Input) -> crate::accept::ResolvedAdmission {
-        let runtime_idle = self.runtime_phase_snapshot().is_idle_or_attached();
-        self.resolve_admission_for_runtime_idle(input, runtime_idle)
+    pub(crate) fn resolve_admission(
+        &self,
+        input: &Input,
+    ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        self.resolve_admission_with_wake_policy(input, false)
+    }
+
+    pub(crate) fn resolve_admission_without_wake(
+        &self,
+        input: &Input,
+    ) -> Result<ResolvedAdmission, RuntimeDriverError> {
+        self.resolve_admission_with_wake_policy(input, true)
     }
 
     pub(crate) async fn accept_resolved_input(
@@ -1906,6 +2132,17 @@ impl EphemeralRuntimeDriver {
             self.ledger.accept(state.clone());
         }
 
+        if resolved.authority.input_id != input_id.to_string() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "resolved admission authority id '{}' did not match accepted input '{input_id}'",
+                resolved.authority.input_id
+            )));
+        }
+        self.dsl_apply(
+            Self::resolve_admission_plan_input(&resolved.authority),
+            "ResolveAdmissionPlan",
+        )?;
+
         if let Some(s) = self.ledger.get_mut(&input_id) {
             s.policy = Some(PolicySnapshot {
                 version: resolved.policy.policy_version,
@@ -1918,7 +2155,6 @@ impl EphemeralRuntimeDriver {
             },
         ));
 
-        let runtime_idle = runtime_phase.is_idle_or_attached();
         let handling_mode = resolved.handling_mode;
         let content_shape = ContentShape::from_kind(input.kind());
         let is_prompt = matches!(input, Input::Prompt(_));
@@ -1983,13 +2219,6 @@ impl EphemeralRuntimeDriver {
         }
         self.rebuild_queue_projections();
         self.debug_assert_queue_projection_alignment();
-
-        if !runtime_idle
-            && matches!(resolved.policy.wake_mode, crate::WakeMode::WakeIfIdle)
-            && PostAdmissionSignal::WakeLoop > self.post_admission_signal
-        {
-            self.post_admission_signal = PostAdmissionSignal::WakeLoop;
-        }
 
         let final_state = self.ledger.get(&input_id).cloned().unwrap_or(state);
         Ok(AcceptOutcome::Accepted {
@@ -2258,7 +2487,7 @@ impl EphemeralRuntimeDriver {
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
     async fn accept_input(&mut self, input: Input) -> Result<AcceptOutcome, RuntimeDriverError> {
-        let resolved = self.resolve_admission(&input);
+        let resolved = self.resolve_admission(&input)?;
         self.accept_resolved_input(input, resolved).await
     }
 
@@ -2347,7 +2576,7 @@ mod tests {
         input: &Input,
         queue_mode: QueueMode,
     ) -> crate::accept::ResolvedAdmission {
-        let mut resolved = driver.resolve_admission(input);
+        let mut resolved = driver.resolve_admission(input).unwrap();
         resolved.policy.queue_mode = queue_mode;
         resolved.admission_plan = crate::accept::admission_plan_from_policy(
             &resolved.policy,
@@ -2483,7 +2712,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_admission_for_runtime_idle_uses_explicit_machine_phase_not_control_projection() {
+    fn resolve_admission_uses_generated_machine_phase_not_control_projection() {
         let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("phase-drift"));
         force_control_shadow(
             &mut driver,
@@ -2493,13 +2722,9 @@ mod tests {
         );
 
         let input = peer_message_input();
-        let projected = driver.resolve_admission(&input);
+        let projected = driver.resolve_admission(&input).unwrap();
         assert_eq!(projected.policy.wake_mode, WakeMode::WakeIfIdle);
         assert!(!projected.coarse_flags.interrupt_yielding);
-
-        let machine_owned = driver.resolve_admission_for_runtime_idle(&input, true);
-        assert_eq!(machine_owned.policy.wake_mode, WakeMode::WakeIfIdle);
-        assert!(!machine_owned.coarse_flags.interrupt_yielding);
-        assert!(!machine_owned.coarse_flags.request_immediate_processing);
+        assert!(!projected.coarse_flags.request_immediate_processing);
     }
 }

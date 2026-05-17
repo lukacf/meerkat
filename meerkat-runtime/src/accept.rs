@@ -5,11 +5,9 @@ use meerkat_core::types::HandlingMode;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use crate::driver::PostAdmissionSignal;
-use crate::input::Input;
 use crate::input_state::InputState;
+use crate::meerkat_machine::dsl as mm_dsl;
 use crate::policy::PolicyDecision;
-use crate::policy_table::DefaultPolicyTable;
 use crate::runtime_state::RuntimeState;
 
 // `AcceptOutcome` is a domain envelope. The wire shape lives in
@@ -54,6 +52,18 @@ pub struct CoarseAdmissionFlags {
     pub wake_if_idle: bool,
 }
 
+/// Typed machine input that authorized a live admission resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MachineAdmissionAuthority {
+    pub input_id: String,
+    pub input_kind: mm_dsl::AdmissionInputKind,
+    pub requested_lane: Option<mm_dsl::InputLane>,
+    pub silent_intent_match: bool,
+    pub existing_superseded: bool,
+    pub runtime_running: bool,
+    pub without_wake: bool,
+}
+
 /// Machine-owned resolution of an accepted input's semantic admission path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedAdmission {
@@ -63,6 +73,7 @@ pub struct ResolvedAdmission {
     pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
     pub admission_plan: AdmissionPlan,
     pub coarse_flags: CoarseAdmissionFlags,
+    pub(crate) authority: MachineAdmissionAuthority,
 }
 
 /// Typed reason why an input was rejected at the accept boundary.
@@ -225,100 +236,6 @@ pub fn handling_mode_from_policy(policy: &PolicyDecision) -> HandlingMode {
             HandlingMode::Steer
         }
         _ => HandlingMode::Queue,
-    }
-}
-
-/// Whether this input requests immediate processing after admission.
-///
-/// This remains narrower than "routes through the steer lane". Some inputs
-/// route through checkpoint/steer paths for batching, but only explicit steer
-/// intent should request in-turn processing.
-pub fn requests_immediate_processing(input: &Input) -> bool {
-    matches!(input.handling_mode(), Some(HandlingMode::Steer))
-}
-
-/// Whether this input carries the "wake the runtime loop once the session
-/// reaches idle" intent.
-///
-/// Derived from the kind-level policy with `runtime_idle = false` (the
-/// Running-phase arm is where this flag actually matters; the Idle /
-/// Attached queued arms already emit `WakeLoop` unconditionally). Drives
-/// the DSL `wake_if_idle` field on `AcceptWithCompletion` so the machine
-/// emits `PostAdmissionSignal::WakeLoop` for late peer-response terminals
-/// and other queue-bound wake-if-idle inputs that arrive mid-turn.
-pub fn requests_wake_if_idle(input: &Input) -> bool {
-    matches!(
-        DefaultPolicyTable::resolve(input, false).wake_mode,
-        crate::WakeMode::WakeIfIdle,
-    )
-}
-
-/// Resolve the machine-owned semantic admission path for an accepted input.
-///
-/// Runtime helpers may still perform mechanical queue lookups (for example,
-/// determining which existing queued input would be superseded), but the
-/// semantic decision about policy, routing, and admission disposition is owned
-/// here rather than inside the driver helper.
-pub fn resolve_admission(
-    input: &Input,
-    runtime_idle: bool,
-    silent_intents: &[String],
-    existing_superseded_id: Option<InputId>,
-) -> ResolvedAdmission {
-    let mut policy = DefaultPolicyTable::resolve(input, runtime_idle);
-    crate::silent_intent::apply_silent_intent_override(input, silent_intents, &mut policy);
-    let handling_mode = handling_mode_from_policy(&policy);
-    let runtime_semantics =
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
-    let primitive_projection = crate::input::runtime_input_projection(input);
-    let admission_plan = admission_plan_from_policy(&policy, handling_mode, existing_superseded_id);
-    let request_immediate_processing = requests_immediate_processing(input);
-    let interrupt_yielding = !request_immediate_processing
-        && matches!(policy.wake_mode, crate::WakeMode::InterruptYielding);
-    let wake_if_idle =
-        !request_immediate_processing && matches!(policy.wake_mode, crate::WakeMode::WakeIfIdle);
-
-    ResolvedAdmission {
-        policy,
-        handling_mode,
-        runtime_semantics,
-        primitive_projection,
-        admission_plan,
-        coarse_flags: CoarseAdmissionFlags {
-            request_immediate_processing,
-            interrupt_yielding,
-            wake_if_idle,
-        },
-    }
-}
-
-/// Classify the machine-owned post-admission control signal for a resolved
-/// accept outcome.
-///
-/// Admission-time wake / interrupt / immediate-processing semantics are owned
-/// by the checked-in Meerkat machine. The runtime helper may still carry other
-/// wake signals for non-admission bookkeeping, but plain accept classification
-/// should flow through this function.
-pub fn post_admission_signal_from_accept_outcome(
-    outcome: &AcceptOutcome,
-    request_immediate_processing: bool,
-) -> PostAdmissionSignal {
-    if !matches!(outcome, AcceptOutcome::Accepted { .. }) {
-        return PostAdmissionSignal::None;
-    }
-    if request_immediate_processing {
-        return PostAdmissionSignal::RequestImmediateProcessing;
-    }
-
-    match outcome {
-        AcceptOutcome::Accepted { policy, .. } => match policy.wake_mode {
-            crate::WakeMode::InterruptYielding => PostAdmissionSignal::InterruptYielding,
-            crate::WakeMode::WakeIfIdle => PostAdmissionSignal::WakeLoop,
-            crate::WakeMode::None => PostAdmissionSignal::None,
-        },
-        AcceptOutcome::Deduplicated { .. } | AcceptOutcome::Rejected { .. } => {
-            PostAdmissionSignal::None
-        }
     }
 }
 

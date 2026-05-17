@@ -559,6 +559,96 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithoutWakeRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalQueueIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalQueueAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalQueueRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalSteerIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalSteerAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedTerminalSteerRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedQueueIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedQueueAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedQueueRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedSteerIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedSteerAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanRequestedSteerRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultQueueKindIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultQueueKindAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultQueueKindRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultPeerMessageOrRequestIdle`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultPeerMessageOrRequestAttached`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultPeerMessageOrRequestRunning`
+  - anchors: `meerkat_machine`, `peer_directory_reachability_authority`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanPeerResponseProgressIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanPeerResponseProgressAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `realtime_connection_projection`
+- `ResolveAdmissionPlanPeerResponseProgressRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultPeerResponseTerminalIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveAdmissionPlanDefaultPeerResponseTerminalAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveAdmissionPlanDefaultPeerResponseTerminalRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `ResolveAdmissionPlanDefaultContinuationIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultContinuationAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanDefaultContinuationRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanOperationIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanOperationAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionPlanOperationRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `ClassifyExternalEnvelopeMessageAttached`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2229,6 +2319,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `IngressAccepted`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
+- `AdmissionResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

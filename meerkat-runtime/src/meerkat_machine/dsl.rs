@@ -1955,6 +1955,234 @@ impl From<crate::HandlingMode> for InputLane {
     }
 }
 
+/// Typed live-admission input kind carried by `ResolveAdmissionPlan`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+impl From<crate::identifiers::InputKind> for AdmissionInputKind {
+    fn from(kind: crate::identifiers::InputKind) -> Self {
+        match kind {
+            crate::identifiers::InputKind::Prompt => Self::Prompt,
+            crate::identifiers::InputKind::PeerMessage => Self::PeerMessage,
+            crate::identifiers::InputKind::PeerRequest => Self::PeerRequest,
+            crate::identifiers::InputKind::PeerResponseProgress => Self::PeerResponseProgress,
+            crate::identifiers::InputKind::PeerResponseTerminal => Self::PeerResponseTerminal,
+            crate::identifiers::InputKind::FlowStep => Self::FlowStep,
+            crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
+            crate::identifiers::InputKind::Continuation => Self::Continuation,
+            crate::identifiers::InputKind::Operation => Self::Operation,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+impl From<AdmissionPolicyApplyMode> for crate::policy::ApplyMode {
+    fn from(mode: AdmissionPolicyApplyMode) -> Self {
+        match mode {
+            AdmissionPolicyApplyMode::StageRunStart => Self::StageRunStart,
+            AdmissionPolicyApplyMode::StageRunBoundary => Self::StageRunBoundary,
+            AdmissionPolicyApplyMode::InjectNow => Self::InjectNow,
+            AdmissionPolicyApplyMode::Ignore => Self::Ignore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyWakeMode {
+    #[default]
+    WakeIfIdle,
+    InterruptYielding,
+    None,
+}
+
+impl From<AdmissionPolicyWakeMode> for crate::policy::WakeMode {
+    fn from(mode: AdmissionPolicyWakeMode) -> Self {
+        match mode {
+            AdmissionPolicyWakeMode::WakeIfIdle => Self::WakeIfIdle,
+            AdmissionPolicyWakeMode::InterruptYielding => Self::InterruptYielding,
+            AdmissionPolicyWakeMode::None => Self::None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyQueueMode {
+    None,
+    #[default]
+    Fifo,
+    Coalesce,
+    Supersede,
+    Priority,
+}
+
+impl From<AdmissionPolicyQueueMode> for crate::policy::QueueMode {
+    fn from(mode: AdmissionPolicyQueueMode) -> Self {
+        match mode {
+            AdmissionPolicyQueueMode::None => Self::None,
+            AdmissionPolicyQueueMode::Fifo => Self::Fifo,
+            AdmissionPolicyQueueMode::Coalesce => Self::Coalesce,
+            AdmissionPolicyQueueMode::Supersede => Self::Supersede,
+            AdmissionPolicyQueueMode::Priority => Self::Priority,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyConsumePoint {
+    OnAccept,
+    OnApply,
+    OnRunStart,
+    #[default]
+    OnRunComplete,
+    ExplicitAck,
+}
+
+impl From<AdmissionPolicyConsumePoint> for crate::policy::ConsumePoint {
+    fn from(point: AdmissionPolicyConsumePoint) -> Self {
+        match point {
+            AdmissionPolicyConsumePoint::OnAccept => Self::OnAccept,
+            AdmissionPolicyConsumePoint::OnApply => Self::OnApply,
+            AdmissionPolicyConsumePoint::OnRunStart => Self::OnRunStart,
+            AdmissionPolicyConsumePoint::OnRunComplete => Self::OnRunComplete,
+            AdmissionPolicyConsumePoint::ExplicitAck => Self::ExplicitAck,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPolicyDrainPolicy {
+    #[default]
+    QueueNextTurn,
+    SteerBatch,
+    Immediate,
+    Ignore,
+}
+
+impl From<AdmissionPolicyDrainPolicy> for crate::policy::DrainPolicy {
+    fn from(policy: AdmissionPolicyDrainPolicy) -> Self {
+        match policy {
+            AdmissionPolicyDrainPolicy::QueueNextTurn => Self::QueueNextTurn,
+            AdmissionPolicyDrainPolicy::SteerBatch => Self::SteerBatch,
+            AdmissionPolicyDrainPolicy::Immediate => Self::Immediate,
+            AdmissionPolicyDrainPolicy::Ignore => Self::Ignore,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+impl From<AdmissionRoutingDisposition> for crate::policy::RoutingDisposition {
+    fn from(disposition: AdmissionRoutingDisposition) -> Self {
+        match disposition {
+            AdmissionRoutingDisposition::Queue => Self::Queue,
+            AdmissionRoutingDisposition::Steer => Self::Steer,
+            AdmissionRoutingDisposition::Immediate => Self::Immediate,
+            AdmissionRoutingDisposition::Drop => Self::Drop,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+impl From<AdmissionRunApplyBoundary> for meerkat_core::lifecycle::run_primitive::RunApplyBoundary {
+    fn from(boundary: AdmissionRunApplyBoundary) -> Self {
+        match boundary {
+            AdmissionRunApplyBoundary::RunStart => Self::RunStart,
+            AdmissionRunApplyBoundary::RunCheckpoint => Self::RunCheckpoint,
+            AdmissionRunApplyBoundary::Immediate => Self::Immediate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+impl From<AdmissionRuntimeExecutionKind> for meerkat_core::lifecycle::RuntimeExecutionKind {
+    fn from(kind: AdmissionRuntimeExecutionKind) -> Self {
+        match kind {
+            AdmissionRuntimeExecutionKind::ContentTurn => Self::ContentTurn,
+            AdmissionRuntimeExecutionKind::ResumePending => Self::ResumePending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+impl From<AdmissionPeerResponseTerminalApplyIntent>
+    for meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent
+{
+    fn from(intent: AdmissionPeerResponseTerminalApplyIntent) -> Self {
+        match intent {
+            AdmissionPeerResponseTerminalApplyIntent::AppendContextAndRun => {
+                Self::AppendContextAndRun
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionPlanKind {
+    ConsumedOnAccept,
+    #[default]
+    Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionQueueActionKind {
+    #[default]
+    None,
+    EnqueueTo,
+    EnqueueFront,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionExistingQueuedActionKind {
+    #[default]
+    None,
+    Coalesce,
+    Supersede,
+}
+
 /// Typed persisted input kind carried by recovered-admission witnesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RecoveredInputKind {

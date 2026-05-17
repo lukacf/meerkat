@@ -102,7 +102,7 @@ pub fn session_runtime_bindings_have_machine_authority(
 }
 
 // Re-exports for convenience
-pub use accept::{AcceptOutcome, RejectReason, post_admission_signal_from_accept_outcome};
+pub use accept::{AcceptOutcome, RejectReason};
 pub use coalescing::{
     AggregateDescriptor, CoalescingResult, SupersessionScope, apply_coalescing, apply_supersession,
     check_supersession, create_aggregate_input, is_coalescing_eligible,
@@ -181,10 +181,51 @@ pub fn runtime_stamped_prompt_turn_metadata(
         meerkat_core::ContentInput::Text(String::new()),
         metadata,
     ));
-    let policy = policy_table::DefaultPolicyTable::resolve(&input, true);
-    let semantics =
-        ingress_types::RuntimeInputSemantics::from_policy_and_kind(&policy, input.kind());
+    let semantics = runtime_prompt_semantics_from_machine(&input);
     runtime_loop::for_input(&input, semantics)
+}
+
+fn runtime_prompt_semantics_from_machine(input: &Input) -> ingress_types::RuntimeInputSemantics {
+    let mut authority = meerkat_machine::dsl::MeerkatMachineAuthority::from_state(
+        meerkat_machine::dsl::MeerkatMachineState {
+            lifecycle_phase: meerkat_machine::dsl::MeerkatPhase::Idle,
+            ..meerkat_machine::dsl::MeerkatMachineState::default()
+        },
+    );
+    let transition = meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        meerkat_machine::dsl::MeerkatMachineInput::ResolveAdmissionPlan {
+            input_id: input.id().to_string(),
+            input_kind: meerkat_machine::dsl::AdmissionInputKind::from(input.kind()),
+            requested_lane: input
+                .handling_mode()
+                .map(meerkat_machine::dsl::InputLane::from),
+            silent_intent_match: false,
+            existing_superseded: false,
+            runtime_running: false,
+            without_wake: false,
+        },
+    )
+    .expect("generated admission authority must accept runtime prompt metadata");
+
+    transition
+        .effects
+        .into_iter()
+        .find_map(|effect| match effect {
+            meerkat_machine::dsl::MeerkatMachineEffect::AdmissionResolved {
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                ..
+            } => Some(ingress_types::RuntimeInputSemantics {
+                boundary: runtime_boundary.into(),
+                execution_kind: runtime_execution_kind.into(),
+                peer_response_terminal_apply_intent: runtime_peer_response_terminal_apply_intent
+                    .map(Into::into),
+            }),
+            _ => None,
+        })
+        .expect("generated admission authority must emit prompt runtime semantics")
 }
 
 #[doc(hidden)]

@@ -239,6 +239,71 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
             NamedTypeBinding::string_enum("InboundPeerRequestState", &["Received", "Replied"]),
             NamedTypeBinding::string("InputId"),
             NamedTypeBinding::string_enum(
+                "AdmissionInputKind",
+                &[
+                    "Prompt",
+                    "PeerMessage",
+                    "PeerRequest",
+                    "PeerResponseProgress",
+                    "PeerResponseTerminal",
+                    "FlowStep",
+                    "ExternalEvent",
+                    "Continuation",
+                    "Operation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyApplyMode",
+                &["StageRunStart", "StageRunBoundary", "InjectNow", "Ignore"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyWakeMode",
+                &["WakeIfIdle", "InterruptYielding", "None"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyQueueMode",
+                &["None", "Fifo", "Coalesce", "Supersede", "Priority"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyConsumePoint",
+                &[
+                    "OnAccept",
+                    "OnApply",
+                    "OnRunStart",
+                    "OnRunComplete",
+                    "ExplicitAck",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPolicyDrainPolicy",
+                &["QueueNextTurn", "SteerBatch", "Immediate", "Ignore"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRoutingDisposition",
+                &["Queue", "Steer", "Immediate", "Drop"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRunApplyBoundary",
+                &["RunStart", "RunCheckpoint", "Immediate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionRuntimeExecutionKind",
+                &["ContentTurn", "ResumePending"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionPeerResponseTerminalApplyIntent",
+                &["AppendContextAndRun"],
+            ),
+            NamedTypeBinding::string_enum("AdmissionPlanKind", &["ConsumedOnAccept", "Queued"]),
+            NamedTypeBinding::string_enum(
+                "AdmissionQueueActionKind",
+                &["None", "EnqueueTo", "EnqueueFront"],
+            ),
+            NamedTypeBinding::string_enum(
+                "AdmissionExistingQueuedActionKind",
+                &["None", "Coalesce", "Supersede"],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputAbandonReason",
                 &[
                     "Retired",

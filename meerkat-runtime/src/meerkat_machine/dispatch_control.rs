@@ -49,12 +49,9 @@ impl MeerkatMachine {
 
                 let (outcome, signal, runtime_effect, effect_previous_dsl_state) = {
                     let mut drv = driver.lock().await;
-                    let runtime_idle = self
-                        .existing_session_runtime_state(&session_id)
-                        .await
-                        .unwrap_or(RuntimeState::Destroyed)
-                        .is_idle_or_attached();
-                    let resolved = drv.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    let resolved = drv
+                        .resolve_admission(&input)
+                        .map_err(|err| RuntimeControlPlaneError::Internal(err.to_string()))?;
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {

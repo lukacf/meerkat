@@ -8,16 +8,8 @@
 use crate::input::{Input, PeerConvention};
 use crate::policy::{ApplyMode, PolicyDecision, WakeMode};
 
-/// Check if the given input matches a silent comms intent and override the
-/// policy decision accordingly.
-///
-/// Returns `true` if the override was applied (the intent was silenced),
-/// `false` otherwise.
-pub fn apply_silent_intent_override(
-    input: &Input,
-    silent_intents: &[String],
-    decision: &mut PolicyDecision,
-) -> bool {
+/// Return whether this input matches a configured silent comms intent.
+pub fn matches_silent_intent(input: &Input, silent_intents: &[String]) -> bool {
     if silent_intents.is_empty() {
         return false;
     }
@@ -30,7 +22,20 @@ pub fn apply_silent_intent_override(
         _ => return false,
     };
 
-    if silent_intents.iter().any(|s| s == intent) {
+    silent_intents.iter().any(|s| s == intent)
+}
+
+/// Check if the given input matches a silent comms intent and override the
+/// policy decision accordingly.
+///
+/// Returns `true` if the override was applied (the intent was silenced),
+/// `false` otherwise.
+pub fn apply_silent_intent_override(
+    input: &Input,
+    silent_intents: &[String],
+    decision: &mut PolicyDecision,
+) -> bool {
+    if matches_silent_intent(input, silent_intents) {
         // Keep the input queued so its content is injected into the session
         // as context for the next LLM turn, but suppress waking so it does
         // not trigger a turn by itself.

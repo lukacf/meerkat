@@ -231,6 +231,8 @@ pub(crate) fn project_state(
         next_priority_admission_seq: default_state.next_priority_admission_seq,
         input_admission_seq: std::collections::BTreeMap::new(),
         input_lane: std::collections::BTreeMap::new(),
+        admission_authorized_lanes: std::collections::BTreeMap::new(),
+        admission_authorized_plans: std::collections::BTreeMap::new(),
         recovered_admitted_inputs: std::collections::BTreeSet::new(),
         recovered_admitted_lanes: std::collections::BTreeMap::new(),
         op_statuses: std::collections::BTreeMap::new(),

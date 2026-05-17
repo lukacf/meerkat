@@ -59,8 +59,7 @@ impl MeerkatMachine {
 
                 let (resolved, outcome, handle, accepted_input_id, signal) = {
                     let mut driver = driver.lock().await;
-                    let runtime_idle = state.is_idle_or_attached();
-                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    let resolved = driver.resolve_admission(&input)?;
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithCompletion {
@@ -256,8 +255,7 @@ impl MeerkatMachine {
 
                 let (outcome, accepted_input_id) = {
                     let mut driver = driver.lock().await;
-                    let runtime_idle = state.is_idle_or_attached();
-                    let resolved = driver.resolve_admission_for_runtime_idle(&input, runtime_idle);
+                    let resolved = driver.resolve_admission_without_wake(&input)?;
                     self.preview_session_dsl_input(
                         &session_id,
                         crate::meerkat_machine::dsl::MeerkatMachineInput::AcceptWithoutWake {
@@ -269,8 +267,6 @@ impl MeerkatMachine {
                     )
                     .await
                     .map_err(|reason| Self::classify_ingress_dsl_rejection(state, reason))?;
-                    let mut resolved = resolved;
-                    resolved.policy.wake_mode = crate::policy::WakeMode::None;
                     let result = match driver
                         .accept_resolved_input(input, resolved)
                         .await

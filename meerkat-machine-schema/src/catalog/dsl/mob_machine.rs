@@ -402,6 +402,10 @@ macro_rules! mob_catalog_machine_dsl {
             RespawnMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: bool, session_id: SessionId },
             DestroyMob { session_id: SessionId },
             ObserveRuntimeDestroyed { agent_runtime_id: AgentRuntimeId, fence_token: FenceToken },
+            RecoverRosterMember { agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: bool },
+            RecoverRosterWiring { edge: WiringEdge },
+            RecoverExternalPeerWiring { edge: ExternalPeerEdge },
+            RecoverMemberRestoreFailure { agent_identity: AgentIdentity, reason: String },
             MarkCompleted,
             StartRun,
             FinishRun,
@@ -608,6 +612,26 @@ macro_rules! mob_catalog_machine_dsl {
             guard "coordinator_bound" { self.coordinator_bound == true }
             guard "identity_absent" { self.identity_to_runtime.contains_key(agent_identity) == false }
             update {}
+            to Running
+        }
+
+        transition RecoverRosterMemberRunning {
+            on signal RecoverRosterMember { agent_identity, agent_runtime_id, fence_token, external_addressable }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "identity_not_recovered" { self.identity_to_runtime.contains_key(agent_identity) == false }
+            guard "runtime_not_recovered" { self.live_runtime_ids.contains(agent_runtime_id) == false }
+            update {
+                self.live_runtime_ids.insert(agent_runtime_id);
+                if external_addressable {
+                    self.externally_addressable_runtime_ids.insert(agent_runtime_id);
+                } else {
+                    self.externally_addressable_runtime_ids.remove(agent_runtime_id);
+                }
+                self.runtime_fence_tokens.insert(agent_runtime_id, fence_token);
+                self.identity_to_runtime.insert(agent_identity, agent_runtime_id);
+                self.member_restore_failures.remove(agent_identity);
+                self.topology_epoch += 1;
+            }
             to Running
         }
 
@@ -903,6 +927,15 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitMemberLifecycleNotice { kind: MemberLifecycleKind::Respawned }
         }
 
+        transition RecoverMemberRestoreFailureRunning {
+            on signal RecoverMemberRestoreFailure { agent_identity, reason }
+            guard { self.lifecycle_phase == Phase::Running }
+            update {
+                self.member_restore_failures.insert(agent_identity, reason);
+            }
+            to Running
+        }
+
         transition MarkCompleted {
             on signal MarkCompleted
             guard { self.lifecycle_phase == Phase::Running || self.lifecycle_phase == Phase::Stopped }
@@ -1095,6 +1128,25 @@ macro_rules! mob_catalog_machine_dsl {
             emit EmitWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
         }
 
+        transition RecoverRosterWiringRunning {
+            on signal RecoverRosterWiring { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_not_already_recovered" { self.wiring_edges.contains(edge) == false }
+            update {
+                self.wiring_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverRosterWiringAlreadyRecovered {
+            on signal RecoverRosterWiring { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "edge_already_recovered" { self.wiring_edges.contains(edge) == true }
+            update {}
+            to Running
+        }
+
         transition UnwireMembersRunning {
             on input UnwireMembers { edge }
             guard { self.lifecycle_phase == Phase::Running }
@@ -1119,6 +1171,25 @@ macro_rules! mob_catalog_machine_dsl {
             to Running
             emit WiringGraphChanged { epoch: self.topology_epoch }
             emit EmitExternalPeerWiringLifecycleNotice { kind: WiringLifecycleKind::Wired, edge: edge }
+        }
+
+        transition RecoverExternalPeerWiringRunning {
+            on signal RecoverExternalPeerWiring { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_not_already_recovered" { self.external_peer_edges.contains(edge) == false }
+            update {
+                self.external_peer_edges.insert(edge);
+                self.topology_epoch += 1;
+            }
+            to Running
+        }
+
+        transition RecoverExternalPeerWiringAlreadyRecovered {
+            on signal RecoverExternalPeerWiring { edge }
+            guard { self.lifecycle_phase == Phase::Running }
+            guard "external_peer_already_recovered" { self.external_peer_edges.contains(edge) == true }
+            update {}
+            to Running
         }
 
         transition UnwireExternalPeerRunning {

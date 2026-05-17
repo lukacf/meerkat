@@ -33,6 +33,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `EnsureMemberRunningMissing`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`
+- `RecoverRosterMemberRunning`
+  - anchors: `mob_handle_surface`, `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`
 - `ReconcileRunning`
   - anchors: `mob_handle_surface`, `mob_actor_authority`
   - scenarios: `spawn-work-terminal`, `retire-respawn-destroy`, `flow-and-run-lifecycle`
@@ -135,6 +138,9 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RespawnMember`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`
+- `RecoverMemberRestoreFailureRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `operator-provenance-and-peer-input`
 - `MarkCompleted`
   - anchors: `mob_actor_authority`
   - scenarios: `flow-and-run-lifecycle`
@@ -183,12 +189,24 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `WireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
+- `RecoverRosterWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`
+- `RecoverRosterWiringAlreadyRecovered`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`
 - `UnwireMembersRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `wiring-and-session-binding`
 - `WireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerWiringRunning`
+  - anchors: `mob_actor_authority`
+  - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
+- `RecoverExternalPeerWiringAlreadyRecovered`
+  - anchors: `mob_actor_authority`
+  - scenarios: `wiring-and-session-binding`, `event-subscriptions-and-notices`, `operator-provenance-and-peer-input`
 - `UnwireExternalPeerRunning`
   - anchors: `mob_actor_authority`
   - scenarios: `retire-respawn-destroy`, `wiring-and-session-binding`, `flow-and-run-lifecycle`, `operator-provenance-and-peer-input`

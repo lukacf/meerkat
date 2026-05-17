@@ -41,29 +41,68 @@ enum BuilderMode {
     Resume,
 }
 
-/// Construct a `MobMachineAuthority` whose `lifecycle_phase` matches the
-/// `initial_phase` threaded from the builder's reconstruction logic.
-///
-/// The DSL `init(Running)` clause always starts the authority in
-/// `MobPhase::Running`; for resumes that landed in `Stopped`, `Completed`,
-/// or `Destroyed` we overwrite the phase field directly before handing the
-/// authority to the actor. This is the seam that used to live in the
-/// separate `Arc<AtomicU8>` projection: with the shadow deleted (dogma
-/// #1/#13/#17), the DSL authority becomes the single source of truth at
-/// construction time too.
-fn seed_mob_authority(
-    initial_phase: MobState,
-) -> crate::machines::mob_machine::MobMachineAuthority {
-    use crate::machines::mob_machine::{MobMachineAuthority, MobPhase};
-    let mut authority = MobMachineAuthority::new();
-    let dsl_phase = match initial_phase {
-        MobState::Creating | MobState::Running => MobPhase::Running,
-        MobState::Stopped => MobPhase::Stopped,
-        MobState::Completed => MobPhase::Completed,
-        MobState::Destroyed => MobPhase::Destroyed,
-    };
-    authority.state.lifecycle_phase = dsl_phase;
-    authority
+fn seed_mob_authority() -> crate::machines::mob_machine::MobMachineAuthority {
+    crate::machines::mob_machine::MobMachineAuthority::new()
+}
+
+fn apply_seeded_mob_input(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    input: crate::machines::mob_machine::MobMachineInput,
+    context: &'static str,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    let input_debug = format!("{input:?}");
+    let transition = mob_dsl::MobMachineMutator::apply(authority, input).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine seeded authority ({context}) rejected {input_debug}: {error}"
+        ))
+    })?;
+    if transition.from_phase != transition.to_phase {
+        authority.state.lifecycle_phase = transition.to_phase;
+    }
+    Ok(())
+}
+
+fn apply_seeded_mob_signal(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    signal: crate::machines::mob_machine::MobMachineSignal,
+    context: &'static str,
+) -> Result<(), MobError> {
+    let signal_debug = format!("{signal:?}");
+    let transition = authority.apply_signal(signal).map_err(|error| {
+        MobError::Internal(format!(
+            "MobMachine seeded authority ({context}) rejected {signal_debug}: {error}"
+        ))
+    })?;
+    if transition.from_phase != transition.to_phase {
+        authority.state.lifecycle_phase = transition.to_phase;
+    }
+    Ok(())
+}
+
+fn finish_seeded_mob_authority_phase(
+    authority: &mut crate::machines::mob_machine::MobMachineAuthority,
+    target_phase: MobState,
+) -> Result<(), MobError> {
+    use crate::machines::mob_machine as mob_dsl;
+
+    match target_phase {
+        MobState::Creating | MobState::Running => Ok(()),
+        MobState::Stopped => {
+            apply_seeded_mob_input(authority, mob_dsl::MobMachineInput::Stop, "seed_phase_stop")
+        }
+        MobState::Completed => apply_seeded_mob_input(
+            authority,
+            mob_dsl::MobMachineInput::Complete,
+            "seed_phase_complete",
+        ),
+        MobState::Destroyed => apply_seeded_mob_input(
+            authority,
+            mob_dsl::MobMachineInput::Destroy,
+            "seed_phase_destroy",
+        ),
+    }
 }
 
 #[cfg(feature = "runtime-adapter")]
@@ -95,21 +134,21 @@ fn canonical_runtime_adapter_for_session_service(
 /// MobMachine-owned guard that checks membership — including the work-lane
 /// `SubmitWork` transitions that own External/Internal legality.
 ///
-/// This helper replays every live roster entry into the DSL exactly as a
-/// fresh spawn would have done, populating `live_runtime_ids`,
-/// `runtime_fence_tokens`, `externally_addressable_runtime_ids`, and
-/// `identity_to_runtime`. It also rehydrates machine-owned local and external
-/// wiring edges from the event-projected roster so respawn/reconcile restore
-/// logic can read topology from MobMachine instead of using roster fields as
-/// authority. `external_addressable` is resolved from the definition's inline
-/// profile (realm-profile overrides are resolved asynchronously elsewhere;
-/// callers that need realm overrides can re-feed spawn events through the live
+/// This helper feeds every live roster entry into generated recovery signals
+/// that populate `live_runtime_ids`, `runtime_fence_tokens`,
+/// `externally_addressable_runtime_ids`, and `identity_to_runtime`. It also
+/// rehydrates machine-owned local and external wiring edges from the
+/// event-projected roster so respawn/reconcile restore logic can read topology
+/// from MobMachine instead of using roster fields as authority.
+/// `external_addressable` is resolved from the definition's inline profile
+/// (realm-profile overrides are resolved asynchronously elsewhere; callers
+/// that need realm overrides can re-feed spawn events through the live
 /// pipeline).
 fn seed_mob_authority_sync_from_roster(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     roster: &Roster,
     definition: &MobDefinition,
-) {
+) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
     for entry in roster.list_all() {
         // Use the inline profile where available. Realm-profile overrides
@@ -127,46 +166,45 @@ fn seed_mob_authority_sync_from_roster(
         let dsl_identity = mob_dsl::AgentIdentity::from_domain(&entry.agent_identity);
         let dsl_runtime_id = mob_dsl::AgentRuntimeId::from_domain(&entry.agent_runtime_id);
         let dsl_fence = mob_dsl::FenceToken::from_domain(entry.fence_token);
-        authority
-            .state
-            .live_runtime_ids
-            .insert(dsl_runtime_id.clone());
-        if external_addressable {
-            authority
-                .state
-                .externally_addressable_runtime_ids
-                .insert(dsl_runtime_id.clone());
-        }
-        authority
-            .state
-            .runtime_fence_tokens
-            .insert(dsl_runtime_id.clone(), dsl_fence);
-        authority
-            .state
-            .identity_to_runtime
-            .insert(dsl_identity, dsl_runtime_id);
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverRosterMember {
+                agent_identity: dsl_identity,
+                agent_runtime_id: dsl_runtime_id,
+                fence_token: dsl_fence,
+                external_addressable,
+            },
+            "recover_roster_member",
+        )?;
 
         for peer_identity in &entry.wired_to {
             if let Some(peer_entry) = roster.get_by_identity(peer_identity) {
-                authority
-                    .state
-                    .wiring_edges
-                    .insert(mob_dsl::WiringEdge::new(
-                        mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-                        mob_dsl::AgentIdentity::from_domain(&peer_entry.agent_identity),
-                    ));
+                apply_seeded_mob_signal(
+                    authority,
+                    mob_dsl::MobMachineSignal::RecoverRosterWiring {
+                        edge: mob_dsl::WiringEdge::new(
+                            mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                            mob_dsl::AgentIdentity::from_domain(&peer_entry.agent_identity),
+                        ),
+                    },
+                    "recover_roster_wiring",
+                )?;
             }
         }
         for spec in entry.external_peer_specs.values() {
-            authority
-                .state
-                .external_peer_edges
-                .insert(mob_dsl::ExternalPeerEdge::new(
-                    mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
-                    mob_dsl::ExternalPeerEndpoint::from(spec),
-                ));
+            apply_seeded_mob_signal(
+                authority,
+                mob_dsl::MobMachineSignal::RecoverExternalPeerWiring {
+                    edge: mob_dsl::ExternalPeerEdge::new(
+                        mob_dsl::AgentIdentity::from_domain(&entry.agent_identity),
+                        mob_dsl::ExternalPeerEndpoint::from(spec),
+                    ),
+                },
+                "recover_external_peer_wiring",
+            )?;
         }
     }
+    Ok(())
 }
 
 async fn seed_mob_authority_sync_from_flow_runs(
@@ -175,7 +213,6 @@ async fn seed_mob_authority_sync_from_flow_runs(
     event_store: Arc<dyn crate::store::MobEventStore>,
     mob_id: &MobId,
 ) -> Result<(), MobError> {
-    use crate::machines::mob_machine as mob_dsl;
     use crate::run::MobRun;
 
     let terminalization = super::terminalization::FlowTerminalizationAuthority::new(
@@ -190,7 +227,6 @@ async fn seed_mob_authority_sync_from_flow_runs(
             .then_with(|| left.run_id.to_string().cmp(&right.run_id.to_string()))
     });
 
-    let resumed_phase = authority.state.lifecycle_phase;
     for mut run in runs {
         super::recovery::reconcile_run_state(&mut run).map_err(|error| {
             MobError::Internal(format!("cannot resume flow run '{}': {error}", run.run_id))
@@ -199,13 +235,11 @@ async fn seed_mob_authority_sync_from_flow_runs(
             continue;
         }
 
-        authority.state.lifecycle_phase = mob_dsl::MobPhase::Running;
         MobRun::replay_flow_authority_inputs_into(
             authority,
             &run.flow_authority_inputs,
             &format!("resume_flow_run_{}", run.run_id),
         )?;
-        authority.state.lifecycle_phase = resumed_phase;
         if flow_run_replayed_active_admission(&run) {
             converge_recovered_active_flow_run(
                 authority,
@@ -214,10 +248,8 @@ async fn seed_mob_authority_sync_from_flow_runs(
                 run.run_id.clone(),
             )
             .await?;
-            authority.state.lifecycle_phase = resumed_phase;
         }
     }
-    authority.state.lifecycle_phase = resumed_phase;
     Ok(())
 }
 
@@ -445,16 +477,21 @@ fn apply_recovered_flow_signal(
 fn seed_mob_authority_restore_failures(
     authority: &mut crate::machines::mob_machine::MobMachineAuthority,
     restore_diagnostics: &HashMap<MeerkatId, super::handle::RestoreFailureDiagnostic>,
-) {
+) -> Result<(), MobError> {
     use crate::machines::mob_machine as mob_dsl;
     for (identity, diagnostic) in restore_diagnostics {
-        authority.state.member_restore_failures.insert(
-            mob_dsl::AgentIdentity::from_domain(&crate::ids::AgentIdentity::from(
-                identity.as_str(),
-            )),
-            diagnostic.reason.clone(),
-        );
+        apply_seeded_mob_signal(
+            authority,
+            mob_dsl::MobMachineSignal::RecoverMemberRestoreFailure {
+                agent_identity: mob_dsl::AgentIdentity::from_domain(
+                    &crate::ids::AgentIdentity::from(identity.as_str()),
+                ),
+                reason: diagnostic.reason.clone(),
+            },
+            "recover_member_restore_failure",
+        )?;
     }
+    Ok(())
 }
 
 struct RuntimeWiring {
@@ -739,7 +776,7 @@ impl MobBuilder {
             supervisor_authority,
         )?);
 
-        Ok(Self::start_runtime(
+        Self::start_runtime(
             definition,
             Roster::new(),
             MobState::Running,
@@ -754,7 +791,7 @@ impl MobBuilder {
             default_external_tools_provider,
             storage.realm_profiles.clone(),
             realtime_session_factory,
-        ))
+        )
     }
 
     /// Resume a mob from persisted events.
@@ -941,7 +978,7 @@ impl MobBuilder {
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
         let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
-        let initial_dsl_authority = Box::new(seed_mob_authority(dsl_seed_state));
+        let initial_dsl_authority = Box::new(seed_mob_authority());
         let (machine_state_watch_tx, machine_state_watch_rx) =
             tokio::sync::watch::channel(initial_dsl_authority.state.clone());
         // Preview phase watch so the preview handle can answer status()
@@ -999,10 +1036,10 @@ impl MobBuilder {
 
         // Seed the DSL authority from the finalized roster. After
         // `reconcile_resume` the roster reflects every member that was
-        // alive at resume time; replaying those as DSL spawns is what
-        // lets MobMachine guards (SubmitWork legality, Retire membership,
-        // etc.) see resumed members on the first command.
-        seed_mob_authority_sync_from_roster(&mut wiring.dsl_authority, &roster, &definition);
+        // alive at resume time; generated recovery signals let MobMachine
+        // guards (SubmitWork legality, Retire membership, etc.) see
+        // resumed members on the first command.
+        seed_mob_authority_sync_from_roster(&mut wiring.dsl_authority, &roster, &definition)?;
         seed_mob_authority_sync_from_flow_runs(
             &mut wiring.dsl_authority,
             storage.runs.clone(),
@@ -1014,7 +1051,8 @@ impl MobBuilder {
         seed_mob_authority_restore_failures(
             &mut wiring.dsl_authority,
             &restore_diagnostics_snapshot,
-        );
+        )?;
+        finish_seeded_mob_authority_phase(&mut wiring.dsl_authority, dsl_seed_state)?;
         let _ = wiring
             .machine_state_watch_tx
             .send(wiring.dsl_authority.state.clone());
@@ -1605,14 +1643,15 @@ impl MobBuilder {
         default_external_tools_provider: Option<crate::ExternalToolsProvider>,
         realm_profile_store: Option<Arc<dyn crate::store::RealmProfileStore>>,
         realtime_session_factory: Option<Arc<dyn meerkat_client::RealtimeSessionFactory>>,
-    ) -> MobHandle {
+    ) -> Result<MobHandle, MobError> {
         // Seed the DSL authority from the reconstructed shell roster so the
         // MobMachine sees already-spawned members immediately on resume.
         // Profile lookup is best-effort-sync here — resume paths thread a
         // concrete profile via `start_runtime_with_components`; fresh create
         // paths pass an empty roster so the replay is a no-op either way.
-        let mut dsl_authority = Box::new(seed_mob_authority(initial_state));
-        seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition);
+        let mut dsl_authority = Box::new(seed_mob_authority());
+        seed_mob_authority_sync_from_roster(&mut dsl_authority, &initial_roster, &definition)?;
+        finish_seeded_mob_authority_phase(&mut dsl_authority, initial_state)?;
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state.clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
@@ -1631,7 +1670,7 @@ impl MobBuilder {
             command_rx,
         };
 
-        Self::start_runtime_with_components(
+        Ok(Self::start_runtime_with_components(
             definition,
             wiring,
             events,
@@ -1643,7 +1682,7 @@ impl MobBuilder {
             default_external_tools_provider,
             realm_profile_store,
             realtime_session_factory,
-        )
+        ))
     }
 
     #[cfg(feature = "runtime-adapter")]

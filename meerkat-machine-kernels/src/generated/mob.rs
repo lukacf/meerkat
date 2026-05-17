@@ -2359,6 +2359,26 @@ pub mod signals {
         pub fence_token: FenceToken,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterMember {
+        pub agent_identity: AgentIdentity,
+        pub agent_runtime_id: AgentRuntimeId,
+        pub fence_token: FenceToken,
+        pub external_addressable: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverRosterWiring {
+        pub edge: WiringEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverExternalPeerWiring {
+        pub edge: ExternalPeerEdge,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverMemberRestoreFailure {
+        pub agent_identity: AgentIdentity,
+        pub reason: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct MarkCompleted {}
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct StartRun {}
@@ -2416,6 +2436,10 @@ pub enum Signal {
     RespawnMember(signals::RespawnMember),
     DestroyMob(signals::DestroyMob),
     ObserveRuntimeDestroyed(signals::ObserveRuntimeDestroyed),
+    RecoverRosterMember(signals::RecoverRosterMember),
+    RecoverRosterWiring(signals::RecoverRosterWiring),
+    RecoverExternalPeerWiring(signals::RecoverExternalPeerWiring),
+    RecoverMemberRestoreFailure(signals::RecoverMemberRestoreFailure),
     MarkCompleted(signals::MarkCompleted),
     StartRun(signals::StartRun),
     FinishRun(signals::FinishRun),
@@ -2448,6 +2472,10 @@ impl Signal {
             Self::RespawnMember(_) => SignalKind::RespawnMember,
             Self::DestroyMob(_) => SignalKind::DestroyMob,
             Self::ObserveRuntimeDestroyed(_) => SignalKind::ObserveRuntimeDestroyed,
+            Self::RecoverRosterMember(_) => SignalKind::RecoverRosterMember,
+            Self::RecoverRosterWiring(_) => SignalKind::RecoverRosterWiring,
+            Self::RecoverExternalPeerWiring(_) => SignalKind::RecoverExternalPeerWiring,
+            Self::RecoverMemberRestoreFailure(_) => SignalKind::RecoverMemberRestoreFailure,
             Self::MarkCompleted(_) => SignalKind::MarkCompleted,
             Self::StartRun(_) => SignalKind::StartRun,
             Self::FinishRun(_) => SignalKind::FinishRun,
@@ -2481,6 +2509,10 @@ pub enum SignalKind {
     RespawnMember,
     DestroyMob,
     ObserveRuntimeDestroyed,
+    RecoverRosterMember,
+    RecoverRosterWiring,
+    RecoverExternalPeerWiring,
+    RecoverMemberRestoreFailure,
     MarkCompleted,
     StartRun,
     FinishRun,
@@ -2658,6 +2690,7 @@ pub enum TransitionId {
     SpawnRunningReplacing,
     EnsureMemberRunningExisting,
     EnsureMemberRunningMissing,
+    RecoverRosterMemberRunning,
     ReconcileRunning,
     ReconcileStopped,
     ReconcileCompleted,
@@ -2692,6 +2725,7 @@ pub enum TransitionId {
     ObserveRuntimeRetired,
     ResetMember,
     RespawnMember,
+    RecoverMemberRestoreFailureRunning,
     MarkCompleted,
     DestroyMob,
     ObserveRuntimeDestroyed,
@@ -2708,8 +2742,12 @@ pub enum TransitionId {
     CompleteRunning,
     ResetToRunning,
     WireMembersRunning,
+    RecoverRosterWiringRunning,
+    RecoverRosterWiringAlreadyRecovered,
     UnwireMembersRunning,
     WireExternalPeerRunning,
+    RecoverExternalPeerWiringRunning,
+    RecoverExternalPeerWiringAlreadyRecovered,
     UnwireExternalPeerRunning,
     ForceCancelRunning,
     SubscribeAgentEventsRunning,

@@ -179,6 +179,10 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `RespawnMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, generation: Generation, external_addressable: Bool, session_id: SessionId)
 - `DestroyMob`(session_id: SessionId)
 - `ObserveRuntimeDestroyed`(agent_runtime_id: AgentRuntimeId, fence_token: FenceToken)
+- `RecoverRosterMember`(agent_identity: AgentIdentity, agent_runtime_id: AgentRuntimeId, fence_token: FenceToken, external_addressable: Bool)
+- `RecoverRosterWiring`(edge: WiringEdge)
+- `RecoverExternalPeerWiring`(edge: ExternalPeerEdge)
+- `RecoverMemberRestoreFailure`(agent_identity: AgentIdentity, reason: String)
 - `MarkCompleted`
 - `StartRun`
 - `FinishRun`
@@ -265,6 +269,14 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `coordinator_bound`
   - `identity_absent`
+- To: `Running`
+
+### `RecoverRosterMemberRunning`
+- From: `Running`
+- On: `RecoverRosterMember`(agent_identity, agent_runtime_id, fence_token, external_addressable)
+- Guards:
+  - `identity_not_recovered`
+  - `runtime_not_recovered`
 - To: `Running`
 
 ### `ReconcileRunning`
@@ -524,6 +536,11 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `RequestRuntimeBinding`, `EmitMemberLifecycleNotice`
 - To: `Running`
 
+### `RecoverMemberRestoreFailureRunning`
+- From: `Running`
+- On: `RecoverMemberRestoreFailure`(agent_identity, reason)
+- To: `Running`
+
 ### `MarkCompleted`
 - From: `Running`, `Stopped`
 - On: `MarkCompleted`()
@@ -623,6 +640,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `WiringGraphChanged`, `EmitWiringLifecycleNotice`
 - To: `Running`
 
+### `RecoverRosterWiringRunning`
+- From: `Running`
+- On: `RecoverRosterWiring`(edge)
+- Guards:
+  - `edge_not_already_recovered`
+- To: `Running`
+
+### `RecoverRosterWiringAlreadyRecovered`
+- From: `Running`
+- On: `RecoverRosterWiring`(edge)
+- Guards:
+  - `edge_already_recovered`
+- To: `Running`
+
 ### `UnwireMembersRunning`
 - From: `Running`
 - On: `UnwireMembers`(edge)
@@ -637,6 +668,20 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Guards:
   - `external_peer_not_already_wired`
 - Emits: `WiringGraphChanged`, `EmitExternalPeerWiringLifecycleNotice`
+- To: `Running`
+
+### `RecoverExternalPeerWiringRunning`
+- From: `Running`
+- On: `RecoverExternalPeerWiring`(edge)
+- Guards:
+  - `external_peer_not_already_recovered`
+- To: `Running`
+
+### `RecoverExternalPeerWiringAlreadyRecovered`
+- From: `Running`
+- On: `RecoverExternalPeerWiring`(edge)
+- Guards:
+  - `external_peer_already_recovered`
 - To: `Running`
 
 ### `UnwireExternalPeerRunning`

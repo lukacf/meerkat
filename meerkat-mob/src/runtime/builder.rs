@@ -5,6 +5,8 @@ use std::collections::HashMap;
 #[cfg(feature = "runtime-adapter")]
 use std::collections::HashSet;
 
+const MOB_COMMAND_CHANNEL_CAPACITY: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // MobBuilder
 // ---------------------------------------------------------------------------
@@ -937,7 +939,7 @@ impl MobBuilder {
         // Prepare shared runtime components early so resume reconciliation can
         // wire tool dispatchers for recreated sessions to the final actor channel.
         let roster_state = Arc::new(RwLock::new(RosterAuthority::new()));
-        let (command_tx, command_rx) = mpsc::channel(64);
+        let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(seeded_restore_diagnostics));
         let initial_dsl_authority = Box::new(seed_mob_authority(dsl_seed_state));
         let (machine_state_watch_tx, machine_state_watch_rx) =
@@ -1614,7 +1616,7 @@ impl MobBuilder {
         let (machine_state_watch_tx, _machine_state_watch_rx) =
             tokio::sync::watch::channel(dsl_authority.state.clone());
         let roster = Arc::new(RwLock::new(RosterAuthority::from_roster(initial_roster)));
-        let (command_tx, command_rx) = mpsc::channel(64);
+        let (command_tx, command_rx) = mpsc::channel(MOB_COMMAND_CHANNEL_CAPACITY);
         let restore_diagnostics = Arc::new(RwLock::new(HashMap::new()));
         let wiring = RuntimeWiring {
             roster,

@@ -11,7 +11,7 @@
 //!   consistency checks.
 //! - `wire`/`unwire`/`remove` are projection mutations only.
 
-use crate::event::{MemberRef, MobEvent, MobEventKind};
+use crate::event::{MemberRef, MemberWireEdge, MobEvent, MobEventKind};
 use crate::ids::{AgentIdentity, AgentRuntimeId, FenceToken, Generation, ProfileName};
 use crate::runtime_mode::MobRuntimeMode;
 use meerkat_core::comms::{PeerId, TrustedPeerDescriptor};
@@ -219,6 +219,16 @@ impl Roster {
                 }
                 if let Some(entry) = self.entries.get_mut(b) {
                     entry.wired_to.insert(a.clone());
+                }
+            }
+            MobEventKind::MembersWiredBatch { edges } => {
+                for edge in edges {
+                    if let Some(entry) = self.entries.get_mut(&edge.a) {
+                        entry.wired_to.insert(edge.b.clone());
+                    }
+                    if let Some(entry) = self.entries.get_mut(&edge.b) {
+                        entry.wired_to.insert(edge.a.clone());
+                    }
                 }
             }
             MobEventKind::MembersUnwired { a, b } => {
@@ -859,6 +869,71 @@ mod tests {
             roster1.get(&MeerkatId::from("a")).unwrap().role,
             roster2.get(&MeerkatId::from("a")).unwrap().role,
         );
+    }
+
+    #[test]
+    fn test_members_wired_batch_projects_bidirectional_edges() {
+        let a = AgentIdentity::from("a");
+        let b = AgentIdentity::from("b");
+        let c = AgentIdentity::from("c");
+        let events = vec![
+            make_event(
+                1,
+                spawned_kind(
+                    a.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                2,
+                spawned_kind(
+                    b.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                3,
+                spawned_kind(
+                    c.as_str(),
+                    "worker",
+                    MobRuntimeMode::AutonomousHost,
+                    MemberRef::from_bridge_session_id(session_id()),
+                    BTreeMap::new(),
+                ),
+            ),
+            make_event(
+                4,
+                MobEventKind::MembersWiredBatch {
+                    edges: vec![
+                        MemberWireEdge {
+                            a: a.clone(),
+                            b: b.clone(),
+                        },
+                        MemberWireEdge {
+                            a: a.clone(),
+                            b: c.clone(),
+                        },
+                    ],
+                },
+            ),
+        ];
+
+        let roster = Roster::project(&events);
+        let a_entry = roster.get_by_identity(&a).expect("a projected");
+        let b_entry = roster.get_by_identity(&b).expect("b projected");
+        let c_entry = roster.get_by_identity(&c).expect("c projected");
+
+        assert!(a_entry.wired_to.contains(&b));
+        assert!(a_entry.wired_to.contains(&c));
+        assert_eq!(a_entry.wired_to.len(), 2);
+        assert!(b_entry.wired_to.contains(&a));
+        assert!(c_entry.wired_to.contains(&a));
     }
 
     #[test]

@@ -127,8 +127,9 @@ pub use handle::{
     HelperResult, MemberDeliveryReceipt, MemberHandle, MemberRespawnReceipt, MobDestroyError,
     MobDestroyReport, MobEventsSubscription, MobEventsSubscriptionConfig, MobEventsView, MobHandle,
     MobMemberListEntry, MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot,
-    MobRespawnError, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport, SpawnMemberSpec,
-    SpawnResult, SupervisorRotationReport, WorkDeliveryReceipt,
+    MobRespawnError, MobUnreachablePeer, MobWireMembersBatchReport, PeerTarget,
+    PreviousMemberCleanupReport, SpawnMemberSpec, SpawnResult, SupervisorRotationReport,
+    WorkDeliveryReceipt,
 };
 use pending_spawn_lineage::{PendingSpawnInsertImpact, PendingSpawnLineage};
 pub use reconcile::{

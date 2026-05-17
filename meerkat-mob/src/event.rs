@@ -329,6 +329,15 @@ pub enum MobEventKind {
         /// Second member of the edge.
         b: AgentIdentity,
     },
+    /// Multiple bidirectional wiring edges were established between local members.
+    ///
+    /// This is the compact projection event for batch topology materialization.
+    /// MobMachine still owns the canonical `wiring_edges` graph; the event is
+    /// replay data for roster/read-model consumers.
+    MembersWiredBatch {
+        /// Normalized `(a, b)` member edges admitted by the MobMachine authority.
+        edges: Vec<MemberWireEdge>,
+    },
     /// Bidirectional wiring edge removed between two local members.
     ///
     /// DSL-emit-driven observability counterpart of [`Self::MembersWired`].
@@ -449,6 +458,15 @@ pub enum MobEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audit_invocation_id: Option<String>,
     },
+}
+
+/// Normalized local-member wiring edge carried by compact topology events.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemberWireEdge {
+    /// First member of the edge (lexicographically smaller identity).
+    pub a: AgentIdentity,
+    /// Second member of the edge.
+    pub b: AgentIdentity,
 }
 
 /// An agent event attributed to a specific mob member.
@@ -775,6 +793,22 @@ mod tests {
         roundtrip(&MobEventKind::MembersWired {
             a: AgentIdentity::from("l-1"),
             b: AgentIdentity::from("w-2"),
+        });
+    }
+
+    #[test]
+    fn test_members_wired_batch_roundtrip() {
+        roundtrip(&MobEventKind::MembersWiredBatch {
+            edges: vec![
+                MemberWireEdge {
+                    a: AgentIdentity::from("l-1"),
+                    b: AgentIdentity::from("w-2"),
+                },
+                MemberWireEdge {
+                    a: AgentIdentity::from("l-1"),
+                    b: AgentIdentity::from("w-3"),
+                },
+            ],
         });
     }
 

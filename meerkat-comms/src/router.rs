@@ -437,13 +437,14 @@ impl Router {
                     // typed target namespace. Require the canonical pubkey to
                     // have exactly one live inproc owner before delivery.
                     registry
-                        .send_to_pubkey_any_namespace_with_id(
+                        .send_to_pubkey_any_namespace_with_id_wait(
                             &self.keypair,
                             &peer.pubkey,
                             envelope.id,
                             envelope.kind,
                             self.require_peer_auth,
                         )
+                        .await
                         .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }
@@ -458,13 +459,14 @@ impl Router {
                 PeerAddr::Inproc(_) => {
                     let registry = InprocRegistry::global();
                     registry
-                        .send_to_pubkey_any_namespace_with_id(
+                        .send_to_pubkey_any_namespace_with_id_wait(
                             &self.keypair,
                             &peer.pubkey,
                             envelope.id,
                             envelope.kind,
                             self.require_peer_auth,
                         )
+                        .await
                         .map_err(|err| map_inproc_send_error(err, dest))
                 }
             }

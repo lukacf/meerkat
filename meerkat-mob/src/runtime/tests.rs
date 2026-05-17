@@ -188,6 +188,7 @@ struct MockCommsBehavior {
     fail_send_peer_added: bool,
     fail_send_peer_retired: bool,
     fail_send_peer_unwired: bool,
+    peer_lifecycle_delay_ms: u64,
 }
 
 struct MockCommsRuntime {
@@ -428,6 +429,10 @@ impl CoreCommsRuntime for MockCommsRuntime {
                     .behavior
                     .read()
                     .expect("poisoned behavior lock in mock runtime");
+                if behavior.peer_lifecycle_delay_ms > 0 {
+                    tokio::time::sleep(Duration::from_millis(behavior.peer_lifecycle_delay_ms))
+                        .await;
+                }
                 match kind {
                     meerkat_core::comms::PeerLifecycleKind::PeerAdded
                         if behavior.fail_send_peer_added =>
@@ -615,6 +620,7 @@ struct MockSessionService {
     create_session_max_in_flight: AtomicU64,
     archive_delay_ms: AtomicU64,
     start_turn_delay_ms: AtomicU64,
+    inject_delay_ms: AtomicU64,
     flow_turn_delay_ms: AtomicU64,
     flow_turn_never_terminal: std::sync::atomic::AtomicBool,
     flow_turn_fail: std::sync::atomic::AtomicBool,
@@ -672,6 +678,7 @@ impl MockSessionService {
             create_session_max_in_flight: AtomicU64::new(0),
             archive_delay_ms: AtomicU64::new(0),
             start_turn_delay_ms: AtomicU64::new(0),
+            inject_delay_ms: AtomicU64::new(0),
             flow_turn_delay_ms: AtomicU64::new(0),
             flow_turn_never_terminal: std::sync::atomic::AtomicBool::new(false),
             flow_turn_fail: std::sync::atomic::AtomicBool::new(false),
@@ -943,6 +950,11 @@ impl MockSessionService {
 
     fn set_start_turn_delay_ms(&self, delay_ms: u64) {
         self.start_turn_delay_ms
+            .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn set_inject_delay_ms(&self, delay_ms: u64) {
+        self.inject_delay_ms
             .store(delay_ms, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1527,6 +1539,7 @@ async fn retire_test_runtime_archive(
 
 struct CountingInjector {
     calls: Arc<AtomicU64>,
+    inject_delay_ms: u64,
     delay_ms: u64,
     never_terminal: bool,
     fail: bool,
@@ -1544,6 +1557,9 @@ impl EventInjector for CountingInjector {
     ) -> Result<(), EventInjectorError> {
         if self.fail_inject {
             return Err(EventInjectorError::Closed);
+        }
+        if self.inject_delay_ms > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(self.inject_delay_ms));
         }
         self.calls.fetch_add(1, Ordering::Relaxed);
         Ok(())
@@ -1617,6 +1633,7 @@ impl SessionServiceCommsExt for MockSessionService {
             return None;
         }
         let delay_ms = self.flow_turn_delay_ms.load(Ordering::Relaxed);
+        let inject_delay_ms = self.inject_delay_ms.load(Ordering::Relaxed);
         let never_terminal = self
             .flow_turn_never_terminal
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1632,6 +1649,7 @@ impl SessionServiceCommsExt for MockSessionService {
         let fail_inject = self.fail_inject.load(std::sync::atomic::Ordering::Relaxed);
         Some(Arc::new(CountingInjector {
             calls: self.inject_calls.clone(),
+            inject_delay_ms,
             delay_ms,
             never_terminal,
             fail,
@@ -1654,6 +1672,7 @@ impl SessionServiceCommsExt for MockSessionService {
             return None;
         }
         let delay_ms = self.flow_turn_delay_ms.load(Ordering::Relaxed);
+        let inject_delay_ms = self.inject_delay_ms.load(Ordering::Relaxed);
         let never_terminal = self
             .flow_turn_never_terminal
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1669,6 +1688,7 @@ impl SessionServiceCommsExt for MockSessionService {
         let fail_inject = self.fail_inject.load(std::sync::atomic::Ordering::Relaxed);
         Some(Arc::new(CountingInjector {
             calls: self.inject_calls.clone(),
+            inject_delay_ms,
             delay_ms,
             never_terminal,
             fail,
@@ -1886,6 +1906,7 @@ impl FaultInjectedMobEventStore {
             MobEventKind::MemberReset { .. } => "MemberReset",
             MobEventKind::MemberKickoffUpdated { .. } => "MemberKickoffUpdated",
             MobEventKind::MembersWired { .. } => "MembersWired",
+            MobEventKind::MembersWiredBatch { .. } => "MembersWiredBatch",
             MobEventKind::MembersUnwired { .. } => "MembersUnwired",
             MobEventKind::ExternalPeerWired { .. } => "ExternalPeerWired",
             MobEventKind::ExternalPeerUnwired { .. } => "ExternalPeerUnwired",
@@ -15600,6 +15621,283 @@ async fn test_wire_emits_peers_wired_event() {
 }
 
 #[tokio::test]
+async fn test_wire_members_batch_materializes_dense_topology_once() {
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let sid_l = handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("l-1"), None)
+        .await
+        .expect("spawn lead")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    let sid_w1 = handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-1"), None)
+        .await
+        .expect("spawn worker one")
+        .bridge_session_id()
+        .expect("session-backed")
+        .clone();
+    handle
+        .spawn(ProfileName::from("worker"), MeerkatId::from("w-2"), None)
+        .await
+        .expect("spawn worker two");
+
+    let report = handle
+        .wire_members_batch([
+            (AgentIdentity::from("l-1"), AgentIdentity::from("w-1")),
+            (AgentIdentity::from("w-2"), AgentIdentity::from("l-1")),
+            (AgentIdentity::from("l-1"), AgentIdentity::from("w-1")),
+        ])
+        .await
+        .expect("batch wire");
+    assert_eq!(report.requested, 3);
+    assert_eq!(report.wired.len(), 2);
+    assert!(report.already_wired.is_empty());
+
+    let lead = handle
+        .get_member(&AgentIdentity::from("l-1"))
+        .await
+        .expect("lead projected");
+    assert_eq!(lead.wired_to.len(), 2);
+    assert!(lead.wired_to.contains(&AgentIdentity::from("w-1")));
+    assert!(lead.wired_to.contains(&AgentIdentity::from("w-2")));
+    let worker = handle
+        .get_member(&AgentIdentity::from("w-1"))
+        .await
+        .expect("worker projected");
+    assert!(worker.wired_to.contains(&AgentIdentity::from("l-1")));
+
+    let trusted_by_lead = service.trusted_peer_names(&sid_l).await;
+    assert!(
+        trusted_by_lead
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("worker", "w-1"))
+    );
+    assert!(
+        trusted_by_lead
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("worker", "w-2"))
+    );
+    let trusted_by_worker = service.trusted_peer_names(&sid_w1).await;
+    assert!(
+        trusted_by_worker
+            .iter()
+            .any(|name| name.as_str() == test_comms_name("lead", "l-1"))
+    );
+
+    let events = handle.events().replay_all().await.expect("replay");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MembersWiredBatch { .. }))
+            .count(),
+        1,
+        "batch topology materialization should emit one compact event"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind, MobEventKind::MembersWired { .. }))
+            .count(),
+        0,
+        "batch topology materialization must not fan out per-edge events"
+    );
+
+    let second = handle
+        .wire_members_batch([
+            (AgentIdentity::from("l-1"), AgentIdentity::from("w-1")),
+            (AgentIdentity::from("l-1"), AgentIdentity::from("w-2")),
+        ])
+        .await
+        .expect("idempotent batch wire");
+    assert_eq!(second.requested, 2);
+    assert_eq!(second.already_wired.len(), 2);
+    assert!(second.wired.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_wire_members_batch_materializes_300_by_150_dense_topology_in_seconds() {
+    const AGENTS: usize = 300;
+    const PEERS_PER_AGENT: usize = 150;
+    const EDGE_OFFSETS: usize = PEERS_PER_AGENT / 2;
+    const EXPECTED_EDGES: usize = AGENTS * PEERS_PER_AGENT / 2;
+
+    let (handle, _service) = create_test_mob(sample_definition()).await;
+    let identities = (0..AGENTS)
+        .map(|index| AgentIdentity::from(format!("agent-{index:03}")))
+        .collect::<Vec<_>>();
+    let specs = identities
+        .iter()
+        .map(|identity| SpawnMemberSpec::new("worker", identity.as_str()))
+        .collect::<Vec<_>>();
+
+    let spawn_started = std::time::Instant::now();
+    let spawned = handle.spawn_many(specs).await;
+    let spawn_elapsed = spawn_started.elapsed();
+    assert_eq!(spawned.len(), AGENTS);
+    for result in spawned {
+        result.expect("spawn_many dense topology member");
+    }
+
+    let mut edges = Vec::with_capacity(EXPECTED_EDGES);
+    for index in 0..AGENTS {
+        for offset in 1..=EDGE_OFFSETS {
+            edges.push((
+                identities[index].clone(),
+                identities[(index + offset) % AGENTS].clone(),
+            ));
+        }
+    }
+    assert_eq!(edges.len(), EXPECTED_EDGES);
+
+    let wire_started = std::time::Instant::now();
+    let report = handle
+        .wire_members_batch(edges)
+        .await
+        .expect("batch wire dense topology");
+    let wire_elapsed = wire_started.elapsed();
+
+    assert_eq!(report.requested, EXPECTED_EDGES);
+    assert_eq!(report.wired.len(), EXPECTED_EDGES);
+    assert!(report.already_wired.is_empty());
+
+    for identity in &identities {
+        let member = handle
+            .get_member(identity)
+            .await
+            .expect("dense topology member projected");
+        assert_eq!(
+            member.wired_to.len(),
+            PEERS_PER_AGENT,
+            "{identity} should have exactly {PEERS_PER_AGENT} peers"
+        );
+    }
+
+    let events = handle.events().replay_all().await.expect("replay");
+    let batch_events = events
+        .iter()
+        .filter(|event| matches!(event.kind, MobEventKind::MembersWiredBatch { .. }))
+        .count();
+    let single_edge_events = events
+        .iter()
+        .filter(|event| matches!(event.kind, MobEventKind::MembersWired { .. }))
+        .count();
+    assert_eq!(batch_events, 1);
+    assert_eq!(
+        single_edge_events, 0,
+        "dense topology materialization must not emit per-edge wire events"
+    );
+    assert!(
+        wire_elapsed < std::time::Duration::from_secs(30),
+        "300x150 topology materialization should be seconds, not minutes (spawn={spawn_elapsed:?}, wire={wire_elapsed:?})"
+    );
+    eprintln!(
+        "dense topology stress: agents={AGENTS}, edges={EXPECTED_EDGES}, spawn={spawn_elapsed:?}, wire={wire_elapsed:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_retire_fanout_notifies_150_peers_with_bounded_parallelism() {
+    const PEERS: usize = 150;
+    const PER_NOTIFICATION_DELAY_MS: u64 = 20;
+
+    let (handle, service) = create_test_mob(sample_definition()).await;
+    let retiring = AgentIdentity::from("retiring");
+    let retiring_sid = handle
+        .spawn(
+            ProfileName::from("worker"),
+            MeerkatId::from("retiring"),
+            None,
+        )
+        .await
+        .expect("spawn retiring member")
+        .bridge_session_id()
+        .expect("session-backed retiring member")
+        .clone();
+
+    let peer_identities = (0..PEERS)
+        .map(|index| AgentIdentity::from(format!("peer-{index:03}")))
+        .collect::<Vec<_>>();
+    let specs = peer_identities
+        .iter()
+        .map(|identity| SpawnMemberSpec::new("worker", identity.as_str()))
+        .collect::<Vec<_>>();
+    let spawned = handle.spawn_many(specs).await;
+    for result in spawned {
+        result.expect("spawn peer");
+    }
+
+    let mut peer_session_ids = Vec::with_capacity(PEERS);
+    for identity in &peer_identities {
+        peer_session_ids.push(
+            handle
+                .resolve_bridge_session_id(identity)
+                .await
+                .expect("peer bridge session id"),
+        );
+    }
+
+    handle
+        .wire_members_batch(
+            peer_identities
+                .iter()
+                .map(|peer| (retiring.clone(), peer.clone())),
+        )
+        .await
+        .expect("wire retiring member to peers");
+    service
+        .set_comms_behavior(
+            &test_comms_name("worker", "retiring"),
+            MockCommsBehavior {
+                peer_lifecycle_delay_ms: PER_NOTIFICATION_DELAY_MS,
+                ..MockCommsBehavior::default()
+            },
+        )
+        .await;
+
+    let started = Instant::now();
+    handle
+        .retire(retiring.clone())
+        .await
+        .expect("retire high-degree member");
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "150 peer-retired notifications with {PER_NOTIFICATION_DELAY_MS}ms send delay should fan out with bounded parallelism, not run sequentially (elapsed={elapsed:?})"
+    );
+    eprintln!(
+        "retire fanout stress: peers={PEERS}, per_notification_delay_ms={PER_NOTIFICATION_DELAY_MS}, retire={elapsed:?}"
+    );
+    let retiring_intents = service.sent_intents(&retiring_sid).await;
+    assert_eq!(
+        retiring_intents
+            .iter()
+            .filter(|intent| intent.as_str() == "mob.peer_retired")
+            .count(),
+        PEERS,
+        "retiring member must send one peer-retired notice per wired peer"
+    );
+    for (identity, session_id) in peer_identities.iter().zip(peer_session_ids.iter()) {
+        let member = handle
+            .get_member(identity)
+            .await
+            .expect("peer should remain active");
+        assert!(
+            !member.wired_to.contains(&retiring),
+            "{identity} should no longer project the retired peer"
+        );
+        let trusted = service.trusted_peer_names(session_id).await;
+        assert!(
+            !trusted
+                .iter()
+                .any(|name| name == &test_comms_name("worker", "retiring")),
+            "{identity} should remove trust for the retired peer"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_wire_is_idempotent_and_emits_single_pair_event() {
     let (handle, service) = create_test_mob(sample_definition()).await;
     let sid_l = handle
@@ -26639,6 +26937,60 @@ async fn test_shutdown_does_not_stall_on_stuck_lifecycle_notification() {
         "shutdown must not stall on stuck lifecycle notification tasks"
     );
     shutdown_result.unwrap().expect("shutdown should succeed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_lifecycle_notification_burst_backpressures_without_dropping() {
+    const NOTIFICATIONS: usize = 48;
+    const INJECT_DELAY_MS: u64 = 20;
+
+    let def = sample_definition();
+    let service = Arc::new(MockSessionService::new());
+    let _ = service.enable_runtime_adapter();
+    let handle = MobBuilder::new(def, MobStorage::in_memory())
+        .with_session_service(service.clone())
+        .create()
+        .await
+        .expect("create mob");
+    handle
+        .spawn(ProfileName::from("lead"), MeerkatId::from("lead-1"), None)
+        .await
+        .expect("spawn autonomous orchestrator");
+    service.set_inject_delay_ms(INJECT_DELAY_MS);
+
+    let baseline = service.inject_call_count();
+    let started = Instant::now();
+    handle
+        .debug_lifecycle_notification_burst(NOTIFICATIONS, "burst lifecycle")
+        .await
+        .expect("lifecycle burst");
+    let command_elapsed = started.elapsed();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while service.inject_call_count() < baseline + NOTIFICATIONS as u64 {
+        assert!(
+            Instant::now() < deadline,
+            "lifecycle burst must inject every notification instead of dropping at the task cap"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let total_elapsed = started.elapsed();
+
+    assert_eq!(
+        service.inject_call_count(),
+        baseline + NOTIFICATIONS as u64,
+        "lifecycle burst must inject every notification instead of dropping at the task cap"
+    );
+    assert!(
+        command_elapsed >= Duration::from_millis(INJECT_DELAY_MS),
+        "burst should apply backpressure once the lifecycle task set saturates"
+    );
+    assert!(
+        total_elapsed < Duration::from_secs(3),
+        "backpressured lifecycle burst should complete in bounded waves, not stall indefinitely (elapsed={total_elapsed:?})"
+    );
+    eprintln!(
+        "lifecycle notification stress: notifications={NOTIFICATIONS}, inject_delay_ms={INJECT_DELAY_MS}, command={command_elapsed:?}, total={total_elapsed:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

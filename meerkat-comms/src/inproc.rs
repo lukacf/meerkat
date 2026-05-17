@@ -471,6 +471,7 @@ impl InprocRegistry {
     ///
     /// Router call sites already resolved the destination from canonical trust
     /// state, so delivery must use that identity rather than a display name.
+    #[cfg(test)]
     pub(crate) fn send_to_pubkey_any_namespace_with_id(
         &self,
         from_keypair: &Keypair,
@@ -491,6 +492,33 @@ impl InprocRegistry {
             kind,
             sign_envelope,
         )
+    }
+
+    /// Backpressured variant of [`Self::send_to_pubkey_any_namespace_with_id`].
+    ///
+    /// Runtime-originated peer sends should await receiver capacity instead of
+    /// turning a transient full inbox into semantic message loss.
+    pub(crate) async fn send_to_pubkey_any_namespace_with_id_wait(
+        &self,
+        from_keypair: &Keypair,
+        to_pubkey: &PubKey,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let sender = self
+            .get_by_pubkey_any_namespace(to_pubkey)
+            .ok_or_else(|| InprocSendError::PeerNotFound(to_pubkey.to_peer_id().to_string()))?;
+
+        Self::deliver_to_sender_wait(
+            from_keypair,
+            *to_pubkey,
+            sender,
+            envelope_id,
+            kind,
+            sign_envelope,
+        )
+        .await
     }
 
     /// Send a message directly to an inproc peer within a namespace.
@@ -587,6 +615,42 @@ impl InprocRegistry {
         // Deliver directly to inbox
         let envelope_id = envelope.id;
         match sender.send_classified(InboxItem::External { envelope }) {
+            AdmissionOutcome::Admitted => {}
+            AdmissionOutcome::Dropped {
+                reason: DropReason::SessionClosed,
+            } => return Err(InprocSendError::InboxClosed),
+            AdmissionOutcome::Dropped {
+                reason: DropReason::InboxFull,
+            } => return Err(InprocSendError::InboxFull),
+            AdmissionOutcome::Dropped { reason } => {
+                return Err(InprocSendError::IngressDropped(reason));
+            }
+        }
+
+        Ok(envelope_id)
+    }
+
+    async fn deliver_to_sender_wait(
+        from_keypair: &Keypair,
+        to_pubkey: PubKey,
+        sender: InboxSender,
+        envelope_id: Uuid,
+        kind: MessageKind,
+        sign_envelope: bool,
+    ) -> Result<uuid::Uuid, InprocSendError> {
+        let mut envelope = Envelope {
+            id: envelope_id,
+            from: from_keypair.public_key(),
+            to: to_pubkey,
+            kind,
+            sig: Signature::new([0u8; 64]),
+        };
+        if sign_envelope {
+            envelope.sign(from_keypair);
+        }
+
+        let envelope_id = envelope.id;
+        match sender.send_wait(InboxItem::External { envelope }).await {
             AdmissionOutcome::Admitted => {}
             AdmissionOutcome::Dropped {
                 reason: DropReason::SessionClosed,

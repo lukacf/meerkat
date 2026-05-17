@@ -47,6 +47,9 @@ use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 type TurnEventTx = tokio::sync::mpsc::Sender<meerkat_core::EventEnvelope<meerkat_core::AgentEvent>>;
 
 #[cfg(feature = "runtime-adapter")]
+const DEFERRED_TURN_EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+#[cfg(feature = "runtime-adapter")]
 struct DeferredTurnEventDelivery {
     release_tx: oneshot::Sender<()>,
 }
@@ -67,7 +70,7 @@ fn defer_turn_events_until_machine_completion(
         return (None, None);
     };
 
-    let (deferred_tx, mut deferred_rx) = mpsc::channel(64);
+    let (deferred_tx, mut deferred_rx) = mpsc::channel(DEFERRED_TURN_EVENT_CHANNEL_CAPACITY);
     let (release_tx, release_rx) = oneshot::channel();
     let session_id = session_id.clone();
     tokio::spawn(async move {

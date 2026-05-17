@@ -649,6 +649,17 @@ pub enum PeerTarget {
     External(TrustedPeerDescriptor),
 }
 
+/// Summary for one dense local-member topology materialization pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobWireMembersBatchReport {
+    /// Number of edges requested before normalization/deduplication.
+    pub requested: usize,
+    /// Normalized unique edges already present in the MobMachine graph.
+    pub already_wired: Vec<crate::event::MemberWireEdge>,
+    /// Normalized unique edges newly admitted by the MobMachine graph.
+    pub wired: Vec<crate::event::MemberWireEdge>,
+}
+
 /// Typed request to bind a local member to an external peer.
 ///
 /// App-facing surfaces provide this shape instead of comms-owned `peer_id` /
@@ -1563,6 +1574,16 @@ impl MobHandle {
                 Ok(MobMachineCommandResult::LifecycleSnapshot(snapshot))
             }
             #[cfg(test)]
+            MobMachineCommand::LifecycleNotificationBurst { count, message } => {
+                self.send_actor_command(|reply_tx| MobCommand::LifecycleNotificationBurst {
+                    count,
+                    message,
+                    reply_tx,
+                })
+                .await??;
+                Ok(MobMachineCommandResult::LifecycleNotificationBurst)
+            }
+            #[cfg(test)]
             MobMachineCommand::DslT2Snapshot => {
                 let snapshot = self
                     .send_actor_command(|reply_tx| MobCommand::DslT2Snapshot { reply_tx })
@@ -1595,6 +1616,12 @@ impl MobHandle {
                 })
                 .await??;
                 Ok(MobMachineCommandResult::Unit)
+            }
+            MobMachineCommand::WireMembersBatch { edges } => {
+                let report = self
+                    .send_actor_command(|reply_tx| MobCommand::WireMembersBatch { edges, reply_tx })
+                    .await??;
+                Ok(MobMachineCommandResult::WireMembersBatchReport(report))
             }
             MobMachineCommand::Unwire { local, target } => {
                 self.send_actor_command(|reply_tx| MobCommand::Unwire {
@@ -2702,6 +2729,36 @@ impl MobHandle {
         }
     }
 
+    /// Materialize many local-member wiring edges in one actor command.
+    ///
+    /// This is intended for initial topology reconciliation, where callers
+    /// already have a graph snapshot. It only accepts local mob-member
+    /// identities; external peer wiring stays on the single-edge path because
+    /// those mutations carry descriptor/rollback semantics per peer.
+    pub async fn wire_members_batch<I, A, B>(
+        &self,
+        edges: I,
+    ) -> Result<MobWireMembersBatchReport, MobError>
+    where
+        I: IntoIterator<Item = (A, B)>,
+        A: Into<AgentIdentity>,
+        B: Into<AgentIdentity>,
+    {
+        let edges = edges
+            .into_iter()
+            .map(|(a, b)| (a.into(), b.into()))
+            .collect();
+        match self
+            .execute_machine_command(MobMachineCommand::WireMembersBatch { edges })
+            .await?
+        {
+            MobMachineCommandResult::WireMembersBatchReport(report) => Ok(report),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
     /// Unwire a local member from either another local member or an external peer.
     pub async fn unwire<T>(&self, local: AgentIdentity, target: T) -> Result<(), MobError>
     where
@@ -3039,6 +3096,26 @@ impl MobHandle {
             .await?
         {
             MobMachineCommandResult::LifecycleSnapshot(snapshot) => Ok(snapshot),
+            _ => Err(MobError::Internal(
+                "unexpected command result variant".into(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn debug_lifecycle_notification_burst(
+        &self,
+        count: usize,
+        message: impl Into<String>,
+    ) -> Result<(), MobError> {
+        match self
+            .execute_machine_command(MobMachineCommand::LifecycleNotificationBurst {
+                count,
+                message: message.into(),
+            })
+            .await?
+        {
+            MobMachineCommandResult::LifecycleNotificationBurst => Ok(()),
             _ => Err(MobError::Internal(
                 "unexpected command result variant".into(),
             )),

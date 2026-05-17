@@ -127,6 +127,11 @@ pub(crate) enum MobMachineCommand {
     #[cfg(test)]
     LifecycleSnapshot,
     #[cfg(test)]
+    LifecycleNotificationBurst {
+        count: usize,
+        message: String,
+    },
+    #[cfg(test)]
     DslT2Snapshot,
     SetSpawnPolicy {
         policy: Option<Arc<dyn crate::runtime::SpawnPolicy>>,
@@ -143,6 +148,15 @@ pub(crate) enum MobMachineCommand {
     Wire {
         local: MeerkatId,
         target: crate::runtime::PeerTarget,
+    },
+    /// Materialize many local-member wiring edges through one actor command.
+    ///
+    /// This is shell batching for dense topology reconciliation. Each edge
+    /// still lowers into the MobMachine-owned `WireMembers` input; the command
+    /// only coalesces validation, actor queuing, comms side effects, and
+    /// projection/event fanout.
+    WireMembersBatch {
+        edges: Vec<(AgentIdentity, AgentIdentity)>,
     },
     /// Unwire a local member from a peer target. Mirror of `Wire`.
     Unwire {
@@ -177,6 +191,7 @@ pub(crate) struct SubmitWorkCommand {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum MobMachineCommandResult {
     Unit,
+    WireMembersBatchReport(crate::runtime::MobWireMembersBatchReport),
     RunId(RunId),
     WorkReceipt {
         work_ref: WorkRef,
@@ -209,6 +224,8 @@ pub(crate) enum MobMachineCommandResult {
     OrchestratorSnapshot(MobOrchestratorSnapshot),
     #[cfg(test)]
     LifecycleSnapshot(MobLifecycleSnapshot),
+    #[cfg(test)]
+    LifecycleNotificationBurst,
     #[cfg(test)]
     DslT2Snapshot(crate::runtime::MobDslT2Snapshot),
 }
@@ -549,12 +566,14 @@ impl MobMachineCommandVariant {
             Self::FlowTrackerCounts
             | Self::OrchestratorSnapshot
             | Self::LifecycleSnapshot
+            | Self::LifecycleNotificationBurst
             | Self::DslT2Snapshot
             | Self::ListMembersMatching
             | Self::Wire
+            | Self::WireMembersBatch
             | Self::Unwire => None,
             #[cfg(not(test))]
-            Self::ListMembersMatching | Self::Wire | Self::Unwire => None,
+            Self::ListMembersMatching | Self::Wire | Self::WireMembersBatch | Self::Unwire => None,
             Self::RunFlow => Some(MobMachineCatalogInput::RunFlow),
             Self::CancelFlow => Some(MobMachineCatalogInput::CancelFlow),
             Self::FlowStatus => Some(MobMachineCatalogInput::FlowStatus),
@@ -744,6 +763,7 @@ const fn mob_machine_command_classification(
         MobMachineCommandVariant::FlowTrackerCounts
         | MobMachineCommandVariant::OrchestratorSnapshot
         | MobMachineCommandVariant::LifecycleSnapshot
+        | MobMachineCommandVariant::LifecycleNotificationBurst
         | MobMachineCommandVariant::DslT2Snapshot => {
             MobMachineCommandClassification::ShellMechanic(
                 MobMachineShellMechanicReason::TestInspection,
@@ -758,6 +778,9 @@ const fn mob_machine_command_classification(
             MobMachineCatalogInput::WireMembers,
             MobMachineCatalogInput::WireExternalPeer,
         ]),
+        MobMachineCommandVariant::WireMembersBatch => {
+            MobMachineCommandClassification::CatalogInput(MobMachineCatalogInput::WireMembers)
+        }
         MobMachineCommandVariant::Unwire => MobMachineCommandClassification::CatalogInputs(&[
             MobMachineCatalogInput::UnwireMembers,
             MobMachineCatalogInput::UnwireExternalPeer,

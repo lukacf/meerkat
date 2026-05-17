@@ -281,6 +281,12 @@ pub(super) enum MobCommand {
     LifecycleSnapshot {
         reply_tx: oneshot::Sender<MobLifecycleSnapshot>,
     },
+    #[cfg(test)]
+    LifecycleNotificationBurst {
+        count: usize,
+        message: String,
+        reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
     /// Snapshot the T2 DSL field projections (member state markers, wiring
     /// edges, identity→runtime map, tasks + task id sets) directly from the
     /// DSL authority. Test-only read seam used by the runtime-parity
@@ -360,6 +366,11 @@ pub(super) enum MobCommand {
         local: MeerkatId,
         target: super::handle::PeerTarget,
         reply_tx: oneshot::Sender<Result<(), MobError>>,
+    },
+    /// Materialize many local-member wiring edges through one actor turn.
+    WireMembersBatch {
+        edges: Vec<(AgentIdentity, AgentIdentity)>,
+        reply_tx: oneshot::Sender<Result<super::handle::MobWireMembersBatchReport, MobError>>,
     },
     /// Unwire a local mob member from a peer target. Mirror of `Wire`:
     /// local member targets forward to `UnwireMembers`, while raw external

@@ -133,6 +133,7 @@ struct ClassifiedInboxQueue {
     trusted_peers: Arc<RwLock<TrustedPeers>>,
     phase: PeerIngressState,
     dropped_count: Arc<AtomicU64>,
+    capacity_notify: Arc<Notify>,
 }
 
 impl ClassifiedInboxQueue {
@@ -145,11 +146,16 @@ impl ClassifiedInboxQueue {
             trusted_peers,
             phase: PeerIngressState::Absent,
             dropped_count: Arc::new(AtomicU64::new(0)),
+            capacity_notify: Arc::new(Notify::new()),
         }
     }
 
     fn dropped_counter(&self) -> Arc<AtomicU64> {
         self.dropped_count.clone()
+    }
+
+    fn capacity_notifier(&self) -> Arc<Notify> {
+        self.capacity_notify.clone()
     }
 
     /// Admit a prepared item into the peer-ingress lifecycle.
@@ -258,6 +264,9 @@ impl ClassifiedInboxQueue {
         for entry in &drained {
             self.note_peer_dequeue(entry);
         }
+        if !drained.is_empty() {
+            self.capacity_notify.notify_waiters();
+        }
         drained
     }
 
@@ -265,6 +274,7 @@ impl ClassifiedInboxQueue {
         let entry = self.entries.pop_front();
         if let Some(entry_ref) = entry.as_ref() {
             self.note_peer_dequeue(entry_ref);
+            self.capacity_notify.notify_one();
         }
         entry
     }
@@ -779,6 +789,112 @@ impl InboxSender {
                 );
                 self.record_drop(DropReason::InboxFull)
             }
+        }
+    }
+
+    /// Send an item through the same admission path as [`Self::send`], but
+    /// await queue capacity instead of reporting `InboxFull`.
+    ///
+    /// This is used by runtime-originated peer sends where backpressure is
+    /// preferable to semantic loss. Policy and closed-queue failures remain
+    /// typed `Dropped` outcomes; only capacity waits.
+    pub async fn send_wait(&self, item: InboxItem) -> AdmissionOutcome {
+        if self.classification_context.is_some() {
+            return self.send_classified_wait(item).await;
+        }
+        match self.tx.send(item).await {
+            Ok(()) => {
+                self.notify.notify_waiters();
+                AdmissionOutcome::Admitted
+            }
+            Err(_) => {
+                tracing::warn!(
+                    reason = ?DropReason::SessionClosed,
+                    "raw inbox dropped item while waiting: queue closed"
+                );
+                self.record_drop(DropReason::SessionClosed)
+            }
+        }
+    }
+
+    async fn send_classified_wait(&self, item: InboxItem) -> AdmissionOutcome {
+        let (Some(ctx), Some(classified_queue)) =
+            (&self.classification_context, &self.classified_queue)
+        else {
+            return self.send_wait_raw_fallback(item).await;
+        };
+
+        let result = match ctx.prepare(item) {
+            Some(r) => r,
+            None => {
+                tracing::warn!(
+                    reason = ?DropReason::ClassificationRejected,
+                    "classified inbox dropped item at classification stage"
+                );
+                return self.record_drop(DropReason::ClassificationRejected);
+            }
+        };
+        let kind = result.kind;
+        let is_actionable = result.class.is_actionable();
+        let mut prepared = Some(result);
+
+        loop {
+            let capacity_notify = {
+                let mut queue = classified_queue.lock();
+                if queue.closed {
+                    tracing::warn!(
+                        kind = ?kind,
+                        reason = ?DropReason::SessionClosed,
+                        "classified inbox dropped item while waiting: queue closed"
+                    );
+                    return self.record_drop(DropReason::SessionClosed);
+                }
+                if queue.entries.len() < queue.capacity {
+                    let Some(result) = prepared.take() else {
+                        tracing::error!(
+                            kind = ?kind,
+                            reason = ?DropReason::SessionClosed,
+                            "classified inbox send_wait reached admission after item was already consumed"
+                        );
+                        return self.record_drop(DropReason::SessionClosed);
+                    };
+                    let decision = queue.admit_peer_receive(&result);
+                    if let AdmissionOutcome::Dropped { reason } = decision.outcome {
+                        return self.record_drop(reason);
+                    }
+                    queue.entries.push_back(ClassifiedInboxEntry {
+                        raw_item_id: result.raw_item_id,
+                        item: result.item,
+                        class: result.class,
+                        auth: result.auth,
+                        kind,
+                        from_peer: result.from_peer,
+                        ingress_fact: result.ingress_fact,
+                        lifecycle_peer: result.lifecycle_peer,
+                        request_id: result.request_id,
+                        admission_diagnostic: decision.admission_diagnostic,
+                        response_terminality: result.response_terminality,
+                        text_projection: result.text_projection,
+                    });
+                    if is_actionable && let Some(ref actionable) = self.actionable_notify {
+                        actionable.notify_waiters();
+                    }
+                    self.notify.notify_waiters();
+                    return AdmissionOutcome::Admitted;
+                }
+                queue.capacity_notifier()
+            };
+            capacity_notify.notified().await;
+        }
+    }
+
+    async fn send_wait_raw_fallback(&self, item: InboxItem) -> AdmissionOutcome {
+        match self.tx.send(item).await {
+            Ok(()) => {
+                self.notify.notify_waiters();
+                AdmissionOutcome::Admitted
+            }
+            Err(_) => self.record_drop(DropReason::SessionClosed),
         }
     }
 
@@ -1742,6 +1858,191 @@ mod tests {
             }
         );
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn test_classified_send_wait_backpressures_until_capacity_opens() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), false);
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx),
+            classified_queue: Some(classified_queue.clone()),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        assert_eq!(
+            sender.send_classified(InboxItem::External {
+                envelope: make_test_envelope(),
+            }),
+            AdmissionOutcome::Admitted
+        );
+
+        let waiting_sender = sender.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_sender
+                .send_wait(InboxItem::External {
+                    envelope: make_test_envelope(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "send_wait must wait instead of dropping when the classified queue is full"
+        );
+
+        assert!(classified_queue.lock().pop_front().is_some());
+        assert_eq!(
+            waiting.await.expect("send_wait task should complete"),
+            AdmissionOutcome::Admitted
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "backpressured send should not increment the drop counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classified_send_wait_rechecks_trust_after_capacity_opens() {
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let queue = ClassifiedInboxQueue::new(1, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(1);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx.clone()),
+            classified_queue: Some(classified_queue.clone()),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        assert_eq!(
+            sender.send_classified(InboxItem::External {
+                envelope: make_test_envelope(),
+            }),
+            AdmissionOutcome::Admitted
+        );
+
+        let waiting_sender = sender.clone();
+        let waiting = tokio::spawn(async move {
+            waiting_sender
+                .send_wait(InboxItem::External {
+                    envelope: make_test_envelope(),
+                })
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "send_wait should be parked on capacity before the revoke"
+        );
+
+        *ctx.trusted_peers.write() = TrustedPeers::new();
+        assert!(classified_queue.lock().pop_front().is_some());
+
+        assert_eq!(
+            waiting.await.expect("send_wait task should complete"),
+            AdmissionOutcome::Dropped {
+                reason: DropReason::UntrustedSender
+            },
+            "capacity wait must not carry stale classification-time trust into admission"
+        );
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            classified_queue.lock().entries.len(),
+            0,
+            "revoked ingress must not be queued after capacity opens"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_classified_send_wait_stress_backpressures_burst_without_drops() {
+        const CAPACITY: usize = 8;
+        const WAITERS: usize = 256;
+
+        let sender_pubkey = PubKey::new([1u8; 32]);
+        let ctx = make_classification_context(make_trusted("peer", &sender_pubkey), true);
+        let actionable_notify = Arc::new(Notify::new());
+        let notify = Arc::new(Notify::new());
+        let queue =
+            ClassifiedInboxQueue::new(CAPACITY, ctx.require_peer_auth, ctx.trusted_peers.clone());
+        let counter = queue.dropped_counter();
+        let classified_queue = Arc::new(Mutex::new(queue));
+        let (tx, _rx) = mpsc::channel::<InboxItem>(CAPACITY);
+        let sender = InboxSender {
+            tx,
+            notify,
+            classification_context: Some(ctx),
+            classified_queue: Some(classified_queue.clone()),
+            actionable_notify: Some(actionable_notify),
+            dropped_count: Some(counter.clone()),
+        };
+
+        for _ in 0..CAPACITY {
+            assert_eq!(
+                sender.send_classified(InboxItem::External {
+                    envelope: make_test_envelope(),
+                }),
+                AdmissionOutcome::Admitted
+            );
+        }
+
+        let mut waiters = Vec::with_capacity(WAITERS);
+        for _ in 0..WAITERS {
+            let waiting_sender = sender.clone();
+            waiters.push(tokio::spawn(async move {
+                waiting_sender
+                    .send_wait(InboxItem::External {
+                        envelope: make_test_envelope(),
+                    })
+                    .await
+            }));
+        }
+        tokio::task::yield_now().await;
+        assert!(
+            waiters.iter().any(|waiter| !waiter.is_finished()),
+            "burst should saturate the tiny classified queue and park send_wait tasks"
+        );
+
+        for _ in 0..(CAPACITY + WAITERS) {
+            loop {
+                if classified_queue.lock().pop_front().is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        for waiter in waiters {
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+                    .await
+                    .expect("send_wait task should complete without stalling")
+                    .expect("send_wait task should join"),
+                AdmissionOutcome::Admitted
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            0,
+            "backpressured burst must not record capacity drops"
+        );
     }
 
     #[test]

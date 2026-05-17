@@ -77,7 +77,7 @@ pub use coordination::{
 };
 pub use definition::MobDefinition;
 pub use error::MobError;
-pub use event::{AttributedEvent, MobEvent, MobEventKind, NewMobEvent};
+pub use event::{AttributedEvent, MemberWireEdge, MobEvent, MobEventKind, NewMobEvent};
 pub use ids::{
     AgentIdentity, AgentRuntimeId, BranchId, FenceToken, FlowId, FlowNodeId, FrameId, Generation,
     LoopId, LoopInstanceId, MobId, ProfileName, RunId, StepId, WorkOrigin, WorkRef, WorkSpec,
@@ -127,9 +127,9 @@ pub use runtime::{
     MemberRespawnReceipt, MobBuilder, MobDestroyError, MobDestroyReport, MobEventRouterConfig,
     MobEventRouterHandle, MobEventsSubscription, MobEventsSubscriptionConfig, MobHandle,
     MobMemberSnapshot, MobMemberStatus, MobPeerConnectivitySnapshot, MobRespawnError,
-    MobSessionService, MobState, MobUnreachablePeer, PeerTarget, PreviousMemberCleanupReport,
-    SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec, SupervisorRotationReport,
-    WorkDeliveryReceipt,
+    MobSessionService, MobState, MobUnreachablePeer, MobWireMembersBatchReport, PeerTarget,
+    PreviousMemberCleanupReport, SpawnMemberSpec, SpawnPolicy, SpawnResult, SpawnSpec,
+    SupervisorRotationReport, WorkDeliveryReceipt,
 };
 pub use runtime::{FlowFrameKernel, FlowFrameMutator};
 pub use runtime::{FlowTurnExecutor, FlowTurnOutcome, FlowTurnTicket, TimeoutDisposition};

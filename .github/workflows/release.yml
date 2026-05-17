@@ -96,16 +96,31 @@ jobs:
             const pollMs = 30 * 1000;
             const started = Date.now();
 
-            for (;;) {
-              const { data } = await github.rest.checks.listForRef({
-                owner,
-                repo,
-                ref,
-                filter: "latest",
-                per_page: 100,
-              });
+            async function listAcceptedChecks() {
+              const checks = [];
+              for (let page = 1; ; page += 1) {
+                const { data } = await github.rest.checks.listForRef({
+                  owner,
+                  repo,
+                  ref,
+                  filter: "all",
+                  per_page: 100,
+                  page,
+                });
+                for (const run of data.check_runs) {
+                  if (acceptedCheckNames.has(run.name)) {
+                    checks.push(run);
+                  }
+                }
+                if (data.check_runs.length < 100) {
+                  break;
+                }
+              }
+              return checks;
+            }
 
-              const checks = data.check_runs.filter((run) => acceptedCheckNames.has(run.name));
+            for (;;) {
+              const checks = await listAcceptedChecks();
               if (checks.length > 0) {
                 core.info(
                   checks

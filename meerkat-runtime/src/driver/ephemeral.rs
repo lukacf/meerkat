@@ -650,50 +650,95 @@ impl EphemeralRuntimeDriver {
     /// Called by the persistent driver during crash recovery to ensure the
     /// driver knows about inputs loaded from the store before `Recover` fires.
     ///
-    /// Important: this records mechanical metadata and then applies
-    /// `RecoverInputLifecycle`; the caller restores the recovered `InputState`
-    /// into the ledger before this call, so we must not rebuild physical queue
-    /// projections until the full recovery batch has entered the DSL.
+    /// Important: this first submits a recovered-admission witness to
+    /// MeerkatMachine. Mechanical metadata is re-materialized only after that
+    /// generated authority accepts the persisted kind/policy/semantics tuple.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_recovered_to_ingress(
         &mut self,
         work_id: InputId,
-        content_shape: ContentShape,
-        handling_mode: HandlingMode,
         runtime_semantics: RuntimeInputSemantics,
-        primitive_projection: RuntimeInputProjection,
-        is_prompt: bool,
         recovered_state: &InputState,
         recovered_seed: &InputStateSeed,
         policy: PolicyDecision,
         request_id: Option<RequestId>,
         reservation_key: Option<ReservationKey>,
     ) -> Result<(), RuntimeDriverError> {
-        let persisted_input =
-            recovered_state.persisted_input.as_ref().ok_or_else(|| {
-                RuntimeDriverError::Internal(format!(
-                    "store corruption: recovered input '{work_id}' has no persisted input; cannot validate recovered runtime semantics"
-                ))
-            })?;
-        let expected = RuntimeInputSemantics::from_policy_and_kind(&policy, persisted_input.kind());
-        if runtime_semantics != expected {
-            return Err(RuntimeDriverError::Internal(format!(
-                "store corruption: recovered input '{work_id}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind"
-            )));
-        }
-        self.recover_input_lifecycle(
+        let persisted_input = recovered_state.persisted_input.as_ref().ok_or_else(|| {
+            RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' has no persisted input; cannot validate recovered admission witness"
+            ))
+        })?;
+        let input_kind = persisted_input.kind();
+        let handling_mode = crate::accept::handling_mode_from_policy(&policy);
+        let content_shape = ContentShape::from_kind(input_kind);
+        let primitive_projection = crate::input::runtime_input_projection(persisted_input);
+        let is_prompt = matches!(persisted_input, Input::Prompt(_));
+
+        self.apply_recovered_admission_witness(
+            &work_id,
+            input_kind,
+            handling_mode,
+            runtime_semantics,
+            &policy,
+        )?;
+        self.apply_recovered_lifecycle(&work_id, recovered_seed, Some(handling_mode))?;
+        self.record_admission_metadata(
             &work_id,
             &content_shape,
             handling_mode,
             runtime_semantics,
             primitive_projection,
             is_prompt,
-            recovered_state,
-            recovered_seed,
             &policy,
             request_id.as_ref(),
             reservation_key.as_ref(),
+        );
+        Ok(())
+    }
+
+    fn apply_recovered_admission_witness(
+        &mut self,
+        work_id: &InputId,
+        input_kind: crate::identifiers::InputKind,
+        handling_mode: HandlingMode,
+        runtime_semantics: RuntimeInputSemantics,
+        policy: &PolicyDecision,
+    ) -> Result<(), RuntimeDriverError> {
+        let terminal_apply_intent = runtime_semantics
+            .peer_response_terminal_apply_intent
+            .map(mm_dsl::RecoveredPeerResponseTerminalApplyIntent::from);
+        let runtime_boundary =
+            mm_dsl::RecoveredRunApplyBoundary::try_from(runtime_semantics.boundary).map_err(
+                |err| {
+                    RuntimeDriverError::Internal(format!(
+                        "store corruption: recovered input '{work_id}' has unsupported runtime boundary: {err}"
+                    ))
+                },
+            )?;
+
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RecoverAdmittedInput {
+                input_id: Self::dsl_key(work_id),
+                input_kind: mm_dsl::RecoveredInputKind::from(input_kind),
+                policy_apply_mode: mm_dsl::RecoveredPolicyApplyMode::from(policy.apply_mode),
+                policy_routing_disposition: mm_dsl::RecoveredRoutingDisposition::from(
+                    policy.routing_disposition,
+                ),
+                runtime_boundary,
+                runtime_execution_kind: mm_dsl::RecoveredRuntimeExecutionKind::from(
+                    runtime_semantics.execution_kind,
+                ),
+                runtime_peer_response_terminal_apply_intent: terminal_apply_intent,
+                lane: mm_dsl::InputLane::from(handling_mode),
+            },
+            "RecoverAdmittedInput",
         )
+        .map_err(|err| {
+            RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' rejected by generated recovered-admission authority: {err}"
+            ))
+        })
     }
 
     pub(crate) fn recover_terminal_input_lifecycle(
@@ -726,38 +771,6 @@ impl EphemeralRuntimeDriver {
             InputLifecycleState::Coalesced => mm_dsl::InputPhase::Coalesced,
             InputLifecycleState::Abandoned => mm_dsl::InputPhase::Abandoned,
         }
-    }
-
-    /// Recover driver state for a persisted input. Store rows are persistence
-    /// witnesses; the recovered lifecycle facts enter the DSL through the
-    /// dedicated machine input below, never through direct state hydration.
-    #[allow(clippy::too_many_arguments)]
-    fn recover_input_lifecycle(
-        &mut self,
-        work_id: &InputId,
-        content_shape: &ContentShape,
-        handling_mode: HandlingMode,
-        runtime_semantics: RuntimeInputSemantics,
-        primitive_projection: RuntimeInputProjection,
-        is_prompt: bool,
-        _recovered_state: &InputState,
-        recovered_seed: &InputStateSeed,
-        policy: &PolicyDecision,
-        request_id: Option<&RequestId>,
-        reservation_key: Option<&ReservationKey>,
-    ) -> Result<(), RuntimeDriverError> {
-        self.record_admission_metadata(
-            work_id,
-            content_shape,
-            handling_mode,
-            runtime_semantics,
-            primitive_projection,
-            is_prompt,
-            policy,
-            request_id,
-            reservation_key,
-        );
-        self.apply_recovered_lifecycle(work_id, recovered_seed, Some(handling_mode))
     }
 
     fn apply_recovered_lifecycle(

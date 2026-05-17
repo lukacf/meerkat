@@ -481,6 +481,40 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 "RuntimeEffectKind",
                 &["CancelAfterBoundary", "StopRuntimeExecutor"],
             ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputKind",
+                &[
+                    "Prompt",
+                    "PeerMessage",
+                    "PeerRequest",
+                    "PeerResponseProgress",
+                    "PeerResponseTerminal",
+                    "FlowStep",
+                    "ExternalEvent",
+                    "Continuation",
+                    "Operation",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredPolicyApplyMode",
+                &["StageRunStart", "StageRunBoundary", "InjectNow", "Ignore"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredRoutingDisposition",
+                &["Queue", "Steer", "Immediate", "Drop"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredRunApplyBoundary",
+                &["RunStart", "RunCheckpoint", "Immediate"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredRuntimeExecutionKind",
+                &["ContentTurn", "ResumePending"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredPeerResponseTerminalApplyIntent",
+                &["AppendContextAndRun"],
+            ),
             NamedTypeBinding::string("SessionId"),
             NamedTypeBinding::string("SessionLlmCapabilitySurface"),
             NamedTypeBinding::string_enum(
@@ -695,6 +729,7 @@ runtime_internal_inputs!(
         ProgressReportedOp,
         QueueAccepted,
         RecordBoundarySeq,
+        RecoverAdmittedInput,
         PublishLocalEndpoint,
         RecoverableFailure,
         RecoverInputLifecycle,

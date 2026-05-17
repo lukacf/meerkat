@@ -921,6 +921,75 @@ pub enum InputLane {
     Steer,
 }
 
+/// Typed persisted input kind carried by recovered-admission witnesses.
+///
+/// Recovery observes this from the durable input payload, then MeerkatMachine
+/// owns whether the paired runtime semantics and policy stamps are coherent
+/// for that kind. Shell recovery must not rebuild that legality table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+/// Typed mirror of the recovered policy apply mode used only as an admission
+/// witness. The machine validates this against the persisted runtime boundary
+/// stamp before any recovered admission facts are re-materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+/// Typed mirror of recovered routing disposition. The machine validates this
+/// against the recovered lane witness so queue/steer truth is not rebuilt by
+/// recovery glue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+/// Typed persisted runtime apply boundary carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+/// Typed persisted runtime execution class carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+/// Typed recovered terminal peer-response apply intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchTurnPhase {
     #[default]
@@ -1266,6 +1335,12 @@ macro_rules! meerkat_catalog_machine_dsl {
             // maps to exactly one `InputLane` value by construction.
             // Replaces the former `queue_lane`/`steer_lane` parallel sets.
             input_lane: Map<String, Enum<InputLane>>,
+            // Recovered admission witnesses accepted by MeerkatMachine before
+            // shell recovery may re-materialize admission metadata. The lane
+            // map records the machine-validated queue/steer witness so
+            // RecoverInputLifecycle cannot write a different lane.
+            recovered_admitted_inputs: Set<String>,
+            recovered_admitted_lanes: Map<String, Enum<InputLane>>,
 
             // --- Ops lifecycle substate ---
             op_statuses: Map<String, Enum<OperationStatus>>,
@@ -1513,6 +1588,8 @@ macro_rules! meerkat_catalog_machine_dsl {
             next_admission_seq = 0,
             input_admission_seq = EmptyMap,
             input_lane = EmptyMap,
+            recovered_admitted_inputs = EmptySet,
+            recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
             op_statuses = EmptyMap,
             op_completion_seq = EmptyMap,
@@ -1734,6 +1811,16 @@ macro_rules! meerkat_catalog_machine_dsl {
             },
             RunCancelled { run_id: RunId },
             // Input lifecycle inputs
+            RecoverAdmittedInput {
+                input_id: String,
+                input_kind: Enum<RecoveredInputKind>,
+                policy_apply_mode: Enum<RecoveredPolicyApplyMode>,
+                policy_routing_disposition: Enum<RecoveredRoutingDisposition>,
+                runtime_boundary: Enum<RecoveredRunApplyBoundary>,
+                runtime_execution_kind: Enum<RecoveredRuntimeExecutionKind>,
+                runtime_peer_response_terminal_apply_intent: Option<Enum<RecoveredPeerResponseTerminalApplyIntent>>,
+                lane: Enum<InputLane>,
+            },
             RecoverInputLifecycle {
                 input_id: String,
                 phase: Enum<InputPhase>,
@@ -6995,6 +7082,58 @@ macro_rules! meerkat_catalog_machine_dsl {
         // Absorbed substate transitions — Input Lifecycle
         // =====================================================================
 
+        // RecoverAdmittedInput: accept or reject the recovered admission
+        // witness before shell recovery may re-materialize admission metadata.
+        // This is the coherence check for persisted input kind, policy, lane,
+        // and runtime semantics stamps.
+        transition RecoverAdmittedInput {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RecoverAdmittedInput {
+                input_id,
+                input_kind,
+                policy_apply_mode,
+                policy_routing_disposition,
+                runtime_boundary,
+                runtime_execution_kind,
+                runtime_peer_response_terminal_apply_intent,
+                lane
+            }
+            guard "recovered_boundary_matches_policy" {
+                (policy_apply_mode == RecoveredPolicyApplyMode::StageRunBoundary
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunCheckpoint)
+                || (policy_apply_mode == RecoveredPolicyApplyMode::InjectNow
+                    && runtime_boundary == RecoveredRunApplyBoundary::Immediate)
+                || ((policy_apply_mode == RecoveredPolicyApplyMode::StageRunStart
+                    || policy_apply_mode == RecoveredPolicyApplyMode::Ignore)
+                    && runtime_boundary == RecoveredRunApplyBoundary::RunStart)
+            }
+            guard "recovered_execution_kind_matches_input" {
+                (input_kind == RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ResumePending)
+                || (input_kind != RecoveredInputKind::Continuation
+                    && runtime_execution_kind == RecoveredRuntimeExecutionKind::ContentTurn)
+            }
+            guard "recovered_terminal_intent_matches_input" {
+                (input_kind == RecoveredInputKind::PeerResponseTerminal
+                    && runtime_peer_response_terminal_apply_intent == Some(RecoveredPeerResponseTerminalApplyIntent::AppendContextAndRun))
+                || (input_kind != RecoveredInputKind::PeerResponseTerminal
+                    && runtime_peer_response_terminal_apply_intent == None)
+            }
+            guard "recovered_lane_matches_policy" {
+                ((policy_routing_disposition == RecoveredRoutingDisposition::Steer
+                    || policy_routing_disposition == RecoveredRoutingDisposition::Immediate)
+                    && lane == InputLane::Steer)
+                || ((policy_routing_disposition == RecoveredRoutingDisposition::Queue
+                    || policy_routing_disposition == RecoveredRoutingDisposition::Drop)
+                    && lane == InputLane::Queue)
+            }
+            update {
+                self.recovered_admitted_inputs.insert(input_id);
+                self.recovered_admitted_lanes.insert(input_id, lane);
+            }
+            to Idle
+        }
+
         // RecoverInputLifecycle: restore persisted input lifecycle facts
         // through machine authority. Store recovery may present an input at
         // any lifecycle phase, so this transition deliberately owns the
@@ -7014,6 +7153,19 @@ macro_rules! meerkat_catalog_machine_dsl {
                 run_id,
                 boundary_sequence,
                 lane
+            }
+            guard "recovered_lifecycle_has_admission_witness" {
+                phase == InputPhase::Consumed
+                || phase == InputPhase::Superseded
+                || phase == InputPhase::Coalesced
+                || phase == InputPhase::Abandoned
+                || self.recovered_admitted_inputs.contains(input_id)
+            }
+            guard "recovered_queued_lane_matches_witness" {
+                (phase != InputPhase::Queued && lane == None)
+                || (phase == InputPhase::Queued
+                    && self.recovered_admitted_lanes.contains_key(input_id)
+                    && lane == Some(self.recovered_admitted_lanes.get_cloned(input_id).get("value")))
             }
             update {
                 self.input_phases.insert(input_id, phase);

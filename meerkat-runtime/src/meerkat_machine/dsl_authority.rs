@@ -228,6 +228,8 @@ pub(crate) fn project_state(
         next_admission_seq: 0,
         input_admission_seq: std::collections::BTreeMap::new(),
         input_lane: std::collections::BTreeMap::new(),
+        recovered_admitted_inputs: std::collections::BTreeSet::new(),
+        recovered_admitted_lanes: std::collections::BTreeMap::new(),
         op_statuses: std::collections::BTreeMap::new(),
         op_completion_seq: std::collections::BTreeMap::new(),
         op_terminal_outcomes: std::collections::BTreeMap::new(),

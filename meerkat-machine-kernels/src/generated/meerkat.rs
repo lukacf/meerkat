@@ -2134,6 +2134,356 @@ impl std::fmt::Display for PreRunPhase {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RecoveredInputKind {
+    #[default]
+    #[serde(rename = "Prompt")]
+    Prompt,
+    #[serde(rename = "PeerMessage")]
+    PeerMessage,
+    #[serde(rename = "PeerRequest")]
+    PeerRequest,
+    #[serde(rename = "PeerResponseProgress")]
+    PeerResponseProgress,
+    #[serde(rename = "PeerResponseTerminal")]
+    PeerResponseTerminal,
+    #[serde(rename = "FlowStep")]
+    FlowStep,
+    #[serde(rename = "ExternalEvent")]
+    ExternalEvent,
+    #[serde(rename = "Continuation")]
+    Continuation,
+    #[serde(rename = "Operation")]
+    Operation,
+}
+impl RecoveredInputKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Prompt => "Prompt",
+            Self::PeerMessage => "PeerMessage",
+            Self::PeerRequest => "PeerRequest",
+            Self::PeerResponseProgress => "PeerResponseProgress",
+            Self::PeerResponseTerminal => "PeerResponseTerminal",
+            Self::FlowStep => "FlowStep",
+            Self::ExternalEvent => "ExternalEvent",
+            Self::Continuation => "Continuation",
+            Self::Operation => "Operation",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Prompt" => Ok(Self::Prompt),
+            "PeerMessage" => Ok(Self::PeerMessage),
+            "PeerRequest" => Ok(Self::PeerRequest),
+            "PeerResponseProgress" => Ok(Self::PeerResponseProgress),
+            "PeerResponseTerminal" => Ok(Self::PeerResponseTerminal),
+            "FlowStep" => Ok(Self::FlowStep),
+            "ExternalEvent" => Ok(Self::ExternalEvent),
+            "Continuation" => Ok(Self::Continuation),
+            "Operation" => Ok(Self::Operation),
+            other => Err(format!("invalid RecoveredInputKind value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    #[serde(rename = "AppendContextAndRun")]
+    AppendContextAndRun,
+}
+impl RecoveredPeerResponseTerminalApplyIntent {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AppendContextAndRun => "AppendContextAndRun",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "AppendContextAndRun" => Ok(Self::AppendContextAndRun),
+            other => Err(format!(
+                "invalid RecoveredPeerResponseTerminalApplyIntent value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredPeerResponseTerminalApplyIntent {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredPeerResponseTerminalApplyIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredPolicyApplyMode {
+    #[default]
+    #[serde(rename = "StageRunStart")]
+    StageRunStart,
+    #[serde(rename = "StageRunBoundary")]
+    StageRunBoundary,
+    #[serde(rename = "InjectNow")]
+    InjectNow,
+    #[serde(rename = "Ignore")]
+    Ignore,
+}
+impl RecoveredPolicyApplyMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::StageRunStart => "StageRunStart",
+            Self::StageRunBoundary => "StageRunBoundary",
+            Self::InjectNow => "InjectNow",
+            Self::Ignore => "Ignore",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "StageRunStart" => Ok(Self::StageRunStart),
+            "StageRunBoundary" => Ok(Self::StageRunBoundary),
+            "InjectNow" => Ok(Self::InjectNow),
+            "Ignore" => Ok(Self::Ignore),
+            other => Err(format!("invalid RecoveredPolicyApplyMode value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredPolicyApplyMode {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredPolicyApplyMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredRoutingDisposition {
+    #[default]
+    #[serde(rename = "Queue")]
+    Queue,
+    #[serde(rename = "Steer")]
+    Steer,
+    #[serde(rename = "Immediate")]
+    Immediate,
+    #[serde(rename = "Drop")]
+    Drop,
+}
+impl RecoveredRoutingDisposition {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queue => "Queue",
+            Self::Steer => "Steer",
+            Self::Immediate => "Immediate",
+            Self::Drop => "Drop",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredRoutingDisposition {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Queue" => Ok(Self::Queue),
+            "Steer" => Ok(Self::Steer),
+            "Immediate" => Ok(Self::Immediate),
+            "Drop" => Ok(Self::Drop),
+            other => Err(format!(
+                "invalid RecoveredRoutingDisposition value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredRoutingDisposition {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredRoutingDisposition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    #[serde(rename = "RunStart")]
+    RunStart,
+    #[serde(rename = "RunCheckpoint")]
+    RunCheckpoint,
+    #[serde(rename = "Immediate")]
+    Immediate,
+}
+impl RecoveredRunApplyBoundary {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RunStart => "RunStart",
+            Self::RunCheckpoint => "RunCheckpoint",
+            Self::Immediate => "Immediate",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "RunStart" => Ok(Self::RunStart),
+            "RunCheckpoint" => Ok(Self::RunCheckpoint),
+            "Immediate" => Ok(Self::Immediate),
+            other => Err(format!("invalid RecoveredRunApplyBoundary value `{other}`")),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredRunApplyBoundary {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredRunApplyBoundary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    #[serde(rename = "ContentTurn")]
+    ContentTurn,
+    #[serde(rename = "ResumePending")]
+    ResumePending,
+}
+impl RecoveredRuntimeExecutionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ContentTurn => "ContentTurn",
+            Self::ResumePending => "ResumePending",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ContentTurn" => Ok(Self::ContentTurn),
+            "ResumePending" => Ok(Self::ResumePending),
+            other => Err(format!(
+                "invalid RecoveredRuntimeExecutionKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredRuntimeExecutionKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredRuntimeExecutionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RegistrationPhase {
     #[default]
     #[serde(rename = "Queuing")]
@@ -3798,6 +4148,8 @@ pub struct State {
     pub next_admission_seq: u64,
     pub input_admission_seq: std::collections::BTreeMap<String, u64>,
     pub input_lane: std::collections::BTreeMap<String, InputLane>,
+    pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
+    pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
     pub op_completion_seq: std::collections::BTreeMap<String, u64>,
     pub op_terminal_outcomes: std::collections::BTreeMap<String, OperationTerminalOutcomeKind>,
@@ -4217,6 +4569,18 @@ pub mod inputs {
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RunCancelled {
         pub run_id: RunId,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoverAdmittedInput {
+        pub input_id: String,
+        pub input_kind: RecoveredInputKind,
+        pub policy_apply_mode: RecoveredPolicyApplyMode,
+        pub policy_routing_disposition: RecoveredRoutingDisposition,
+        pub runtime_boundary: RecoveredRunApplyBoundary,
+        pub runtime_execution_kind: RecoveredRuntimeExecutionKind,
+        pub runtime_peer_response_terminal_apply_intent:
+            Option<RecoveredPeerResponseTerminalApplyIntent>,
+        pub lane: InputLane,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct RecoverInputLifecycle {
@@ -4690,6 +5054,7 @@ pub enum Input {
     ServiceTurnCommitted(inputs::ServiceTurnCommitted),
     RunFailed(inputs::RunFailed),
     RunCancelled(inputs::RunCancelled),
+    RecoverAdmittedInput(inputs::RecoverAdmittedInput),
     RecoverInputLifecycle(inputs::RecoverInputLifecycle),
     QueueAccepted(inputs::QueueAccepted),
     SteerAccepted(inputs::SteerAccepted),
@@ -4860,6 +5225,7 @@ impl Input {
             Self::ServiceTurnCommitted(_) => InputKind::ServiceTurnCommitted,
             Self::RunFailed(_) => InputKind::RunFailed,
             Self::RunCancelled(_) => InputKind::RunCancelled,
+            Self::RecoverAdmittedInput(_) => InputKind::RecoverAdmittedInput,
             Self::RecoverInputLifecycle(_) => InputKind::RecoverInputLifecycle,
             Self::QueueAccepted(_) => InputKind::QueueAccepted,
             Self::SteerAccepted(_) => InputKind::SteerAccepted,
@@ -5031,6 +5397,7 @@ pub enum InputKind {
     ServiceTurnCommitted,
     RunFailed,
     RunCancelled,
+    RecoverAdmittedInput,
     RecoverInputLifecycle,
     QueueAccepted,
     SteerAccepted,
@@ -5925,6 +6292,11 @@ pub enum TransitionId {
     RollbackRunRunningToRetired,
     RecycleFromIdleOrRetired,
     RecycleFromAttached,
+    RecoverAdmittedInputIdle,
+    RecoverAdmittedInputAttached,
+    RecoverAdmittedInputRunning,
+    RecoverAdmittedInputRetired,
+    RecoverAdmittedInputStopped,
     RecoverInputLifecycleIdle,
     RecoverInputLifecycleAttached,
     RecoverInputLifecycleRunning,
@@ -6422,6 +6794,8 @@ pub fn initial_state() -> State {
         next_admission_seq: 0,
         input_admission_seq: Default::default(),
         input_lane: Default::default(),
+        recovered_admitted_inputs: Default::default(),
+        recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),
         op_completion_seq: Default::default(),
         op_terminal_outcomes: Default::default(),

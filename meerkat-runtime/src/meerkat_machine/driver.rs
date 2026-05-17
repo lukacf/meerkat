@@ -1528,51 +1528,19 @@ pub(crate) fn machine_apply_recovered_input_normalization(
 }
 
 pub(crate) struct RecoveredIngressEntry {
-    pub content_shape: crate::ingress_types::ContentShape,
-    pub handling_mode: meerkat_core::types::HandlingMode,
     pub runtime_semantics: crate::ingress_types::RuntimeInputSemantics,
-    pub primitive_projection: crate::ingress_types::RuntimeInputProjection,
-    pub is_prompt: bool,
     pub policy: crate::policy::PolicyDecision,
-}
-
-fn expected_recovered_runtime_semantics(
-    state: &InputState,
-) -> Option<crate::ingress_types::RuntimeInputSemantics> {
-    let persisted_input = state.persisted_input.as_ref()?;
-    let policy = &state.policy.as_ref()?.decision;
-    Some(
-        crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            policy,
-            persisted_input.kind(),
-        ),
-    )
 }
 
 pub(crate) fn machine_build_recovered_ingress_entry(
     state: &InputState,
 ) -> Option<RecoveredIngressEntry> {
-    let persisted_input = state.persisted_input.as_ref()?;
+    state.persisted_input.as_ref()?;
     let runtime_semantics = state.runtime_semantics?;
     let policy = state.policy.as_ref()?.decision.clone();
-    if runtime_semantics
-        != crate::ingress_types::RuntimeInputSemantics::from_policy_and_kind(
-            &policy,
-            persisted_input.kind(),
-        )
-    {
-        return None;
-    }
-    let handling_mode = crate::accept::handling_mode_from_policy(&policy);
-    let content_shape = crate::ingress_types::ContentShape::from_kind(persisted_input.kind());
-    let primitive_projection = crate::input::runtime_input_projection(persisted_input);
 
     Some(RecoveredIngressEntry {
-        content_shape,
-        handling_mode,
         runtime_semantics,
-        primitive_projection,
-        is_prompt: matches!(persisted_input, crate::input::Input::Prompt(_)),
         policy,
     })
 }
@@ -1593,14 +1561,6 @@ fn missing_recovered_ingress_entry_reason(state: &InputState) -> String {
     if state.policy.is_none() {
         return format!(
             "store corruption: recovered input '{}' missing runtime admission policy stamp; cannot recover without runtime-stamped policy and lane metadata",
-            state.input_id
-        );
-    }
-    if let Some(expected) = expected_recovered_runtime_semantics(state)
-        && state.runtime_semantics != Some(expected)
-    {
-        return format!(
-            "store corruption: recovered input '{}' has runtime execution semantics stamp that does not match persisted input kind and admission policy; cannot recover with contradictory runtime-stamped execution kind",
             state.input_id
         );
     }
@@ -1651,24 +1611,20 @@ pub(crate) fn machine_recover_ephemeral_driver(
     }
 
     for (input_id, entry, state, seed) in recovered_entries {
-        // Persist the normalized shell back into the ledger only after we have
-        // proven the recovered input can re-enter ingress with typed metadata.
-        if let Some(ledger_slot) = driver.ledger_mut().get_mut(&input_id) {
-            *ledger_slot = state.clone();
-        }
         driver.admit_recovered_to_ingress(
-            input_id,
-            entry.content_shape,
-            entry.handling_mode,
+            input_id.clone(),
             entry.runtime_semantics,
-            entry.primitive_projection,
-            entry.is_prompt,
             &state,
             &seed,
             entry.policy,
             None,
             None,
         )?;
+        // Persist the normalized shell back into the ledger only after
+        // generated recovered-admission authority accepts the witness.
+        if let Some(ledger_slot) = driver.ledger_mut().get_mut(&input_id) {
+            *ledger_slot = state.clone();
+        }
     }
 
     driver.rebuild_queue_projections_after_recovery();
@@ -1714,6 +1670,16 @@ pub(crate) async fn machine_recover_persistent_driver(
                 ));
             };
 
+            driver.admit_recovered_to_ingress(
+                bundle.state.input_id.clone(),
+                entry.runtime_semantics,
+                &bundle.state,
+                &bundle.seed,
+                entry.policy,
+                None,
+                None,
+            )?;
+
             let inserted = driver.ledger_mut().recover(bundle.state.clone());
             if !inserted {
                 continue;
@@ -1722,20 +1688,6 @@ pub(crate) async fn machine_recover_persistent_driver(
             if let Some(input) = bundle.state.persisted_input.clone() {
                 recovered_payloads.push((bundle.state.input_id.clone(), input));
             }
-
-            driver.admit_recovered_to_ingress(
-                bundle.state.input_id.clone(),
-                entry.content_shape,
-                entry.handling_mode,
-                entry.runtime_semantics,
-                entry.primitive_projection,
-                entry.is_prompt,
-                &bundle.state,
-                &bundle.seed,
-                entry.policy,
-                None,
-                None,
-            )?;
         }
     }
 
@@ -1911,11 +1863,7 @@ mod tests {
         let err = driver
             .admit_recovered_to_ingress(
                 input_id.clone(),
-                ContentShape::from_kind(input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 runtime_semantics,
-                crate::input::runtime_input_projection(&input),
-                true,
                 &state,
                 &seed,
                 policy,
@@ -1926,7 +1874,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("does not match persisted input kind and admission policy"),
+                .contains("generated recovered-admission authority"),
             "unexpected recovery error: {err}"
         );
         assert!(
@@ -1977,16 +1925,12 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 resume_id.clone(),
-                ContentShape::from_kind(resume_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&resume_input),
-                false,
                 &resume_state,
                 &seed,
                 resume_policy,
@@ -1997,15 +1941,11 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 prompt_id.clone(),
-                ContentShape::from_kind(prompt_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&prompt_input),
-                true,
                 &prompt_state,
                 &seed,
                 queue_policy(
@@ -2057,16 +1997,12 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 prefix_id.clone(),
-                ContentShape::from_kind(prefix_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&prefix_input),
-                false,
                 &prefix_state,
                 &seed,
                 prefix_policy,
@@ -2077,15 +2013,11 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 prompt_id,
-                ContentShape::from_kind(prompt_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&prompt_input),
-                true,
                 &prompt_state,
                 &seed,
                 queue_policy(
@@ -2156,15 +2088,11 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 event_id.clone(),
-                ContentShape::from_kind(event_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&event_input),
-                false,
                 &event_state,
                 &seed,
                 queue_policy(
@@ -2178,15 +2106,11 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 prompt_id,
-                ContentShape::from_kind(prompt_input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&prompt_input),
-                true,
                 &prompt_state,
                 &seed,
                 queue_policy(
@@ -2228,15 +2152,11 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 input_id.clone(),
-                ContentShape::from_kind(input.kind()),
-                meerkat_core::types::HandlingMode::Queue,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&input),
-                true,
                 &state,
                 &seed,
                 queue_policy(
@@ -2282,16 +2202,12 @@ mod tests {
         driver
             .admit_recovered_to_ingress(
                 input_id.clone(),
-                ContentShape::from_kind(input.kind()),
-                meerkat_core::types::HandlingMode::Steer,
                 crate::ingress_types::RuntimeInputSemantics {
                     boundary:
                         meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint,
                     execution_kind: meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending,
                     peer_response_terminal_apply_intent: None,
                 },
-                crate::input::runtime_input_projection(&input),
-                false,
                 &state,
                 &seed,
                 policy,
@@ -2947,6 +2863,37 @@ mod recovery_tests {
         state
     }
 
+    fn queued_seed() -> InputStateSeed {
+        let mut seed = InputStateSeed::new_accepted();
+        seed.phase = InputLifecycleState::Queued;
+        seed
+    }
+
+    fn recovered_admission_rejection(state: crate::input_state::InputState) -> String {
+        let entry = machine_build_recovered_ingress_entry(&state)
+            .expect("test state should carry the recovered admission witness fields");
+        let mut driver = crate::driver::ephemeral::EphemeralRuntimeDriver::new(
+            LogicalRuntimeId::new("recovered-admission-authority-test"),
+        );
+        let input_id = state.input_id.clone();
+        let err = driver
+            .admit_recovered_to_ingress(
+                input_id.clone(),
+                entry.runtime_semantics,
+                &state,
+                &queued_seed(),
+                entry.policy,
+                None,
+                None,
+            )
+            .expect_err("generated recovered-admission authority must reject this witness");
+        assert!(
+            driver.admitted_runtime_semantics(&input_id).is_none(),
+            "rejected recovered admission must not record runtime semantics"
+        );
+        err.to_string()
+    }
+
     #[test]
     fn recovered_ingress_entry_requires_persisted_input_for_content_shape() {
         let mut state = crate::input_state::InputState::new_accepted(InputId::new());
@@ -2997,7 +2944,7 @@ mod recovery_tests {
     }
 
     #[test]
-    fn recovered_ingress_entry_rejects_prompt_stamped_as_resume_pending() {
+    fn recovered_admission_authority_rejects_prompt_stamped_as_resume_pending() {
         let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
         let decision = policy(ApplyMode::StageRunStart);
         let mut runtime_semantics =
@@ -3010,13 +2957,14 @@ mod recovery_tests {
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            recovered_admission_rejection(state)
+                .contains("generated recovered-admission authority"),
             "recovery must reject a prompt row whose durable stamp says ResumePending"
         );
     }
 
     #[test]
-    fn recovered_ingress_entry_rejects_continuation_stamped_as_content_turn() {
+    fn recovered_admission_authority_rejects_continuation_stamped_as_content_turn() {
         let input = Input::Continuation(
             crate::input::ContinuationInput::detached_background_op_completed(),
         );
@@ -3031,13 +2979,14 @@ mod recovery_tests {
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            recovered_admission_rejection(state)
+                .contains("generated recovered-admission authority"),
             "recovery must reject a continuation row whose durable stamp says ContentTurn"
         );
     }
 
     #[test]
-    fn recovered_ingress_entry_rejects_boundary_mismatch() {
+    fn recovered_admission_authority_rejects_boundary_mismatch() {
         let input = Input::Prompt(crate::input::PromptInput::new("queued prompt", None));
         let decision = policy(ApplyMode::StageRunStart);
         let mut runtime_semantics =
@@ -3050,13 +2999,14 @@ mod recovery_tests {
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            recovered_admission_rejection(state)
+                .contains("generated recovered-admission authority"),
             "recovery must reject a durable stamp whose boundary disagrees with policy"
         );
     }
 
     #[test]
-    fn recovered_ingress_entry_rejects_terminal_intent_mismatch() {
+    fn recovered_admission_authority_rejects_terminal_intent_mismatch() {
         let input = crate::input::peer_response_terminal_input(
             meerkat_core::comms::PeerId::new(),
             Some(meerkat_core::comms::PeerName::new("reviewer").expect("peer name")),
@@ -3074,7 +3024,8 @@ mod recovery_tests {
         let state = state_with_runtime_semantics(input, decision, runtime_semantics);
 
         assert!(
-            machine_build_recovered_ingress_entry(&state).is_none(),
+            recovered_admission_rejection(state)
+                .contains("generated recovered-admission authority"),
             "recovery must reject a terminal peer-response stamp with missing terminal apply intent"
         );
     }

@@ -1000,6 +1000,21 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `RecycleFromAttached`
   - anchors: `meerkat_machine`
   - scenarios: `recycle_and_compaction`
+- `RecoverAdmittedInputIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `RecoverAdmittedInputAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `RecoverAdmittedInputRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `RecoverAdmittedInputRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `RecoverAdmittedInputStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
 - `RecoverInputLifecycleIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

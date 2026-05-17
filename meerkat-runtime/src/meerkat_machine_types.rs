@@ -643,6 +643,7 @@ meerkat_machine_runtime_internal_inputs!(
         MarkApplied,
         MarkAppliedPendingConsumption,
         QueueAccepted,
+        RecoverAdmittedInput,
         RecoverInputLifecycle,
         RetryRequested,
         RollbackStaged,

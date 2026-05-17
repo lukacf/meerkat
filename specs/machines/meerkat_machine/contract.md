@@ -86,6 +86,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `next_admission_seq`: `u64`
 - `input_admission_seq`: `Map<String, u64>`
 - `input_lane`: `Map<String, InputLane>`
+- `recovered_admitted_inputs`: `Set<String>`
+- `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
 - `op_completion_seq`: `Map<String, u64>`
 - `op_terminal_outcomes`: `Map<String, OperationTerminalOutcomeKind>`
@@ -223,6 +225,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `ServiceTurnCommitted`(run_id: RunId)
 - `RunFailed`(run_id: RunId, runtime_apply_failure_cause: Option<RuntimeApplyFailureCause>, runtime_apply_failure_message: Option<String>, terminal_outcome: TurnTerminalOutcome, terminal_cause_kind: TurnTerminalCauseKind, error: String)
 - `RunCancelled`(run_id: RunId)
+- `RecoverAdmittedInput`(input_id: String, input_kind: RecoveredInputKind, policy_apply_mode: RecoveredPolicyApplyMode, policy_routing_disposition: RecoveredRoutingDisposition, runtime_boundary: RecoveredRunApplyBoundary, runtime_execution_kind: RecoveredRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<RecoveredPeerResponseTerminalApplyIntent>, lane: InputLane)
 - `RecoverInputLifecycle`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, superseded_by: Option<String>, aggregate_id: Option<String>, abandon_reason: Option<InputAbandonReason>, abandon_attempt_count: u64, attempt_count: u64, run_id: Option<String>, boundary_sequence: Option<u64>, lane: Option<InputLane>)
 - `QueueAccepted`(input_id: String)
 - `SteerAccepted`(input_id: String)
@@ -3044,33 +3047,98 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - Emits: `InitiateRecycle`
 - To: `Attached`
 
+### `RecoverAdmittedInputIdle`
+- From: `Idle`
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- Guards:
+  - `recovered_boundary_matches_policy`
+  - `recovered_execution_kind_matches_input`
+  - `recovered_terminal_intent_matches_input`
+  - `recovered_lane_matches_policy`
+- To: `Idle`
+
+### `RecoverAdmittedInputAttached`
+- From: `Attached`
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- Guards:
+  - `recovered_boundary_matches_policy`
+  - `recovered_execution_kind_matches_input`
+  - `recovered_terminal_intent_matches_input`
+  - `recovered_lane_matches_policy`
+- To: `Attached`
+
+### `RecoverAdmittedInputRunning`
+- From: `Running`
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- Guards:
+  - `recovered_boundary_matches_policy`
+  - `recovered_execution_kind_matches_input`
+  - `recovered_terminal_intent_matches_input`
+  - `recovered_lane_matches_policy`
+- To: `Running`
+
+### `RecoverAdmittedInputRetired`
+- From: `Retired`
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- Guards:
+  - `recovered_boundary_matches_policy`
+  - `recovered_execution_kind_matches_input`
+  - `recovered_terminal_intent_matches_input`
+  - `recovered_lane_matches_policy`
+- To: `Retired`
+
+### `RecoverAdmittedInputStopped`
+- From: `Stopped`
+- On: `RecoverAdmittedInput`(input_id, input_kind, policy_apply_mode, policy_routing_disposition, runtime_boundary, runtime_execution_kind, runtime_peer_response_terminal_apply_intent, lane)
+- Guards:
+  - `recovered_boundary_matches_policy`
+  - `recovered_execution_kind_matches_input`
+  - `recovered_terminal_intent_matches_input`
+  - `recovered_lane_matches_policy`
+- To: `Stopped`
+
 ### `RecoverInputLifecycleIdle`
 - From: `Idle`
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Guards:
+  - `recovered_lifecycle_has_admission_witness`
+  - `recovered_queued_lane_matches_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
 ### `RecoverInputLifecycleAttached`
 - From: `Attached`
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Guards:
+  - `recovered_lifecycle_has_admission_witness`
+  - `recovered_queued_lane_matches_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
 ### `RecoverInputLifecycleRunning`
 - From: `Running`
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Guards:
+  - `recovered_lifecycle_has_admission_witness`
+  - `recovered_queued_lane_matches_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
 ### `RecoverInputLifecycleRetired`
 - From: `Retired`
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Guards:
+  - `recovered_lifecycle_has_admission_witness`
+  - `recovered_queued_lane_matches_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
 ### `RecoverInputLifecycleStopped`
 - From: `Stopped`
 - On: `RecoverInputLifecycle`(input_id, phase, terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count, attempt_count, run_id, boundary_sequence, lane)
+- Guards:
+  - `recovered_lifecycle_has_admission_witness`
+  - `recovered_queued_lane_matches_witness`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 

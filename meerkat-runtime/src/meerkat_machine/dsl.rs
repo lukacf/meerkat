@@ -1955,6 +1955,152 @@ impl From<crate::HandlingMode> for InputLane {
     }
 }
 
+/// Typed persisted input kind carried by recovered-admission witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputKind {
+    #[default]
+    Prompt,
+    PeerMessage,
+    PeerRequest,
+    PeerResponseProgress,
+    PeerResponseTerminal,
+    FlowStep,
+    ExternalEvent,
+    Continuation,
+    Operation,
+}
+
+impl From<crate::identifiers::InputKind> for RecoveredInputKind {
+    fn from(kind: crate::identifiers::InputKind) -> Self {
+        match kind {
+            crate::identifiers::InputKind::Prompt => Self::Prompt,
+            crate::identifiers::InputKind::PeerMessage => Self::PeerMessage,
+            crate::identifiers::InputKind::PeerRequest => Self::PeerRequest,
+            crate::identifiers::InputKind::PeerResponseProgress => Self::PeerResponseProgress,
+            crate::identifiers::InputKind::PeerResponseTerminal => Self::PeerResponseTerminal,
+            crate::identifiers::InputKind::FlowStep => Self::FlowStep,
+            crate::identifiers::InputKind::ExternalEvent => Self::ExternalEvent,
+            crate::identifiers::InputKind::Continuation => Self::Continuation,
+            crate::identifiers::InputKind::Operation => Self::Operation,
+        }
+    }
+}
+
+/// Typed mirror of the recovered policy apply mode used only as an admission
+/// witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPolicyApplyMode {
+    #[default]
+    StageRunStart,
+    StageRunBoundary,
+    InjectNow,
+    Ignore,
+}
+
+impl From<crate::policy::ApplyMode> for RecoveredPolicyApplyMode {
+    fn from(mode: crate::policy::ApplyMode) -> Self {
+        match mode {
+            crate::policy::ApplyMode::StageRunStart => Self::StageRunStart,
+            crate::policy::ApplyMode::StageRunBoundary => Self::StageRunBoundary,
+            crate::policy::ApplyMode::InjectNow => Self::InjectNow,
+            crate::policy::ApplyMode::Ignore => Self::Ignore,
+        }
+    }
+}
+
+/// Typed mirror of recovered routing disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRoutingDisposition {
+    #[default]
+    Queue,
+    Steer,
+    Immediate,
+    Drop,
+}
+
+impl From<crate::policy::RoutingDisposition> for RecoveredRoutingDisposition {
+    fn from(disposition: crate::policy::RoutingDisposition) -> Self {
+        match disposition {
+            crate::policy::RoutingDisposition::Queue => Self::Queue,
+            crate::policy::RoutingDisposition::Steer => Self::Steer,
+            crate::policy::RoutingDisposition::Immediate => Self::Immediate,
+            crate::policy::RoutingDisposition::Drop => Self::Drop,
+        }
+    }
+}
+
+/// Typed persisted runtime apply boundary carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRunApplyBoundary {
+    #[default]
+    RunStart,
+    RunCheckpoint,
+    Immediate,
+}
+
+impl TryFrom<meerkat_core::lifecycle::run_primitive::RunApplyBoundary>
+    for RecoveredRunApplyBoundary
+{
+    type Error = &'static str;
+
+    fn try_from(
+        boundary: meerkat_core::lifecycle::run_primitive::RunApplyBoundary,
+    ) -> Result<Self, Self::Error> {
+        match boundary {
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunStart => {
+                Ok(Self::RunStart)
+            }
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::RunCheckpoint => {
+                Ok(Self::RunCheckpoint)
+            }
+            meerkat_core::lifecycle::run_primitive::RunApplyBoundary::Immediate => {
+                Ok(Self::Immediate)
+            }
+            _ => Err("unknown recovered runtime boundary"),
+        }
+    }
+}
+
+/// Typed persisted runtime execution class carried by recovered-admission
+/// witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredRuntimeExecutionKind {
+    #[default]
+    ContentTurn,
+    ResumePending,
+}
+
+impl From<meerkat_core::lifecycle::RuntimeExecutionKind> for RecoveredRuntimeExecutionKind {
+    fn from(kind: meerkat_core::lifecycle::RuntimeExecutionKind) -> Self {
+        match kind {
+            meerkat_core::lifecycle::RuntimeExecutionKind::ContentTurn => Self::ContentTurn,
+            meerkat_core::lifecycle::RuntimeExecutionKind::ResumePending => Self::ResumePending,
+        }
+    }
+}
+
+/// Typed recovered terminal peer-response apply intent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredPeerResponseTerminalApplyIntent {
+    #[default]
+    AppendContextAndRun,
+}
+
+impl From<meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent>
+    for RecoveredPeerResponseTerminalApplyIntent
+{
+    fn from(
+        intent: meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent,
+    ) -> Self {
+        match intent {
+            meerkat_core::lifecycle::run_primitive::PeerResponseTerminalApplyIntent::AppendContextAndRun => {
+                Self::AppendContextAndRun
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum RoutingSwitchTurnPhase {
     #[default]

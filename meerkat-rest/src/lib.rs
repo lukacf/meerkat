@@ -11313,9 +11313,14 @@ mod tests {
         use tower::ServiceExt;
 
         let temp = TempDir::new().unwrap();
-        let state = AppState::load_from(temp.path().to_path_buf())
+        let mut state = AppState::load_from(temp.path().to_path_buf())
             .await
             .unwrap();
+        let mock_client: Arc<dyn LlmClient> = Arc::new(MockLlmClient);
+        state.mob_state = Arc::new(
+            meerkat_mob_mcp::MobMcpState::new(state.session_service.clone())
+                .with_default_llm_client(Some(mock_client)),
+        );
         let mut definition =
             meerkat_mob::MobDefinition::explicit(meerkat_mob::MobId::from("test_mob"));
         definition.profiles.insert(

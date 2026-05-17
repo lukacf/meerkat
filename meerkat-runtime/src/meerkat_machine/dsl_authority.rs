@@ -235,6 +235,7 @@ pub(crate) fn project_state(
         admission_authorized_plans: std::collections::BTreeMap::new(),
         admission_authorized_existing_actions: std::collections::BTreeMap::new(),
         admission_authorized_existing_targets: std::collections::BTreeMap::new(),
+        admission_idempotency_inputs: std::collections::BTreeMap::new(),
         recovered_admitted_inputs: std::collections::BTreeSet::new(),
         recovered_admitted_lanes: std::collections::BTreeMap::new(),
         op_statuses: std::collections::BTreeMap::new(),

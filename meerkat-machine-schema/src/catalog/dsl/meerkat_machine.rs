@@ -1039,6 +1039,37 @@ pub enum AdmissionExistingQueuedActionKind {
     Supersede,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    Accept,
+    Deduplicated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputObservedPhase {
+    Accepted,
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    ConsumeOnAccept,
+    QueueAccepted,
+    RollbackStaged,
+    BoundaryReceiptCommitted,
+    MissingBoundaryReceipt,
+}
+
 /// Typed persisted input kind carried by recovered-admission witnesses.
 ///
 /// Recovery observes this from the durable input payload, then MeerkatMachine
@@ -1463,6 +1494,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             admission_authorized_plans: Map<String, Enum<AdmissionPlanKind>>,
             admission_authorized_existing_actions: Map<String, Enum<AdmissionExistingQueuedActionKind>>,
             admission_authorized_existing_targets: Map<String, String>,
+            admission_idempotency_inputs: Map<String, String>,
             // Recovered admission witnesses accepted by MeerkatMachine before
             // shell recovery may re-materialize admission metadata. The lane
             // map records the machine-validated queue/steer witness so
@@ -1721,6 +1753,7 @@ macro_rules! meerkat_catalog_machine_dsl {
             admission_authorized_plans = EmptyMap,
             admission_authorized_existing_actions = EmptyMap,
             admission_authorized_existing_targets = EmptyMap,
+            admission_idempotency_inputs = EmptyMap,
             recovered_admitted_inputs = EmptySet,
             recovered_admitted_lanes = EmptyMap,
             // Ops lifecycle substate
@@ -1894,6 +1927,14 @@ macro_rules! meerkat_catalog_machine_dsl {
                 existing_superseded_input_id: Option<String>,
                 runtime_running: bool,
                 without_wake: bool,
+            },
+            ResolveAdmissionIdempotency { input_id: String, idempotency_key: Option<String> },
+            RegisterAcceptedIdempotency { input_id: String, idempotency_key: String },
+            NormalizeRecoveredInputLifecycle {
+                input_id: String,
+                phase: Enum<RecoveredInputObservedPhase>,
+                consume_on_accept: bool,
+                applied_boundary_committed: Option<bool>,
             },
             Prepare { session_id: SessionId, run_id: RunId },
             Commit { input_id: InputId, run_id: RunId },
@@ -2310,6 +2351,20 @@ macro_rules! meerkat_catalog_machine_dsl {
                 interrupt_yielding: bool,
                 wake_if_idle: bool,
             },
+            AdmissionIdempotencyResolved {
+                input_id: String,
+                result: Enum<AdmissionIdempotencyResultKind>,
+                existing_input_id: Option<String>,
+            },
+            RecoveredInputLifecycleNormalized {
+                input_id: String,
+                phase: Enum<InputPhase>,
+                terminal_kind: Option<Enum<InputTerminalKind>>,
+                recovered: bool,
+                abandoned: bool,
+                requeued: bool,
+                history_reason: Option<Enum<RecoveredInputNormalizationReasonKind>>,
+            },
             PostAdmissionSignal { signal: Enum<PostAdmissionSignalKind> },
             ReadyForRun,
             InputLifecycleNotice,
@@ -2436,6 +2491,8 @@ macro_rules! meerkat_catalog_machine_dsl {
         disposition InitiateRecycle => local,
         disposition IngressAccepted => external,
         disposition AdmissionResolved => local,
+        disposition AdmissionIdempotencyResolved => local,
+        disposition RecoveredInputLifecycleNormalized => local,
         disposition PostAdmissionSignal => local,
         disposition ReadyForRun => local,
         disposition InputLifecycleNotice => external,
@@ -4022,7 +4079,216 @@ macro_rules! meerkat_catalog_machine_dsl {
             emit IngressAccepted
         }
 
-        // 26b. ResolveAdmissionPlan: generated live-admission policy/default
+        // 26a. NormalizeRecoveredInputLifecycle: generated recovery
+        // lifecycle-normalization authority. The shell supplies typed
+        // observations from durable storage (observed phase, consume-on-
+        // accept policy predicate, boundary receipt presence); the machine
+        // emits the normalized lifecycle fact and accounting deltas that the
+        // recovery shell may project into the recovered bundle.
+        transition NormalizeRecoveredInputAcceptedConsumeOnAccept {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
+            guard "consume_on_accept" { consume_on_accept == true }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Consumed,
+                terminal_kind: Some(InputTerminalKind::Consumed),
+                recovered: true,
+                abandoned: true,
+                requeued: false,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::ConsumeOnAccept)
+            }
+        }
+
+        transition NormalizeRecoveredInputAcceptedQueue {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "accepted_phase" { phase == RecoveredInputObservedPhase::Accepted }
+            guard "not_consume_on_accept" { consume_on_accept == false }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: true,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::QueueAccepted)
+            }
+        }
+
+        transition NormalizeRecoveredInputStaged {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "staged_phase" { phase == RecoveredInputObservedPhase::Staged }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: true,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::RollbackStaged)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedCommitted {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_committed_observed" {
+                applied_boundary_committed != None
+                && applied_boundary_committed.get("value") == true
+            }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Consumed,
+                terminal_kind: Some(InputTerminalKind::Consumed),
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::BoundaryReceiptCommitted)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedMissingReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_missing_observed" {
+                applied_boundary_committed != None
+                && applied_boundary_committed.get("value") == false
+            }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: Some(RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt)
+            }
+        }
+
+        transition NormalizeRecoveredInputAppliedUnobservedReceipt {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "applied_phase" {
+                phase == RecoveredInputObservedPhase::Applied
+                || phase == RecoveredInputObservedPhase::AppliedPendingConsumption
+            }
+            guard "boundary_receipt_unobserved" { applied_boundary_committed == None }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: if phase == RecoveredInputObservedPhase::Applied { InputPhase::Applied } else { InputPhase::AppliedPendingConsumption },
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: None
+            }
+        }
+
+        transition NormalizeRecoveredInputQueued {
+            per_phase [Initializing, Idle, Attached, Running, Retired, Stopped]
+            on input NormalizeRecoveredInputLifecycle { input_id, phase, consume_on_accept, applied_boundary_committed }
+            guard "queued_phase" { phase == RecoveredInputObservedPhase::Queued }
+            update {}
+            to Idle
+            emit RecoveredInputLifecycleNormalized {
+                input_id: input_id,
+                phase: InputPhase::Queued,
+                terminal_kind: None,
+                recovered: true,
+                abandoned: false,
+                requeued: false,
+                history_reason: None
+            }
+        }
+
+        // 26b. ResolveAdmissionIdempotency: generated idempotency admission
+        // authority. The shell provides only the parsed key, if any; the
+        // machine owns the key-to-input map and therefore owns whether an
+        // input is newly admitted or publicly classified as deduplicated.
+        transition ResolveAdmissionIdempotencyNoKey {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "no_idempotency_key" { idempotency_key == None }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Accept,
+                existing_input_id: None
+            }
+        }
+
+        transition ResolveAdmissionIdempotencyNewKey {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "idempotency_key_present" { idempotency_key != None }
+            guard "idempotency_key_unclaimed" {
+                !self.admission_idempotency_inputs.contains_key(idempotency_key.get("value"))
+            }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Accept,
+                existing_input_id: None
+            }
+        }
+
+        transition ResolveAdmissionIdempotencyDuplicate {
+            per_phase [Idle, Attached, Running]
+            on input ResolveAdmissionIdempotency { input_id, idempotency_key }
+            guard "idempotency_key_present" { idempotency_key != None }
+            guard "idempotency_key_claimed" {
+                self.admission_idempotency_inputs.contains_key(idempotency_key.get("value"))
+            }
+            update {}
+            to Idle
+            emit AdmissionIdempotencyResolved {
+                input_id: input_id,
+                result: AdmissionIdempotencyResultKind::Deduplicated,
+                existing_input_id: Some(self.admission_idempotency_inputs.get_cloned(idempotency_key.get("value")).get("value"))
+            }
+        }
+
+        transition RegisterAcceptedIdempotency {
+            per_phase [Idle, Attached, Running, Retired, Stopped]
+            on input RegisterAcceptedIdempotency { input_id, idempotency_key }
+            guard "input_tracked" { self.input_phases.contains_key(input_id) }
+            guard "idempotency_key_unclaimed_or_same_input" {
+                !self.admission_idempotency_inputs.contains_key(idempotency_key)
+                || self.admission_idempotency_inputs.get_cloned(idempotency_key).get("value") == input_id
+            }
+            update {
+                self.admission_idempotency_inputs.insert(idempotency_key, input_id);
+            }
+            to Idle
+            emit InputLifecycleNotice
+        }
+
+        // 26c. ResolveAdmissionPlan: generated live-admission policy/default
         // authority. The shell presents parsed input observations only
         // (kind, optional requested lane, silent-intent match, and whether a
         // coalescing candidate exists). This transition emits the full typed

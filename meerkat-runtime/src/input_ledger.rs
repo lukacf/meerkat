@@ -1,11 +1,10 @@
 //! InputLedger — in-memory ledger of InputState entries.
 //!
-//! IndexMap<InputId, InputState> with dedup by idempotency_key.
+//! IndexMap<InputId, InputState>.
 
 use indexmap::IndexMap;
 use meerkat_core::lifecycle::InputId;
 
-use crate::identifiers::IdempotencyKey;
 use crate::input::InputDurability;
 use crate::input_state::InputState;
 
@@ -14,8 +13,6 @@ use crate::input_state::InputState;
 pub struct InputLedger {
     /// InputId → InputState (insertion order preserved).
     states: IndexMap<InputId, InputState>,
-    /// IdempotencyKey → InputId for dedup lookup.
-    idempotency_index: IndexMap<IdempotencyKey, InputId>,
 }
 
 impl InputLedger {
@@ -29,37 +26,16 @@ impl InputLedger {
         self.states.insert(state.input_id.clone(), state);
     }
 
-    /// Accept with an idempotency key for dedup.
-    /// Returns `Some(existing_id)` if the key already exists (dedup hit).
-    pub fn accept_with_idempotency(
-        &mut self,
-        state: InputState,
-        key: IdempotencyKey,
-    ) -> Option<InputId> {
-        if let Some(existing_id) = self.idempotency_index.get(&key) {
-            return Some(existing_id.clone());
-        }
-        let input_id = state.input_id.clone();
-        self.idempotency_index.insert(key, input_id);
-        self.states.insert(state.input_id.clone(), state);
-        None
-    }
-
     /// Recover a durable InputState from persistent storage.
     ///
-    /// Unlike `accept()`, this also rebuilds the idempotency index
-    /// and filters out Ephemeral inputs (which should not survive restart).
+    /// Unlike `accept()`, this filters out Ephemeral inputs (which should not
+    /// survive restart). Idempotency ownership lives in the generated
+    /// MeerkatMachine recovery/admission path, not in the ledger.
     /// Returns `true` if the state was inserted, `false` if filtered.
     pub fn recover(&mut self, state: InputState) -> bool {
         // Ephemeral inputs should not survive restarts
         if state.durability == Some(InputDurability::Ephemeral) {
             return false;
-        }
-
-        // Rebuild idempotency index so dedup works after restart
-        if let Some(ref key) = state.idempotency_key {
-            self.idempotency_index
-                .insert(key.clone(), state.input_id.clone());
         }
 
         self.states.insert(state.input_id.clone(), state);
@@ -71,18 +47,9 @@ impl InputLedger {
         self.states.get(input_id)
     }
 
-    /// Look up the canonical input ID for an idempotency key.
-    pub fn input_id_for_idempotency_key(&self, key: &IdempotencyKey) -> Option<InputId> {
-        self.idempotency_index.get(key).cloned()
-    }
-
-    /// Remove an input from the ledger and dedup index.
+    /// Remove an input from the ledger.
     pub fn remove(&mut self, input_id: &InputId) -> Option<InputState> {
-        let removed = self.states.shift_remove(input_id)?;
-        if let Some(key) = &removed.idempotency_key {
-            self.idempotency_index.shift_remove(key);
-        }
-        Some(removed)
+        self.states.shift_remove(input_id)
     }
 
     /// Get mutable reference to the state of a specific input.
@@ -127,61 +94,21 @@ mod tests {
     }
 
     #[test]
-    fn dedup_by_idempotency_key() {
+    fn accept_preserves_idempotency_key_as_metadata_only() {
         let mut ledger = InputLedger::new();
-        let key = IdempotencyKey::new("req-123");
 
-        let id1 = InputId::new();
-        let state1 = InputState::new_accepted(id1.clone());
-        let result = ledger.accept_with_idempotency(state1, key.clone());
-        assert!(result.is_none()); // First time — accepted
+        let input_id = InputId::new();
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.idempotency_key = Some(crate::identifiers::IdempotencyKey::new("req-123"));
+        ledger.accept(state);
 
-        let id2 = InputId::new();
-        let state2 = InputState::new_accepted(id2);
-        let result = ledger.accept_with_idempotency(state2, key);
-        assert!(result.is_some()); // Duplicate — returns existing ID
-        assert_eq!(result.unwrap(), id1);
-        assert_eq!(ledger.len(), 1); // Only one entry
-    }
-
-    #[test]
-    fn dedup_index_does_not_consult_terminal_cache() {
-        let mut ledger = InputLedger::new();
-        let key = IdempotencyKey::new("req-terminal-cache");
-
-        let id1 = InputId::new();
-        let mut state1 = InputState::new_accepted(id1.clone());
-        state1.terminal_outcome = Some(crate::input_state::InputTerminalOutcome::Consumed);
-        assert!(
-            ledger
-                .accept_with_idempotency(state1, key.clone())
-                .is_none()
-        );
-
-        let id2 = InputId::new();
-        let state2 = InputState::new_accepted(id2);
-        assert_eq!(ledger.accept_with_idempotency(state2, key), Some(id1));
         assert_eq!(ledger.len(), 1);
-    }
-
-    #[test]
-    fn recover_rebuilds_idempotency_index() {
-        let mut ledger = InputLedger::new();
-        let key = IdempotencyKey::new("req-123");
-
-        // Simulate recovery: inject state with an idempotency key
-        let id1 = InputId::new();
-        let mut state = InputState::new_accepted(id1.clone());
-        state.idempotency_key = Some(key.clone());
-        state.durability = Some(InputDurability::Durable);
-        assert!(ledger.recover(state));
-
-        // Now try to accept a new input with the same key → should be dedup'd
-        let id2 = InputId::new();
-        let state2 = InputState::new_accepted(id2);
-        let result = ledger.accept_with_idempotency(state2, key);
-        assert_eq!(result, Some(id1), "Dedup should find the recovered input");
-        assert_eq!(ledger.len(), 1, "No duplicate entry should be created");
+        assert_eq!(
+            ledger
+                .get(&input_id)
+                .and_then(|state| state.idempotency_key.as_ref()),
+            Some(&crate::identifiers::IdempotencyKey::new("req-123"))
+        );
     }
 
     #[test]

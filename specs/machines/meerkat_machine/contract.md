@@ -91,6 +91,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `admission_authorized_plans`: `Map<String, AdmissionPlanKind>`
 - `admission_authorized_existing_actions`: `Map<String, AdmissionExistingQueuedActionKind>`
 - `admission_authorized_existing_targets`: `Map<String, String>`
+- `admission_idempotency_inputs`: `Map<String, String>`
 - `recovered_admitted_inputs`: `Set<String>`
 - `recovered_admitted_lanes`: `Map<String, InputLane>`
 - `op_statuses`: `Map<String, OperationStatus>`
@@ -194,6 +195,9 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `AcceptWithCompletion`(input_id: InputId, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
 - `AcceptWithoutWake`(input_id: InputId)
 - `ResolveAdmissionPlan`(input_id: String, input_kind: AdmissionInputKind, requested_lane: Option<InputLane>, silent_intent_match: Bool, existing_superseded_input_id: Option<String>, runtime_running: Bool, without_wake: Bool)
+- `ResolveAdmissionIdempotency`(input_id: String, idempotency_key: Option<String>)
+- `RegisterAcceptedIdempotency`(input_id: String, idempotency_key: String)
+- `NormalizeRecoveredInputLifecycle`(input_id: String, phase: RecoveredInputObservedPhase, consume_on_accept: Bool, applied_boundary_committed: Option<Bool>)
 - `Prepare`(session_id: SessionId, run_id: RunId)
 - `Commit`(input_id: InputId, run_id: RunId)
 - `Fail`(run_id: RunId)
@@ -372,6 +376,8 @@ _Generated from the Rust machine catalog. Do not edit by hand._
 - `InitiateRecycle`
 - `IngressAccepted`
 - `AdmissionResolved`(input_id: String, policy_version: u64, policy_apply_mode: AdmissionPolicyApplyMode, policy_wake_mode: AdmissionPolicyWakeMode, policy_queue_mode: AdmissionPolicyQueueMode, policy_consume_point: AdmissionPolicyConsumePoint, policy_drain_policy: AdmissionPolicyDrainPolicy, policy_routing_disposition: AdmissionRoutingDisposition, lane: InputLane, plan: AdmissionPlanKind, queue_action: AdmissionQueueActionKind, existing_action: AdmissionExistingQueuedActionKind, existing_input_id: Option<String>, requires_active_pre_admission: Bool, runtime_boundary: AdmissionRunApplyBoundary, runtime_execution_kind: AdmissionRuntimeExecutionKind, runtime_peer_response_terminal_apply_intent: Option<AdmissionPeerResponseTerminalApplyIntent>, record_transcript: Bool, request_immediate_processing: Bool, interrupt_yielding: Bool, wake_if_idle: Bool)
+- `AdmissionIdempotencyResolved`(input_id: String, result: AdmissionIdempotencyResultKind, existing_input_id: Option<String>)
+- `RecoveredInputLifecycleNormalized`(input_id: String, phase: InputPhase, terminal_kind: Option<InputTerminalKind>, recovered: Bool, abandoned: Bool, requeued: Bool, history_reason: Option<RecoveredInputNormalizationReasonKind>)
 - `PostAdmissionSignal`(signal: PostAdmissionSignalKind)
 - `ReadyForRun`
 - `InputLifecycleNotice`
@@ -1802,6 +1808,495 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `session_registered`
 - Emits: `IngressAccepted`
 - To: `Running`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAcceptedConsumeOnAcceptStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputAcceptedQueueInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAcceptedQueueIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAcceptedQueueAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAcceptedQueueRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAcceptedQueueRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAcceptedQueueStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `accepted_phase`
+  - `not_consume_on_accept`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputStagedInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputStagedIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputStagedAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputStagedRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputStagedRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputStagedStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `staged_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputAppliedCommittedInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAppliedCommittedIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAppliedCommittedAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAppliedCommittedRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAppliedCommittedRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAppliedCommittedStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_committed_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAppliedMissingReceiptStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_missing_observed`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputAppliedUnobservedReceiptStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `applied_phase`
+  - `boundary_receipt_unobserved`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `NormalizeRecoveredInputQueuedInitializing`
+- From: `Initializing`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Initializing`
+
+### `NormalizeRecoveredInputQueuedIdle`
+- From: `Idle`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Idle`
+
+### `NormalizeRecoveredInputQueuedAttached`
+- From: `Attached`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Attached`
+
+### `NormalizeRecoveredInputQueuedRunning`
+- From: `Running`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Running`
+
+### `NormalizeRecoveredInputQueuedRetired`
+- From: `Retired`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Retired`
+
+### `NormalizeRecoveredInputQueuedStopped`
+- From: `Stopped`
+- On: `NormalizeRecoveredInputLifecycle`(input_id, phase, consume_on_accept, applied_boundary_committed)
+- Guards:
+  - `queued_phase`
+- Emits: `RecoveredInputLifecycleNormalized`
+- To: `Stopped`
+
+### `ResolveAdmissionIdempotencyNoKeyIdle`
+- From: `Idle`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `no_idempotency_key`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Idle`
+
+### `ResolveAdmissionIdempotencyNoKeyAttached`
+- From: `Attached`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `no_idempotency_key`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Attached`
+
+### `ResolveAdmissionIdempotencyNoKeyRunning`
+- From: `Running`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `no_idempotency_key`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Running`
+
+### `ResolveAdmissionIdempotencyNewKeyIdle`
+- From: `Idle`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_unclaimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Idle`
+
+### `ResolveAdmissionIdempotencyNewKeyAttached`
+- From: `Attached`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_unclaimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Attached`
+
+### `ResolveAdmissionIdempotencyNewKeyRunning`
+- From: `Running`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_unclaimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Running`
+
+### `ResolveAdmissionIdempotencyDuplicateIdle`
+- From: `Idle`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_claimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Idle`
+
+### `ResolveAdmissionIdempotencyDuplicateAttached`
+- From: `Attached`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_claimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Attached`
+
+### `ResolveAdmissionIdempotencyDuplicateRunning`
+- From: `Running`
+- On: `ResolveAdmissionIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `idempotency_key_present`
+  - `idempotency_key_claimed`
+- Emits: `AdmissionIdempotencyResolved`
+- To: `Running`
+
+### `RegisterAcceptedIdempotencyIdle`
+- From: `Idle`
+- On: `RegisterAcceptedIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `input_tracked`
+  - `idempotency_key_unclaimed_or_same_input`
+- Emits: `InputLifecycleNotice`
+- To: `Idle`
+
+### `RegisterAcceptedIdempotencyAttached`
+- From: `Attached`
+- On: `RegisterAcceptedIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `input_tracked`
+  - `idempotency_key_unclaimed_or_same_input`
+- Emits: `InputLifecycleNotice`
+- To: `Attached`
+
+### `RegisterAcceptedIdempotencyRunning`
+- From: `Running`
+- On: `RegisterAcceptedIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `input_tracked`
+  - `idempotency_key_unclaimed_or_same_input`
+- Emits: `InputLifecycleNotice`
+- To: `Running`
+
+### `RegisterAcceptedIdempotencyRetired`
+- From: `Retired`
+- On: `RegisterAcceptedIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `input_tracked`
+  - `idempotency_key_unclaimed_or_same_input`
+- Emits: `InputLifecycleNotice`
+- To: `Retired`
+
+### `RegisterAcceptedIdempotencyStopped`
+- From: `Stopped`
+- On: `RegisterAcceptedIdempotency`(input_id, idempotency_key)
+- Guards:
+  - `input_tracked`
+  - `idempotency_key_unclaimed_or_same_input`
+- Emits: `InputLifecycleNotice`
+- To: `Stopped`
 
 ### `ResolveAdmissionPlanRequestedTerminalQueueIdle`
 - From: `Idle`

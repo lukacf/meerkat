@@ -396,20 +396,7 @@ impl MeerkatMachine {
                             RuntimeDriverError::NotReady { state },
                         ))
                     } else if !driver.as_driver().active_input_ids().is_empty() {
-                        let duplicate_active_input = input
-                            .header()
-                            .idempotency_key
-                            .as_ref()
-                            .and_then(|key| driver.input_id_for_idempotency_key(key));
-                        if let Some(existing_id) = duplicate_active_input {
-                            Some(RuntimeDriverError::ValidationFailed {
-                                reason: format!(
-                                    "accept_input_and_run does not support deduplicated admission; existing input {existing_id} already owns execution"
-                                ),
-                            })
-                        } else {
-                            Some(RuntimeDriverError::NotReady { state })
-                        }
+                        Some(RuntimeDriverError::NotReady { state })
                     } else {
                         None
                     }

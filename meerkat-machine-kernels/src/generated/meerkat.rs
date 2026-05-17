@@ -82,6 +82,58 @@ impl std::fmt::Display for AdmissionExistingQueuedActionKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    #[serde(rename = "Accept")]
+    Accept,
+    #[serde(rename = "Deduplicated")]
+    Deduplicated,
+}
+impl AdmissionIdempotencyResultKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "Accept",
+            Self::Deduplicated => "Deduplicated",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for AdmissionIdempotencyResultKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accept" => Ok(Self::Accept),
+            "Deduplicated" => Ok(Self::Deduplicated),
+            other => Err(format!(
+                "invalid AdmissionIdempotencyResultKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for AdmissionIdempotencyResultKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for AdmissionIdempotencyResultKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum AdmissionInputKind {
     #[default]
     #[serde(rename = "Prompt")]
@@ -2962,6 +3014,150 @@ impl std::fmt::Display for RecoveredInputKind {
     serde::Serialize,
     serde::Deserialize,
 )]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    #[serde(rename = "ConsumeOnAccept")]
+    ConsumeOnAccept,
+    #[serde(rename = "QueueAccepted")]
+    QueueAccepted,
+    #[serde(rename = "RollbackStaged")]
+    RollbackStaged,
+    #[serde(rename = "BoundaryReceiptCommitted")]
+    BoundaryReceiptCommitted,
+    #[serde(rename = "MissingBoundaryReceipt")]
+    MissingBoundaryReceipt,
+}
+impl RecoveredInputNormalizationReasonKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ConsumeOnAccept => "ConsumeOnAccept",
+            Self::QueueAccepted => "QueueAccepted",
+            Self::RollbackStaged => "RollbackStaged",
+            Self::BoundaryReceiptCommitted => "BoundaryReceiptCommitted",
+            Self::MissingBoundaryReceipt => "MissingBoundaryReceipt",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputNormalizationReasonKind {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "ConsumeOnAccept" => Ok(Self::ConsumeOnAccept),
+            "QueueAccepted" => Ok(Self::QueueAccepted),
+            "RollbackStaged" => Ok(Self::RollbackStaged),
+            "BoundaryReceiptCommitted" => Ok(Self::BoundaryReceiptCommitted),
+            "MissingBoundaryReceipt" => Ok(Self::MissingBoundaryReceipt),
+            other => Err(format!(
+                "invalid RecoveredInputNormalizationReasonKind value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputNormalizationReasonKind {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputNormalizationReasonKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub enum RecoveredInputObservedPhase {
+    #[default]
+    #[serde(rename = "Accepted")]
+    Accepted,
+    #[serde(rename = "Queued")]
+    Queued,
+    #[serde(rename = "Staged")]
+    Staged,
+    #[serde(rename = "Applied")]
+    Applied,
+    #[serde(rename = "AppliedPendingConsumption")]
+    AppliedPendingConsumption,
+    #[serde(rename = "Consumed")]
+    Consumed,
+    #[serde(rename = "Superseded")]
+    Superseded,
+    #[serde(rename = "Coalesced")]
+    Coalesced,
+    #[serde(rename = "Abandoned")]
+    Abandoned,
+}
+impl RecoveredInputObservedPhase {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accepted => "Accepted",
+            Self::Queued => "Queued",
+            Self::Staged => "Staged",
+            Self::Applied => "Applied",
+            Self::AppliedPendingConsumption => "AppliedPendingConsumption",
+            Self::Consumed => "Consumed",
+            Self::Superseded => "Superseded",
+            Self::Coalesced => "Coalesced",
+            Self::Abandoned => "Abandoned",
+        }
+    }
+}
+impl std::convert::TryFrom<&str> for RecoveredInputObservedPhase {
+    type Error = String;
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "Accepted" => Ok(Self::Accepted),
+            "Queued" => Ok(Self::Queued),
+            "Staged" => Ok(Self::Staged),
+            "Applied" => Ok(Self::Applied),
+            "AppliedPendingConsumption" => Ok(Self::AppliedPendingConsumption),
+            "Consumed" => Ok(Self::Consumed),
+            "Superseded" => Ok(Self::Superseded),
+            "Coalesced" => Ok(Self::Coalesced),
+            "Abandoned" => Ok(Self::Abandoned),
+            other => Err(format!(
+                "invalid RecoveredInputObservedPhase value `{other}`"
+            )),
+        }
+    }
+}
+impl std::convert::TryFrom<String> for RecoveredInputObservedPhase {
+    type Error = String;
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::try_from(value.as_str())
+    }
+}
+impl std::fmt::Display for RecoveredInputObservedPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+#[allow(non_camel_case_types)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub enum RecoveredPeerResponseTerminalApplyIntent {
     #[default]
     #[serde(rename = "AppendContextAndRun")]
@@ -4904,6 +5100,7 @@ pub struct State {
     pub admission_authorized_existing_actions:
         std::collections::BTreeMap<String, AdmissionExistingQueuedActionKind>,
     pub admission_authorized_existing_targets: std::collections::BTreeMap<String, String>,
+    pub admission_idempotency_inputs: std::collections::BTreeMap<String, String>,
     pub recovered_admitted_inputs: std::collections::BTreeSet<String>,
     pub recovered_admitted_lanes: std::collections::BTreeMap<String, InputLane>,
     pub op_statuses: std::collections::BTreeMap<String, OperationStatus>,
@@ -5199,6 +5396,23 @@ pub mod inputs {
         pub existing_superseded_input_id: Option<String>,
         pub runtime_running: bool,
         pub without_wake: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct ResolveAdmissionIdempotency {
+        pub input_id: String,
+        pub idempotency_key: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RegisterAcceptedIdempotency {
+        pub input_id: String,
+        pub idempotency_key: String,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct NormalizeRecoveredInputLifecycle {
+        pub input_id: String,
+        pub phase: RecoveredInputObservedPhase,
+        pub consume_on_accept: bool,
+        pub applied_boundary_committed: Option<bool>,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct Prepare {
@@ -5816,6 +6030,9 @@ pub enum Input {
     AcceptWithCompletion(inputs::AcceptWithCompletion),
     AcceptWithoutWake(inputs::AcceptWithoutWake),
     ResolveAdmissionPlan(inputs::ResolveAdmissionPlan),
+    ResolveAdmissionIdempotency(inputs::ResolveAdmissionIdempotency),
+    RegisterAcceptedIdempotency(inputs::RegisterAcceptedIdempotency),
+    NormalizeRecoveredInputLifecycle(inputs::NormalizeRecoveredInputLifecycle),
     Prepare(inputs::Prepare),
     Commit(inputs::Commit),
     Fail(inputs::Fail),
@@ -5994,6 +6211,11 @@ impl Input {
             Self::AcceptWithCompletion(_) => InputKind::AcceptWithCompletion,
             Self::AcceptWithoutWake(_) => InputKind::AcceptWithoutWake,
             Self::ResolveAdmissionPlan(_) => InputKind::ResolveAdmissionPlan,
+            Self::ResolveAdmissionIdempotency(_) => InputKind::ResolveAdmissionIdempotency,
+            Self::RegisterAcceptedIdempotency(_) => InputKind::RegisterAcceptedIdempotency,
+            Self::NormalizeRecoveredInputLifecycle(_) => {
+                InputKind::NormalizeRecoveredInputLifecycle
+            }
             Self::Prepare(_) => InputKind::Prepare,
             Self::Commit(_) => InputKind::Commit,
             Self::Fail(_) => InputKind::Fail,
@@ -6173,6 +6395,9 @@ pub enum InputKind {
     AcceptWithCompletion,
     AcceptWithoutWake,
     ResolveAdmissionPlan,
+    ResolveAdmissionIdempotency,
+    RegisterAcceptedIdempotency,
+    NormalizeRecoveredInputLifecycle,
     Prepare,
     Commit,
     Fail,
@@ -6507,6 +6732,22 @@ pub mod effects {
         pub wake_if_idle: bool,
     }
     #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct AdmissionIdempotencyResolved {
+        pub input_id: String,
+        pub result: AdmissionIdempotencyResultKind,
+        pub existing_input_id: Option<String>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    pub struct RecoveredInputLifecycleNormalized {
+        pub input_id: String,
+        pub phase: InputPhase,
+        pub terminal_kind: Option<InputTerminalKind>,
+        pub recovered: bool,
+        pub abandoned: bool,
+        pub requeued: bool,
+        pub history_reason: Option<RecoveredInputNormalizationReasonKind>,
+    }
+    #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
     pub struct PostAdmissionSignal {
         pub signal: PostAdmissionSignalKind,
     }
@@ -6698,6 +6939,8 @@ pub enum Effect {
     InitiateRecycle(effects::InitiateRecycle),
     IngressAccepted(effects::IngressAccepted),
     AdmissionResolved(effects::AdmissionResolved),
+    AdmissionIdempotencyResolved(effects::AdmissionIdempotencyResolved),
+    RecoveredInputLifecycleNormalized(effects::RecoveredInputLifecycleNormalized),
     PostAdmissionSignal(effects::PostAdmissionSignal),
     ReadyForRun(effects::ReadyForRun),
     InputLifecycleNotice(effects::InputLifecycleNotice),
@@ -6770,6 +7013,8 @@ pub enum EffectKind {
     InitiateRecycle,
     IngressAccepted,
     AdmissionResolved,
+    AdmissionIdempotencyResolved,
+    RecoveredInputLifecycleNormalized,
     PostAdmissionSignal,
     ReadyForRun,
     InputLifecycleNotice,
@@ -6991,6 +7236,62 @@ pub enum TransitionId {
     AcceptWithoutWakeIdle,
     AcceptWithoutWakeAttached,
     AcceptWithoutWakeRunning,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptRunning,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptRetired,
+    NormalizeRecoveredInputAcceptedConsumeOnAcceptStopped,
+    NormalizeRecoveredInputAcceptedQueueInitializing,
+    NormalizeRecoveredInputAcceptedQueueIdle,
+    NormalizeRecoveredInputAcceptedQueueAttached,
+    NormalizeRecoveredInputAcceptedQueueRunning,
+    NormalizeRecoveredInputAcceptedQueueRetired,
+    NormalizeRecoveredInputAcceptedQueueStopped,
+    NormalizeRecoveredInputStagedInitializing,
+    NormalizeRecoveredInputStagedIdle,
+    NormalizeRecoveredInputStagedAttached,
+    NormalizeRecoveredInputStagedRunning,
+    NormalizeRecoveredInputStagedRetired,
+    NormalizeRecoveredInputStagedStopped,
+    NormalizeRecoveredInputAppliedCommittedInitializing,
+    NormalizeRecoveredInputAppliedCommittedIdle,
+    NormalizeRecoveredInputAppliedCommittedAttached,
+    NormalizeRecoveredInputAppliedCommittedRunning,
+    NormalizeRecoveredInputAppliedCommittedRetired,
+    NormalizeRecoveredInputAppliedCommittedStopped,
+    NormalizeRecoveredInputAppliedMissingReceiptInitializing,
+    NormalizeRecoveredInputAppliedMissingReceiptIdle,
+    NormalizeRecoveredInputAppliedMissingReceiptAttached,
+    NormalizeRecoveredInputAppliedMissingReceiptRunning,
+    NormalizeRecoveredInputAppliedMissingReceiptRetired,
+    NormalizeRecoveredInputAppliedMissingReceiptStopped,
+    NormalizeRecoveredInputAppliedUnobservedReceiptInitializing,
+    NormalizeRecoveredInputAppliedUnobservedReceiptIdle,
+    NormalizeRecoveredInputAppliedUnobservedReceiptAttached,
+    NormalizeRecoveredInputAppliedUnobservedReceiptRunning,
+    NormalizeRecoveredInputAppliedUnobservedReceiptRetired,
+    NormalizeRecoveredInputAppliedUnobservedReceiptStopped,
+    NormalizeRecoveredInputQueuedInitializing,
+    NormalizeRecoveredInputQueuedIdle,
+    NormalizeRecoveredInputQueuedAttached,
+    NormalizeRecoveredInputQueuedRunning,
+    NormalizeRecoveredInputQueuedRetired,
+    NormalizeRecoveredInputQueuedStopped,
+    ResolveAdmissionIdempotencyNoKeyIdle,
+    ResolveAdmissionIdempotencyNoKeyAttached,
+    ResolveAdmissionIdempotencyNoKeyRunning,
+    ResolveAdmissionIdempotencyNewKeyIdle,
+    ResolveAdmissionIdempotencyNewKeyAttached,
+    ResolveAdmissionIdempotencyNewKeyRunning,
+    ResolveAdmissionIdempotencyDuplicateIdle,
+    ResolveAdmissionIdempotencyDuplicateAttached,
+    ResolveAdmissionIdempotencyDuplicateRunning,
+    RegisterAcceptedIdempotencyIdle,
+    RegisterAcceptedIdempotencyAttached,
+    RegisterAcceptedIdempotencyRunning,
+    RegisterAcceptedIdempotencyRetired,
+    RegisterAcceptedIdempotencyStopped,
     ResolveAdmissionPlanRequestedTerminalQueueIdle,
     ResolveAdmissionPlanRequestedTerminalQueueAttached,
     ResolveAdmissionPlanRequestedTerminalQueueRunning,
@@ -7705,6 +8006,7 @@ pub fn initial_state() -> State {
         admission_authorized_plans: Default::default(),
         admission_authorized_existing_actions: Default::default(),
         admission_authorized_existing_targets: Default::default(),
+        admission_idempotency_inputs: Default::default(),
         recovered_admitted_inputs: Default::default(),
         recovered_admitted_lanes: Default::default(),
         op_statuses: Default::default(),

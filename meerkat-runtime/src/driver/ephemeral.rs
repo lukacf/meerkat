@@ -22,7 +22,7 @@ use crate::accept::{
     ExistingQueuedAdmissionAction, MachineAdmissionAuthority, ResolvedAdmission,
 };
 use crate::durability::{DurabilityError, validate_durability};
-use crate::identifiers::{LogicalRuntimeId, PolicyVersion};
+use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, PolicyVersion};
 use crate::ingress_types::{
     ContentShape, RequestId, ReservationKey, RuntimeInputProjection, RuntimeInputSemantics,
 };
@@ -718,6 +718,7 @@ impl EphemeralRuntimeDriver {
             &policy,
         )?;
         self.apply_recovered_lifecycle(&work_id, recovered_seed, Some(handling_mode))?;
+        self.register_accepted_idempotency(&work_id, recovered_state.idempotency_key.as_ref())?;
         self.record_admission_metadata(
             &work_id,
             &content_shape,
@@ -780,12 +781,14 @@ impl EphemeralRuntimeDriver {
         &mut self,
         work_id: &InputId,
         recovered_seed: &InputStateSeed,
+        idempotency_key: Option<&IdempotencyKey>,
     ) -> Result<(), RuntimeDriverError> {
         debug_assert!(
             recovered_seed.phase.is_terminal(),
             "terminal recovery path must only be used for terminal input phases"
         );
-        self.apply_recovered_lifecycle(work_id, recovered_seed, None)
+        self.apply_recovered_lifecycle(work_id, recovered_seed, None)?;
+        self.register_accepted_idempotency(work_id, idempotency_key)
     }
 
     fn lifecycle_to_input_phase(lifecycle: InputLifecycleState) -> mm_dsl::InputPhase {
@@ -988,38 +991,11 @@ impl EphemeralRuntimeDriver {
         primitive_projection: RuntimeInputProjection,
         is_prompt: bool,
         policy: &PolicyDecision,
+        mut state: InputState,
         queue_action: AdmissionQueueAction,
         existing_action: Option<&ExistingQueuedAdmissionAction>,
     ) -> Result<(), RuntimeDriverError> {
-        // 1. Persist admission metadata on the shell side.
-        self.record_admission_metadata(
-            input_id,
-            content_shape,
-            handling_mode,
-            runtime_semantics,
-            primitive_projection,
-            is_prompt,
-            policy,
-            None,
-            None,
-        );
-
-        // 2. Persist the input payload on the ledger and record the
-        //    history transition. The DSL apply below is the authoritative
-        //    phase writer; the shell only carries the history/metadata cache.
-        let now = Utc::now();
-        if let Some(s) = self.ledger.get_mut(input_id) {
-            s.persisted_input = Some(input.clone());
-            s.history.push(InputStateHistoryEntry {
-                timestamp: now,
-                from: InputLifecycleState::Accepted,
-                to: InputLifecycleState::Queued,
-                reason: Some("QueueAccepted".into()),
-            });
-            s.updated_at = now;
-        }
-
-        // 3. DSL phase transition (authoritative). Admission lane mirrors
+        // 1. DSL phase transition (authoritative). Admission lane mirrors
         //    the resolved handling_mode; the DSL owns lane membership from
         //    first touch.
         let admission_lane = mm_dsl::InputLane::from(handling_mode);
@@ -1040,8 +1016,9 @@ impl EphemeralRuntimeDriver {
         };
         self.dsl_apply(admission_input, admission_label)?;
 
-        // 4. Handle supersession / coalescing of an existing queued input.
-        //    The new input goes into the queue (step 5); the existing one
+        // 2. Handle supersession / coalescing of an existing queued input.
+        //    The new input goes into the queue after generated authority has
+        //    accepted every side effect; the existing one
         //    transitions to its terminal state here. The DSL transitions
         //    own lane removal.
         if let Some(action) = existing_action {
@@ -1093,19 +1070,13 @@ impl EphemeralRuntimeDriver {
             }
         }
 
-        // 5. Enqueue the new input into the correct lane. When the
+        // 3. Apply generated queue ordering/reroute facts. When the
         //    queue_action's target differs from the admission lane (e.g.
         //    priority reroute), the shell emits a `ChangeLane` transition
         //    rather than writing `input_lane` directly.
-        match queue_action {
+        match queue_action.clone() {
             AdmissionQueueAction::None => {}
             AdmissionQueueAction::EnqueueTo { target } => {
-                match target {
-                    HandlingMode::Queue => self.queue.enqueue(input_id.clone(), input.clone()),
-                    HandlingMode::Steer => {
-                        self.steer_queue.enqueue(input_id.clone(), input.clone());
-                    }
-                }
                 let target_lane = mm_dsl::InputLane::from(target);
                 if target_lane != admission_lane {
                     self.dsl_apply(
@@ -1118,15 +1089,6 @@ impl EphemeralRuntimeDriver {
                 }
             }
             AdmissionQueueAction::EnqueueFront { target } => {
-                match target {
-                    HandlingMode::Queue => {
-                        self.queue.enqueue_front(input_id.clone(), input.clone());
-                    }
-                    HandlingMode::Steer => {
-                        self.steer_queue
-                            .enqueue_front(input_id.clone(), input.clone());
-                    }
-                }
                 let key = Self::dsl_key(input_id);
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::PrioritizeInput {
@@ -1147,6 +1109,58 @@ impl EphemeralRuntimeDriver {
             }
         }
 
+        self.register_accepted_idempotency(input_id, input.header().idempotency_key.as_ref())?;
+
+        let now = Utc::now();
+        state.persisted_input = Some(input.clone());
+        state.policy = Some(PolicySnapshot {
+            version: policy.policy_version,
+            decision: policy.clone(),
+        });
+        state.history.push(InputStateHistoryEntry {
+            timestamp: now,
+            from: InputLifecycleState::Accepted,
+            to: InputLifecycleState::Queued,
+            reason: Some("QueueAccepted".into()),
+        });
+        state.updated_at = now;
+        self.ledger.accept(state);
+        self.record_admission_metadata(
+            input_id,
+            content_shape,
+            handling_mode,
+            runtime_semantics,
+            primitive_projection,
+            is_prompt,
+            policy,
+            None,
+            None,
+        );
+
+        match queue_action {
+            AdmissionQueueAction::None => {}
+            AdmissionQueueAction::EnqueueTo { target } => match target {
+                HandlingMode::Queue => self.queue.enqueue(input_id.clone(), input.clone()),
+                HandlingMode::Steer => {
+                    self.steer_queue.enqueue(input_id.clone(), input.clone());
+                }
+            },
+            AdmissionQueueAction::EnqueueFront { target } => match target {
+                HandlingMode::Queue => {
+                    self.queue.enqueue_front(input_id.clone(), input.clone());
+                }
+                HandlingMode::Steer => {
+                    self.steer_queue
+                        .enqueue_front(input_id.clone(), input.clone());
+                }
+            },
+        }
+
+        self.emit_event(RuntimeEvent::InputLifecycle(
+            InputLifecycleEvent::Accepted {
+                input_id: input_id.clone(),
+            },
+        ));
         self.emit_event(RuntimeEvent::InputLifecycle(InputLifecycleEvent::Queued {
             input_id: input_id.clone(),
         }));
@@ -1973,6 +1987,89 @@ impl EphemeralRuntimeDriver {
         })
     }
 
+    fn resolved_idempotency_from_machine_effects(
+        input_id: &InputId,
+        effects: Vec<mm_dsl::MeerkatMachineEffect>,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        let Some((effect_input_id, result, existing_input_id)) =
+            effects.into_iter().find_map(|effect| match effect {
+                mm_dsl::MeerkatMachineEffect::AdmissionIdempotencyResolved {
+                    input_id,
+                    result,
+                    existing_input_id,
+                } => Some((input_id, result, existing_input_id)),
+                _ => None,
+            })
+        else {
+            return Err(RuntimeDriverError::Internal(
+                "ResolveAdmissionIdempotency emitted no AdmissionIdempotencyResolved effect".into(),
+            ));
+        };
+
+        if effect_input_id != input_id.to_string() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "ResolveAdmissionIdempotency returned input id '{effect_input_id}' for '{input_id}'"
+            )));
+        }
+
+        match (result, existing_input_id) {
+            (mm_dsl::AdmissionIdempotencyResultKind::Accept, None) => Ok(None),
+            (mm_dsl::AdmissionIdempotencyResultKind::Accept, Some(existing_id)) => {
+                Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionIdempotency accepted '{input_id}' but emitted existing input '{existing_id}'"
+                )))
+            }
+            (mm_dsl::AdmissionIdempotencyResultKind::Deduplicated, Some(existing_id)) => {
+                let existing_id = existing_id
+                    .parse::<uuid::Uuid>()
+                    .map(InputId::from_uuid)
+                    .map_err(|err| {
+                        RuntimeDriverError::Internal(format!(
+                            "ResolveAdmissionIdempotency emitted invalid existing input id: {err}"
+                        ))
+                    })?;
+                Ok(Some(existing_id))
+            }
+            (mm_dsl::AdmissionIdempotencyResultKind::Deduplicated, None) => {
+                Err(RuntimeDriverError::Internal(format!(
+                    "ResolveAdmissionIdempotency deduplicated '{input_id}' without an existing input"
+                )))
+            }
+        }
+    }
+
+    fn resolve_idempotency(
+        &mut self,
+        input_id: &InputId,
+        idempotency_key: Option<String>,
+    ) -> Result<Option<InputId>, RuntimeDriverError> {
+        let effects = self.dsl_apply_effects(
+            mm_dsl::MeerkatMachineInput::ResolveAdmissionIdempotency {
+                input_id: Self::dsl_key(input_id),
+                idempotency_key,
+            },
+            "ResolveAdmissionIdempotency",
+        )?;
+        Self::resolved_idempotency_from_machine_effects(input_id, effects)
+    }
+
+    pub(crate) fn register_accepted_idempotency(
+        &mut self,
+        input_id: &InputId,
+        idempotency_key: Option<&IdempotencyKey>,
+    ) -> Result<(), RuntimeDriverError> {
+        let Some(idempotency_key) = idempotency_key else {
+            return Ok(());
+        };
+        self.dsl_apply(
+            mm_dsl::MeerkatMachineInput::RegisterAcceptedIdempotency {
+                input_id: Self::dsl_key(input_id),
+                idempotency_key: idempotency_key.to_string(),
+            },
+            "RegisterAcceptedIdempotency",
+        )
+    }
+
     fn resolved_admission_from_machine_effects(
         &self,
         input: &Input,
@@ -2188,40 +2285,41 @@ impl EphemeralRuntimeDriver {
         }
 
         let input_id = input.id().clone();
-        let mut state = InputState::new_accepted(input_id.clone());
-        state.durability = Some(input.header().durability);
-        state.idempotency_key = input.header().idempotency_key.clone();
-        if let Some(ref key) = input.header().idempotency_key {
-            if let Some(existing_id) = self
-                .ledger
-                .accept_with_idempotency(state.clone(), key.clone())
-            {
-                tracing::debug!(
-                    work_id = ?input_id,
-                    existing_id = ?existing_id,
-                    "input deduplicated"
-                );
-                self.emit_event(RuntimeEvent::InputLifecycle(
-                    InputLifecycleEvent::Deduplicated {
-                        input_id: input_id.clone(),
-                        existing_id: existing_id.clone(),
-                    },
-                ));
-                return Ok(AcceptOutcome::Deduplicated {
-                    input_id,
-                    existing_id,
-                });
-            }
-        } else {
-            self.ledger.accept(state.clone());
-        }
-
         if resolved.authority().input_id() != input_id.to_string() {
             return Err(RuntimeDriverError::Internal(format!(
                 "resolved admission authority id '{}' did not match accepted input '{input_id}'",
                 resolved.authority().input_id()
             )));
         }
+
+        if let Some(existing_id) = self.resolve_idempotency(
+            &input_id,
+            input
+                .header()
+                .idempotency_key
+                .as_ref()
+                .map(std::string::ToString::to_string),
+        )? {
+            tracing::debug!(
+                work_id = ?input_id,
+                existing_id = ?existing_id,
+                "input deduplicated"
+            );
+            self.emit_event(RuntimeEvent::InputLifecycle(
+                InputLifecycleEvent::Deduplicated {
+                    input_id: input_id.clone(),
+                    existing_id: existing_id.clone(),
+                },
+            ));
+            return Ok(AcceptOutcome::Deduplicated {
+                input_id,
+                existing_id,
+            });
+        }
+
+        let mut state = InputState::new_accepted(input_id.clone());
+        state.durability = Some(input.header().durability);
+        state.idempotency_key = input.header().idempotency_key.clone();
         let existing_superseded_id = self.existing_superseded_input(&input).map(|(id, _)| id);
         let authority = MachineAdmissionAuthority::new(
             input_id.to_string(),
@@ -2240,33 +2338,10 @@ impl EphemeralRuntimeDriver {
         let (policy, handling_mode, runtime_semantics, primitive_projection, admission_plan) =
             resolved.into_parts();
 
-        if let Some(s) = self.ledger.get_mut(&input_id) {
-            s.policy = Some(PolicySnapshot {
-                version: policy.policy_version,
-                decision: policy.clone(),
-            });
-        }
-        self.emit_event(RuntimeEvent::InputLifecycle(
-            InputLifecycleEvent::Accepted {
-                input_id: input_id.clone(),
-            },
-        ));
-
         let content_shape = ContentShape::from_kind(input.kind());
         let is_prompt = matches!(input, Input::Prompt(_));
         match admission_plan {
             AdmissionPlan::ConsumedOnAccept => {
-                self.record_admission_metadata(
-                    &input_id,
-                    &content_shape,
-                    handling_mode,
-                    runtime_semantics,
-                    primitive_projection.clone(),
-                    is_prompt,
-                    &policy,
-                    None,
-                    None,
-                );
                 self.dsl_apply(
                     mm_dsl::MeerkatMachineInput::QueueAccepted {
                         input_id: Self::dsl_key(&input_id),
@@ -2279,17 +2354,40 @@ impl EphemeralRuntimeDriver {
                     },
                     "ConsumeOnAccept",
                 )?;
+                self.register_accepted_idempotency(
+                    &input_id,
+                    input.header().idempotency_key.as_ref(),
+                )?;
                 let now = Utc::now();
-                if let Some(s) = self.ledger.get_mut(&input_id) {
-                    s.history.push(InputStateHistoryEntry {
-                        timestamp: now,
-                        from: InputLifecycleState::Accepted,
-                        to: InputLifecycleState::Consumed,
-                        reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
-                    });
-                    s.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                    s.updated_at = now;
-                }
+                state.policy = Some(PolicySnapshot {
+                    version: policy.policy_version,
+                    decision: policy.clone(),
+                });
+                state.history.push(InputStateHistoryEntry {
+                    timestamp: now,
+                    from: InputLifecycleState::Accepted,
+                    to: InputLifecycleState::Consumed,
+                    reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
+                });
+                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                state.updated_at = now;
+                self.ledger.accept(state);
+                self.record_admission_metadata(
+                    &input_id,
+                    &content_shape,
+                    handling_mode,
+                    runtime_semantics,
+                    primitive_projection.clone(),
+                    is_prompt,
+                    &policy,
+                    None,
+                    None,
+                );
+                self.emit_event(RuntimeEvent::InputLifecycle(
+                    InputLifecycleEvent::Accepted {
+                        input_id: input_id.clone(),
+                    },
+                ));
                 tracing::debug!(work_id = ?input_id, "input consumed on accept");
             }
             AdmissionPlan::Queued {
@@ -2307,6 +2405,7 @@ impl EphemeralRuntimeDriver {
                         primitive_projection,
                         is_prompt,
                         &policy,
+                        state,
                         queue_action,
                         existing_action.as_ref(),
                     )?;
@@ -2634,7 +2733,7 @@ impl crate::traits::RuntimeDriver for EphemeralRuntimeDriver {
 #[cfg(test)]
 mod tests {
     use super::EphemeralRuntimeDriver;
-    use crate::identifiers::{LogicalRuntimeId, SupersessionKey};
+    use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, SupersessionKey};
     use crate::input::{
         Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
         PeerInput, PromptInput,
@@ -2888,6 +2987,57 @@ mod tests {
                 !state
                     .admission_authorized_existing_targets
                     .contains_key(&second_id.to_string())
+            );
+        });
+    }
+
+    #[tokio::test]
+    async fn idempotency_dedup_is_resolved_by_generated_machine_map() {
+        let mut driver = EphemeralRuntimeDriver::new(LogicalRuntimeId::new("dedup-authority"));
+        let key = IdempotencyKey::new("machine-owned-dedup");
+
+        let mut first = prompt_input("first");
+        let first_id = first.id().clone();
+        if let Input::Prompt(prompt) = &mut first {
+            prompt.header.idempotency_key = Some(key.clone());
+        }
+        let first_outcome = driver.accept_input(first).await.unwrap();
+        assert!(first_outcome.is_accepted());
+
+        driver.with_dsl_state(|state| {
+            assert_eq!(
+                state.admission_idempotency_inputs.get(&key.to_string()),
+                Some(&first_id.to_string()),
+                "generated machine state must own the idempotency key binding"
+            );
+        });
+
+        let mut duplicate = prompt_input("second");
+        let duplicate_id = duplicate.id().clone();
+        if let Input::Prompt(prompt) = &mut duplicate {
+            prompt.header.idempotency_key = Some(key.clone());
+        }
+        let duplicate_outcome = driver.accept_input(duplicate).await.unwrap();
+
+        match duplicate_outcome {
+            crate::accept::AcceptOutcome::Deduplicated {
+                input_id,
+                existing_id,
+            } => {
+                assert_eq!(input_id, duplicate_id);
+                assert_eq!(existing_id, first_id);
+            }
+            other => panic!("expected generated deduplicated outcome, got {other:?}"),
+        }
+        assert!(
+            driver.input_state(&duplicate_id).is_none(),
+            "deduplicated inputs must not be admitted into the shell ledger"
+        );
+        driver.with_dsl_state(|state| {
+            assert_eq!(
+                state.admission_idempotency_inputs.get(&key.to_string()),
+                Some(&first_id.to_string()),
+                "duplicate resolution must not rewrite the generated key owner"
             );
         });
     }

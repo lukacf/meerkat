@@ -7,7 +7,7 @@ use meerkat_core::lifecycle::{CoreApplyFailureCause, InputId, RunBoundaryReceipt
 use crate::accept::{AcceptOutcome, ResolvedAdmission};
 use crate::driver::ephemeral::{EphemeralDriverRollbackSnapshot, EphemeralRuntimeDriver};
 use crate::driver::persistent::PersistentRuntimeDriver;
-use crate::identifiers::{IdempotencyKey, LogicalRuntimeId};
+use crate::identifiers::LogicalRuntimeId;
 use crate::ingress_types::ContentShape;
 use crate::input::Input;
 use crate::input_state::{
@@ -134,13 +134,6 @@ impl DriverEntry {
         match self {
             DriverEntry::Ephemeral(d) => d,
             DriverEntry::Persistent(d) => d,
-        }
-    }
-
-    pub(crate) fn input_id_for_idempotency_key(&self, key: &IdempotencyKey) -> Option<InputId> {
-        match self {
-            DriverEntry::Ephemeral(d) => d.ledger().input_id_for_idempotency_key(key),
-            DriverEntry::Persistent(d) => d.inner_ref().ledger().input_id_for_idempotency_key(key),
         }
     }
 
@@ -1397,7 +1390,7 @@ pub(crate) async fn machine_normalize_recovered_input_state(
         None
     };
 
-    let _ = machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed);
+    let _ = machine_apply_recovered_input_normalization(&mut bundle, applied_boundary_committed)?;
 
     Ok(bundle)
 }
@@ -1432,111 +1425,215 @@ pub(crate) struct MachineRecoveryDelta {
     pub requeued: usize,
 }
 
+fn recovered_observed_phase(
+    phase: InputLifecycleState,
+) -> crate::meerkat_machine::dsl::RecoveredInputObservedPhase {
+    match phase {
+        InputLifecycleState::Accepted => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Accepted
+        }
+        InputLifecycleState::Queued => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Queued
+        }
+        InputLifecycleState::Staged => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Staged
+        }
+        InputLifecycleState::Applied => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Applied
+        }
+        InputLifecycleState::AppliedPendingConsumption => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::AppliedPendingConsumption
+        }
+        InputLifecycleState::Consumed => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Consumed
+        }
+        InputLifecycleState::Superseded => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Superseded
+        }
+        InputLifecycleState::Coalesced => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Coalesced
+        }
+        InputLifecycleState::Abandoned => {
+            crate::meerkat_machine::dsl::RecoveredInputObservedPhase::Abandoned
+        }
+    }
+}
+
+fn lifecycle_from_normalized_phase(
+    phase: crate::meerkat_machine::dsl::InputPhase,
+) -> InputLifecycleState {
+    match phase {
+        crate::meerkat_machine::dsl::InputPhase::Queued => InputLifecycleState::Queued,
+        crate::meerkat_machine::dsl::InputPhase::Staged => InputLifecycleState::Staged,
+        crate::meerkat_machine::dsl::InputPhase::Applied => InputLifecycleState::Applied,
+        crate::meerkat_machine::dsl::InputPhase::AppliedPendingConsumption => {
+            InputLifecycleState::AppliedPendingConsumption
+        }
+        crate::meerkat_machine::dsl::InputPhase::Consumed => InputLifecycleState::Consumed,
+        crate::meerkat_machine::dsl::InputPhase::Superseded => InputLifecycleState::Superseded,
+        crate::meerkat_machine::dsl::InputPhase::Coalesced => InputLifecycleState::Coalesced,
+        crate::meerkat_machine::dsl::InputPhase::Abandoned => InputLifecycleState::Abandoned,
+    }
+}
+
+fn terminal_from_normalized_kind(
+    kind: Option<crate::meerkat_machine::dsl::InputTerminalKind>,
+) -> Result<Option<InputTerminalOutcome>, RuntimeDriverError> {
+    match kind {
+        None => Ok(None),
+        Some(crate::meerkat_machine::dsl::InputTerminalKind::Consumed) => {
+            Ok(Some(InputTerminalOutcome::Consumed))
+        }
+        Some(other) => Err(RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle emitted terminal kind {other:?} without required payload"
+        ))),
+    }
+}
+
+fn recovery_normalization_reason(
+    reason: crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind,
+) -> &'static str {
+    match reason {
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::ConsumeOnAccept => {
+            "recovery: ConsumeOnAccept (Ignore+OnAccept policy)"
+        }
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::QueueAccepted => {
+            "recovery: QueueAccepted"
+        }
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::RollbackStaged => {
+            "recovery: RollbackStaged"
+        }
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::BoundaryReceiptCommitted => {
+            "recovery: boundary receipt already committed"
+        }
+        crate::meerkat_machine::dsl::RecoveredInputNormalizationReasonKind::MissingBoundaryReceipt => {
+            "recovery: missing boundary receipt"
+        }
+    }
+}
+
 pub(crate) fn machine_apply_recovered_input_normalization(
     bundle: &mut StoredInputState,
     applied_boundary_committed: Option<bool>,
-) -> MachineRecoveryDelta {
+) -> Result<MachineRecoveryDelta, RuntimeDriverError> {
     let mut delta = MachineRecoveryDelta::default();
     let StoredInputState { state, seed } = bundle;
 
-    match seed.phase {
-        InputLifecycleState::Accepted => {
-            let consume_on_accept = state
-                .policy
-                .as_ref()
-                .map(|policy| {
-                    policy.decision.apply_mode == crate::policy::ApplyMode::Ignore
-                        && policy.decision.consume_point == crate::policy::ConsumePoint::OnAccept
-                })
-                .unwrap_or(false);
-            let now = Utc::now();
-            let from = seed.phase;
-            if consume_on_accept {
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from,
-                    to: InputLifecycleState::Consumed,
-                    reason: Some("recovery: ConsumeOnAccept (Ignore+OnAccept policy)".into()),
-                });
-                seed.phase = InputLifecycleState::Consumed;
-                seed.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
-                state.updated_at = now;
-                delta.abandoned += 1;
-            } else {
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from,
-                    to: InputLifecycleState::Queued,
-                    reason: Some("recovery: QueueAccepted".into()),
-                });
-                seed.phase = InputLifecycleState::Queued;
-                state.updated_at = now;
-                delta.requeued += 1;
-            }
-            delta.recovered += 1;
-        }
-        InputLifecycleState::Staged => {
-            // Crashed mid-stage — rollback to Queued so the replay path can
-            // pick it up. This mirrors the recovery view of
-            // `RollbackStaged`: phase goes back to `Queued`, while the
-            // attempt counter remains whatever the persisted shell/DSL caches
-            // already recorded. The live `rollback_staged` path still owns
-            // the exhausted-attempts branch once the runtime resumes.
-            let now = Utc::now();
-            let from = seed.phase;
-            state.history.push(InputStateHistoryEntry {
-                timestamp: now,
-                from,
-                to: InputLifecycleState::Queued,
-                reason: Some("recovery: RollbackStaged".into()),
-            });
-            seed.phase = InputLifecycleState::Queued;
-            state.updated_at = now;
-            delta.requeued += 1;
-            delta.recovered += 1;
-        }
-        InputLifecycleState::Applied | InputLifecycleState::AppliedPendingConsumption => {
-            if let Some(has_receipt) = applied_boundary_committed {
-                let now = Utc::now();
-                let from = seed.phase;
-                let to = if has_receipt {
-                    InputLifecycleState::Consumed
-                } else {
-                    InputLifecycleState::Queued
-                };
-                state.history.push(InputStateHistoryEntry {
-                    timestamp: now,
-                    from,
-                    to,
-                    reason: Some(if has_receipt {
-                        "recovery: boundary receipt already committed".into()
-                    } else {
-                        "recovery: missing boundary receipt".into()
-                    }),
-                });
-                seed.phase = to;
-                let terminal = if has_receipt {
-                    Some(InputTerminalOutcome::Consumed)
-                } else {
-                    None
-                };
-                seed.terminal_outcome = terminal.clone();
-                state.terminal_outcome = terminal;
-                state.updated_at = now;
-            }
-            delta.recovered += 1;
-        }
-        InputLifecycleState::Queued => {
-            delta.recovered += 1;
-        }
-        InputLifecycleState::Consumed
-        | InputLifecycleState::Superseded
-        | InputLifecycleState::Coalesced
-        | InputLifecycleState::Abandoned => {}
+    if seed.phase.is_terminal() {
+        return Ok(delta);
     }
 
-    delta
+    let consume_on_accept = state
+        .policy
+        .as_ref()
+        .map(|policy| {
+            policy.decision.apply_mode == crate::policy::ApplyMode::Ignore
+                && policy.decision.consume_point == crate::policy::ConsumePoint::OnAccept
+        })
+        .unwrap_or(false);
+    let input_id = state.input_id.to_string();
+    let mut authority = crate::meerkat_machine::dsl::MeerkatMachineAuthority::new();
+    let transition = crate::meerkat_machine::dsl::MeerkatMachineMutator::apply(
+        &mut authority,
+        crate::meerkat_machine::dsl::MeerkatMachineInput::NormalizeRecoveredInputLifecycle {
+            input_id: input_id.clone(),
+            phase: recovered_observed_phase(seed.phase),
+            consume_on_accept,
+            applied_boundary_committed,
+        },
+    )
+    .map_err(|err| {
+        RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle rejected recovered input '{input_id}': {err:?}"
+        ))
+    })?;
+
+    let Some((
+        effect_input_id,
+        normalized_phase,
+        terminal_kind,
+        recovered,
+        abandoned,
+        requeued,
+        history_reason,
+    )) =
+        transition.effects.into_iter().find_map(|effect| {
+            match effect {
+        crate::meerkat_machine::dsl::MeerkatMachineEffect::RecoveredInputLifecycleNormalized {
+            input_id,
+            phase,
+            terminal_kind,
+            recovered,
+            abandoned,
+            requeued,
+            history_reason,
+        } => Some((
+            input_id,
+            phase,
+            terminal_kind,
+            recovered,
+            abandoned,
+            requeued,
+            history_reason,
+        )),
+        _ => None,
+    }
+        })
+    else {
+        return Err(RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle emitted no normalized lifecycle effect for '{input_id}'"
+        )));
+    };
+
+    if effect_input_id != input_id {
+        return Err(RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle returned input id '{effect_input_id}' for '{input_id}'"
+        )));
+    }
+
+    let next_phase = lifecycle_from_normalized_phase(normalized_phase);
+    let next_terminal = terminal_from_normalized_kind(terminal_kind)?;
+    if next_phase.is_terminal() != next_terminal.is_some() {
+        return Err(RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle emitted incoherent phase {next_phase:?} and terminal {next_terminal:?} for '{input_id}'"
+        )));
+    }
+
+    let from = seed.phase;
+    if history_reason.is_none()
+        && (next_phase != seed.phase || next_terminal != seed.terminal_outcome)
+    {
+        return Err(RuntimeDriverError::Internal(format!(
+            "NormalizeRecoveredInputLifecycle changed '{input_id}' without a history reason"
+        )));
+    }
+
+    if let Some(reason) = history_reason {
+        let now = Utc::now();
+        state.history.push(InputStateHistoryEntry {
+            timestamp: now,
+            from,
+            to: next_phase,
+            reason: Some(recovery_normalization_reason(reason).into()),
+        });
+        state.updated_at = now;
+    }
+
+    seed.phase = next_phase;
+    seed.terminal_outcome = next_terminal.clone();
+    state.terminal_outcome = next_terminal;
+
+    if recovered {
+        delta.recovered += 1;
+    }
+    if abandoned {
+        delta.abandoned += 1;
+    }
+    if requeued {
+        delta.requeued += 1;
+    }
+
+    Ok(delta)
 }
 
 pub(crate) struct RecoveredIngressEntry {
@@ -1600,7 +1697,7 @@ pub(crate) fn machine_recover_ephemeral_driver(
         let Some(mut bundle) = driver.stored_input_state(input_id) else {
             continue;
         };
-        let delta = machine_apply_recovered_input_normalization(&mut bundle, None);
+        let delta = machine_apply_recovered_input_normalization(&mut bundle, None)?;
         recovered += delta.recovered;
         abandoned += delta.abandoned;
         requeued += delta.requeued;
@@ -1672,7 +1769,11 @@ pub(crate) async fn machine_recover_persistent_driver(
                 if !inserted {
                     continue;
                 }
-                driver.recover_terminal_input_lifecycle(&bundle.state.input_id, &bundle.seed)?;
+                driver.recover_terminal_input_lifecycle(
+                    &bundle.state.input_id,
+                    &bundle.seed,
+                    bundle.state.idempotency_key.as_ref(),
+                )?;
                 continue;
             }
 

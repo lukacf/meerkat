@@ -304,6 +304,34 @@ pub fn meerkat_machine_schema_metadata() -> MachineSchemaMetadata {
                 &["None", "Coalesce", "Supersede"],
             ),
             NamedTypeBinding::string_enum(
+                "AdmissionIdempotencyResultKind",
+                &["Accept", "Deduplicated"],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputObservedPhase",
+                &[
+                    "Accepted",
+                    "Queued",
+                    "Staged",
+                    "Applied",
+                    "AppliedPendingConsumption",
+                    "Consumed",
+                    "Superseded",
+                    "Coalesced",
+                    "Abandoned",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
+                "RecoveredInputNormalizationReasonKind",
+                &[
+                    "ConsumeOnAccept",
+                    "QueueAccepted",
+                    "RollbackStaged",
+                    "BoundaryReceiptCommitted",
+                    "MissingBoundaryReceipt",
+                ],
+            ),
+            NamedTypeBinding::string_enum(
                 "InputAbandonReason",
                 &[
                     "Retired",

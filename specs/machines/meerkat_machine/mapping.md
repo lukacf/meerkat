@@ -559,6 +559,174 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AcceptWithoutWakeRunning`
   - anchors: `meerkat_machine`
   - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedConsumeOnAcceptStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAcceptedQueueStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputStagedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputStagedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `NormalizeRecoveredInputStagedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+- `NormalizeRecoveredInputStagedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputStagedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `NormalizeRecoveredInputStagedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `staged_visibility_apply`, `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedCommittedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputAppliedMissingReceiptInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedMissingReceiptIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedMissingReceiptAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedMissingReceiptRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedMissingReceiptRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedMissingReceiptStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputAppliedUnobservedReceiptStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `NormalizeRecoveredInputQueuedInitializing`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputQueuedIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `NormalizeRecoveredInputQueuedAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `realtime_connection_projection`, `product_turn_streaming`
+- `NormalizeRecoveredInputQueuedRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `input_admission_and_queueing`, `product_turn_streaming`
+- `NormalizeRecoveredInputQueuedRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `product_turn_streaming`, `recycle_and_compaction`
+- `NormalizeRecoveredInputQueuedStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
+- `ResolveAdmissionIdempotencyNoKeyIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyNoKeyAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyNoKeyRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyNewKeyIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyNewKeyAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyNewKeyRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyDuplicateIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyDuplicateAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `ResolveAdmissionIdempotencyDuplicateRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`
+- `RegisterAcceptedIdempotencyIdle`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `recycle_and_compaction`
+- `RegisterAcceptedIdempotencyAttached`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`, `realtime_connection_projection`
+- `RegisterAcceptedIdempotencyRunning`
+  - anchors: `meerkat_machine`
+  - scenarios: `turn_interrupt_and_shutdown`, `session_registration_and_binding`, `input_admission_and_queueing`
+- `RegisterAcceptedIdempotencyRetired`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`
+- `RegisterAcceptedIdempotencyStopped`
+  - anchors: `meerkat_machine`
+  - scenarios: `session_registration_and_binding`, `input_admission_and_queueing`
 - `ResolveAdmissionPlanRequestedTerminalQueueIdle`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`
@@ -2322,6 +2490,12 @@ This section is generated from the Rust machine catalog. Do not edit it by hand.
 - `AdmissionResolved`
   - anchors: `meerkat_machine`
   - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `AdmissionIdempotencyResolved`
+  - anchors: `meerkat_machine`
+  - scenarios: `peer_reachability_probe`, `input_admission_and_queueing`, `ops_completion_and_waiters`
+- `RecoveredInputLifecycleNormalized`
+  - anchors: `meerkat_machine`
+  - scenarios: `input_admission_and_queueing`, `product_turn_streaming`
 - `PostAdmissionSignal`
   - anchors: `meerkat_machine`
   - scenarios: `input_admission_and_queueing`

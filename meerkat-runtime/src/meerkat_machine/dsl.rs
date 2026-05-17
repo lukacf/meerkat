@@ -1098,6 +1098,20 @@ impl InputPhase {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputObservedPhase {
+    Accepted,
+    #[default]
+    Queued,
+    Staged,
+    Applied,
+    AppliedPendingConsumption,
+    Consumed,
+    Superseded,
+    Coalesced,
+    Abandoned,
+}
+
 /// Typed input terminal kind, mirroring the closed set of literals the DSL
 /// transitions assign to `input_terminal_kind`. The companion fields
 /// (`input_superseded_by`, `input_aggregate_id`, `input_abandon_reason`,
@@ -2165,6 +2179,23 @@ pub enum AdmissionPlanKind {
     ConsumedOnAccept,
     #[default]
     Queued,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum AdmissionIdempotencyResultKind {
+    #[default]
+    Accept,
+    Deduplicated,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum RecoveredInputNormalizationReasonKind {
+    #[default]
+    ConsumeOnAccept,
+    QueueAccepted,
+    RollbackStaged,
+    BoundaryReceiptCommitted,
+    MissingBoundaryReceipt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]

@@ -819,6 +819,12 @@ impl EphemeralRuntimeDriver {
     ) -> Result<(), RuntimeDriverError> {
         let key = Self::dsl_key(work_id);
         let lifecycle_state = recovered_seed.phase;
+        if lifecycle_state.is_terminal() != recovered_seed.terminal_outcome.is_some() {
+            return Err(RuntimeDriverError::Internal(format!(
+                "store corruption: recovered input '{work_id}' phase {lifecycle_state:?} has incoherent terminal outcome {:?}",
+                recovered_seed.terminal_outcome
+            )));
+        }
         let (terminal_kind, superseded_by, aggregate_id, abandon_reason, abandon_attempt_count) =
             match recovered_seed.terminal_outcome.clone() {
                 Some(InputTerminalOutcome::Consumed) => (
@@ -2451,6 +2457,16 @@ impl EphemeralRuntimeDriver {
                     &input_id,
                     input.header().idempotency_key.as_ref(),
                 )?;
+                let terminal_outcome = self.input_terminal_outcome(&input_id).ok_or_else(|| {
+                    RuntimeDriverError::Internal(format!(
+                        "machine terminal projection missing consume-on-accept outcome for {input_id}"
+                    ))
+                })?;
+                if terminal_outcome != InputTerminalOutcome::Consumed {
+                    return Err(RuntimeDriverError::Internal(format!(
+                        "machine terminal projection for consume-on-accept {input_id} was {terminal_outcome:?}"
+                    )));
+                }
                 let now = Utc::now();
                 state.policy = Some(PolicySnapshot {
                     version: policy.policy_version,
@@ -2462,7 +2478,7 @@ impl EphemeralRuntimeDriver {
                     to: InputLifecycleState::Consumed,
                     reason: Some("ConsumeOnAccept (Ignore+OnAccept)".into()),
                 });
-                state.terminal_outcome = Some(InputTerminalOutcome::Consumed);
+                state.terminal_outcome = Some(terminal_outcome);
                 state.updated_at = now;
                 self.ledger.accept(state);
                 self.record_admission_metadata(
@@ -2828,14 +2844,16 @@ mod tests {
     use super::EphemeralRuntimeDriver;
     use crate::identifiers::{IdempotencyKey, LogicalRuntimeId, SupersessionKey};
     use crate::input::{
-        Input, InputDurability, InputHeader, InputOrigin, InputVisibility, PeerConvention,
-        PeerInput, PromptInput,
+        Input, InputDurability, InputHeader, InputOrigin, InputVisibility, OperationInput,
+        PeerConvention, PeerInput, PromptInput,
     };
+    use crate::input_state::{InputLifecycleState, InputStateSeed, InputTerminalOutcome};
     use crate::meerkat_machine::dsl as mm_dsl;
     use crate::traits::{RuntimeDriver, RuntimeDriverError};
     use crate::{RuntimeState, WakeMode};
     use chrono::Utc;
     use meerkat_core::lifecycle::{InputId, RunId};
+    use meerkat_core::ops::{OpEvent, OperationId};
 
     fn peer_message_input() -> Input {
         Input::Peer(PeerInput {
@@ -2863,6 +2881,24 @@ mod tests {
 
     fn prompt_input(text: &str) -> Input {
         Input::Prompt(PromptInput::new(text, None))
+    }
+
+    fn operation_input() -> Input {
+        let operation_id = OperationId::new();
+        Input::Operation(OperationInput {
+            header: InputHeader {
+                id: InputId::new(),
+                timestamp: Utc::now(),
+                source: InputOrigin::System,
+                durability: InputDurability::Derived,
+                visibility: InputVisibility::default(),
+                idempotency_key: None,
+                supersession_key: None,
+                correlation_id: None,
+            },
+            operation_id: operation_id.clone(),
+            event: OpEvent::Cancelled { id: operation_id },
+        })
     }
 
     fn progress_input_with_supersession(label: &str, supersession_key: &str) -> Input {
@@ -3175,6 +3211,91 @@ mod tests {
                 "rejected inputs must not create lifecycle machine facts"
             );
         });
+    }
+
+    #[tokio::test]
+    async fn consume_on_accept_terminal_outcome_is_machine_owned() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("consume-on-accept-terminal"));
+
+        let input = operation_input();
+        let input_id = input.id().clone();
+        let outcome = driver.accept_input(input).await.unwrap();
+
+        match outcome {
+            crate::accept::AcceptOutcome::Accepted { seed, state, .. } => {
+                assert_eq!(seed.phase, InputLifecycleState::Consumed);
+                assert_eq!(
+                    seed.terminal_outcome,
+                    Some(InputTerminalOutcome::Consumed),
+                    "accepted result must project terminal outcome from generated machine state"
+                );
+                assert_eq!(
+                    state.terminal_outcome,
+                    Some(InputTerminalOutcome::Consumed),
+                    "shell cache should mirror the generated terminal outcome"
+                );
+            }
+            other => panic!("expected consume-on-accept accepted outcome, got {other:?}"),
+        }
+        assert_eq!(
+            driver.input_terminal_outcome(&input_id),
+            Some(InputTerminalOutcome::Consumed)
+        );
+        driver.with_dsl_state(|state| {
+            assert_eq!(
+                state.input_terminal_kind.get(&input_id.to_string()),
+                Some(&mm_dsl::InputTerminalKind::Consumed),
+                "ConsumeOnAccept must write generated terminal kind"
+            );
+        });
+    }
+
+    #[test]
+    fn recovered_terminal_lifecycle_requires_terminal_witness() {
+        let mut driver =
+            EphemeralRuntimeDriver::new(LogicalRuntimeId::new("recover-terminal-witness"));
+        let input_id = InputId::new();
+        let seed = InputStateSeed {
+            phase: InputLifecycleState::Consumed,
+            last_run_id: None,
+            last_boundary_sequence: None,
+            admission_sequence: None,
+            terminal_outcome: None,
+            attempt_count: 0,
+        };
+
+        let err = driver
+            .recover_terminal_input_lifecycle(&input_id, &seed, None)
+            .expect_err("terminal recovery without terminal outcome must fail closed");
+        assert!(
+            matches!(&err, RuntimeDriverError::Internal(message) if message.contains("incoherent terminal outcome")),
+            "unexpected recovery error: {err:?}"
+        );
+
+        let generated_err = driver
+            .dsl_apply(
+                mm_dsl::MeerkatMachineInput::RecoverInputLifecycle {
+                    input_id: input_id.to_string(),
+                    phase: mm_dsl::InputPhase::Consumed,
+                    terminal_kind: None,
+                    superseded_by: None,
+                    aggregate_id: None,
+                    abandon_reason: None,
+                    abandon_attempt_count: 0,
+                    attempt_count: 0,
+                    run_id: None,
+                    boundary_sequence: None,
+                    admission_sequence: None,
+                    lane: None,
+                },
+                "RecoverInputLifecycle(test)",
+            )
+            .expect_err("generated recovery authority must reject missing terminal kind");
+        assert!(
+            matches!(&generated_err, RuntimeDriverError::Internal(message) if message.contains("RecoverInputLifecycle")),
+            "unexpected generated recovery error: {generated_err:?}"
+        );
     }
 
     #[test]

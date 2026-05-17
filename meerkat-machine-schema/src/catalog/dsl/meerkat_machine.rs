@@ -8231,6 +8231,46 @@ macro_rules! meerkat_catalog_machine_dsl {
             guard "recovered_queued_order_has_witness" {
                 phase != InputPhase::Queued || admission_sequence != None
             }
+            guard "recovered_terminal_payload_matches_phase" {
+                (
+                    phase == InputPhase::Consumed
+                    && terminal_kind == Some(InputTerminalKind::Consumed)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Superseded
+                    && terminal_kind == Some(InputTerminalKind::Superseded)
+                    && superseded_by != None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Coalesced
+                    && terminal_kind == Some(InputTerminalKind::Coalesced)
+                    && superseded_by == None
+                    && aggregate_id != None
+                    && abandon_reason == None
+                )
+                || (
+                    phase == InputPhase::Abandoned
+                    && terminal_kind == Some(InputTerminalKind::Abandoned)
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason != None
+                )
+                || (
+                    phase != InputPhase::Consumed
+                    && phase != InputPhase::Superseded
+                    && phase != InputPhase::Coalesced
+                    && phase != InputPhase::Abandoned
+                    && terminal_kind == None
+                    && superseded_by == None
+                    && aggregate_id == None
+                    && abandon_reason == None
+                )
+            }
             update {
                 self.input_phases.insert(input_id, phase);
 
@@ -8459,6 +8499,11 @@ macro_rules! meerkat_catalog_machine_dsl {
             update {
                 self.input_phases.insert(input_id, InputPhase::Consumed);
                 self.input_lane.remove(input_id);
+                self.input_terminal_kind.insert(input_id, InputTerminalKind::Consumed);
+                self.input_superseded_by.remove(input_id);
+                self.input_aggregate_id.remove(input_id);
+                self.input_abandon_reason.remove(input_id);
+                self.input_abandon_attempt_count.remove(input_id);
             }
             to Idle
             emit RecordTerminalOutcome

@@ -1764,6 +1764,13 @@ pub(crate) async fn machine_recover_persistent_driver(
         }
 
         if driver.input_state(&bundle.state.input_id).is_none() {
+            if bundle.seed.phase.is_terminal() != bundle.seed.terminal_outcome.is_some() {
+                return Err(RuntimeDriverError::Internal(format!(
+                    "store corruption: recovered input '{}' phase {:?} has incoherent terminal outcome {:?}",
+                    bundle.state.input_id, bundle.seed.phase, bundle.seed.terminal_outcome
+                )));
+            }
+
             if bundle.seed.phase.is_terminal() {
                 let inserted = driver.ledger_mut().recover(bundle.state.clone());
                 if !inserted {

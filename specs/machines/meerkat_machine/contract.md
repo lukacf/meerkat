@@ -3998,6 +3998,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Idle`
 
@@ -4008,6 +4009,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Attached`
 
@@ -4018,6 +4020,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Running`
 
@@ -4028,6 +4031,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Retired`
 
@@ -4038,6 +4042,7 @@ _Generated from the Rust machine catalog. Do not edit by hand._
   - `recovered_lifecycle_has_admission_witness`
   - `recovered_queued_lane_matches_witness`
   - `recovered_queued_order_has_witness`
+  - `recovered_terminal_payload_matches_phase`
 - Emits: `InputLifecycleNotice`
 - To: `Stopped`
 
